@@ -25,7 +25,7 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     if (initialTitle !== undefined) return { ...route, initialTitle };
     return api.getWorkstreamContext(route.workstreamId).then(ctx => {
       const cached = workstreamDetailCache.get(route.workstreamId);
-      workstreamDetailCache.set(route.workstreamId, { ctx, ctxState: cached?.ctxState ?? null, paths: cached?.paths ?? null });
+      workstreamDetailCache.set(route.workstreamId, { ctx, ctxState: cached?.ctxState ?? null });
       return { ...route, initialTitle: ctx.workstream.title };
     });
   }

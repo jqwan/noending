@@ -14,7 +14,7 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 const terminal = (id: string, live = true, sessionId = "s1"): TerminalSummary => ({
-  terminal_id: id, session_id: sessionId, owner_workstream_id: null, identity_revision: 1, agent: "codex", cwd: "/work",
+  terminal_id: id, session_id: sessionId, initial_workstream_id: null, identity_revision: 1, agent: "codex", cwd: "/work",
   created_at: id, live, exit_code: null, session_title: "Session",
 });
 it("switches between history and detail without launching an Agent", async () => {

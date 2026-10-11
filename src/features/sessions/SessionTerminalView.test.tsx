@@ -159,7 +159,7 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
   return {
     terminal_id: "t-1",
     session_id: "s1",
-    owner_workstream_id: null,
+    initial_workstream_id: null,
     identity_revision: 1,
     agent: "codex",
     cwd: "/tmp/work",
@@ -264,7 +264,7 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   vi.mocked(api.getSessionDetail).mockResolvedValue({
     session: { agent: "codex", source_kind: "codex", archived_at: null, title: "页面匹配的会话" },
     messages: [],
-    owner_workstream: null,
+    tracked_workstreams: [],
     workspace_path: null,
     source_status: "available",
     can_resume: true,
@@ -401,7 +401,7 @@ it("a bound snapshot shows the session-detail entry enabled from the start", asy
   vi.mocked(api.getSessionDetail).mockResolvedValue({
     session: { agent: "codex", source_kind: "codex", archived_at: null, title: "已有身份" },
     messages: [],
-    owner_workstream: null,
+    tracked_workstreams: [],
     workspace_path: null,
     source_status: "available",
     can_resume: true,

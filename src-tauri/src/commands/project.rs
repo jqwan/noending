@@ -110,11 +110,8 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
 
     let mut workstream_count: BTreeMap<String, i64> = BTreeMap::new();
     {
-        let mut st = conn.prepare(
-            "SELECT wp.project_id, COUNT(DISTINCT wsp.workstream_id)
-             FROM workstream_paths wsp JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-             GROUP BY wp.project_id",
-        )?;
+        let mut st = conn
+            .prepare("SELECT project_id,COUNT(*) FROM workstream_projects GROUP BY project_id")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (id, count) = row?;
@@ -151,11 +148,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
     let mut workstream_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {
         let mut st = conn.prepare(
-            "SELECT wp.project_id, MAX(w.updated_at)
-             FROM workstreams w
-             JOIN workstream_paths wsp ON wsp.workstream_id = w.id
-             JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-             GROUP BY wp.project_id",
+            "SELECT wsp.project_id,MAX(w.updated_at) FROM workstreams w JOIN workstream_projects wsp ON wsp.workstream_id=w.id GROUP BY wsp.project_id",
         )?;
         let rows = st.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))

@@ -8,7 +8,7 @@ import { viewState } from "../hooks/useViewState";
 import { sessionPages, sessionTerminals, rememberSessionPage } from "../features/sessions/sessionNavigation";
 import { EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
 import type { Route } from "../app/routes";
-import type { TerminalSummary, Session, WorkstreamCardData, ProjectCardData } from "../types";
+import type { TerminalSummary, Session, ProjectCardData } from "../types";
 
 vi.mock("../api", () => ({
   api: {
@@ -31,7 +31,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
-  vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
 });
 
@@ -46,7 +46,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   return {
     terminal_id: "t-1",
     session_id: null,
-    owner_workstream_id: null, identity_revision: 0,
+    initial_workstream_id: null, identity_revision: 0,
     agent: "codex",
     cwd: "/repo/x",
     created_at: new Date().toISOString(),
@@ -67,7 +67,7 @@ function session(over: Partial<Session> = {}): Session {
     cwd: "/repo/x",
     project_id: "p-1",
     workspace_path_id: "wp-1",
-    owner_workstream_id: "ws-1",
+    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: baseTime,
     last_activity_at: baseTime,
@@ -85,26 +85,6 @@ function session(over: Partial<Session> = {}): Session {
     source_tail_hash: "tail-hash",
     fact_generation: 1,
     latest_message_seq: 1,
-    ...over,
-  };
-}
-
-function workstreamCard(over: Partial<WorkstreamCardData> = {}): WorkstreamCardData {
-  return {
-    id: "ws-1",
-    projects: [{ id: "p-1", name: "项目A" }],
-    title: "任务重构",
-    description: "重构描述",
-
-    visibility: "normal",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    summary: null,
-    last_activity_at: new Date().toISOString(),
-    session_count: 1,
-    latest_session: null,
-    path_count: 1,
-
     ...over,
   };
 }
@@ -127,7 +107,7 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
   };
 }
 
-function switchGroupBy(name: "按任务归类" | "按项目归类" | "按代理归类" | "不分组（全部会话）") {
+function switchGroupBy(name: "按项目归类" | "按项目归类" | "按代理归类" | "不分组（全部会话）") {
   const trigger = screen.getByRole("button", { name: /会话归类/ });
   fireEvent.click(trigger);
   const item = screen.getByRole("menuitemradio", { name });
@@ -280,15 +260,15 @@ describe("Sidebar 最近活动", () => {
     });
 
     vi.mocked(api.listSessions).mockResolvedValue([activeRecent, oldSession, archivedSession, desktopOnlySession]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "测试任务" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "测试任务" }),
     ]);
 
     renderSidebar();
 
     // 1. Header shows group trigger button replacing static title
     expect(await screen.findByRole("button", { name: /会话归类/ })).toBeTruthy();
-    expect(screen.getByText("任务")).toBeTruthy();
+    expect(screen.getByText("项目")).toBeTruthy();
 
     // 2. Default: shows all sessions (not restricted to 7 days)
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
@@ -363,17 +343,17 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("有终端启动的会话")).toBeTruthy();
   });
 
-  it("groups by workstream by default and navigates to session detail on click", async () => {
+  it("groups by project by default and navigates to session detail on click", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
         id: "s-1",
         title: "修复侧栏问题",
-        owner_workstream_id: "ws-1",
+        project_id: "ws-1",
         last_conversation_at: new Date(Date.now() - 1000).toISOString(),
       }),
     ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "侧栏任务" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "侧栏任务" }),
     ]);
 
     const navigate = renderSidebar();
@@ -449,38 +429,17 @@ describe("Sidebar 最近活动", () => {
     expect(titleContainer.style.getPropertyValue("--overflow-width")).toBe("");
   });
 
-  it("keeps an unbound terminal in its selected task and retains that group after ingestion", async () => {
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "启动任务" })]);
-    vi.mocked(api.terminalList).mockResolvedValue([terminal({ owner_workstream_id: "ws-1" })]);
-    const navigate = renderSidebar();
-    const group = await screen.findByRole("button", { name: /启动任务/ });
-    expect(screen.getByTitle("新会话 · /repo/x")).toBeTruthy();
-    expect(screen.queryByText("无任务")).toBeNull();
-    fireEvent.click(group);
-    expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull();
-    fireEvent.click(group);
-    fireEvent.click(screen.getByTitle("新会话 · /repo/x"));
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "t-1" }));
-    vi.mocked(api.listSessions).mockResolvedValue([session({ title: "摄入会话" })]);
-    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1", owner_workstream_id: "ws-1" })]);
-    act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); window.dispatchEvent(new CustomEvent(EVT_SYNCED)); });
-    await waitFor(() => expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull());
-    await screen.findByText("摄入会话");
-    expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /启动任务/ }));
-    expect(screen.queryByText("摄入会话")).toBeNull();
-  });
 
   it("toggles group collapse when group header is clicked", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
         id: "s-1",
         title: "可折叠会话",
-        owner_workstream_id: "ws-1",
+        project_id: "ws-1",
       }),
     ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "折叠测试任务" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "折叠测试任务" }),
     ]);
 
     renderSidebar();
@@ -496,89 +455,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("可折叠会话")).toBeTruthy();
   });
 
-  it("switches grouping between workstream and project", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({
-        id: "s-1",
-        title: "切换测试会话",
-        owner_workstream_id: "ws-1",
-        project_id: "p-1",
-      }),
-    ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "按任务分组名" }),
-    ]);
-    vi.mocked(api.listProjectCards).mockResolvedValue([
-      projectCard({ id: "p-1", name: "按项目分组名" }),
-    ]);
 
-    renderSidebar();
-
-    expect(await screen.findByText("按任务分组名")).toBeTruthy();
-    expect(screen.queryByText("按项目分组名")).toBeNull();
-
-    // 切换至按项目归类
-    switchGroupBy("按项目归类");
-
-    const projectGroupHeader = await screen.findByRole("button", { name: /按项目分组名/ });
-    expect(screen.queryByText("按任务分组名")).toBeNull();
-
-    // 收起项目分组
-    fireEvent.click(projectGroupHeader);
-    expect(screen.queryByText("切换测试会话")).toBeNull();
-
-    // 切回按任务归类
-    switchGroupBy("按任务归类");
-
-    expect(await screen.findByText("按任务分组名")).toBeTruthy();
-  });
-
-  it("handles unassigned workstream and unassigned project groups", async () => {
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-real", title: "真正的任务", created_at: "2026-10-01T00:00:00.000Z" }),
-    ]);
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({
-        id: "s-orphan",
-        title: "孤立会话",
-        owner_workstream_id: null,
-        project_id: null,
-      }),
-      session({
-        id: "s-owned",
-        title: "归属会话",
-        owner_workstream_id: "ws-real",
-        project_id: null,
-      }),
-    ]);
-
-    renderSidebar();
-
-    // 任务维度：无任务
-    const taskUnassigned = await screen.findByText("无任务");
-    expect(taskUnassigned).toBeTruthy();
-    const taskHeader = taskUnassigned.closest(".sidebar-recent-group-header");
-    expect(taskHeader?.className).toContain("unassigned-group");
-    // Uses inbox icon
-    expect(taskHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
-      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
-    );
-
-    // "无任务" should be sorted after "真正的任务" (sunk to bottom)
-    const groupTitles = Array.from(document.querySelectorAll(".sidebar-recent-group-title")).map(el => el.textContent);
-    expect(groupTitles).toEqual(["真正的任务", "无任务"]);
-
-    // 项目维度：无项目
-    switchGroupBy("按项目归类");
-
-    const projectUnassigned = await screen.findByText("无项目");
-    expect(projectUnassigned).toBeTruthy();
-    const projectHeader = projectUnassigned.closest(".sidebar-recent-group-header");
-    expect(projectHeader?.className).toContain("unassigned-group");
-    expect(projectHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
-      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
-    );
-  });
 
   it("refetches recent sessions on EVT_SYNCED event", async () => {
     renderSidebar();
@@ -664,7 +541,7 @@ describe("Sidebar 最近活动", () => {
       id: "s-older-created",
       title: "更早创建但最近聊天的会话",
       agent: "codex",
-      owner_workstream_id: "ws-1",
+      project_id: "ws-1",
       started_at: "2026-10-01T10:00:00.000Z",
       last_conversation_at: "2026-10-10T12:00:00.000Z",
     });
@@ -672,14 +549,14 @@ describe("Sidebar 最近活动", () => {
       id: "s-newer-created",
       title: "更晚创建但较早聊天的会话",
       agent: "codex",
-      owner_workstream_id: "ws-1",
+      project_id: "ws-1",
       started_at: "2026-10-05T10:00:00.000Z",
       last_conversation_at: "2026-10-06T12:00:00.000Z",
     });
 
     vi.mocked(api.listSessions).mockResolvedValue([olderCreated, newerCreated]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "测试排序任务" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "测试排序任务" }),
     ]);
 
     renderSidebar();
@@ -690,23 +567,6 @@ describe("Sidebar 最近活动", () => {
     expect(links[1].textContent).toContain("更早创建但最近聊天的会话");
   });
 
-  it("sorts project and workstream groups by created_at desc", async () => {
-    const wsOld = workstreamCard({ id: "ws-old", title: "旧任务", created_at: "2026-09-01T00:00:00Z" });
-    const wsNew = workstreamCard({ id: "ws-new", title: "新任务", created_at: "2026-10-01T00:00:00Z" });
-
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-ws-old", title: "旧任务会话", owner_workstream_id: "ws-old" }),
-      session({ id: "s-ws-new", title: "新任务会话", owner_workstream_id: "ws-new" }),
-    ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([wsOld, wsNew]);
-
-    renderSidebar();
-    await screen.findByText("新任务");
-
-    const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
-    expect(groupHeaders[0].textContent).toContain("新任务");
-    expect(groupHeaders[1].textContent).toContain("旧任务");
-  });
 
   it("sorts agent groups by terminal capability first, then by name", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
@@ -772,17 +632,16 @@ describe("Sidebar 最近活动", () => {
   });
 
   it.each([
-    ["workstream", "关联任务"],
-    ["project", "关联项目"],
+        ["project", "关联项目"],
     ["agent", "Codex"],
     ["none", null],
   ] as const)("moves pinned sessions out of the %s list and restores them on unpin", async (groupBy, groupTitle) => {
-    viewState.set("sidebar.recent.groupBy", groupBy);
+    viewState.set("sidebar.recent.groupBy.v2", groupBy);
     vi.mocked(api.listSessions).mockResolvedValue([
       session({ id: "s-1", title: "需要置顶的会话" }),
       session({ id: "s-2", title: "普通会话" }),
     ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "关联任务" })]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "关联任务" })]);
     vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "关联项目" })]);
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1" })]);
 
@@ -824,8 +683,8 @@ describe("Sidebar 最近活动", () => {
     if (groupTitle) expect(screen.getByTitle(`${groupTitle} (2)`)).toBeTruthy();
   });
 
-  it.each(["workstream", "none"] as const)("keeps pinned sessions out of the %s list when the pinned section is collapsed", async (groupBy) => {
-    viewState.set("sidebar.recent.groupBy", groupBy);
+  it.each(["project", "none"] as const)("keeps pinned sessions out of the %s list when the pinned section is collapsed", async (groupBy) => {
+    viewState.set("sidebar.recent.groupBy.v2", groupBy);
     localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["s-pinned"]));
     vi.mocked(api.listSessions).mockResolvedValue([
       session({ id: "s-pinned", title: "已置顶会话" }),
@@ -851,8 +710,8 @@ describe("Sidebar 最近活动", () => {
 
   it("excludes pinned terminal-only rows from the regular list and restores terminal navigation on unpin", async () => {
     localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["terminal:t-1"]));
-    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", owner_workstream_id: "ws-1" })]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "启动任务" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", initial_workstream_id: "ws-1" })]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "启动任务" })]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
 
     await screen.findByTitle("置顶 (1)");
@@ -861,7 +720,7 @@ describe("Sidebar 最近活动", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "取消置顶：待同步会话" }));
     expect(screen.queryByTitle("置顶 (1)")).toBeNull();
-    expect(screen.getByTitle("启动任务 (1)")).toBeTruthy();
+    expect(await screen.findByTitle("无项目 (1)")).toBeTruthy();
     expect(screen.getAllByText("待同步会话")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: /^待同步会话/ }));
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-1" }));
@@ -875,19 +734,17 @@ describe("Sidebar 最近活动", () => {
     renderSidebar();
     await screen.findByText("测试会话");
 
-    const groupTrigger = screen.getByRole("button", { name: "会话归类：按任务归类" });
+    const groupTrigger = screen.getByRole("button", { name: "会话归类：按项目归类" });
     expect(groupTrigger.getAttribute("aria-expanded")).toBe("false");
 
     // Click trigger to open menu
     fireEvent.click(groupTrigger);
     expect(groupTrigger.getAttribute("aria-expanded")).toBe("true");
 
-    const taskOpt = screen.getByRole("menuitemradio", { name: "按任务归类" });
     const projectOpt = screen.getByRole("menuitemradio", { name: "按项目归类" });
     const agentOpt = screen.getByRole("menuitemradio", { name: "按代理归类" });
     const noneOpt = screen.getByRole("menuitemradio", { name: "不分组（全部会话）" });
-    expect(taskOpt.getAttribute("aria-checked")).toBe("true");
-    expect(projectOpt.getAttribute("aria-checked")).toBe("false");
+    expect(projectOpt.getAttribute("aria-checked")).toBe("true");
     expect(agentOpt.getAttribute("aria-checked")).toBe("false");
     expect(noneOpt.getAttribute("aria-checked")).toBe("false");
 
@@ -907,12 +764,12 @@ describe("Sidebar 最近活动", () => {
 
   it("renders flat session list without group headers when ungrouped (会话) is selected", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-1", title: "会话一", owner_workstream_id: "ws-1" }),
-      session({ id: "s-2", title: "会话二", owner_workstream_id: "ws-2" }),
+      session({ id: "s-1", title: "会话一", project_id: "ws-1" }),
+      session({ id: "s-2", title: "会话二", project_id: "ws-2" }),
     ]);
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "任务一" }),
-      workstreamCard({ id: "ws-2", title: "任务二" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "任务一" }),
+      projectCard({ id: "ws-2", name: "任务二" }),
     ]);
 
     renderSidebar();
@@ -988,17 +845,17 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("limits group to 5 sessions with 展开显示 button and resets on collapse", async () => {
-    const ws = workstreamCard({ id: "ws-test", title: "测试任务" });
+    const ws = projectCard({ id: "ws-test", name: "测试任务" });
     const testSessions = Array.from({ length: 7 }, (_, i) =>
       session({
         id: `s-${i + 1}`,
         title: `会话 ${i + 1}`,
-        owner_workstream_id: "ws-test",
+        project_id: "ws-test",
         started_at: new Date(Date.now() - (7 - i) * 60000).toISOString(),
       }),
     );
 
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([ws]);
     vi.mocked(api.listSessions).mockResolvedValue(testSessions);
 
     renderSidebar();
@@ -1040,16 +897,16 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("does not render 展开显示 button when group has 5 or fewer sessions", async () => {
-    const ws = workstreamCard({ id: "ws-small", title: "小型任务" });
+    const ws = projectCard({ id: "ws-small", name: "小型任务" });
     const testSessions = Array.from({ length: 4 }, (_, i) =>
       session({
         id: `s-${i + 1}`,
         title: `小型会话 ${i + 1}`,
-        owner_workstream_id: "ws-small",
+        project_id: "ws-small",
       }),
     );
 
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([ws]);
     vi.mocked(api.listSessions).mockResolvedValue(testSessions);
 
     renderSidebar();
@@ -1061,10 +918,10 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("enables marquee scrolling on group header hover when group title overflows", async () => {
-    const ws = workstreamCard({ id: "ws-long", title: "这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动" });
-    const s = session({ id: "s-1", owner_workstream_id: "ws-long", title: "普通会话" });
+    const ws = projectCard({ id: "ws-long", name: "这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动" });
+    const s = session({ id: "s-1", project_id: "ws-long", title: "普通会话" });
 
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([ws]);
     vi.mocked(api.listSessions).mockResolvedValue([s]);
 
     renderSidebar();
@@ -1083,10 +940,10 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("does not enable marquee scrolling on group header hover when group title fits", async () => {
-    const ws = workstreamCard({ id: "ws-short", title: "短任务" });
-    const s = session({ id: "s-1", owner_workstream_id: "ws-short", title: "普通会话" });
+    const ws = projectCard({ id: "ws-short", name: "短任务" });
+    const s = session({ id: "s-1", project_id: "ws-short", title: "普通会话" });
 
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([ws]);
     vi.mocked(api.listSessions).mockResolvedValue([s]);
 
     renderSidebar();
@@ -1106,13 +963,13 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("collapses all groups and expands all groups with the one-click button", async () => {
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "任务甲" }),
-      workstreamCard({ id: "ws-2", title: "任务乙" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "任务甲" }),
+      projectCard({ id: "ws-2", name: "任务乙" }),
     ]);
     vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-1", owner_workstream_id: "ws-1", title: "会话甲" }),
-      session({ id: "s-2", owner_workstream_id: "ws-2", title: "会话乙" }),
+      session({ id: "s-1", project_id: "ws-1", title: "会话甲" }),
+      session({ id: "s-2", project_id: "ws-2", title: "会话乙" }),
     ]);
 
     renderSidebar();
@@ -1142,11 +999,11 @@ describe("Sidebar 最近活动", () => {
   });
 
   it("toggles session icons display via display settings in menu", async () => {
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
-      workstreamCard({ id: "ws-1", title: "任务分组" }),
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "ws-1", name: "任务分组" }),
     ]);
     vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-1", owner_workstream_id: "ws-1", title: "有图标的会话", agent: "codex" }),
+      session({ id: "s-1", project_id: "ws-1", title: "有图标的会话", agent: "codex" }),
     ]);
 
     renderSidebar();

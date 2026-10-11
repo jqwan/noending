@@ -29,7 +29,20 @@ fn ws_row(db: &Db, title: &str) -> noending::domain::Workstream {
         updated_at: now(),
     };
     db.upsert_workstream(&w).unwrap();
+    let project = project_row(db, "Task project");
+    let path = std::env::temp_dir().join(format!("noending-launch-cwd-{}", new_id()));
+    std::fs::create_dir_all(&path).unwrap();
+    let canonical = noending::workspace::normalize_path(&path.to_string_lossy()).unwrap();
+    db.tx(|tx| {
+        noending::storage::workspace::insert_workspace_path_conn(tx, &canonical, &project.id)
+    })
+    .unwrap();
+    noending::workspace::workstream::set_workstream_projects(db, &w.id, &[project.id]).unwrap();
     w
+}
+
+fn task_cwd(db: &Db, task: &str) -> String {
+    db.read().query_row("SELECT wp.canonical_path FROM workspace_paths wp JOIN workstream_projects p ON p.project_id=wp.project_id WHERE p.workstream_id=?1",[task],|r|r.get(0)).unwrap()
 }
 
 fn project_row(db: &Db, name: &str) -> noending::domain::Project {
@@ -74,7 +87,9 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
     db.get_session(session_id)
         .unwrap()
         .unwrap()
-        .owner_workstream_id
+        .tracked_workstream_ids
+        .into_iter()
+        .next()
 }
 
 // Issue #8: storage / domain consistency
@@ -238,7 +253,7 @@ fn prepare_new_does_not_create_session_or_file() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -246,7 +261,7 @@ fn prepare_new_does_not_create_session_or_file() {
     // 1. PreparedLaunch captures the launch facts & fingerprint
     assert_eq!(prepared.mode, "new");
     assert_eq!(
-        prepared.owner_workstream_id.as_deref(),
+        prepared.initial_workstream_id.as_deref(),
         Some(ws.id.as_str())
     );
     assert!(!prepared.state_fingerprint.is_empty());
@@ -270,7 +285,7 @@ fn prepare_resume_uses_current_owner_without_writing() {
 
     let session = session_row(&db, Agent::Codex, Some(now()), None);
     // ws1 is the Session's current Owner
-    db.set_session_owner(&session.id, Some(&ws1.id)).unwrap();
+    support::track(&db, &session.id, Some(&ws1.id)).unwrap();
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
@@ -282,13 +297,10 @@ fn prepare_resume_uses_current_owner_without_writing() {
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
-    assert_eq!(
-        prepared.owner_workstream_id.as_deref(),
-        Some(ws1.id.as_str())
-    );
+    assert_eq!(prepared.initial_workstream_id.as_deref(), None);
     // ws2 is a different Workstream and is never adopted as the Owner.
     assert_ne!(
-        prepared.owner_workstream_id.as_deref(),
+        prepared.initial_workstream_id.as_deref(),
         Some(ws2.id.as_str())
     );
 
@@ -315,7 +327,7 @@ fn state_fingerprint_stale_detection_on_owner_metadata_change() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -351,20 +363,21 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
     assert!(prepared.runtime.is_default());
 
     let fingerprint_of = |db: &Db| {
-        launcher::compute_state_fingerprint(
+        launcher::compute_state_fingerprint_in(
             db,
             "new",
             None,
-            prepared.owner_workstream_id.as_deref(),
+            prepared.initial_workstream_id.as_deref(),
             Agent::Codex,
             &LaunchWorkspace::default(),
+            &prepared.cwd_resolution,
         )
         .unwrap()
     };
@@ -431,7 +444,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -484,7 +497,7 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -529,7 +542,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();
@@ -542,7 +555,7 @@ fn prepared_launch_lazy_ttl_cleanup() {
             &db,
             Agent::Codex,
             Some(ws.id.as_str()),
-            None,
+            Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
         .unwrap();

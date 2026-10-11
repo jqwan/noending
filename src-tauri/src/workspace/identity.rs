@@ -3,7 +3,7 @@
 //!
 //! Every caller must reuse these functions rather than write a second
 //! normalizer: two normalizers means two `path_id`s for one directory, and
-//! `workspace_paths.id` is the join key for Sessions, WorkstreamPaths and
+//! `workspace_paths.id` is the join key for Sessions and
 //! therefore every Project fact.
 //!
 //! ## Why identity is lexical and never `fs::canonicalize`

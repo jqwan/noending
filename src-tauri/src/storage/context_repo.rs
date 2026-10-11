@@ -273,7 +273,7 @@ pub fn commit_workstream_summary_conn(
     conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3,
         context_revision = context_revision + 1, consumed_input_revision = input_revision WHERE workstream_id = ?1",
         params![workstream_id, summary, now()])?;
-    crate::storage::workstream_paths::reindex_workstream_search_conn(conn, workstream_id)?;
+    crate::storage::workstream_projects::reindex_workstream_search_conn(conn, workstream_id)?;
     Ok(get_workstream_context_state_conn(conn, workstream_id)?.context_revision)
 }
 
@@ -321,7 +321,7 @@ pub fn ensure_workstream_state_conn(conn: &Connection, workstream_id: &str) -> R
 }
 
 /// Bump `input_revision` — called by paths that change what the Workstream
-/// has pending inputs: Owner set, title /
+/// has pending inputs: tracking set, projects, title /
 /// description change or Session ownership change.
 pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
@@ -373,7 +373,7 @@ pub fn delete_unowned_workstream_frontiers_conn(
            AND NOT EXISTS (
              SELECT 1 FROM sessions s
              WHERE s.id = workstream_session_frontiers.session_id
-               AND s.owner_workstream_id = ?1
+               AND EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1)
            )",
         params![workstream_id],
     )?;

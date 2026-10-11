@@ -120,19 +120,23 @@ impl SessionSnapshot {
                 .unwrap_or_default(),
         })
     }
-    fn validate(&self, conn: &rusqlite::Connection, owner: Option<&str>) -> Result<()> {
-        let identity: Option<(i64, i64, Option<String>, Option<String>, i64)> = conn.query_row(
-            "SELECT fact_generation,COALESCE((SELECT revision FROM session_contexts WHERE session_id=sessions.id),0),owner_workstream_id,(SELECT project_id FROM workspace_paths WHERE id=sessions.workspace_path_id),latest_message_seq FROM sessions WHERE id=?1",
-            [&self.session.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
-        ).optional()?;
+    fn validate(&self, conn: &rusqlite::Connection, tracked_task: Option<&str>) -> Result<()> {
+        let identity: Option<(i64,i64,Option<String>,i64)>=conn.query_row(
+            "SELECT fact_generation,COALESCE((SELECT revision FROM session_contexts WHERE session_id=sessions.id),0),(SELECT project_id FROM workspace_paths WHERE id=sessions.workspace_path_id),latest_message_seq FROM sessions WHERE id=?1",
+            [&self.session.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         if identity.as_ref().is_none_or(|i| {
             i.0 != self.generation
                 || i.1 != self.revision()
-                || i.3 != self.session.project_id
-                || i.4 < self.latest
-                || owner.is_some_and(|owner| i.2.as_deref() != Some(owner))
+                || i.2 != self.session.project_id
+                || i.3 < self.latest
         }) {
             return Err(stale());
+        }
+        if let Some(task) = tracked_task {
+            let linked:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM session_workstreams WHERE session_id=?1 AND workstream_id=?2)",rusqlite::params![self.session.id,task],|r|r.get(0))?;
+            if !linked {
+                return Err(stale());
+            }
         }
         Ok(())
     }
@@ -418,12 +422,8 @@ fn extract_session(
         ))
     })
 }
-fn task_paths(conn: &rusqlite::Connection, id: &str) -> Result<Vec<String>> {
-    let mut st=conn.prepare("SELECT wp.canonical_path FROM workstream_paths p JOIN workspace_paths wp ON wp.id=p.workspace_path_id WHERE p.workstream_id=?1 ORDER BY p.position")?;
-    let rows = st
-        .query_map([id], |r| r.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
+fn task_projects(conn: &rusqlite::Connection, id: &str) -> Result<Vec<String>> {
+    crate::storage::workstream_projects::project_ids_for_workstream(conn, id)
 }
 fn extract_task(
     db: &Db,
@@ -435,7 +435,7 @@ fn extract_task(
     with_operation(db, id, home, "workstream", |launch, operation| {
         let ws = db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
         let state = query::task_state(&db.read(), id)?;
-        let paths = task_paths(&db.read(), id)?;
+        let project_ids = task_projects(&db.read(), id)?;
         let snapshots = db
             .sessions_for_workstream(id)?
             .into_iter()
@@ -472,7 +472,7 @@ fn extract_task(
             id,
             "task",
             serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
-            "working_directories":paths}),
+            "related_projects":crate::workspace::workstream::projects_for_workstream(db,id)?}),
             state.context_revision,
             &snapshots,
             regenerate,
@@ -492,7 +492,7 @@ fn extract_task(
                 .optional()?;
             let mut current_ids: Vec<String> = {
                 let mut st =
-                    tx.prepare("SELECT id FROM sessions WHERE owner_workstream_id=?1 ORDER BY id")?;
+                    tx.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1) ORDER BY id")?;
                 let rows = st
                     .query_map([id], |r| r.get(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -505,7 +505,7 @@ fn extract_task(
                 || current.input_revision != state.input_revision
                 || current_ws != Some((ws.title.clone(), ws.description.clone()))
                 || current_ids != expected_ids
-                || task_paths(tx, id)? != paths
+                || task_projects(tx, id)? != project_ids
             {
                 return Err(stale());
             }
@@ -598,6 +598,9 @@ fn run_batch(
         .filter_map(|s| s.session.project_id.clone())
         .chain((kind == "project").then(|| id.to_string()))
         .collect();
+    if kind == "task" {
+        projects.extend(task_projects(&db.read(), id)?);
+    }
     projects.sort();
     projects.dedup();
     files.add_preferences(&projects);

@@ -17,7 +17,6 @@ use noending::domain::{
     WorkspaceObservation, WorkspacePath,
 };
 use noending::storage::workspace::{insert_workspace_path_conn, rename_project_conn};
-use noending::storage::workstream_paths::append_workstream_path_conn;
 use noending::storage::Db;
 use noending::workspace::project::{
     apply_projection_effect, delete_project_permanently, ensure_workspace_path,
@@ -27,6 +26,7 @@ use noending::workspace::project::{
 };
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
+use support::associate_path_project as append_workstream_path_conn;
 
 // fixtures
 
@@ -756,7 +756,8 @@ fn merge_deletes_the_zero_path_project() {
         "a Workstream survives its Project; membership is its path list"
     );
     assert_eq!(
-        noending::storage::workstream_paths::project_ids_for_workstream(&db.read(), "w-1").unwrap(),
+        noending::storage::workstream_projects::project_ids_for_workstream(&db.read(), "w-1")
+            .unwrap(),
         vec![survivor.clone()],
         "all associated paths now reach the survivor"
     );
@@ -946,7 +947,12 @@ fn project_archive_is_independent_and_all_sessions_block_permanent_deletion() {
     noending::lifecycle::archive_session(&db, &s.id).unwrap();
     assert!(delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).is_err());
     assert_eq!(
-        db.list_workstream_paths("normal-task").unwrap().len(),
+        noending::storage::workstream_projects::project_ids_for_workstream(
+            &db.read(),
+            "normal-task"
+        )
+        .unwrap()
+        .len(),
         1,
         "rejection does not detach tasks"
     );
@@ -1021,10 +1027,11 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
             db.get_workstream(id).unwrap().unwrap().visibility,
             visibility
         );
-        let paths = db.list_workstream_paths(id).unwrap();
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].workspace_path_id, other.id);
-        assert_eq!(paths[0].position, 0);
+        assert_eq!(
+            noending::storage::workstream_projects::project_ids_for_workstream(&db.read(), id)
+                .unwrap(),
+            vec![other.project_id.clone()]
+        );
     }
     assert!(db.get_project(&path.project_id).unwrap().is_none());
     assert!(db.get_workspace_path(&path.id).unwrap().is_none());
@@ -1732,7 +1739,7 @@ fn project_detail_has_the_frozen_shape() {
         "every associated path counts equally"
     );
     assert_eq!(
-        noending::storage::workstream_paths::workstreams_for_project(
+        noending::storage::workstream_projects::workstreams_for_project(
             &db.read(),
             &sibling.project_id
         )
@@ -2111,7 +2118,7 @@ fn restored_directory_becomes_present_again() {
 }
 
 #[test]
-fn refresh_does_not_touch_workstream_paths() {
+fn refresh_preserves_explicit_task_projects() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set("/work/a", plain("/work/a", true));
@@ -2124,8 +2131,8 @@ fn refresh_does_not_touch_workstream_paths() {
     };
     let before = count_rows(
         &db,
-        "SELECT COUNT(*) FROM workstream_paths WHERE workspace_path_id = ?",
-        &wp.id,
+        "SELECT COUNT(*) FROM workstream_projects WHERE project_id = ?",
+        &wp.project_id,
     );
     assert_eq!(before, 1);
 
@@ -2133,11 +2140,11 @@ fn refresh_does_not_touch_workstream_paths() {
     assert_eq!(
         count_rows(
             &db,
-            "SELECT COUNT(*) FROM workstream_paths WHERE workspace_path_id = ?",
-            &wp.id
+            "SELECT COUNT(*) FROM workstream_projects WHERE project_id = ?",
+            &wp.project_id
         ),
         before,
-        "refresh never writes workstream_paths"
+        "refresh never changes explicit task associations"
     );
 }
 

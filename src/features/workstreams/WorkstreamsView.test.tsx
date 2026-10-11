@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi
 vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
 vi.mock("../../api", () => ({ api: { archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
-const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1, path_count: 0, created_at: "", updated_at: "", summary: null, last_activity_at: null, latest_session: null });
+const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "", summary: null, last_activity_at: null, latest_session: null });
 beforeEach(() => { vi.clearAllMocks(); viewState.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 

@@ -70,16 +70,6 @@ export interface AddProjectPathResult {
   project_name: string;
 }
 
-/** `list_workstream_paths` row: the entry plus the facts the UI shows beside it. */
-export interface WorkstreamPathRow extends WorkstreamPath {
-  canonical_path: string;
-  project_id: string;
-  project_name: string | null;
-  exists: boolean;
-}
-
-// Path picker (workspace::probe, read-only)
-
 /** Why the string is not a WorkspacePath right now (`PathProbe.status`）。 */
 export type ProbeStatus = "ok" | "unresolvable" | "reserved" | "home";
 
@@ -113,32 +103,6 @@ export interface RecentWorkspacePath {
   git_state: WorkspaceGitState | null;
   git_kind: string | null;
   last_used_at: string | null;
-}
-
-/** One raw string of a create_workstream submission, and what became of it. */
-export interface CreatedPathOutcome {
-  raw: string;
-  accepted: boolean;
-  canonical_path: string | null;
-  position: number | null;
-  project_name: string | null;
-  reason: string | null;
-}
-
-/** `create_workstream` — the Workstream plus the per-path outcome. Rejected
- *  paths are reported, never guessed into paths。 */
-export interface CreateWorkstreamReport {
-  workstream: Workstream;
-  paths: CreatedPathOutcome[];
-}
-
-/** One entry of a Workstream's working-path list; position is display order only. */
-export interface WorkstreamPath {
-  id: string;
-  workstream_id: string;
-  workspace_path_id: string;
-  position: number;
-  created_at: string;
 }
 
 /** Workspace settings surface (backend: get_workspace_settings). */
@@ -202,8 +166,6 @@ export interface WorkstreamCardData {
   last_activity_at: string | null;
   session_count: number;
   latest_session: LatestSessionInfo | null;
-  /** How many working paths the Workstream has. `0` is a normal state. */
-  path_count: number;
 }
 
 /** 逻辑会话：用户可感知、可 Resume 的主会话。身份是 `(agent, root_agent_session_id)`；
@@ -219,12 +181,8 @@ export interface Session {
   project_id: string | null;
   /** Null for a Session with no cwd — v0.2 never fabricates a path. */
   workspace_path_id: string | null;
-  /**
-   * 语义归属：这条执行属于哪项持续工作。`null` = 未归属任务。
-   * A Session has at most one Owner Workstream. 只由显式用户动作或匹配到的
-   * 新建终端首次绑定设置，fork 不继承。
-   */
-  owner_workstream_id: string | null;
+  /** 会话可跟踪多个任务，不影响目录和项目归属。 */
+  tracked_workstream_ids: string[];
   /** 若本会话是独立 fork，其来源会话（仅 provenance；生命周期完全独立）。 */
   forked_from_session_id: string | null;
   started_at: string | null;
@@ -396,14 +354,20 @@ export interface SessionMessageStats {
 }
 
 /** `get_session_detail` — 逻辑会话详情。 */
+export interface SessionTracking {
+  session: Session;
+  tracked_workstreams: Workstream[];
+  available_workstreams: Workstream[];
+}
+
 export interface SessionDetail {
   session: Session;
   /** Conversation：只含根源的 user/assistant 消息。 */
   messages: SessionMessage[];
   /** 会话消息统计：用户消息与代理回复总数。 */
   message_stats?: SessionMessageStats;
-  /** 唯一的所属任务；`null` = 未归属任务。 */
-  owner_workstream: Workstream | null;
+  /** 会话显式跟踪的任务，包含已归档任务。 */
+  tracked_workstreams: Workstream[];
   workspace_path: SessionWorkspacePath | null;
   ingested_message_sequence: number;
   processed_message_sequence: number;
@@ -499,8 +463,8 @@ export interface PreparedLaunch {
   mode: "new" | "resume";
   agent: Agent;
   session_id?: string | null;
-  /** 这次启动唯一的所属任务；`null` = standalone。 */
-  owner_workstream_id: string | null;
+  /** 新建时预选的跟踪任务；首次原生绑定后消费。 */
+  initial_workstream_id: string | null;
   cwd?: string | null;
   /** `cwd` 由哪一层决定，以及发生 fallback 时的说明。 */
   cwd_resolution: CwdResolution;
@@ -530,8 +494,8 @@ export interface TerminalSummary {
   terminal_id: string;
   /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
-  /** 首次绑定前为启动时所选任务；绑定后为当前会话的所属任务。只在内存中保存。 */
-  owner_workstream_id: string | null;
+  /** 首次绑定前的跟踪意图，绑定后清空。只在内存中保存。 */
+  initial_workstream_id: string | null;
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   agent: Agent;

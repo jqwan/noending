@@ -10,12 +10,10 @@ import {
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
   type WorkstreamContextView,
-  type WorkstreamPathRow,
 } from "../../types";
 import type { Route } from "../../app/routes";
 import SummaryMarkdown from "../sessions/SummaryMarkdown";
 import WorkstreamSessions from "./WorkstreamSessions";
-import WorkstreamPathList from "./WorkspacePaths";
 
 /** Task organization and the current Markdown summary. All reads are pure. */
 export const workstreamDetailCache = new Map<
@@ -23,7 +21,7 @@ export const workstreamDetailCache = new Map<
   {
     ctx: WorkstreamContextData;
     ctxState: WorkstreamContextView | null;
-    paths: WorkstreamPathRow[] | null;
+
   }
 >();
 
@@ -54,8 +52,6 @@ export default function WorkstreamDetailView({
   const [ctxUpdating, setCtxUpdating] = useState(false);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
-  const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(() => cached?.paths ?? null);
-  const [pathsError, setPathsError] = useState("");
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -90,18 +86,15 @@ export default function WorkstreamDetailView({
     if (currentCached) {
       setCtx(currentCached.ctx);
       setCtxState(currentCached.ctxState);
-      setPaths(currentCached.paths);
     } else {
       setCtx(null);
       setCtxState(null);
-      setPaths(null);
     }
     setLoadError("");
     setCtxUpdateError(null);
     setPreferenceError(null);
     setFailedSessions([]);
     setCtxUpdating(false);
-    setPathsError("");
     setMenuOpen(false);
     setEditing(false);
     setConfirmArchive(false);
@@ -115,7 +108,6 @@ export default function WorkstreamDetailView({
       workstreamDetailCache.set(workstreamId, {
         ctx: c,
         ctxState: prev?.ctxState ?? null,
-        paths: prev?.paths ?? null,
       });
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
 
@@ -128,17 +120,6 @@ export default function WorkstreamDetailView({
       }
     }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorDetails(e)); });
 
-    api.listWorkstreamPaths(workstreamId).then((rows) => {
-      if (cancelled) return;
-      setPaths(rows);
-      setPathsError("");
-      const prev = workstreamDetailCache.get(workstreamId);
-      if (prev) {
-        workstreamDetailCache.set(workstreamId, { ...prev, paths: rows });
-      }
-    }).catch((e) => {
-      if (!cancelled) { setPaths(null); setPathsError(`读取工作目录失败：${String(e)}`); }
-    });
     return () => {
       cancelled = true;
     };
@@ -153,7 +134,6 @@ export default function WorkstreamDetailView({
       workstreamDetailCache.set(workstreamId, {
         ctx: c,
         ctxState: prev?.ctxState ?? null,
-        paths: prev?.paths ?? null,
       });
     }).catch(console.error);
 
@@ -166,19 +146,7 @@ export default function WorkstreamDetailView({
       }
     }).catch(console.error);
 
-    api.listWorkstreamPaths(workstreamId).then((rows) => {
-      if (currentWorkstreamId.current !== workstreamId) return;
-      setPaths(rows);
-      setPathsError("");
-      const prev = workstreamDetailCache.get(workstreamId);
-      if (prev) {
-        workstreamDetailCache.set(workstreamId, { ...prev, paths: rows });
-      }
-    }).catch((e) => {
-      if (currentWorkstreamId.current !== workstreamId) return;
-      setPaths(null);
-      setPathsError(`读取工作目录失败：${String(e)}`);
-    });
+
   }, [workstreamId]);
 
   useRefreshSignal(refresh);
@@ -320,31 +288,14 @@ export default function WorkstreamDetailView({
     }
   };
 
-  /** 工作目录还没读回来时不能进编辑模式：草稿由当前列表预填，拿「空」当
-   *  「没有目录」会在保存时把已有路径全删掉，所以明说还在读。 */
   const openEditor = () => {
     setMenuOpen(false);
-    if (paths === null) {
-      setActionError("工作目录还在读取中，请稍后再试。");
-      return;
-    }
     setEditing(true);
   };
 
   const archived = workstream.visibility === "archived";
   // 一个 Workstream 可以关联多个 Project
-  const projectRows = (() => {
-    const byId = new Map<string, { id: string; name: string | null; count: number }>();
-    for (const p of paths ?? []) {
-      const seen = byId.get(p.project_id);
-      byId.set(p.project_id, {
-        id: p.project_id,
-        name: p.project_name ?? seen?.name ?? null,
-        count: (seen?.count ?? 0) + 1,
-      });
-    }
-    return [...byId.values()];
-  })();
+  const projectRows=ctx.projects;
 
   return (
     <div className="main task-detail">
@@ -358,7 +309,7 @@ export default function WorkstreamDetailView({
             </button>
             {!archived && (
               <button className="btn ghost icon-button" aria-label="归档"
-                title="归档：保留路径、会话与摘要，归档后不能新建会话。"
+                title="归档：保留项目关联、会话跟踪与摘要，归档后不能新建会话。"
                 onClick={() => setConfirmArchive(true)}>
                 <Icon name="archive" />
               </button>
@@ -443,22 +394,17 @@ export default function WorkstreamDetailView({
           </div>
         </section>
 
-        <WorkstreamPathList
-          paths={paths}
-          error={pathsError}
-        />
-
         <section className="rail-section">
           <div className="section-label">项目</div>
-          {paths === null && (
-            <div className="muted small">{pathsError || "读取工作目录后才能确定…"}</div>
+          {false && (
+            <div className="muted small">{""}</div>
           )}
-          {paths !== null && projectRows.length === 0 && (
+          {projectRows.length === 0 && (
             <div className="l1-none">
               暂无项目
             </div>
           )}
-          {paths !== null && projectRows.map((p) => (
+          {projectRows.map((p) => (
             <div className="list-row" key={p.id} role="link" tabIndex={0}
               onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
               onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
@@ -472,10 +418,10 @@ export default function WorkstreamDetailView({
         </aside>
       </div>
 
-      {editing && paths !== null && (
+      {editing && (
         <WorkstreamFormModal
           workstream={workstream}
-          paths={paths}
+          projects={projectRows}
           onClose={() => setEditing(false)}
           onSaved={refresh}
         />

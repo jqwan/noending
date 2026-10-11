@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
+import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
@@ -23,13 +23,12 @@ import {
   type Project,
   type SessionContextView,
   type SessionDetail,
-  type Workstream,
 } from "../../types";
 import type { Route } from "../../app/routes";
 
 /**
  * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
- * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / Owner。
+ * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / task tracking。
  * 唯一的会话→会话链接是 fork 来源。
  */
 export const sessionDetailCache = new Map<string, SessionDetail>();
@@ -49,7 +48,6 @@ export default function SessionDetailView({
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
-  const [ownerOpen, setOwnerOpen] = useState(false);
   /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
@@ -146,7 +144,7 @@ export default function SessionDetailView({
       </div>
     );
   }
-  const { session, owner_workstream } = detail;
+  const { session } = detail;
 
   /** 一次点击 → 最多启动一次 Agent → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async (regenerate = false) => {
@@ -217,14 +215,6 @@ export default function SessionDetailView({
     ? workspacePath.project_name
     : null;
   /** 这条会话「属于」哪个项目：工作目录与 Session API 使用相同的项目派生链。 */
-  const sessionProjectId = workspacePath?.project_id ?? session.project_id ?? null;
-
-  /** 设置所属任务：只改 `sessions.owner_workstream_id`，不碰工作路径与 Project。 */
-  const setOwner = async (workstreamId: string | null) => {
-    await api.setSessionOwnerWorkstream(sessionId, workstreamId);
-    refresh();
-    setOwnerOpen(false);
-  };
 
   /** Conversation：只有 root 的 user/assistant prose。 */
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
@@ -303,51 +293,9 @@ export default function SessionDetailView({
         </div>
       )}
 
-      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（所属任务、Context）。 */}
+      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
       <div className="task-detail-layout">
       <div className="task-detail-main">
-      <div className="row between" style={{ marginBottom: 8 }}>
-        <div className="section-label" style={{ margin: 0 }}>所属任务</div>
-      </div>
-      {/* 一次最多一个 Owner：要么一条任务，要么「未归属任务」。
-          没有「再添加一条」的入口——更换与清空都在这一个入口里。 */}
-      {owner_workstream ? (
-        <div
-          className="rail-row"
-          role="link"
-          tabIndex={0}
-          title={`打开任务：${owner_workstream.title}`}
-          onClick={() => navigate({ view: "workstream", workstreamId: owner_workstream.id, initialTitle: owner_workstream.title })}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && e.target === e.currentTarget) {
-              navigate({ view: "workstream", workstreamId: owner_workstream.id, initialTitle: owner_workstream.title });
-            }
-          }}
-        >
-          <div className="rail-main">
-            <div className="rail-title" style={{ overflowWrap: "anywhere" }}>
-              {owner_workstream.title.trim() || "未命名任务"}
-            </div>
-          </div>
-          <button
-            className="btn small"
-            onClick={(e) => {
-              e.stopPropagation();
-              setOwnerOpen(true);
-            }}
-          >
-            更改
-          </button>
-        </div>
-      ) : (
-        <div className="rail-row">
-          <div className="rail-main">
-            <div className="rail-title muted">未归属任务</div>
-          </div>
-          <button className="btn small" onClick={() => setOwnerOpen(true)}>选择</button>
-        </div>
-      )}
-
       {/* 当前摘要只读；更新合并增量，重新生成从完整历史重建。 */}
       <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
         <div className="section-label" style={{ margin: 0 }}>Context</div>
@@ -670,14 +618,6 @@ export default function SessionDetailView({
         />
       )}
 
-      {ownerOpen && (
-        <OwnerPickerModal
-          currentOwnerId={owner_workstream?.id ?? null}
-          projectId={sessionProjectId}
-          onClose={() => setOwnerOpen(false)}
-          onSubmit={setOwner}
-        />
-      )}
     </div>
   );
 }
@@ -723,107 +663,5 @@ function Field({
       </div>
       <div style={{ minWidth: 0 }}>{children}</div>
     </>
-  );
-}
-
-/**
- * 选择所属任务：单选，可清空为「未归属」。
- *
- * 候选按「当前 Project → 其他任务」分组，与工作目录有路径关联的任务优先；
- * 后端不强制这个限制，其他任务仍可选中。归档任务不接收新的归属。
- */
-function OwnerPickerModal({ currentOwnerId, projectId, onClose, onSubmit }: {
-  /** 当前所属任务；null = 未归属。 */
-  currentOwnerId: string | null;
-  /** null = 这条会话没有可解析的项目，此时不分组，只列全部任务。 */
-  projectId: string | null;
-  onClose: () => void;
-  onSubmit: (workstreamId: string | null) => Promise<void>;
-}) {
-  const [tasks, setTasks] = useState<Workstream[] | null>(null);
-  const [projectTaskIds, setProjectTaskIds] = useState<string[]>([]);
-  const [error, setError] = useState(false);
-  const [selected, setSelected] = useState<string | null>(currentOwnerId);
-  const [attempt, setAttempt] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [failText, setFailText] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    setError(false);
-    Promise.all([
-      api.listWorkstreams(),
-      projectId ? api.listWorkstreams(projectId) : Promise.resolve([]),
-    ])
-      .then(([all, inProject]) => {
-        if (!active) return;
-        setTasks(all);
-        setProjectTaskIds(inProject.map((w) => w.id));
-      })
-      .catch(() => { if (active) setError(true); });
-    return () => { active = false; };
-  }, [projectId, attempt]);
-
-  const submit = async () => {
-    if (busy) return;
-    setBusy(true);
-    setFailText("");
-    try {
-      await onSubmit(selected);
-    } catch (e) {
-      setFailText(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const option = (id: string | null, title: string) => (
-    <label className="existing-path-option" key={id ?? "none"}>
-      <input
-        type="radio"
-        name="owner-workstream"
-        checked={selected === id}
-        onChange={() => setSelected(id)}
-      />
-      <span className="existing-path-info" title={title}>{title}</span>
-    </label>
-  );
-
-  const otherTasks = (tasks ?? []).filter((w) => !projectTaskIds.includes(w.id));
-  const projectTasks = (tasks ?? []).filter((w) => projectTaskIds.includes(w.id));
-
-  return (
-    <Modal title="选择所属任务" onClose={onClose}>
-      <div className="existing-path-list" role="radiogroup" aria-label="所属任务">
-        {error ? (
-          <div role="alert">
-            读取任务失败 <button className="btn small" onClick={() => setAttempt((n) => n + 1)}>重试</button>
-          </div>
-        ) : !tasks ? (
-          <div role="status">加载中…</div>
-        ) : (
-          <>
-            {option(null, "未归属")}
-            {projectTasks.length > 0 ? (
-              <>
-                <div className="muted small" style={{ marginTop: 8 }}>当前项目</div>
-                {projectTasks.map((w) => option(w.id, w.title.trim() || "未命名任务"))}
-              </>
-            ) : null}
-            {projectTasks.length > 0 && otherTasks.length > 0 ? (
-              <div className="muted small" style={{ marginTop: 8 }}>其他任务</div>
-            ) : null}
-            {otherTasks.map((w) => option(w.id, w.title.trim() || "未命名任务"))}
-          </>
-        )}
-      </div>
-      {failText && <div className="badge warn" style={{ marginTop: 8 }}>{failText}</div>}
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={busy || !tasks || selected === currentOwnerId} onClick={submit}>
-          {busy ? "保存中…" : "保存"}
-        </button>
-      </div>
-    </Modal>
   );
 }

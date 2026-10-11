@@ -1,5 +1,4 @@
-// Sessions 页的 Workstream 筛选口径：筛选直接看
-// `session.owner_workstream_id`，未归属看 null。不存在"关联任务"这一层。
+// 会话可跟踪多个任务；任务筛选匹配跟踪 ID，无跟踪筛选匹配空列表。
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +40,7 @@ function session(over: Partial<Session> = {}): Session {
     cwd: "/repo",
     workspace_path_id: null,
     project_id: null,
-    owner_workstream_id: null,
+    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: "2026-09-01T00:00:00Z",
     last_activity_at: "2026-09-02T00:00:00Z",
@@ -59,7 +58,7 @@ function session(over: Partial<Session> = {}): Session {
         source_tail_hash: "",
         fact_generation: 1,
         latest_message_seq: 2,
-    
+
     ...over,
   };
 }
@@ -86,21 +85,21 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe("Sessions 页按所属任务筛选", () => {
+describe("Sessions 页按跟踪任务筛选", () => {
   it("筛选选项来自各 Session 的 owner，未归属是 null 而不是某个任务", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "owned", title: "有归属", owner_workstream_id: "w1" }),
-      session({ id: "free", title: "没归属", owner_workstream_id: null }),
+      session({ id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] }),
+      session({ id: "free", title: "没归属", tracked_workstream_ids: [] }),
     ]);
     await act(async () => { render(<SessionsView navigate={navigate} />); });
 
     await screen.findByText("全部任务");
-    // 选中一个真实任务后，只剩 owner_workstream_id 等于它的那一条。
+    // 选中一个真实任务后，只剩 tracked_workstream_ids 包含它的那一条。
     fireEvent.change(taskFilter(), { target: { value: "w1" } });
     screen.getByText("有归属");
     expect(screen.queryByText("没归属")).toBeNull();
 
-    // 「未归属任务」是 `owner_workstream_id === null`，与任何任务 id 都不相等。
+    // 「未归属任务」是 `tracked_workstream_ids.length === 0`，与任何任务 id 都不相等。
     fireEvent.change(taskFilter(), { target: { value: "unassigned" } });
     screen.getByText("没归属");
     expect(screen.queryByText("有归属")).toBeNull();
@@ -121,7 +120,7 @@ it("opens the new-session page from the toolbar and empty-state action", async (
 });
 
 it("shows archived sessions in the same cards and filters, with continue disabled", async () => {
-  vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08", owner_workstream_id: "w1" })]);
+  vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08", tracked_workstream_ids: ["w1"] })]);
   render(<SessionsView navigate={navigate} scope="archived" />);
   await screen.findByText("归档会话");
   expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "archived");

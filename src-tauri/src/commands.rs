@@ -385,7 +385,7 @@ pub fn launch_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    owner_workstream_id: Option<String>,
+    initial_workstream_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
@@ -395,7 +395,7 @@ pub fn launch_new_session(
         launcher.new_session_in(
             db,
             agent,
-            owner_workstream_id.as_deref(),
+            initial_workstream_id.as_deref(),
             cwd.as_deref(),
             &workspace,
         )
@@ -444,7 +444,7 @@ pub fn prepare_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    owner_workstream_id: Option<String>,
+    initial_workstream_id: Option<String>,
     cwd: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::PreparedLaunch> {
@@ -455,7 +455,7 @@ pub fn prepare_new_session(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            owner_workstream_id.as_deref(),
+            initial_workstream_id.as_deref(),
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),
@@ -589,7 +589,7 @@ pub fn launch_embedded_new(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     agent: String,
-    owner_workstream_id: Option<String>,
+    initial_workstream_id: Option<String>,
     cwd: Option<String>,
     initial_message: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
@@ -601,7 +601,7 @@ pub fn launch_embedded_new(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            owner_workstream_id.as_deref(),
+            initial_workstream_id.as_deref(),
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),
@@ -635,7 +635,6 @@ pub fn terminal_list(
                 if let Some(session_id) = &t.session_id {
                     if let Ok(Some(session)) = db.get_session(session_id) {
                         t.session_title = session.title;
-                        t.owner_workstream_id = session.owner_workstream_id;
                     }
                 }
             }
@@ -741,7 +740,6 @@ pub fn terminal_attach(
     if let Some(session_id) = &snapshot.summary.session_id {
         if let Some(session) = with_db(&state, |db| db.get_session(session_id))? {
             snapshot.summary.session_title = session.title;
-            snapshot.summary.owner_workstream_id = session.owner_workstream_id;
         }
     }
     Ok(snapshot)
@@ -1111,4 +1109,14 @@ mod agent_runtime_refresh_seam_tests {
             assert!(err.to_string().contains("http"), "{bad}: {err}");
         }
     }
+}
+
+#[tauri::command]
+pub fn promote_preference(
+    state: State<AppState>,
+    id: String,
+) -> Result<crate::storage::preferences::Preference> {
+    with_db(&state, |db| {
+        crate::storage::preferences::promote_item(db, &id)
+    })
 }

@@ -567,7 +567,7 @@ where
 /// its path and re-scan from scratch. THE MESSAGE STORE IS NEVER DELETED —
 /// message ids and every provenance ref stay valid, because unchanged content
 /// dedups by identity and only new/changed content appends. Context items,
-/// Owner and audit history are untouched.
+/// Tracking and audit history are untouched.
 ///
 /// A re-scan that finds the conversation rewritten, truncated or reordered raises
 /// the Session's fact generation (via the projection), which makes its Context

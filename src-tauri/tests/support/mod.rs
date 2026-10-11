@@ -45,7 +45,7 @@ pub fn session(id: Id, agent: Agent, root_agent_session_id: impl Into<String>) -
         cwd: None,
         workspace_path_id: None,
         project_id: None,
-        owner_workstream_id: None,
+        tracked_workstream_ids: vec![],
         forked_from_session_id: None,
         started_at: None,
         last_activity_at: None,
@@ -164,4 +164,33 @@ pub fn seed_source(generation: i64) -> noending::domain::SourceCursorUpdate {
         start_byte_offset: 0,
         prefix_hash: String::new(),
     }
+}
+
+pub fn track(
+    db: &noending::storage::Db,
+    sid: &str,
+    task: Option<&str>,
+) -> noending::error::Result<()> {
+    db.tx(|tx| {
+        if let Some(tid)=task {
+            tx.execute("INSERT OR IGNORE INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",rusqlite::params![sid,tid])?;
+            noending::storage::bump_input_revision_conn(tx,tid)?;
+        } else {
+            let mut st=tx.prepare("SELECT workstream_id FROM session_workstreams WHERE session_id=?1")?;
+            let ids=st.query_map([sid],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            drop(st);
+            tx.execute("DELETE FROM session_workstreams WHERE session_id=?1",[sid])?;
+            for tid in ids { noending::storage::bump_input_revision_conn(tx,&tid)?; }
+        }
+        noending::storage::index_session_conn(tx,sid)
+    })
+}
+
+pub fn associate_path_project(
+    conn: &rusqlite::Connection,
+    task: &str,
+    path: &str,
+) -> noending::error::Result<()> {
+    conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT ?1,project_id FROM workspace_paths WHERE id=?2",rusqlite::params![task,path])?;
+    Ok(())
 }

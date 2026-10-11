@@ -118,7 +118,7 @@ fn result(dir: &Path, prefix: &str, id: &str, summary: &str) {
 fn task(f: &ServiceFixture, ids: &[&str]) -> Workstream {
     let ws = f.add_workstream("task-test");
     for id in ids {
-        f.db().set_session_owner(id, Some(&ws.id)).unwrap();
+        crate::storage::seed_tracking(&f.db(), id, Some(&ws.id)).unwrap();
     }
     ws
 }
@@ -424,7 +424,7 @@ fn task_changes_retain_current_summaries_until_explicit_regeneration() {
         Ok(r#"{"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[]}"#.into())
     };
     extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
-    f.db().set_session_owner(&b, None).unwrap();
+    crate::storage::seed_tracking(&f.db(), &b, None).unwrap();
     append(&f, &a, "改写后的历史", true);
     assert_eq!(
         session_context_view(f.db(), &a)
@@ -582,7 +582,7 @@ fn appends_during_extraction_remain_pending_but_rewrites_and_owner_changes_rejec
     );
     let ws = task(&f, &[&id]);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        f.db().set_session_owner(&id, None).unwrap();
+        crate::storage::seed_tracking(&f.db(), &id, None).unwrap();
         result(dir, "session", &id, "stale");
         result(dir, "task", &ws.id, "stale");
         empty_preferences(dir);
@@ -786,12 +786,12 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
             rusqlite::params![a, b],
         )
         .unwrap();
-    let (p, path) = project_fixture(&f, "scope", &[&a, &b]);
+    let (p, _path) = project_fixture(&f, "scope", &[&a, &b]);
     let (_, other_path) = project_fixture(&f, "outside", &[&outside]);
     f.db()
         .tx(|tx| {
-            crate::storage::workstream_paths::append_workstream_path_conn(tx, &ws.id, &path)?;
-            crate::storage::workstream_paths::append_workstream_path_conn(tx, &ws.id, &other_path)?;
+            tx.execute("INSERT INTO workstream_projects(workstream_id,project_id) VALUES (?1,?2)",rusqlite::params![ws.id,p.id])?;
+            tx.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT ?1,project_id FROM workspace_paths WHERE id=?2",rusqlite::params![ws.id,other_path])?;
             tx.execute(
                 "UPDATE sessions SET archived_at='2026-10-11' WHERE id=?1",
                 [&b],

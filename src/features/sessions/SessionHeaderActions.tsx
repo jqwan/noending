@@ -58,11 +58,9 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             <b>{title}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。消息同步、搜索和摘要更新保持可用。
           </p>
-          {/* 要求把两个概念摆在同一处明确区分：「从任务移除」只改这条会话的
-              所属任务（详情页的「更改 / 选择」），这里是全局已归档。 */}
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 6px" }}>
-              <b>从任务移除</b> = 只修改这条会话的所属任务，会话本身留在列表里。
+              <b>从任务移除</b> = 只取消这条会话对该任务的跟踪，会话本身留在列表里。
             </p>
             <p style={{ margin: 0 }}>
               <b>归档</b> = 将会话移至「已归档」。Agent 原始会话不会被删除。

@@ -43,7 +43,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
   const [archivedMode, setArchivedMode] = useState(scope === "archived");
   const [allSessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
   const [projects, setProjects] = useState<Project[]>(cachedProjects);
-  /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
+  /** Workstream id → 标题：跟踪任务 ID 的标题在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
   /** Session 来源只用来把"空"拆成两种真实情况：没启用来源 vs 启用了但还没发现。
    *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
@@ -123,11 +123,11 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
     [projects],
   );
 
-  /** 筛选下拉里的任务选项：只列真的在列表里出现过的 Owner。 */
+  /** 筛选下拉里的任务选项：只列当前会话中出现的跟踪任务。 */
   const wsOptions = useMemo(() => {
     const seen = new Set<string>();
     for (const s of sessions ?? []) {
-      if (s.owner_workstream_id) seen.add(s.owner_workstream_id);
+      s.tracked_workstream_ids.forEach(id=>seen.add(id));
     }
     return [...seen]
       .map((id) => [id, workstreamTitleById.get(id)?.trim() || "未命名任务"] as const)
@@ -155,8 +155,8 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
         if (wsFilter === "all") return true;
         // 归属是单值：命中就是这一个，未归属就是 null。
         return wsFilter === "unassigned"
-          ? s.owner_workstream_id === null
-          : s.owner_workstream_id === wsFilter;
+          ? s.tracked_workstream_ids.length === 0
+          : s.tracked_workstream_ids.includes(wsFilter);
       })
       .filter((s) => {
         if (q === "") return true;
@@ -170,7 +170,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
           s.id,
           agentDisplayLabel(s.agent),
           s.project_id ? projectNameById.get(s.project_id) : null,
-          s.owner_workstream_id ? workstreamTitleById.get(s.owner_workstream_id) : null,
+          s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)).join("、"),
         ]
           .filter(Boolean)
           .some((t) => (t as string).toLowerCase().includes(q));
@@ -353,7 +353,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
               <select value={wsFilter} onChange={(e) => setWsFilter(e.target.value)}>
                 <option value="all">全部任务</option>
                 {wsOptions.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
-                <option value="unassigned">未归属任务</option>
+                <option value="unassigned">未跟踪任务</option>
               </select>
             </label>
             {!assistantMode && (<label className="ws-control">
@@ -497,7 +497,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
           </div>
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
             每个会话都会删除 NoEnding 的本地副本；源文件不会被删除，所以源仍存在的会话
-            会在后续同步中作为<b>新会话</b>重新入库（新 id、无所属任务、无摘要）。
+            会在后续同步中作为<b>新会话</b>重新入库（新 id、无跟踪任务、无摘要）。
           </p>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>

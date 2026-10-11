@@ -1,14 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Preference, Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
-  CreateWorkstreamReport,
+
   IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
   Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow, ProjectContextView, ProjectUpdateOutcome,
   AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
-  WorkstreamPath, WorkstreamPathRow,
-  SearchHit, Session, SessionContextView, SessionDetail,
+
+  SearchHit, Session, SessionContextView, SessionDetail, SessionTracking,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
   SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
@@ -49,17 +49,8 @@ export const api = {
   listWorkstreams: (projectId?: string) =>
     invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
-  /**
-   * 没有 Project 参数：v0.2 不做手动的 Workstream→Project 指派。`initialPaths`
-   * 每项是原始字符串，按序落成 WorkstreamPath（首个 ACCEPTED 占主位）；
-   * report 逐项说明落地/拒绝的结果，UI 无需回读再静默丢弃。
-   */
-  createWorkstream: (title: string, description: string, initialPaths: string[] = []) =>
-    invoke<CreateWorkstreamReport>("create_workstream", {
-      title,
-      description,
-      initialPaths,
-    }),
+  createWorkstream: (title: string,description: string,projectIds: string[] = []) =>
+    invoke<Workstream>("create_workstream",{title,description,projectIds}),
   /** 路径选择器的只读预览：这个字符串若作为工作路径会怎样、会投到哪个 Project。
    *  仅供建议——真正决定发生在 create 时。 */
   probeWorkspacePath: (path: string) =>
@@ -70,16 +61,8 @@ export const api = {
     invoke<RecentWorkspacePath[]>("list_recent_workspace_paths", { limit }),
   updateWorkstream: (w: Workstream) => invoke<void>("update_workstream", { workstream: w }),
 
-  // Workstream paths and archive state
-  listWorkstreamPaths: (workstreamId: string) =>
-    invoke<WorkstreamPathRow[]>("list_workstream_paths", { workstreamId }),
-  addWorkstreamPath: (workstreamId: string, path: string) =>
-    invoke<WorkstreamPath>("add_workstream_path", { workstreamId, path }),
-  removeWorkstreamPath: (workstreamId: string, workstreamPathId: string) =>
-    invoke<number>("remove_workstream_path", { workstreamId, workstreamPathId }),
-  /** `orderedWorkspacePathIds` must be the complete current list. */
-  reorderWorkstreamPaths: (workstreamId: string, orderedWorkspacePathIds: string[]) =>
-    invoke<WorkstreamPath[]>("reorder_workstream_paths", { workstreamId, orderedWorkspacePathIds }),
+  setWorkstreamProjects: (workstreamId: string,projectIds: string[]) =>
+    invoke<void>("set_workstream_projects",{workstreamId,projectIds}),
   /** Archive blocks new sessions and preserves task data. */
   archiveWorkstream: (workstreamId: string) =>
     invoke<Workstream>("archive_workstream", { workstreamId }),
@@ -107,6 +90,7 @@ export const api = {
   /** 仅已归档的会话可永久删除；不删除 Agent 源文件。 */
   permanentlyDeleteSession: (sessionId: string) =>
     invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
+  getSessionTracking: (sessionId: string) => invoke<SessionTracking>("get_session_tracking", {sessionId}),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
   /** 在系统默认浏览器打开 http(s) 链接（后端只放行 http/https）。 */
@@ -130,12 +114,9 @@ export const api = {
   /** 导航条的用户消息位置：当前会话里所有 user 消息，按顺序。 */
   getSessionUserMessageMarks: (sessionId: string) =>
     invoke<SessionMessageMark[]>("get_session_user_message_marks", { sessionId }),
-  /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */  /**
-   * 设置 / 清空 Session 唯一的所属任务。`workstreamId === null` 即「未归属任务」。
-   * 只写 `sessions.owner_workstream_id`，不碰 WorkstreamPath、cwd 或 Project。
-   */
-  setSessionOwnerWorkstream: (sessionId: string, workstreamId: string | null) =>
-    invoke<Session>("set_session_owner_workstream", { sessionId, workstreamId }),
+  /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */  /** 添加或取消任务跟踪，不改变项目及目录。 */
+  setSessionTaskTracking: (sessionId: string,workstreamId: string,tracked: boolean) =>
+    invoke<Session>("set_session_task_tracking",{sessionId,workstreamId,tracked}),
 
   // Ingestion: 两个显式更新按钮 + 纯读取。后台摄入只由三个显式入口排队
   // （高级维护页）与两个自动触发（启动 / 回到前台的 freshness 回落）；普通页面打开从不触发。
@@ -181,6 +162,7 @@ export const api = {
     invokeWithPreferences<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
 
   listPreferences: (projectId: string | null) => invoke<Preference[]>("list_preferences", { projectId }),
+  promotePreference: (id: string) => invoke<Preference>("promote_preference",{id}),
   savePreference: (id: string | null, projectId: string | null, content: string, locked: boolean) =>
     invokeWithPreferences<Preference>("save_preference", { id, projectId, content, locked }),
   deletePreference: (id: string) => invokeWithPreferences<void>("delete_preference", { id }),
@@ -192,12 +174,12 @@ export const api = {
   previewSummaryPrompt: (kind: SummaryPromptKind, templates: SummaryPromptTemplates) =>
     invoke<string>("preview_summary_prompt", { kind, templates }),
 
-  /** 新建 Session 最多带一个所属任务（`null` = standalone）。 */
-  prepareNewSession: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, runtime?: AgentRuntimeOverrides) =>
+  /** 新建 Session 可预选一个跟踪任务（`null` = standalone）。 */
+  prepareNewSession: (agent: Agent, initialWorkstreamId: string | null, cwd?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", {
       agent,
       runtime: runtime ?? null,
-      ownerWorkstreamId,
+      initialWorkstreamId,
       cwd: cwd ?? null,
     }),
   launchPrepared: (preparedId: string) =>
@@ -212,11 +194,11 @@ export const api = {
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
    *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, ownerWorkstreamId: string | null, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
+  launchEmbeddedNew: (agent: Agent, initialWorkstreamId: string | null, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
       runtime: runtime ?? null,
-      ownerWorkstreamId,
+      initialWorkstreamId,
       cwd: cwd ?? null,
       initialMessage: initialMessage ?? null,
     }),

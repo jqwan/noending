@@ -199,7 +199,7 @@ fn ingestion_writes_facts_and_zero_context() {
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
+    support::track(&db, &s.id, Some(&ws.id)).unwrap();
 
     let ingested = ingestion::ingest_session(&db, &s).unwrap();
     assert_eq!(ingested, 3, "every Agent event is ingested");
@@ -335,7 +335,7 @@ fn appended_source_ingests_only_the_delta() {
     let file = write_transcript(&dir, 2);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "Delta");
-    db.set_session_owner(&s.id, Some(&ws.id)).unwrap();
+    support::track(&db, &s.id, Some(&ws.id)).unwrap();
 
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
     let generation = db.get_session_ingest_state(&s.id).unwrap().0;

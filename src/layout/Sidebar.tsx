@@ -3,7 +3,7 @@ import { api } from "../api";
 import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import AgentIcon from "../components/AgentIcon";
-import { AGENT_LABELS, type AssistantWorkspace, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData, type AgentStatusEntry } from "../types";
+import { AGENT_LABELS, type AssistantWorkspace, type Agent, type TerminalSummary, type Session, type ProjectCardData, type AgentStatusEntry } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { capsOf, FORMAT_CAPS } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
@@ -19,7 +19,7 @@ export const SIDEBAR_FILTER_OPTIONS: Array<{ key: SidebarFilterKey; label: strin
   { key: "canContinue", label: "可终端继续" },
 ];
 
-export type SidebarGroupBy = "workstream" | "project" | "agent" | "none";
+export type SidebarGroupBy = "project" | "agent" | "none";
 
 export const SIDEBAR_GROUP_OPTIONS: Array<{
   key: SidebarGroupBy;
@@ -27,7 +27,6 @@ export const SIDEBAR_GROUP_OPTIONS: Array<{
   fullLabel: string;
   icon: "tasks" | "project" | "bot" | "chat";
 }> = [
-  { key: "workstream", label: "任务", fullLabel: "按任务归类", icon: "tasks" },
   { key: "project", label: "项目", fullLabel: "按项目归类", icon: "project" },
   { key: "agent", label: "代理", fullLabel: "按代理归类", icon: "bot" },
   { key: "none", label: "会话", fullLabel: "不分组（全部会话）", icon: "chat" },
@@ -141,7 +140,7 @@ export function isSessionTerminalContinuable(
   return caps.terminal && !session.archived_at;
 }
 
-export type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "owner_workstream_id" | "project_id" | "last_conversation_at" | "archived_at"> & {
+export type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "project_id" | "last_conversation_at" | "archived_at"> & {
   source_kind?: string;
   sessionId: string | null;
   terminals: TerminalSummary[];
@@ -178,7 +177,6 @@ export function mergeSidebarSessions(
         agent: terminal.agent,
         title: terminal.session_title ?? "新会话",
         cwd: terminal.cwd,
-        owner_workstream_id: terminal.owner_workstream_id,
         project_id: null,
         last_conversation_at: null,
         archived_at: null,
@@ -232,15 +230,6 @@ export function isAgentTerminalContinuable(agentKey: string): boolean {
   return false;
 }
 
-function getWorkstreamGroupTime(group: SidebarSessionGroup, workstreamMap: Map<string, WorkstreamCardData>): number {
-  if (group.id !== "__unassigned_workstream__" && workstreamMap.has(group.id)) {
-    const card = workstreamMap.get(group.id)!;
-    const t = Date.parse(card.created_at);
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return group.latestTime;
-}
-
 function getProjectGroupTime(group: SidebarSessionGroup, projectMap: Map<string, ProjectCardData>): number {
   if (group.id !== "__unassigned_project__" && projectMap.has(group.id)) {
     const card = projectMap.get(group.id)!;
@@ -261,7 +250,6 @@ export function groupSidebarSessions(
   sessions: SidebarSession[],
   groupBy: SidebarGroupBy,
   sortBy: SidebarSortKey = "createdAt",
-  workstreamMap: Map<string, WorkstreamCardData>,
   projectMap: Map<string, ProjectCardData>,
 ): SidebarSessionGroup[] {
   if (groupBy === "none") {
@@ -280,18 +268,7 @@ export function groupSidebarSessions(
     let groupId: string;
     let groupTitle: string;
 
-    if (groupBy === "workstream") {
-      if (s.owner_workstream_id && workstreamMap.has(s.owner_workstream_id)) {
-        groupId = s.owner_workstream_id;
-        groupTitle = workstreamMap.get(s.owner_workstream_id)!.title;
-      } else if (s.owner_workstream_id) {
-        groupId = s.owner_workstream_id;
-        groupTitle = "未知任务";
-      } else {
-        groupId = "__unassigned_workstream__";
-        groupTitle = "无任务";
-      }
-    } else if (groupBy === "project") {
+    if (groupBy === "project") {
       if (s.project_id && projectMap.has(s.project_id)) {
         groupId = s.project_id;
         groupTitle = projectMap.get(s.project_id)!.name;
@@ -341,19 +318,7 @@ export function groupSidebarSessions(
   // 2. 项目/任务 也是按创建/发现时间排序，代理按是否可终端继续和名称进行排序；无任务/无项目固定沉底
   const groupsList = Array.from(groupsMap.values());
 
-  if (groupBy === "workstream") {
-    return groupsList.sort((a, b) => {
-      const isUnassignedA = a.id === "__unassigned_workstream__";
-      const isUnassignedB = b.id === "__unassigned_workstream__";
-      if (isUnassignedA !== isUnassignedB) {
-        return isUnassignedA ? 1 : -1;
-      }
-      const timeA = getWorkstreamGroupTime(a, workstreamMap);
-      const timeB = getWorkstreamGroupTime(b, workstreamMap);
-      if (timeB !== timeA) return timeB - timeA;
-      return a.title.localeCompare(b.title, "zh-Hans");
-    });
-  } else if (groupBy === "project") {
+  if (groupBy === "project") {
     return groupsList.sort((a, b) => {
       const isUnassignedA = a.id === "__unassigned_project__";
       const isUnassignedB = b.id === "__unassigned_project__";
@@ -589,9 +554,8 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   const [terminalsLoading, setTerminalsLoading] = useState(true);
   const [allTerminals, setTerminals] = useState<TerminalSummary[]>([]);
   const [allSessions, setSessions] = useState<Session[]>([]);
-  const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [groupBy, setGroupBy] = useViewState<SidebarGroupBy>(`${statePrefix}.recent.groupBy`, "workstream");
+  const [groupBy, setGroupBy] = useViewState<SidebarGroupBy>(`${statePrefix}.recent.groupBy.v2`, "project");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [expandedGroupSessions, setExpandedGroupSessions] = useState<Record<string, boolean>>({});
 
@@ -614,12 +578,10 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   const refreshSessions = useCallback(() => {
     Promise.all([
       api.listSessions(undefined, undefined, "all"),
-      api.listWorkstreamCards(),
       api.listProjectCards(),
     ])
-      .then(([sList, wsList, prjList]) => {
+      .then(([sList, prjList]) => {
         setSessions(sList);
-        setWorkstreams(wsList);
         setProjects(prjList);
       })
       .catch(console.error);
@@ -669,14 +631,6 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
     );
   };
-
-  const workstreamMap = useMemo(() => {
-    const map = new Map<string, WorkstreamCardData>();
-    for (const ws of workstreams) {
-      map.set(ws.id, ws);
-    }
-    return map;
-  }, [workstreams]);
 
   const projectMap = useMemo(() => {
     const map = new Map<string, ProjectCardData>();
@@ -757,10 +711,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       ).filter((s) => !isSessionPinned(s)),
       groupBy,
       sortBy,
-      workstreamMap,
       projectMap,
     ).filter((group) => group.sessions.length > 0);
-  }, [sessions, terminals, route, filters, groupBy, sortBy, workstreamMap, projectMap, isSessionPinned]);
+  }, [sessions, terminals, route, filters, groupBy, sortBy, projectMap, isSessionPinned]);
 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => {
@@ -1027,13 +980,10 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           sessionGroups.map((group) => {
             const isCollapsed = Boolean(collapsedGroups[group.id]);
             const isUnassignedGroup =
-              group.id === "__unassigned_workstream__" ||
               group.id === "__unassigned_project__";
             const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;
             const iconName = isUnassignedGroup
               ? "inbox"
-              : groupBy === "workstream"
-              ? (isCollapsed ? "tasks" : "tasksExpanded")
               : groupBy === "project"
               ? (isCollapsed ? "project" : "projectOpen")
               : "bot";

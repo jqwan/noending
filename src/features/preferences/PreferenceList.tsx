@@ -38,6 +38,7 @@ export default function PreferenceList({ projectId }: { projectId: string | null
       await action();
       if (!active.current) return;
       if (inEditor) setEditing(null);
+      window.dispatchEvent(new Event("noending:preferences"));
       refresh();
       showToast("偏好已保存");
     } catch (e) {
@@ -56,6 +57,7 @@ export default function PreferenceList({ projectId }: { projectId: string | null
     {items.map(item => <div className="preference-row" key={item.id}>
       <div className="grow"><span className="preference-content">{item.content}</span>{item.locked && <span className="badge">已锁定</span>}</div>
       <div className="actions">
+        {projectId && <button className="btn small ghost icon-button" title="升级为用户偏好" aria-label={`升级为用户偏好：${item.content}`} disabled={busy} onClick={()=>mutate(()=>api.promotePreference(item.id))}><Icon name="promote"/></button>}
         <button className="btn small ghost" disabled={busy} onClick={() => mutate(() => api.savePreference(item.id, projectId, item.content, !item.locked))}>{item.locked ? "解锁" : "锁定"}</button>
         <button className="btn small ghost icon-button" title="编辑偏好" aria-label={`编辑偏好：${item.content}`} disabled={busy} onClick={() => { setEditing(item); setEditError(""); }}><Icon name="edit" /></button>
         <button className="btn small ghost icon-button" title="删除偏好" aria-label={`删除偏好：${item.content}`} disabled={busy} onClick={() => mutate(() => api.deletePreference(item.id))}><Icon name="trash" /></button>

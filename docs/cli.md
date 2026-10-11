@@ -62,7 +62,7 @@ ne preference list --scope project --project <id>
 ne preference add --scope user --content "说明保持简明"
 ne preference update <id> --content "先说明结论，再说明原因"
 ne preference delete <id>
-ne task create --title "任务名称" --description "说明" --path /absolute/path
+ne task create --title "任务名称" --description "说明" --project <项目id>
 ne task update <任务id> --title "新标题"
 ne task update <任务id> --description "新说明"
 ne task attach <任务id> --session <会话id>
@@ -75,19 +75,17 @@ ne project rename <项目id> --name "新名称"
 ne project archive <项目id>
 ne project unarchive <项目id>
 ne path register --path /absolute/existing/directory
-ne task path list <任务id>
-ne task path add <任务id> --path /absolute/existing/directory
-ne task path remove <任务id> --path-id <workspace_path_id>
-ne task path reorder <任务id> --path-id <workspace_path_id_2> --path-id <workspace_path_id_1>
+ne task project list <任务id>
+ne task project set <任务id> --project <项目id1> --project <项目id2>
 ```
 
-偏好不能改变所属范围，CLI 不提供锁定状态修改；修改或删除时以后端当前锁定状态为准。用户仍可在界面管理所有条目。任务创建可重复传入 `--path`；使用现有目录解析和项目聚合规则。一个会话只有一个所属任务，attach 会移动所属关系；detach 仅解除它与指定任务的关系，不会清除已变更的所属关系。
+偏好不能改变所属范围，CLI 不提供锁定状态修改；修改或删除时以后端当前锁定状态为准。用户仍可在界面管理所有条目。任务创建可重复传入 `--project` 关联多个已有项目。一个会话可跟踪多个任务，attach 只增加该任务的跟踪，不替换其他任务；新增跟踪限于会话当前项目的未归档任务，detach 只取消指定任务的跟踪。
 
 task update 只更改提供的字段，保留归档状态及关联。至少提供 title 或 description，可同时提供；标题不能为空，`--description ""` 清空说明。任务及项目改名同步更新搜索索引，项目名称会标记为用户自定义，不被后续自动命名覆盖。
 
 archive/unarchive 复用界面的归档规则，保留摘要、历史消息和目录关联。归档任务不能新建会话，归档会话不能通过应用继续。归档任务不会连带归档其会话。会话重复执行相同状态的转换会被拒绝；脚本重试使用同一个 request_id 获取原结果。
 
-path register 和 task path add 要求目录已存在且为绝对路径，不创建磁盘目录，也不扫描摄入目录下的会话。项目按现有目录和 Git/worktree 规则派生，不能手动指定归属。task path list 的每项包含关联行 id 和 workspace_path_id；remove/reorder 的 `--path-id` 均使用 **workspace_path_id**。重复添加保留原位置；reorder 必须给出当前目录的完整列表，每项恰好一次（空列表不传 path-id）。remove 只解除任务目录关联，不删除磁盘目录、项目、会话或其所属任务关系。
+path register 要求目录已存在且为绝对路径，不创建磁盘目录，也不扫描摄入目录下的会话。项目按目录和 Git/worktree 规则派生。task project set 替换任务的完整项目列表，空列表解除所有项目关联；不会移动目录或会话，也不会清除现有任务跟踪。任务的 --path 查询匹配其关联项目当前的所有目录。
 
 这些写操作完成后会通知应用刷新。CLI 不提供原始消息编辑、原生会话标题改写、项目身份修改或永久删除。
 

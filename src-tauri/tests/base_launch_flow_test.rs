@@ -6,7 +6,6 @@
 //! nothing; the capability is single-use and the
 //! spawn step is injected via `launch_prepared_with_in` so no Terminal opens.
 
-use rusqlite::Connection;
 mod support;
 
 use noending::adapters::adapter_for;
@@ -18,7 +17,7 @@ use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
-use noending::workspace::{normalize_path, WorkspaceAttaching};
+use noending::workspace::normalize_path;
 
 const PROJECT: &str = "p-base-launch";
 
@@ -37,19 +36,6 @@ fn real_dir(tag: &str, name: &str) -> String {
     let dir = dir.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     normalize_path(&dir.to_string_lossy()).expect("fixture path normalizes")
-}
-
-/// Stand-in for `workspace::project`: lexical, no Git, writes through the
-/// caller's connection (`WorkspaceAttaching`'s contract).
-struct LexicalPaths;
-
-impl WorkspaceAttaching for LexicalPaths {
-    fn ensure_path(&self, conn: &Connection, raw: &str) -> Result<Option<String>> {
-        Ok(match normalize_path(raw) {
-            Some(canonical) => Some(insert_workspace_path_conn(conn, &canonical, PROJECT)?),
-            None => None,
-        })
-    }
 }
 
 /// Point the resolver at a binary that certainly exists so `resolve_install`
@@ -113,7 +99,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
         .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
-    assert!(prepared.owner_workstream_id.is_none());
+    assert!(prepared.initial_workstream_id.is_none());
     assert!(prepared.cwd.is_none());
     assert!(prepared.runtime.is_default());
 
@@ -184,7 +170,7 @@ fn capture_embedded_new_message(
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
-    assert_eq!(target.owner_workstream_id, Some("first-message-task"));
+    assert_eq!(target.initial_workstream_id, Some("first-message-task"));
     assert_eq!(
         target.root_agent_session_id.is_some(),
         matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
@@ -221,8 +207,23 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
             "Chosen task",
         ))
         .unwrap();
+        let cwd = real_dir("first-message", "project");
+        db.tx(|tx| insert_workspace_path_conn(tx, &cwd, PROJECT))
+            .unwrap();
+        noending::workspace::workstream::set_workstream_projects(
+            &db,
+            "first-message-task",
+            &[PROJECT.into()],
+        )
+        .unwrap();
         let mut prepared = launcher
-            .prepare_new_in(&db, agent, Some("first-message-task"), None, &workspace)
+            .prepare_new_in(
+                &db,
+                agent,
+                Some("first-message-task"),
+                Some(&cwd),
+                &workspace,
+            )
             .unwrap();
         assert!(prepared.initial_message.is_none());
         prepared.embedded = true;
@@ -293,15 +294,10 @@ fn prepared_launch_reports_the_resolved_working_directory() {
     let db = open_db("prepared-cwd");
     seed_installation(&db, Agent::Codex);
     let primary = real_dir("prepared-cwd", "primary");
-    let ws = noending::workspace::workstream::create_workstream(
-        &db,
-        &LexicalPaths,
-        "cwd ws",
-        "",
-        &[primary.clone()],
-    )
-    .unwrap()
-    .workstream;
+    db.tx(|tx| insert_workspace_path_conn(tx, &primary, PROJECT))
+        .unwrap();
+    let ws = noending::workspace::workstream::create_workstream(&db, "Task", "", &[PROJECT.into()])
+        .unwrap();
     let launcher = launcher_in("prepared-cwd");
 
     let with_ws = launcher
@@ -557,7 +553,7 @@ fn antigravity_routes_by_source_format() {
         agent: Agent::Antigravity,
         root_agent_session_id: "conv-1".into(),
         title: None,
-        owner_workstream_id: None,
+        tracked_workstream_ids: vec![],
         cwd: None,
         workspace_path_id: None,
         project_id: None,
@@ -838,7 +834,7 @@ fn reconnect_fixture(
         &noending::terminal::EmbeddedTarget {
             registry,
             session_id: Some(sid),
-            owner_workstream_id: None,
+            initial_workstream_id: None,
             root_agent_session_id: Some(&session.root_agent_session_id),
             agent: session.agent,
         },

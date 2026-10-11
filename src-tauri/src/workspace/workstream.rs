@@ -1,29 +1,16 @@
-//! Workstream paths and archive state.
+//! Explicit task/project memberships and session tracking.
 //!
-//! Positions record display order only. Removing an entry
-//! recompacts positions; reordering takes the FULL list. Every path contributes
-//! equally to the task’s Project associations.
-//!
-//! Visibility (`normal | archived`) is the only task state.
-//! `archive` / `restore` only flip visibility, and permanent deletion is
-//! reachable only from `archived`.
-//!
-//! Permanent deletion removes task paths, summary/progress and its search document.
-//! Sessions and physical paths survive; sessions lose their owner via the FK.
-//!
-//! `create_workstream` treats an unresolvable path as "not this one" and reports
-//! it per entry; `add_workstream_path` errors instead, because there the user
-//! asked for exactly one named directory and a silent no-op would be a lie.
+//! Visibility (`normal | archived`) is the only task state. Archive/restore
+//! preserve projects, tracked sessions and summary. Permanent deletion requires
+//! archive state, removes task-owned data and tracking, and preserves sessions
+//! and physical paths. Project membership does not import sessions or copy paths.
 
 use serde::Serialize;
 
 use crate::domain::*;
 use crate::error::{other, Result};
-use crate::storage::workspace::{get_project_conn, get_workspace_path_conn};
-use crate::storage::workstream_paths::{
-    append_workstream_path_conn, project_ids_for_workstream, purge_workstream_data_conn,
-    reindex_workstream_search_conn, remove_workstream_path_conn, reorder_workstream_paths_conn,
-    workstream_path_by_id_conn,
+use crate::storage::workstream_projects::{
+    project_ids_for_workstream, purge_workstream_data_conn, reindex_workstream_search_conn,
 };
 use crate::storage::{new_id, now, Db};
 
@@ -32,9 +19,7 @@ use super::WorkspaceAttaching;
 /// Managed Tauri state carrying the one runtime implementation of
 /// [`WorkspaceAttaching`] (`workspace::wiring::WorkspaceLayer`).
 ///
-/// Every policy function here takes `&dyn WorkspaceAttaching` explicitly so it
-/// stays testable with a scripted stand-in; nothing else may implement or
-/// construct this.
+/// Path probing and launcher commands reuse this shared workspace service.
 pub struct PathService {
     attaching: std::sync::Arc<dyn WorkspaceAttaching + Send + Sync>,
 }
@@ -49,252 +34,43 @@ impl PathService {
     }
 }
 
-// Creation
-
-/// One entry of [`CreateWorkstreamReport::paths`]: what became of each raw
-/// string the user submitted. An entry is either accepted (with the position it
-/// took) or rejected (with the reason); the Workstream itself is always created.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreatedPath {
-    pub raw: String,
-    pub accepted: bool,
-    /// The canonical spelling the path was attached under (accepted only).
-    pub canonical_path: Option<String>,
-    /// Display position in the Workstream's ordered list (accepted only).
-    pub position: Option<i64>,
-    /// Project the path projects onto (accepted only; derived, not chosen).
-    pub project_name: Option<String>,
-    /// Why the string was not attached (rejected only).
-    pub reason: Option<String>,
-}
-
-/// The Workstream plus the per-path outcome of creation. The report exists so
-/// the UI can say "these three landed, this one didn't and here's why" instead
-/// of re-reading the list and silently dropping what it cannot find.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateWorkstreamReport {
-    pub workstream: Workstream,
-    pub paths: Vec<CreatedPath>,
-}
-
-/// `create_workstream(title, description, initial_paths?)`.
-///
-/// Accepted paths take consecutive display positions in submission order.
-/// A string the attacher refuses (`Ok(None)`:
-/// unresolvable, reserved, the Home itself) is reported, never
-/// guessed into a path (不能确定就不猜), and a Workstream whose strings
-/// all bounce is still created with zero paths.
-///
-/// Duplicates inside one call are refused without a second attach: the same raw
-/// string twice, or two spellings that resolve to one canonical directory.
-///
-/// Atomic: the row and every accepted path commit together, so a failed attach
-/// (`Err` from the attacher) cannot leave a half-created Workstream.
+// Creation and project membership
 pub fn create_workstream(
     db: &Db,
-    attaching: &dyn WorkspaceAttaching,
     title: &str,
     description: &str,
-    initial_paths: &[String],
-) -> Result<CreateWorkstreamReport> {
-    crate::storage::ensure_not_empty("Workstream 标题", title)?;
-    let w = Workstream {
+    project_ids: &[String],
+) -> Result<Workstream> {
+    crate::storage::ensure_not_empty("任务标题", title)?;
+    let task = Workstream {
         id: new_id(),
-        title: title.trim().to_string(),
-        description: description.trim().to_string(),
-        visibility: workstream_visibility::NORMAL.into(),
+        title: title.trim().into(),
+        description: description.trim().into(),
+        visibility: "normal".into(),
         created_at: now(),
         updated_at: now(),
     };
-    let mut paths: Vec<CreatedPath> = Vec::new();
-    let mut attached_ids: Vec<String> = Vec::new();
     db.tx(|tx| {
-        crate::storage::upsert_workstream_conn(tx, &w)?;
-        for raw in initial_paths {
-            let raw = raw.trim();
-            if raw.is_empty() {
-                continue;
-            }
-            if let Some(earlier) = paths.iter().position(|p| p.raw == raw) {
-                paths.push(CreatedPath {
-                    raw: raw.to_string(),
-                    accepted: false,
-                    canonical_path: None,
-                    position: None,
-                    project_name: None,
-                    reason: Some(format!(
-                        "与第 {} 条重复",
-                        earlier + 1
-                    )),
-                });
-                continue;
-            }
-            // `Ok(None)` leaves the Workstream without this path; creating it is
-            // still what the user asked for, and the report says what did not
-            // land. An `Err` aborts the whole creation (atomicity case).
-            let Some(path_id) = attaching.ensure_path(tx, raw)? else {
-                paths.push(CreatedPath {
-                    raw: raw.to_string(),
-                    accepted: false,
-                    canonical_path: None,
-                    position: None,
-                    project_name: None,
-                    // The attacher reports no reason, so the message stays true of
-                    // every `Ok(None)` case rather than guessing at one.
-                    reason: Some(
-                        "该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录"
-                            .to_string(),
-                    ),
-                });
-                continue;
-            };
-            // Two spellings, one directory: the registry already holds it from
-            // an earlier entry of this call.
-            if attached_ids.iter().any(|known| *known == path_id) {
-                paths.push(CreatedPath {
-                    raw: raw.to_string(),
-                    accepted: false,
-                    canonical_path: None,
-                    position: None,
-                    project_name: None,
-                    reason: Some("与前面一条指向同一目录".to_string()),
-                });
-                continue;
-            }
-            let wp = get_workspace_path_conn(tx, &path_id)?
-                .ok_or_else(|| other("WorkspacePath 写入后消失"))?;
-            let project_name = get_project_conn(tx, &wp.project_id)?.map(|p| p.name);
-            let row = append_workstream_path_conn(tx, &w.id, &path_id)?;
-            attached_ids.push(path_id);
-            paths.push(CreatedPath {
-                raw: raw.to_string(),
-                accepted: true,
-                canonical_path: Some(wp.canonical_path),
-                position: Some(row.position),
-                project_name,
-                reason: None,
-            });
-        }
-        reindex_workstream_search_conn(tx, &w.id)?;
-        Ok(())
+        crate::storage::upsert_workstream_conn(tx, &task)?;
+        crate::storage::workstream_projects::set_projects_conn(tx, &task.id, project_ids)?;
+        reindex_workstream_search_conn(tx, &task.id)
     })?;
-    Ok(CreateWorkstreamReport {
-        workstream: w,
-        paths,
-    })
+    Ok(task)
 }
-
-// The path list
-
-/// One entry of the list as the UI shows it: the row plus the physical facts
-/// behind it.
-#[derive(Serialize)]
-pub struct WorkstreamPathView {
-    #[serde(flatten)]
-    pub path: WorkstreamPath,
-    pub canonical_path: String,
-    pub project_id: Id,
-    pub project_name: Option<String>,
-    /// Observation, not identity: a path can exist and still be a valid entry.
-    pub exists: bool,
-}
-
-/// A user action that ONLY adds a path. Nothing under the path is
-/// scanned or imported, and an already-present path keeps its original
-/// position.
-pub fn add_workstream_path(
-    db: &Db,
-    attaching: &dyn WorkspaceAttaching,
-    workstream_id: &str,
-    raw_path: &str,
-) -> Result<WorkstreamPath> {
-    require_workstream(db, workstream_id)?;
-    let row = db.tx(|tx| {
-        let path_id = attaching.ensure_path(tx, raw_path)?.ok_or_else(|| {
-            // The attacher's `Ok(None)` covers several refusals (relative with no
-            // base, a reserved path under NoEnding Home, a Home-level repository)
-            // and reports no reason, so the message stays true of all of them
-            // rather than guessing at one.
-            other("该目录不能作为工作路径：需要一个可解析的绝对路径，且不能是 NoEnding 自留目录")
-        })?;
-        let row = append_workstream_path_conn(tx, workstream_id, &path_id)?;
-        Ok(row)
-    })?;
-    Ok(row)
-}
-
-/// Associate an already registered directory, retaining its derived project.
-pub fn add_registered_workstream_path(
-    db: &Db,
-    workstream_id: &str,
-    workspace_path_id: &str,
-) -> Result<WorkstreamPath> {
+pub fn set_workstream_projects(db: &Db, id: &str, projects: &[String]) -> Result<()> {
     db.tx(|tx| {
-        if crate::storage::get_workstream_conn(tx, workstream_id)?.is_none() {
-            return Err(other("任务不存在"));
-        }
-        if get_workspace_path_conn(tx, workspace_path_id)?.is_none() {
-            return Err(other("目录未注册"));
-        }
-        append_workstream_path_conn(tx, workstream_id, workspace_path_id)
+        crate::storage::workstream_projects::set_projects_conn(tx, id, projects)?;
+        tx.execute(
+            "UPDATE workstreams SET updated_at=?2 WHERE id=?1",
+            rusqlite::params![id, now()],
+        )?;
+        reindex_workstream_search_conn(tx, id)
     })
-}
-
-/// Remove one entry and recompact positions without changing session ownership.
-pub fn remove_workstream_path(
-    db: &Db,
-    workstream_id: &str,
-    workstream_path_id: &str,
-) -> Result<()> {
-    require_workstream(db, workstream_id)?;
-    db.tx(|tx| {
-        if workstream_path_by_id_conn(tx, workstream_id, workstream_path_id)?.is_none() {
-            return Err(other("该工作路径不属于此 Workstream"));
-        }
-        remove_workstream_path_conn(tx, workstream_id, workstream_path_id)?;
-        Ok(())
-    })
-}
-
-/// Rewrite the display order. Takes the COMPLETE list.
-pub fn reorder_workstream_paths(
-    db: &Db,
-    workstream_id: &str,
-    ordered_workspace_path_ids: &[String],
-) -> Result<Vec<WorkstreamPath>> {
-    require_workstream(db, workstream_id)?;
-    db.tx(|tx| {
-        reorder_workstream_paths_conn(tx, workstream_id, ordered_workspace_path_ids)?;
-        Ok(())
-    })?;
-    db.list_workstream_paths(workstream_id)
-}
-
-/// The list with the physical facts behind each entry, in position order.
-pub fn list_workstream_path_views(db: &Db, workstream_id: &str) -> Result<Vec<WorkstreamPathView>> {
-    require_workstream(db, workstream_id)?;
-    let rows = db.list_workstream_paths(workstream_id)?;
-    let mut views = Vec::with_capacity(rows.len());
-    for path in rows {
-        let wp = db.get_workspace_path(&path.workspace_path_id)?;
-        // A WorkspacePath that vanished under us is a storage inconsistency, not
-        // a reason to hide an entry the user can still remove.
-        let Some(wp) = wp else { continue };
-        let project_name = db.get_project(&wp.project_id)?.map(|p| p.name);
-        views.push(WorkstreamPathView {
-            project_id: wp.project_id,
-            project_name,
-            canonical_path: wp.canonical_path,
-            exists: wp.exists,
-            path,
-        });
-    }
-    Ok(views)
 }
 
 // Archive state
 
-/// Archive preserves paths, Context, configuration and owned sessions.
+/// Archive preserves projects, summary and tracked sessions.
 /// Archived tasks cannot create sessions.
 ///
 /// Absolute, not a toggle: a retry or double click must not quietly
@@ -385,7 +161,7 @@ pub fn apply_whole_object_edit(db: &Db, payload: &Workstream) -> Result<Workstre
 pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()> {
     let w = require_workstream(db, workstream_id)?;
     if w.visibility != workstream_visibility::ARCHIVED {
-        return Err(other("只能永久删除已归档（已归档）中的 Workstream"));
+        return Err(other("只能永久删除已归档任务"));
     }
     db.tx(|tx| purge_workstream_data_conn(tx, workstream_id))?;
     // The FTS rows are gone with the transaction; `unindex` is the same write
@@ -396,7 +172,7 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
 
 // Projections
 
-/// A task's projects are derived from every associated path, without roles.
+/// A task's explicit project associations, without directory snapshots or roles.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkstreamProject {
     pub id: Id,

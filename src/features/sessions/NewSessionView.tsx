@@ -22,22 +22,20 @@ import {
   type WorkstreamCardData,
 } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
-import { isDirectoryGroupProject } from "../projects/projectKind";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
 export type NewSessionViewProps = {
-  /** 预置选中的所属任务；省略或 "none" = standalone。 */
+  /** 预置选中的跟踪任务；省略或 "none" = standalone。 */
   workstreamId?: string | null;
   /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
-  /** 预置选中的项目 ID；省略或 "none" = 未归属项目，使用默认工作目录。 */
+  /** 预置选中的项目 ID；省略时选择默认工作目录所属的 NoEnding Chat 项目。 */
   projectId?: string | null;
   navigate: (r: Route) => void;
   assistantWorkspace?: AssistantWorkspace;
 };
 
 const STANDALONE = "none";
-const UNASSIGNED_PROJECT = "none";
 
 /** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
@@ -52,11 +50,11 @@ export default function NewSessionView({
   const allowedAgents = CLI_AGENTS;
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
+  const [trackedWorkstreamId, setTrackedWorkstreamId] = useState(
     workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    initialProjectId && initialProjectId !== "none" ? initialProjectId : UNASSIGNED_PROJECT
+    initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
   );
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
@@ -70,7 +68,6 @@ export default function NewSessionView({
   const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntimeOverrides>(NATIVE_RUNTIME);
   const runtime = useAgentRuntime(selectedAgent, runtimeOpen);
   const launchRuntime = runtimeMode === "inherit" ? undefined : runtimeMode === "native" ? NATIVE_RUNTIME : runtimeOverride;
-  const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
@@ -83,6 +80,9 @@ export default function NewSessionView({
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
+  const projectChanged = useRef(false);
+  const [projectError, setProjectError] = useState("");
+  const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -120,28 +120,42 @@ export default function NewSessionView({
   useEffect(() => {
     let cancelled = false;
     if (!assistantWorkspace) {
-      api
-        .listWorkstreamCards()
-        .then((ws) => {
-          if (!cancelled) {
-            const normal = ws.filter((w) => w.visibility === "normal");
-            setWorkstreams(normal);
-            if ((!initialProjectId || initialProjectId === UNASSIGNED_PROJECT) && workstreamId && workstreamId !== STANDALONE) {
-              const targetWs = normal.find((w) => w.id === workstreamId);
-              if (targetWs?.projects.length === 1) {
-                setSelectedProjectId(targetWs.projects[0].id);
-              }
+      setProjectError("");
+      Promise.all([api.listWorkstreamCards(), api.listProjectCards(), api.getWorkspaceSettings()])
+        .then(async ([ws, cards, settings]) => {
+          if (cancelled) return;
+          const normal = ws.filter((w) => w.visibility === "normal");
+          const targetWs = normal.find((w) => w.id === workstreamId);
+          let projectId = initialProjectId && initialProjectId !== "none" ? initialProjectId : "";
+          let defaultDir = "";
+          if (!projectId && targetWs?.projects.length === 1) {
+            projectId = targetWs.projects[0].id;
+          }
+          if (!projectId) {
+            defaultDir = settings.default_workspace;
+            // 使用目录身份而非名称；聊天项目可以改名或转为 Git 项目。
+            projectId = cards.find((p) => [...p.search_paths, ...p.representative_paths].includes(defaultDir))?.id ?? "";
+            if (!projectId) {
+              // 首次使用时默认目录可能尚未注册，由现有目录注册流程派生项目。
+              const result = await api.addProjectPath(defaultDir);
+              if (cancelled) return;
+              projectId = result.project_id;
+              defaultDir = result.path.canonical_path;
+              cards = await api.listProjectCards();
             }
           }
+          if (cancelled) return;
+          setProjects(cards);
+          setWorkstreams(normal);
+          if (!projectChanged.current) {
+            setSelectedProjectId(projectId);
+            if (defaultDir) setSelectedDirPath(defaultDir);
+            if (workstreamId && workstreamId !== STANDALONE && !targetWs) setTrackedWorkstreamId(STANDALONE);
+          }
         })
-        .catch(console.error);
-
-      api
-        .listProjectCards()
-        .then((cards) => {
-          if (!cancelled) setProjects(cards);
-        })
-        .catch(console.error);
+        .catch((reason) => {
+          if (!cancelled) setProjectError(`读取项目失败：${String(reason)}`);
+        });
     }
 
     api
@@ -149,14 +163,6 @@ export default function NewSessionView({
       .then((status) => { if (!cancelled) setAgentStatus(status); })
       .catch(console.error);
 
-    if (!assistantWorkspace) api
-      .getWorkspaceSettings?.()
-      ?.then((s) => {
-        if (!cancelled && s?.default_workspace) {
-          setDefaultWorkspace(s.default_workspace);
-        }
-      })
-      ?.catch(console.error);
 
     if (!initialAgent) {
       api
@@ -169,7 +175,7 @@ export default function NewSessionView({
         .catch(console.error);
     }
     return () => { cancelled = true; };
-  }, [initialAgent, workstreamId, initialProjectId, assistantWorkspace]);
+  }, [initialAgent, workstreamId, initialProjectId, assistantWorkspace, projectLoadAttempt]);
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
@@ -186,21 +192,18 @@ export default function NewSessionView({
   }, [agentStatus, agentAvailable, cliAgents.join(",")]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
-  const isUnassignedProject = selectedProjectId === UNASSIGNED_PROJECT ||
-    (selectedProject !== null && isDirectoryGroupProject(selectedProject));
 
   const otherProjects = useMemo(
-    () => projects.filter((p) => !isDirectoryGroupProject(p)),
+    () => projects,
     [projects],
   );
 
   const projectDirs: string[] = useMemo(() => {
-    if (isUnassignedProject) return defaultWorkspace ? [defaultWorkspace] : [];
     if (!selectedProject) return [];
     return selectedProject.search_paths?.length
       ? selectedProject.search_paths
       : selectedProject.representative_paths;
-  }, [isUnassignedProject, selectedProject, defaultWorkspace]);
+  }, [selectedProject]);
 
   const [selectedDirPath, setSelectedDirPath] = useState<string>("");
   const [dirGitStates, setDirGitStates] = useState<Record<string, boolean>>({});
@@ -211,8 +214,7 @@ export default function NewSessionView({
     }
   }, [projectDirs, selectedDirPath]);
 
-  const probeTarget = isUnassignedProject ? defaultWorkspace :
-    projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
+  const probeTarget = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
   useEffect(() => {
     const target = probeTarget;
     if (!target || selectedProject?.kind === "git" || dirGitStates[target] !== undefined) return;
@@ -234,44 +236,39 @@ export default function NewSessionView({
     };
   }, [probeTarget, selectedProject?.kind, dirGitStates]);
 
-  // 未归属项目由后端解析当前默认工作目录，与任务关联保持独立。
-  const launchCwd = assistantWorkspace?.directory ?? (isUnassignedProject
-    ? undefined
-    : projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0]);
+  const launchCwd = assistantWorkspace?.directory ?? (projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0]);
+
+  const availableTasks = workstreams.filter(w => w.visibility === "normal" && w.projects.some(p => p.id === selectedProjectId));
+  const eligibleTask = trackedWorkstreamId === STANDALONE || availableTasks.some(w => w.id === trackedWorkstreamId);
+  const hasDirectory = Boolean(launchCwd);
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
-    if (!selectedAgent || !agentAvailable) return null;
-    const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
-    if (launchRuntime) return api.prepareNewSession(selectedAgent, ownerId, launchCwd, launchRuntime);
+    if (!selectedAgent || !agentAvailable || !eligibleTask || !hasDirectory) return null;
+    const initialTaskId = trackedWorkstreamId === STANDALONE ? null : trackedWorkstreamId;
+    if (launchRuntime) return api.prepareNewSession(selectedAgent, initialTaskId, launchCwd, launchRuntime);
     if (launchCwd) {
-      return api.prepareNewSession(selectedAgent, ownerId, launchCwd);
+      return api.prepareNewSession(selectedAgent, initialTaskId, launchCwd);
     }
-    return api.prepareNewSession(selectedAgent, ownerId);
-  }, [selectedAgent, ownerWorkstreamId, launchCwd, launchRuntime, agentAvailable]);
+    return api.prepareNewSession(selectedAgent, initialTaskId);
+  }, [selectedAgent, trackedWorkstreamId, launchCwd, launchRuntime, agentAvailable, eligibleTask, hasDirectory]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
 
   const handleWsChange = (next: string) => {
-    if (next === ownerWorkstreamId) return;
+    if (next === trackedWorkstreamId) return;
     releasePrepared();
-    setOwnerWorkstreamId(next);
-    if (next === STANDALONE) {
-      setSelectedProjectId(UNASSIGNED_PROJECT);
-    } else {
-      const ws = workstreams.find((w) => w.id === next);
-      if (ws?.projects.length === 1) {
-        setSelectedProjectId(ws.projects[0].id);
-      } else if (!ws?.projects.some((p) => p.id === selectedProjectId)) {
-        setSelectedProjectId(UNASSIGNED_PROJECT);
-      }
-    }
+    setTrackedWorkstreamId(next);
+
   };
 
   const handleProjectChange = (next: string) => {
     if (next === selectedProjectId) return;
+    projectChanged.current = true;
+    setProjectError("");
     releasePrepared();
     setSelectedProjectId(next);
+    if (!workstreams.find(w=>w.id===trackedWorkstreamId)?.projects.some(p=>p.id===next)) setTrackedWorkstreamId(STANDALONE);
   };
 
   const handleDirChange = (next: string) => {
@@ -295,7 +292,7 @@ export default function NewSessionView({
       const fresh = await api.listProjectCards();
       setProjects(fresh);
       if (res.project_id) {
-        setSelectedProjectId(res.project_id);
+        handleProjectChange(res.project_id);
         setSelectedDirPath(res.path.canonical_path || pickedPath);
       }
       showToast(`已添加到项目「${res.project_name}」`);
@@ -315,7 +312,7 @@ export default function NewSessionView({
     setSelectedAgent(next);
   };
 
-  const canSend = Boolean(message.trim() && selectedAgent && agentAvailable && prepared && !preparing && !busy);
+  const canSend = Boolean(message.trim() && selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
 
   const start = async () => {
     if (!canSend || launching.current) return;
@@ -325,10 +322,10 @@ export default function NewSessionView({
     setBusy(true);
     setError("");
     try {
-      const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
-      const r = assistantWorkspace ? await api.launchEmbeddedNew(selectedAgent, null, launchCwd, message, launchRuntime) : launchRuntime ? await api.launchEmbeddedNew(selectedAgent, ownerId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
+      const initialTaskId = trackedWorkstreamId === STANDALONE ? null : trackedWorkstreamId;
+      const r = assistantWorkspace ? await api.launchEmbeddedNew(selectedAgent, null, launchCwd, message, launchRuntime) : launchRuntime ? await api.launchEmbeddedNew(selectedAgent, initialTaskId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
         selectedAgent,
-        ownerId,
+        initialTaskId,
         launchCwd,
         message,
       );
@@ -348,15 +345,16 @@ export default function NewSessionView({
     }
   };
 
-  const selectedWorkstream = workstreams.find((w) => w.id === ownerWorkstreamId);
+
+  const selectedWorkstream = workstreams.find((w) => w.id === trackedWorkstreamId);
   const taskLabel =
-    ownerWorkstreamId === STANDALONE
+    trackedWorkstreamId === STANDALONE
       ? "无任务"
       : (selectedWorkstream?.title ?? "无任务");
 
-  const projectLabel = isUnassignedProject ? "无项目" : (selectedProject?.name ?? "无项目");
+  const projectLabel = selectedProject?.name ?? "选择项目";
 
-  const currentDir = assistantWorkspace?.directory ?? (isUnassignedProject ? defaultWorkspace : launchCwd || "");
+  const currentDir = assistantWorkspace?.directory ?? (launchCwd || "");
   const dirLabel = useMemo(() => {
     if (!currentDir) return "默认工作目录";
     return ellipsisPathMiddle(currentDir, 42);
@@ -377,7 +375,7 @@ export default function NewSessionView({
             <SidebarLogo size={36} />
             <h1 id="new-session-title">{assistantWorkspace ? "新助手会话" : "开启新会话"}</h1>
           </div>
-          <p className="new-session-subtitle">{assistantWorkspace ? "查询工作区资料，整理摘要与偏好，管理项目、任务和会话" : "选择目标任务与执行项目，立即启动 Agent 展开工作"}</p>
+          <p className="new-session-subtitle">{assistantWorkspace ? "查询工作区资料，整理摘要与偏好，管理项目、任务和会话" : "选择项目与跟踪任务，立即启动 Agent 展开工作"}</p>
         </div>
 
         <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
@@ -388,113 +386,6 @@ export default function NewSessionView({
           </div> : (
 
           <div className="new-session-context">
-            <div
-              className={`new-session-picker new-session-task has-custom-menu${taskMenuOpen ? " open" : ""}`}
-              ref={taskRef}
-              onClick={(e) => {
-                if (busy) return;
-                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
-                setTaskMenuOpen((v) => !v);
-                setProjectMenuOpen(false);
-                setDirMenuOpen(false);
-              }}
-              onKeyDown={(e) => {
-                if (busy) return;
-                if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
-                  if (!taskMenuOpen) {
-                    e.preventDefault();
-                    setTaskMenuOpen(true);
-                    setProjectMenuOpen(false);
-                    setDirMenuOpen(false);
-                  }
-                }
-              }}
-              tabIndex={busy ? -1 : 0}
-              role="button"
-              aria-haspopup="menu"
-              aria-expanded={taskMenuOpen}
-              aria-label={`所属任务：${taskLabel}`}
-              title={taskLabel}
-            >
-              <Icon name={ownerWorkstreamId === STANDALONE ? "inbox" : "tasks"} />
-              <span className="new-session-picker-label truncate">{taskLabel}</span>
-              <Icon name="chevronDown" className="new-session-chevron" />
-              <select
-                aria-label="所属任务（可选）"
-                title={taskLabel}
-                value={ownerWorkstreamId}
-                onChange={(e) => {
-                  if (e.target.value === "__new_workstream__") {
-                    setShowNewWorkstreamModal(true);
-                    return;
-                  }
-                  handleWsChange(e.target.value);
-                }}
-                disabled={busy}
-                tabIndex={-1}
-              >
-                <option value={STANDALONE}>无任务</option>
-                {workstreams.map((w) => (
-                  <option key={w.id} value={w.id}>{w.title}</option>
-                ))}
-                <option value="__new_workstream__">+ 新任务</option>
-              </select>
-
-              {taskMenuOpen && (
-                <div className="new-session-dropdown-menu" role="menu" aria-label="所属任务列表">
-                  <div className="new-session-menu-list">
-                    <button
-                      type="button"
-                      className={`new-session-menu-item${ownerWorkstreamId === STANDALONE ? " selected" : ""}`}
-                      onClick={() => {
-                        handleWsChange(STANDALONE);
-                        setTaskMenuOpen(false);
-                      }}
-                    >
-                      <span className="menu-item-icon"><Icon name="inbox" /></span>
-                      <span className="menu-item-label">无任务</span>
-                      {ownerWorkstreamId === STANDALONE && (
-                        <span className="menu-item-check"><Icon name="check" /></span>
-                      )}
-                    </button>
-                    {workstreams.map((w) => {
-                      const isSelected = ownerWorkstreamId === w.id;
-                      return (
-                        <button
-                          key={w.id}
-                          type="button"
-                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
-                          onClick={() => {
-                            handleWsChange(w.id);
-                            setTaskMenuOpen(false);
-                          }}
-                          title={w.title}
-                        >
-                          <span className="menu-item-icon"><Icon name="tasks" /></span>
-                          <span className="menu-item-label">{w.title}</span>
-                          {isSelected && (
-                            <span className="menu-item-check"><Icon name="check" /></span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="new-session-menu-divider" />
-                  <button
-                    type="button"
-                    className="new-session-menu-action"
-                    onClick={() => {
-                      setShowNewWorkstreamModal(true);
-                      setTaskMenuOpen(false);
-                    }}
-                  >
-                    <span className="action-icon"><Icon name="plus" /></span>
-                    <span>添加任务...</span>
-                  </button>
-                </div>
-              )}
-            </div>
-
             <div
               className={`new-session-picker new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
               ref={projectRef}
@@ -523,13 +414,13 @@ export default function NewSessionView({
               aria-label={`所属项目：${projectLabel}`}
               title={projectLabel}
             >
-              <Icon name={isUnassignedProject ? "inbox" : "project"} />
+              <Icon name="project" />
               <span className="new-session-picker-label truncate">{projectLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
                 aria-label="所属项目"
                 title={projectLabel}
-                value={isUnassignedProject ? UNASSIGNED_PROJECT : selectedProjectId}
+                value={selectedProjectId}
                 onChange={(e) => {
                   if (e.target.value === "__new_project__") {
                     void handleAddNewProject();
@@ -540,7 +431,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={UNASSIGNED_PROJECT}>无项目</option>
+                {!selectedProject && <option value="" disabled>选择项目</option>}
                 {otherProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -550,23 +441,8 @@ export default function NewSessionView({
               {projectMenuOpen && (
                 <div className="new-session-dropdown-menu" role="menu" aria-label="所属项目列表">
                   <div className="new-session-menu-list">
-                    <button
-                      type="button"
-                      className={`new-session-menu-item${isUnassignedProject ? " selected" : ""}`}
-                      onClick={() => {
-                        handleProjectChange(UNASSIGNED_PROJECT);
-                        setProjectMenuOpen(false);
-                      }}
-                      title="无项目"
-                    >
-                      <span className="menu-item-icon"><Icon name="inbox" /></span>
-                      <span className="menu-item-label">无项目</span>
-                      {isUnassignedProject && (
-                        <span className="menu-item-check"><Icon name="check" /></span>
-                      )}
-                    </button>
                     {otherProjects.map((p) => {
-                      const isSelected = !isUnassignedProject && selectedProjectId === p.id;
+                      const isSelected = selectedProjectId === p.id;
                       return (
                         <button
                           key={p.id}
@@ -598,6 +474,114 @@ export default function NewSessionView({
                   >
                     <span className="action-icon"><Icon name="plus" /></span>
                     <span>添加项目...</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div
+              className={`new-session-picker new-session-task has-custom-menu${taskMenuOpen ? " open" : ""}`}
+              ref={taskRef}
+              onClick={(e) => {
+                if (busy) return;
+                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                setTaskMenuOpen((v) => !v);
+                setProjectMenuOpen(false);
+                setDirMenuOpen(false);
+              }}
+              onKeyDown={(e) => {
+                if (busy) return;
+                if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                  if (!taskMenuOpen) {
+                    e.preventDefault();
+                    setTaskMenuOpen(true);
+                    setProjectMenuOpen(false);
+                    setDirMenuOpen(false);
+                  }
+                }
+              }}
+              tabIndex={busy ? -1 : 0}
+              role="button"
+              aria-haspopup="menu"
+              aria-expanded={taskMenuOpen}
+              aria-label={`跟踪任务：${taskLabel}`}
+              title={taskLabel}
+            >
+              <Icon name={trackedWorkstreamId === STANDALONE ? "inbox" : "tasks"} />
+              <span className="new-session-picker-label truncate">{taskLabel}</span>
+              <Icon name="chevronDown" className="new-session-chevron" />
+              <select
+                aria-label="跟踪任务（可选）"
+                title={taskLabel}
+                value={eligibleTask ? trackedWorkstreamId : STANDALONE}
+                onChange={(e) => {
+                  if (e.target.value === "__new_workstream__") {
+                    if (Boolean(selectedProject)) setShowNewWorkstreamModal(true);
+                    return;
+                  }
+                  handleWsChange(e.target.value);
+                }}
+                disabled={busy}
+                tabIndex={-1}
+              >
+                <option value={STANDALONE}>无任务</option>
+                {availableTasks.map((w) => (
+                  <option key={w.id} value={w.id}>{w.title}</option>
+                ))}
+                {Boolean(selectedProject) && <option value="__new_workstream__">+ 新任务</option>}
+              </select>
+
+              {taskMenuOpen && (
+                <div className="new-session-dropdown-menu" role="menu" aria-label="跟踪任务列表">
+                  <div className="new-session-menu-list">
+                    <button
+                      type="button"
+                      className={`new-session-menu-item${trackedWorkstreamId === STANDALONE ? " selected" : ""}`}
+                      onClick={() => {
+                        handleWsChange(STANDALONE);
+                        setTaskMenuOpen(false);
+                      }}
+                    >
+                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-label">无任务</span>
+                      {trackedWorkstreamId === STANDALONE && (
+                        <span className="menu-item-check"><Icon name="check" /></span>
+                      )}
+                    </button>
+                    {availableTasks.map((w) => {
+                      const isSelected = trackedWorkstreamId === w.id;
+                      return (
+                        <button
+                          key={w.id}
+                          type="button"
+                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                          onClick={() => {
+                            handleWsChange(w.id);
+                            setTaskMenuOpen(false);
+                          }}
+                          title={w.title}
+                        >
+                          <span className="menu-item-icon"><Icon name="tasks" /></span>
+                          <span className="menu-item-label">{w.title}</span>
+                          {isSelected && (
+                            <span className="menu-item-check"><Icon name="check" /></span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="new-session-menu-divider" />
+                  <button
+                    type="button"
+                    className="new-session-menu-action"
+                    disabled={!selectedProject}
+                    onClick={() => {
+                      setShowNewWorkstreamModal(true);
+                      setTaskMenuOpen(false);
+                    }}
+                  >
+                    <span className="action-icon"><Icon name="plus" /></span>
+                    <span>添加任务...</span>
                   </button>
                 </div>
               )}
@@ -762,16 +746,17 @@ export default function NewSessionView({
             </div>
           </div>
 
+          {!eligibleTask && <p className="new-session-note">请先选择该任务关联的项目。</p>}
           {prepared?.cwd_resolution?.fallback && (
             <p className="new-session-note" role="status">
               {prepared.cwd_resolution.note || "未从默认工作目录启动"}
             </p>
           )}
-          {error && (
+          {(projectError || error) && (
             <div className="new-session-error" role="alert">
-              <span>{error}</span>
+              <span>{projectError || error}</span>
               {!preparing && !busy && (
-                <button type="button" className="btn small" onClick={() => void prepare()}>重试</button>
+                <button type="button" className="btn small" onClick={() => projectError ? setProjectLoadAttempt((n) => n + 1) : void prepare()}>重试</button>
               )}
             </div>
           )}
@@ -783,33 +768,17 @@ export default function NewSessionView({
         <WorkstreamFormModal
           onClose={() => setShowNewWorkstreamModal(false)}
           onCreated={async (newWs) => {
-            const cards = await api.listWorkstreamCards().catch(() => null);
-            if (cards) {
+            try {
+              const cards=await api.listWorkstreamCards();
               setWorkstreams(cards);
-            } else {
-              setWorkstreams((prev) => [
-                {
-                  id: newWs.id,
-                  projects: [],
-                  title: newWs.title,
-                  description: newWs.description,
-                  visibility: newWs.visibility,
-                  created_at: newWs.created_at,
-                  updated_at: newWs.updated_at,
-                  summary: null,
-                  last_activity_at: null,
-                  session_count: 0,
-                  latest_session: null,
-                  path_count: 0,
-                },
-                ...prev,
-              ]);
-            }
-            releasePrepared();
-            setOwnerWorkstreamId(newWs.id);
+              const created=cards.find(w=>w.id===newWs.id);
+              if(created?.visibility==="normal" && created.projects.some(p=>p.id===selectedProjectId)) {
+                releasePrepared();setTrackedWorkstreamId(created.id);
+              }
+            } catch(e) { showToast(`读取任务失败：${String(e)}`); }
             setShowNewWorkstreamModal(false);
           }}
-          initialProjectId={!isUnassignedProject ? selectedProjectId : undefined}
+          initialProjectId={selectedProjectId || undefined}
         />
       )}
     </main>

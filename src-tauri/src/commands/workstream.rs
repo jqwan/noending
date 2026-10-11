@@ -1,6 +1,6 @@
 //! Workstream commands and the card projection.
 //!
-//! The ordered path list, archive state land here.
+//! Explicit project memberships and archive state land here.
 //! `workstream_cards` is the Home/Sidebar projection, and
 //! `commands.rs` re-exports it so existing tests keep their path.
 //!
@@ -15,29 +15,31 @@ use tauri::State;
 use crate::domain::*;
 use crate::error::Result;
 use crate::storage::Db;
-use crate::workspace::workstream::{self, PathService};
+use crate::workspace::workstream::{self};
 
 use super::{with_db, AppState};
 
 // ---------------- Workstreams ----------------
 
-/// `create_workstream(title, description, initial_paths?)`.
-///
-/// Project is derived through the paths, and the launch anchor is the ordered
-/// path list. Each entry of `initial_paths` is a raw string, resolved by the
-/// Workspace attacher in submission order; a string that does not resolve is
-/// reported back instead of guessed into a path, and the Workstream is still
-/// created with however many paths did land (possibly zero).
 #[tauri::command]
 pub fn create_workstream(
     state: State<AppState>,
-    paths: State<'_, PathService>,
     title: String,
     description: String,
-    initial_paths: Vec<String>,
-) -> Result<workstream::CreateWorkstreamReport> {
+    project_ids: Vec<String>,
+) -> Result<Workstream> {
     with_db(&state, |db| {
-        workstream::create_workstream(db, paths.attaching(), &title, &description, &initial_paths)
+        workstream::create_workstream(db, &title, &description, &project_ids)
+    })
+}
+#[tauri::command]
+pub fn set_workstream_projects(
+    state: State<AppState>,
+    workstream_id: String,
+    project_ids: Vec<String>,
+) -> Result<()> {
+    with_db(&state, |db| {
+        workstream::set_workstream_projects(db, &workstream_id, &project_ids)
     })
 }
 
@@ -100,57 +102,6 @@ pub fn list_workstreams(
     with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
 }
 
-// ---------------- ordered workstream paths ----------------
-
-/// The directory list in display order, with physical facts for each entry.
-#[tauri::command]
-pub fn list_workstream_paths(
-    state: State<AppState>,
-    workstream_id: String,
-) -> Result<Vec<workstream::WorkstreamPathView>> {
-    with_db(&state, |db| {
-        workstream::list_workstream_path_views(db, &workstream_id)
-    })
-}
-
-/// add a working directory. Appends last, or becomes position 0 when the
-/// list is empty. Never imports the Sessions under that path.
-#[tauri::command]
-pub fn add_workstream_path(
-    state: State<AppState>,
-    paths: State<'_, PathService>,
-    workstream_id: String,
-    path: String,
-) -> Result<WorkstreamPath> {
-    with_db(&state, |db| {
-        workstream::add_workstream_path(db, paths.attaching(), &workstream_id, &path)
-    })
-}
-
-/// remove one entry. Sessions and their ownership are untouched.
-#[tauri::command]
-pub fn remove_workstream_path(
-    state: State<AppState>,
-    workstream_id: String,
-    workstream_path_id: String,
-) -> Result<()> {
-    with_db(&state, |db| {
-        workstream::remove_workstream_path(db, &workstream_id, &workstream_path_id)
-    })
-}
-
-/// full-list reorder. "设为主路径" is this with the chosen id first.
-#[tauri::command]
-pub fn reorder_workstream_paths(
-    state: State<AppState>,
-    workstream_id: String,
-    ordered_workspace_path_ids: Vec<String>,
-) -> Result<Vec<WorkstreamPath>> {
-    with_db(&state, |db| {
-        workstream::reorder_workstream_paths(db, &workstream_id, &ordered_workspace_path_ids)
-    })
-}
-
 // ---------------- archive state ----------------
 
 /// Archive the task. Absolute: archiving an archived Workstream is a
@@ -162,7 +113,7 @@ pub fn archive_workstream(state: State<AppState>, workstream_id: String) -> Resu
     })
 }
 
-/// Move out of the recycle bin. Lifecycle, paths and Context are
+/// Move out of the recycle bin. Project memberships and Context are
 /// exactly what the user left, so no state has to be remembered to restore it.
 #[tauri::command]
 pub fn restore_workstream(state: State<AppState>, workstream_id: String) -> Result<Workstream> {
@@ -200,9 +151,6 @@ pub struct WorkstreamCardView {
     pub session_count: i64,
     /// Most recent bound session — the Resume button's agent + target.
     pub latest_session: Option<LatestSessionInfo>,
-    /// How many working paths the Workstream has. `0` is a normal state; the UI
-    /// distinguishes "no path" from "a path in a Project we cannot name".
-    pub path_count: i64,
 }
 
 pub(crate) fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
@@ -249,7 +197,6 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
         let context = db.get_workstream_context_state(&w.id)?;
         let summary_activity = context.updated_at;
-        let paths = db.list_workstream_paths(&w.id)?;
         let projects = workstream::projects_for_workstream(db, &w.id)?;
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
@@ -265,7 +212,6 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             last_activity_at,
             session_count,
             latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
-            path_count: paths.len() as i64,
             workstream: w,
         });
     }

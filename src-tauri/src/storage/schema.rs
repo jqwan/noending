@@ -54,7 +54,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// items, conflicts and review; task consumption no longer duplicates fact generations.
 /// v6 — current user/project preferences with user-controlled Agent locks.
 /// v7 — independent project archive state and explicit project deletion.
-pub const DATABASE_FORMAT_VERSION: i64 = 7;
+pub const DATABASE_FORMAT_VERSION: i64 = 8;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -236,7 +236,7 @@ const CURRENT_SCHEMA: &str = r#"
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    -- The Logical Session: user-visible conversation + lifecycle + Owner.
+    -- The Logical Session: user-visible conversation + lifecycle + tracking.
     -- Identity is (agent, root_agent_session_id): the root source's real
     -- Resume identity. A session IS its root source: the former
     -- session_members / session_member_cursors / session_ingest_state rows
@@ -249,11 +249,7 @@ const CURRENT_SCHEMA: &str = r#"
       title TEXT,
       cwd TEXT,
       workspace_path_id TEXT,
-      -- Semantic ownership: at most one Owner Workstream per Session.
-      -- Deleting the Workstream clears this, never the row.
-      owner_workstream_id TEXT
-        REFERENCES workstreams(id) ON DELETE SET NULL,
-      -- Fork provenance only: lifecycle / Owner / Conversation stay
+      -- Fork provenance only: lifecycle / tracking / Conversation stay
       -- fully independent of the fork source.
       forked_from_session_id TEXT
         REFERENCES sessions(id) ON DELETE SET NULL,
@@ -340,24 +336,24 @@ const CURRENT_SCHEMA: &str = r#"
     );
     -- The Workstream side of the two-level revision scheme.
     -- context_revision guards summary writes;
-    -- input_revision marks Owner-set / paths / title /
+    -- input_revision marks tracked sessions / projects / title /
     -- description changes that leave inputs pending; AI records the
     -- input_revision it consumed so its own success does not leave the
     -- Workstream "pending" again. Created as (0, 1, 0) so the first explicit
     -- generation is allowed.
     CREATE TABLE IF NOT EXISTS workstream_context_state (
-      workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id),
+      workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id) ON DELETE CASCADE,
       context_revision INTEGER NOT NULL DEFAULT 0,
       input_revision INTEGER NOT NULL DEFAULT 0,
       consumed_input_revision INTEGER NOT NULL DEFAULT 0,
       summary TEXT NOT NULL DEFAULT '',
       updated_at TEXT
     );
-    -- What the Workstream has already consumed from each Owner Session.
+    -- What the Workstream has already consumed from each tracked Session.
     -- Written in the same transaction as a combined update; a Session that
-    -- leaves the Owner set is cleaned up on the next successful synthesis.
+    -- is no longer tracked is cleaned up on the next successful synthesis.
     CREATE TABLE IF NOT EXISTS workstream_session_frontiers (
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
+      workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL REFERENCES sessions(id),
       session_context_revision INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (workstream_id, session_id)
@@ -407,7 +403,6 @@ const CURRENT_SCHEMA: &str = r#"
       UNIQUE(agent, path)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
     CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
       ON workstream_session_frontiers(session_id);
 
@@ -446,17 +441,19 @@ const CURRENT_SCHEMA: &str = r#"
       first_seen_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS workstream_paths (
-      id TEXT PRIMARY KEY,
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-      workspace_path_id TEXT NOT NULL REFERENCES workspace_paths(id),
-      position INTEGER NOT NULL,
-      created_at TEXT NOT NULL,
-      UNIQUE(workstream_id, workspace_path_id),
-      UNIQUE(workstream_id, position)
+    CREATE TABLE IF NOT EXISTS workstream_projects (
+      workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY(workstream_id, project_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_workstream_projects_project ON workstream_projects(project_id);
+    CREATE TABLE IF NOT EXISTS session_workstreams (
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+      PRIMARY KEY(session_id, workstream_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_workstreams_task ON session_workstreams(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_workspace_paths_project ON workspace_paths(project_id);
-    CREATE INDEX IF NOT EXISTS idx_workstream_paths_path ON workstream_paths(workspace_path_id);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id
       ON projects(git_id)

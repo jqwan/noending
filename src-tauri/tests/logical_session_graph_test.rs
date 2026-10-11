@@ -6,6 +6,7 @@
 //! (`guardian_review`) and forked pages (`history_base`) — so one fixture family
 //! covers the whole source-shape vocabulary.
 
+mod support;
 use std::path::{Path, PathBuf};
 
 use noending::adapters::all_adapters;
@@ -315,7 +316,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
                 updated_at: now(),
             };
             db.upsert_workstream(&task).unwrap();
-            db.set_session_owner(&session.id, Some(&task.id)).unwrap();
+            support::track(&db, &session.id, Some(&task.id)).unwrap();
         }
         let cursor = db
             .get_session(&session.id)
@@ -623,11 +624,11 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
     // discovery never copies it onto the fork.
     let owner = support_workstream("ws-owner");
     db.upsert_workstream(&owner).unwrap();
-    db.set_session_owner(&parent.id, Some(&owner.id)).unwrap();
+    support::track(&db, &parent.id, Some(&owner.id)).unwrap();
     reconcile(&db);
     let fork = db.get_session(&fork.id).unwrap().unwrap();
     assert!(
-        fork.owner_workstream_id.is_none(),
+        fork.tracked_workstream_ids.is_empty(),
         "a fork never inherits the source session's Owner"
     );
 }
@@ -864,7 +865,7 @@ fn every_adapter_inspects_sources_without_panicking() {
             agent: adapter.agent(),
             root_agent_session_id: "no-such-source".into(),
             title: None,
-            owner_workstream_id: None,
+            tracked_workstream_ids: vec![],
             cwd: None,
             workspace_path_id: None,
             project_id: None,

@@ -29,13 +29,13 @@
 //! * Projects and registered paths are never garbage-collected. Users can
 //!   archive any project independently of its tasks and sessions.
 //! * Permanent deletion requires archive state, no associated sessions and no
-//!   chat/assistant purpose; it detaches task paths and never deletes directories.
+//!   chat/assistant purpose; it detaches task projects and never deletes directories.
 //! * `name_customized` wins over every automatic rename, and automatic naming
 //!   happens at Project creation only: no reconcile, worktree discovery or merge
 //!   renames an existing row (a merge may only carry a `name_customized` name
 //!   into a survivor that has none).
 //! * Reconcile must not hold the DB mutex across a `git` call, must not write
-//!   `workstream_paths`, and must not advance any cursor.
+//!   task project associations, and must not advance any cursor.
 //! * `git_identities.id` is app-assigned (uuid), unlike `workspace_paths.id`
 //!   which is derived from the path.
 //! * WorkspacePath / Project mutations must re-index the affected search rows
@@ -591,19 +591,19 @@ pub fn delete_project_permanently(db: &Db, id: &str, policy: &dyn WorkspacePolic
         }
         let tasks: Vec<String> = {
             let mut st = tx.prepare(
-                "SELECT DISTINCT wsp.workstream_id FROM workstream_paths wsp JOIN workspace_paths wp ON wp.id=wsp.workspace_path_id WHERE wp.project_id=?1",
+                "SELECT workstream_id FROM workstream_projects WHERE project_id=?1",
             )?;
             let rows = st.query_map([id], |row| row.get(0))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
         tx.execute(
-            "DELETE FROM workstream_paths WHERE workspace_path_id IN (SELECT id FROM workspace_paths WHERE project_id=?1)",
+            "DELETE FROM workstream_projects WHERE project_id=?1",
             [id],
         )?;
         for task in tasks {
-            crate::storage::workstream_paths::recompact_workstream_positions_conn(tx, &task)?;
+            crate::storage::bump_input_revision_conn(tx,&task)?;
             tx.execute("UPDATE workstreams SET updated_at=?2 WHERE id=?1", rusqlite::params![task, now()])?;
-            crate::storage::workstream_paths::reindex_workstream_search_conn(tx, &task)?;
+            crate::storage::workstream_projects::reindex_workstream_search_conn(tx, &task)?;
         }
         tx.execute("DELETE FROM workspace_paths WHERE project_id=?1", [id])?;
         tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
@@ -887,8 +887,8 @@ fn create_single_directory_project(
 
 /// A Git family's worktree list becomes WorkspacePaths, and only that.
 ///
-/// Nothing here may touch `workstream_paths` (discovering a WorkspacePath ≠
-/// adding a WorkstreamPath), and an existing row is left alone: we hold no
+/// Nothing here may touch task project associations (discovering a WorkspacePath ≠
+/// associating a task), and an existing row is left alone: we hold no
 /// observation of our own about a sibling, so we must not overwrite facts another
 /// call owns. Only siblings present on disk are adopted: Git may still list a
 /// removed worktree; new missing siblings need not be registered. Existing missing
@@ -1026,12 +1026,27 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         adopted_name = Some(loser.name.clone());
     }
     // `reassign_workspace_path_project_conn` already moved each
-    // path's derived Session cache AND its Workstream search parents, so there is
+    // path's derived Session project and search document, so there is
     // no second pass to make — one door, one job, no half-updated middle state.
-    conn.execute(
-        "UPDATE preferences SET project_id=?1,revision=revision+1 WHERE project_id=?2",
-        rusqlite::params![survivor.id, loser.id],
-    )?;
+    // A task names projects directly. Fold memberships without following paths.
+    let affected_tasks = {
+        let mut stmt =
+            conn.prepare("SELECT workstream_id FROM workstream_projects WHERE project_id=?1")?;
+        let rows = stmt.query_map([&loser.id], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for task in &affected_tasks {
+        crate::storage::bump_input_revision_conn(conn, task)?;
+    }
+    conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT workstream_id,?1 FROM workstream_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
+    let old = crate::storage::project_context_repo::state(conn, &loser.id)?;
+    let current = crate::storage::project_context_repo::state(conn, &survivor.id)?;
+    if current.summary.trim().is_empty() && !old.summary.trim().is_empty() {
+        // Carry the only available summary, but leave its inputs pending for
+        // the user's next explicit update. Never overwrite B's valid summary.
+        crate::storage::project_context_repo::commit(conn, &survivor.id, "", &old.summary, &[])?;
+    }
+    crate::storage::preferences::merge_project_items(conn, &loser.id, &survivor.id)?;
     // Preserve the canonical Git owner's lifecycle during identity merges.
     delete_merged_project_conn(conn, &loser.id)?;
     Ok(MergeOutcome {
@@ -1100,7 +1115,7 @@ impl ProjectProjection<'_> {
 ///   pass and move `last_seen_at` across the whole table at once.
 /// * Updates availability without removing missing or unreferenced paths.
 /// * Writes `workspace_paths` / `projects` / the derived Session cache and the FTS
-///   parents, nothing else. It never writes `workstream_paths` and never
+///   parents, nothing else. It never writes task project associations and never
 ///   advances a cursor.
 pub fn reconcile_workspace_paths(
     db: &Db,
@@ -1253,7 +1268,7 @@ pub fn project_detail(
         policy,
     );
     let workstreams =
-        crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
+        crate::storage::workstream_projects::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
             .map(|workstream| ProjectWorkstream { workstream })
             .collect();
@@ -1288,7 +1303,7 @@ pub fn project_detail(
 /// The tasks associated with one Project, once per task.
 pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorkstream>> {
     Ok(
-        crate::storage::workstream_paths::workstreams_for_project(&db.read(), project_id)?
+        crate::storage::workstream_projects::workstreams_for_project(&db.read(), project_id)?
             .into_iter()
             .map(|workstream| ProjectWorkstream { workstream })
             .collect(),

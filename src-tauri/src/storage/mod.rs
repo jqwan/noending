@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use crate::domain::*;
 use crate::error::{other, Result};
 
-// The WorkspacePath registry, ordered WorkstreamPath list and Session→path
+// The WorkspacePath registry, explicit task/project memberships and Session→path
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
 pub mod message_query;
@@ -27,7 +27,7 @@ pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
 pub mod workspace;
-pub mod workstream_paths;
+pub mod workstream_projects;
 
 pub use context_repo::{
     apply_projection_conn, bump_input_revision_conn, commit_session_context_conn,
@@ -41,7 +41,8 @@ pub use session_lifecycle::PermanentDeletionCounts;
 
 /// Session API projection: Project membership is read through the path, never stored.
 const SESSION_SELECT: &str = "SELECT sessions.*,
-    (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = sessions.workspace_path_id) AS project_id
+    (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = sessions.workspace_path_id) AS project_id,
+    (SELECT json_group_array(workstream_id) FROM (SELECT workstream_id FROM session_workstreams WHERE session_id=sessions.id ORDER BY workstream_id)) AS tracked_workstream_ids
     FROM sessions";
 
 /// Two connections to one SQLite file so UI reads never queue behind writes:
@@ -310,18 +311,14 @@ impl Db {
 
     // Workstreams
 
-    /// Membership is derived from the path chain:
-    /// `workstream_paths → workspace_paths.project_id`. Any position counts as
-    /// membership without primary/secondary roles.
+    /// Tasks explicitly associated with a project; no path snapshot or roles.
     pub fn list_workstreams(&self, project_id: Option<&str>) -> Result<Vec<Workstream>> {
         let conn = self.read();
         let (sql, has_filter): (&str, bool) = if project_id.is_some() {
             (
                 "SELECT w.* FROM workstreams w
               WHERE EXISTS (
-                SELECT 1 FROM workstream_paths wsp
-                JOIN workspace_paths wp ON wp.id = wsp.workspace_path_id
-                WHERE wsp.workstream_id = w.id AND wp.project_id = ?1)
+                SELECT 1 FROM workstream_projects wsp WHERE wsp.workstream_id=w.id AND wsp.project_id=?1)
               ORDER BY w.updated_at DESC",
                 true,
             )
@@ -351,7 +348,7 @@ impl Db {
         let conn = self.read();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions
-             WHERE owner_workstream_id = ?1",
+             WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)",
             params![workstream_id],
             |r| r.get(0),
         )?;
@@ -359,7 +356,7 @@ impl Db {
             .query_row(
                 "SELECT id, agent, COALESCE(last_activity_at, started_at) AS act
                  FROM sessions
-                 WHERE owner_workstream_id = ?1
+                 WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)
                  ORDER BY act DESC
                  LIMIT 1",
                 params![workstream_id],
@@ -405,7 +402,7 @@ impl Db {
     /// `workspace::workstream::delete_workstream_permanently`, which additionally
     /// requires `visibility = archived` and preserves Sessions.
     pub fn delete_workstream(&self, id: &str) -> Result<()> {
-        self.tx(|tx| workstream_paths::purge_workstream_data_conn(tx, id))?;
+        self.tx(|tx| workstream_projects::purge_workstream_data_conn(tx, id))?;
         self.unindex("workstream", id);
         Ok(())
     }
@@ -1074,57 +1071,29 @@ impl Db {
         Ok(None)
     }
 
-    // Session Owner
-
-    /// Set (or clear) the single Owner Workstream of a Session.
-    /// This touches exactly one column: `sessions.owner_workstream_id`.
-    /// `None` clears ownership. No implicit WorkstreamPath / cwd / Project
-    /// mutation happens here.
-    pub fn set_session_owner(&self, session_id: &str, workstream_id: Option<&str>) -> Result<()> {
-        let conn = self.write();
-        set_session_owner_conn(&conn, session_id, workstream_id)
+    pub fn set_session_tracking(&self, sid: &str, tid: &str, tracked: bool) -> Result<()> {
+        self.tx(|tx| workstream_projects::set_tracking_conn(tx, sid, tid, tracked))
     }
-
-    /// Assign a launch's chosen task only to the exact native Session and
-    /// only while it remains ownerless. Preserve later explicit user choices;
-    /// a task deleted before discovery leaves the Session ownerless.
-    pub fn inherit_terminal_owner(
-        &self,
-        session: &Session,
-        workstream_id: Option<&str>,
-    ) -> Result<Option<String>> {
+    /// A launch selection is applied once to its exact native session. A deleted,
+    /// archived or detached task cannot prevent terminal identity binding.
+    pub fn inherit_terminal_tracking(&self, session: &Session, task: Option<&str>) -> Result<()> {
         self.tx(|tx| {
-            let (agent, native_id, mut owner): (String, String, Option<String>) = tx.query_row(
-                "SELECT agent, root_agent_session_id, owner_workstream_id FROM sessions WHERE id = ?1",
-                [&session.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            if agent != session.agent.as_str() || native_id != session.root_agent_session_id {
-                return Err(other("终端会话身份已变化，无法同步所属任务"));
+            let current=get_session_conn(tx,&session.id)?.ok_or_else(||other("会话不存在"))?;
+            if current.agent!=session.agent || current.root_agent_session_id!=session.root_agent_session_id { return Err(other("终端会话身份已变化")); }
+            if let Some(tid)=task {
+                let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM workstreams w JOIN workstream_projects p ON p.workstream_id=w.id WHERE w.id=?1 AND w.visibility='normal' AND p.project_id=?2)",params![tid,current.project_id],|r|r.get(0))?;
+                if eligible { workstream_projects::set_tracking_conn(tx,&current.id,tid,true)?; }
             }
-            if owner.is_none() {
-                if let Some(id) = workstream_id {
-                    let exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
-                        [id],
-                        |row| row.get(0),
-                    )?;
-                    if exists {
-                        set_session_owner_conn(tx, &session.id, Some(id))?;
-                        owner = Some(id.to_string());
-                    }
-                }
-            }
-            Ok(owner)
+            Ok(())
         })
     }
 
-    /// Sessions owned by `workstream_id`, including archived sessions.
-    /// A Session appears in at most one Workstream's list.
+    /// Sessions tracking `workstream_id`, including archived sessions.
+    /// The same session may appear in multiple tasks.
     pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(&format!(
-            "{SESSION_SELECT} WHERE owner_workstream_id = ?1
+            "{SESSION_SELECT} WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)
              ORDER BY COALESCE(last_activity_at, started_at) DESC"
         ))?;
         let rows = st
@@ -1331,7 +1300,7 @@ impl Db {
     /// A task can belong to several projects, so it has no single search parent.
     pub fn index_workstream(&self, w: &Workstream) -> Result<()> {
         let conn = self.write();
-        workstream_paths::reindex_workstream_search_conn(&conn, &w.id)
+        workstream_projects::reindex_workstream_search_conn(&conn, &w.id)
     }
 }
 
@@ -1420,7 +1389,7 @@ impl Db {
                    SELECT ref_id FROM search_index WHERE kind = 'message')",
             [],
         )?;
-        // A document whose body can change (title, Project, Owner Workstream)
+        // A document whose body can change (title, Project, tracked tasks)
         // is refreshed at the write that changed it, so the backfill only covers
         // rows no write ever touched.
         let ids: Vec<String> = {
@@ -1520,8 +1489,8 @@ pub fn get_workstream_conn(conn: &Connection, id: &str) -> Result<Option<Workstr
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
-    // A Session's search document carries its Owner's title, so a rename has
-    // to reach every Session that owns this Workstream. The previous title is
+    // A Session's search document carries its tracked task titles, so a rename has
+    // to reach every Session tracking this task. The previous title is
     // read first: an update that changed nothing else must not rewrite N docs.
     let previous: Option<(String, String)> = conn
         .query_row(
@@ -1556,70 +1525,16 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
         crate::storage::bump_input_revision_conn(conn, &w.id)?;
     }
     if text_changed {
-        reindex_owned_sessions_conn(conn, &w.id)?;
+        reindex_tracking_sessions_conn(conn, &w.id)?;
     }
     Ok(())
 }
 
-/// Set (or clear) a Session's single Owner Workstream through a caller-held
-/// connection, so terminal binding can write ownership together with everything
-/// that must agree with it in ONE transaction.
-///
-/// The target Workstream must exist — a Session pointing at a missing row
-/// would be a silently broken owner — and the search document is refreshed in
-/// the same connection, or the Session stays searchable under its old label.
-pub fn set_session_owner_conn(
-    conn: &Connection,
-    session_id: &str,
-    workstream_id: Option<&str>,
-) -> Result<()> {
-    if let Some(id) = workstream_id {
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workstreams WHERE id = ?1)",
-            params![id],
-            |r| r.get(0),
-        )?;
-        if !exists {
-            return Err(other(format!("未知 Workstream: {id}")));
-        }
-    }
-    let previous_owner: Option<String> = conn
-        .query_row(
-            "SELECT COALESCE(owner_workstream_id, '') FROM sessions WHERE id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .filter(|s: &String| !s.is_empty());
-    let changed = conn.execute(
-        "UPDATE sessions SET owner_workstream_id = ?2 WHERE id = ?1",
-        params![session_id, workstream_id],
-    )?;
-    if changed == 0 {
-        return Err(other(format!("未知 Session: {session_id}")));
-    }
-    // An Owner-set change alters BOTH Workstreams' input: the one gaining the
-    // Session and the one losing it. Either way the next synthesis must run.
-    if let Some(ws) = workstream_id {
-        crate::storage::bump_input_revision_conn(conn, ws)?;
-    }
-    if let Some(old) = previous_owner {
-        if Some(old.as_str()) != workstream_id {
-            crate::storage::bump_input_revision_conn(conn, &old)?;
-        }
-    }
-    index_session_conn(conn, session_id)
-}
-
-/// Rebuild the search documents of the Sessions that OWN `workstream_id`: a
-/// Session's document embeds its Owner Workstream's title, so a rename or an
-/// ownership change (a Workstream deletion nulling it) would otherwise leave
-/// them describing a fact that is no longer true. Runs in the caller's
-/// transaction.
-pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
+/// Rebuild documents for all sessions tracking this task in the caller's transaction.
+pub fn reindex_tracking_sessions_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
-        let mut st = conn.prepare("SELECT id FROM sessions WHERE owner_workstream_id = ?1")?;
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)")?;
         for row in st.query_map(params![workstream_id], |r| r.get(0))? {
             ids.push(row?);
         }
@@ -1631,7 +1546,7 @@ pub fn reindex_owned_sessions_conn(conn: &Connection, workstream_id: &str) -> Re
 }
 
 /// Rebuild the search documents of the Sessions projecting onto `project_id` —
-/// the same rule as [`reindex_owned_sessions_conn`] for the Project name.
+/// the same rule as [`reindex_tracking_sessions_conn`] for the Project name.
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
@@ -1647,16 +1562,14 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
 }
 
 /// Write (or refresh) one Session's search document: title is the Session title
-/// (falling back to the Agent name), body is the Project name plus the ONE Owner
-/// Workstream title (a Session has a single Owner) and the cwd.
+/// (falling back to the Agent name), body is the Project name plus all tracked task titles and the cwd.
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
     let row: Option<(String, String, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), w.title, s.cwd
+            "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), (SELECT group_concat(title, char(10)) FROM (SELECT w.title FROM session_workstreams sw JOIN workstreams w ON w.id=sw.workstream_id WHERE sw.session_id=s.id ORDER BY w.id)), s.cwd
                FROM sessions s
                LEFT JOIN workspace_paths wp ON wp.id = s.workspace_path_id
                LEFT JOIN projects p ON p.id = wp.project_id
-               LEFT JOIN workstreams w ON w.id = s.owner_workstream_id
               WHERE s.id = ?1",
             params![session_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -1971,7 +1884,12 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         cwd: r.get("cwd")?,
         workspace_path_id: r.get("workspace_path_id")?,
         project_id: r.get("project_id")?,
-        owner_workstream_id: r.get("owner_workstream_id")?,
+        tracked_workstream_ids: serde_json::from_str(
+            &r.get::<_, String>("tracked_workstream_ids")?,
+        )
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
         forked_from_session_id: r.get("forked_from_session_id")?,
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
@@ -2038,4 +1956,36 @@ pub fn ensure_not_empty(name: &str, v: &str) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+pub(crate) fn get_session_conn(conn: &Connection, id: &str) -> Result<Option<Session>> {
+    Ok(conn
+        .query_row(
+            &format!("{SESSION_SELECT} WHERE sessions.id=?1"),
+            [id],
+            row_session,
+        )
+        .optional()?)
+}
+
+#[cfg(test)]
+
+pub(crate) fn seed_tracking(
+    db: &crate::storage::Db,
+    sid: &str,
+    task: Option<&str>,
+) -> crate::error::Result<()> {
+    db.tx(|tx| {
+        if let Some(tid)=task {
+            tx.execute("INSERT OR IGNORE INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",rusqlite::params![sid,tid])?;
+            crate::storage::bump_input_revision_conn(tx,tid)?;
+        } else {
+            let mut st=tx.prepare("SELECT workstream_id FROM session_workstreams WHERE session_id=?1")?;
+            let ids=st.query_map([sid],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+            drop(st);
+            tx.execute("DELETE FROM session_workstreams WHERE session_id=?1",[sid])?;
+            for tid in ids { crate::storage::bump_input_revision_conn(tx,&tid)?; }
+        }
+        crate::storage::index_session_conn(tx,sid)
+    })
 }

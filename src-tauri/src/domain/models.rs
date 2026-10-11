@@ -2,7 +2,7 @@
 //! Agent's data format.
 //!
 //! Workspace invariant: a physical working path IS domain state
-//! (`WorkspacePath`, plus the ordered `workstream_paths` list), while an Agent's
+//! (`WorkspacePath` and its Project), while an Agent's
 //! raw transcript layout never is. A Session carries cwd as optional metadata: a
 //! Session with no cwd is legal and gets no WorkspacePath — nothing fabricates
 //! one from a default.
@@ -112,18 +112,6 @@ pub struct GitIdentity {
     pub metadata: serde_json::Value,
 }
 
-/// One entry of a Workstream's ordered working-path list.
-///
-/// `position` records display order only; paths have no primary/secondary roles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkstreamPath {
-    pub id: Id,
-    pub workstream_id: Id,
-    pub workspace_path_id: Id,
-    pub position: i64,
-    pub created_at: String,
-}
-
 /// What the WorkspaceResolver reports about a filesystem path. Purely
 /// observational: it never creates or reassigns anything by itself.
 #[derive(Debug, Clone)]
@@ -145,7 +133,7 @@ pub enum GitDetection {
         toplevel: Option<String>,
         kind: GitWorktreeKind,
         /// `git worktree list --porcelain` result. Discovery of a worktree
-        /// never adds a WorkstreamPath.
+        /// never associates a task.
         worktrees: Vec<String>,
         /// `(name, url)` remotes from the repository's config, URLs
         /// credential-stripped. A fact read, not a naming guess.
@@ -303,15 +291,13 @@ pub struct Session {
     /// terminal binding and `resume`.
     pub root_agent_session_id: String,
     pub title: Option<String>,
-    /// Semantic ownership: the one Workstream this Logical Session belongs to,
-    /// or `None`. At most one Owner. Only an explicit user action
-    /// or the first native terminal binding sets it — never fork inheritance.
-    pub owner_workstream_id: Option<Id>,
+    /// Explicit task tracking, independent of project membership.
+    pub tracked_workstream_ids: Vec<Id>,
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
     /// When this Session is an independently continuable fork, the Logical
-    /// Session its source forked from. Lifecycle, Owner, Conversation and
+    /// Session its source forked from. Lifecycle, tracking, Conversation and
     /// Context stay fully independent of that source; this is a
     /// provenance note, not a parent link in the old sense.
     pub forked_from_session_id: Option<Id>,
@@ -474,8 +460,7 @@ pub struct WorkstreamContextState {
     pub workstream_id: Id,
     /// Guard for current task-summary writes.
     pub context_revision: i64,
-    /// Marks Owner-set / paths / title / description /
-    /// ownership changes that leave new materials pending.
+    /// Marks tracked sessions / project memberships / title / description changes that leave new materials pending.
     pub input_revision: i64,
     /// The `input_revision` the last successful AI update consumed. A
     /// Workstream is pending when `input_revision > consumed_input_revision`.
@@ -484,7 +469,7 @@ pub struct WorkstreamContextState {
     pub updated_at: Option<String>,
 }
 
-/// What a Workstream has already consumed from one Owner Session.
+/// What a Workstream has already consumed from one tracked Session.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct WorkstreamSessionFrontier {
     pub workstream_id: Id,

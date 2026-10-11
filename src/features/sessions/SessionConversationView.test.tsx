@@ -44,7 +44,7 @@ function session(id: string): Session {
     cwd: null,
     project_id: null,
     workspace_path_id: null,
-    owner_workstream_id: null,
+    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: null,
     last_activity_at: null,
@@ -62,7 +62,7 @@ function session(id: string): Session {
         source_tail_hash: "",
         fact_generation: 1,
         latest_message_seq: 2,
-    
+
   };
 }
 
@@ -70,7 +70,7 @@ function detail(me: Session): SessionDetail {
   return {
     session: me,
     messages: [],
-    owner_workstream: null,
+    tracked_workstreams: [],
     workspace_path: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,

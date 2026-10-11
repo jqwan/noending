@@ -3,6 +3,7 @@
 //! the active current_state revision, and a zero-session Workstream stays a
 //! legal card with no Resume target.
 
+mod support;
 use noending::domain::{Agent, Session, Workstream};
 use noending::storage::{new_id, now, Db};
 
@@ -31,8 +32,7 @@ fn discovered(db: &Db, agent: Agent, root_agent_session_id: &str, activity: &str
 }
 
 fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
-    db.set_session_owner(session_id, Some(workstream_id))
-        .unwrap();
+    support::track(&db, session_id, Some(workstream_id)).unwrap();
 }
 
 fn workstream(db: &Db, title: &str) -> Workstream {

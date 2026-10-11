@@ -10,8 +10,8 @@
 //! Invariants: a Session with no cwd keeps `workspace_path_id = NULL` — never
 //! backfill with the default workspace, which would fabricate a fact the
 //! transcript does not contain. Event ingestion must not re-resolve a Project;
-//! discovery is authoritative for cwd. Setting an Owner writes only
-//! `owner_workstream_id`, leaving cwd / `workspace_path_id` untouched.
+//! discovery is authoritative for cwd. Task tracking changes only its relation
+//! rows, leaving cwd and `workspace_path_id` untouched.
 //!
 //! The WorkspacePath creator is [`WorkspaceAttaching`], injected so these rules
 //! stay testable with a scripted stand-in; [`register_workspace_attacher`] holds
@@ -86,7 +86,7 @@ pub fn resolve_session_path(
 }
 
 /// Move a Session onto a WorkspacePath. Project membership follows at read time;
-/// the Session's Owner Workstream is not involved.
+/// the Session's task tracking is not involved.
 pub fn move_session_to_path_conn(
     conn: &Connection,
     session_id: &str,
@@ -166,21 +166,13 @@ pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
     })
 }
 
-// Owner assignment
-
-/// Set (or clear) a Session's single Owner Workstream.
-///
-/// This is the only door for semantic ownership, and it writes exactly one
-/// column. It never touches WorkstreamPath rows, the Session's cwd,
-/// `workspace_path_id` or `project_id`: physical Project
-/// membership and semantic ownership are independent. Returns the Session
-/// after the change.
-pub fn set_session_owner(
+/// Add or remove task tracking without changing physical project membership.
+pub fn set_session_tracking(
     db: &Db,
-    session_id: &str,
-    owner_workstream_id: Option<&str>,
+    sid: &str,
+    tid: &str,
+    tracked: bool,
 ) -> Result<crate::domain::Session> {
-    db.set_session_owner(session_id, owner_workstream_id)?;
-    db.get_session(session_id)?
-        .ok_or_else(|| other(format!("未知 Session: {session_id}")))
+    db.set_session_tracking(sid, tid, tracked)?;
+    db.get_session(sid)?.ok_or_else(|| other("会话不存在"))
 }

@@ -24,7 +24,7 @@ pub fn archive_session_conn(conn: &Connection, session_id: &str, ts: &str) -> Re
     Ok(n > 0)
 }
 
-/// Archive → Normal: same Session id; Owner, members, messages, cursors and the
+/// Archive → Normal: same Session id; tracking, members, messages, cursors and the
 /// Context frontier were never touched, so the next reconcile simply resumes.
 pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool> {
     let n = conn.execute(
@@ -70,7 +70,7 @@ pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
 // Preview counts
 
 /// What a permanent LOCAL deletion will remove, for the confirmation preview.
-/// Workstreams / WorkstreamPaths / WorkspacePaths / Projects and surviving
+/// Workstreams / WorkspacePaths / Projects and surviving
 /// Context content are deliberately absent — they are KEPT.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeletionCounts {
@@ -97,19 +97,15 @@ impl PermanentDeletionCounts {
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
 /// Callers have already required Archive. Other sessions, physical paths,
-/// task summaries and Agent-owned sources survive; the owner task becomes pending.
+/// task summaries and Agent-owned sources survive; all tracked tasks become pending.
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()> {
-    // Removing a session changes the owner task's summary input.
-    if let Some(owner) = tx
-        .query_row(
-            "SELECT owner_workstream_id FROM sessions WHERE id = ?1",
-            params![session_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten()
-    {
-        crate::storage::bump_input_revision_conn(tx, &owner)?;
+    let mut st = tx.prepare("SELECT workstream_id FROM session_workstreams WHERE session_id=?1")?;
+    let tasks = st
+        .query_map([session_id], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(st);
+    for tid in tasks {
+        crate::storage::bump_input_revision_conn(tx, &tid)?;
     }
 
     // 4. The Session's current summary and its place in

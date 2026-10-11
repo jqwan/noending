@@ -188,27 +188,15 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => Kind::Project,
                 };
                 match action {
-                    "path"
-                        if kind == Kind::Task
-                            && words.len() == 4
-                            && !words[3].trim().is_empty() =>
-                    {
+                    "project" if kind == Kind::Task && words.len() == 4 => {
                         let id = words[3].clone();
                         match words[2].as_str() {
-                            "list" => Command::TaskPaths { id },
-                            "add" => Command::AddTaskPath {
+                            "list" => Command::TaskProjects { id },
+                            "set" => Command::SetTaskProjects {
                                 id,
-                                path: options.required("path")?,
+                                projects: options.0.remove("project").unwrap_or_default(),
                             },
-                            "remove" => Command::RemoveTaskPath {
-                                id,
-                                path_id: options.required("path-id")?,
-                            },
-                            "reorder" => Command::ReorderTaskPaths {
-                                id,
-                                path_ids: options.0.remove("path-id").unwrap_or_default(),
-                            },
-                            _ => return Err(invalid("任务目录命令无效")),
+                            _ => return Err(invalid("任务项目命令无效")),
                         }
                     }
                     "update" if kind == Kind::Task => {
@@ -270,7 +258,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     "create" if kind == Kind::Task && words.len() == 2 => Command::CreateTask {
                         title: options.required("title")?,
                         description: options.take("description").unwrap_or_default(),
-                        paths: options.0.remove("path").unwrap_or_default(),
+                        projects: options.0.remove("project").unwrap_or_default(),
                     },
                     "attach" if kind == Kind::Task => Command::Attach {
                         task: id(&words)?,
@@ -375,7 +363,7 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
         None => vec!["ne status", "ne search --help", "ne session/task/project --help", "ne preference --help", "ne summary --help", "ne job --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
-        Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID", "ne task create --title TEXT [--description TEXT] [--path PATH ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task path list ID", "ne task path add ID --path PATH", "ne task path remove ID --path-id WORKSPACE_PATH_ID", "ne task path reorder ID [--path-id WORKSPACE_PATH_ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
+        Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
         Some("project") => vec!["ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID"],
         Some("summary") => vec!["ne summary update session|task|project ID [--wait] [--timeout 600]", "ne summary regenerate session|task|project ID [--wait] [--timeout 600]", "ne summary set session|task|project ID --file FILE --revision REVISION"],
         Some("preference") => vec!["ne preference list --scope user|project [--project ID]", "ne preference add --scope user|project [--project ID] --content TEXT", "ne preference update ID --content TEXT", "ne preference delete ID"],

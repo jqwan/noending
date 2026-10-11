@@ -125,7 +125,7 @@ fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
 }
 
 fn set_owner(db: &Db, session_id: &str, ws_id: &str) {
-    noending::workspace::session::set_session_owner(db, session_id, Some(ws_id)).unwrap();
+    support::track(db, session_id, Some(ws_id)).unwrap();
 }
 
 /// Commit the Session Context frontier through the v1 commit path — what an
@@ -185,8 +185,11 @@ fn archive_keeps_every_fact_and_never_touches_the_source() {
     // are all exactly as they were.
     assert_eq!(db.message_count(&s.id).unwrap(), 1);
     assert_eq!(
-        db.get_session(&s.id).unwrap().unwrap().owner_workstream_id,
-        Some(ws.id.clone()),
+        db.get_session(&s.id)
+            .unwrap()
+            .unwrap()
+            .tracked_workstream_ids,
+        vec![ws.id.clone()],
         "Trash keeps the Owner Workstream (Trash Session → Owner 保留)"
     );
     let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
@@ -297,7 +300,7 @@ fn unarchive_keeps_identity_data_and_search() {
     // : Trash → Restore keeps the same identity and every fact.
     assert_eq!(restored.id, s.id);
     assert!(restored.archived_at.is_none());
-    assert_eq!(restored.owner_workstream_id, Some(ws.id));
+    assert_eq!(restored.tracked_workstream_ids, vec![ws.id]);
     let messages = db.get_messages(&s.id, None, 100).unwrap();
     assert_eq!(
         messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
@@ -565,7 +568,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     assert_ne!(s2, s.id);
     let stored = db.get_session(&s2).unwrap().unwrap();
     assert!(
-        stored.owner_workstream_id.is_none(),
+        stored.tracked_workstream_ids.is_empty(),
         "no old Owner resurrects"
     );
 }

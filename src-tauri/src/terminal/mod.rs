@@ -64,8 +64,8 @@ pub struct TerminalBound {
 pub struct TerminalSummary {
     pub terminal_id: String,
     pub session_id: Option<String>,
-    /// Selected task before first binding; current Session's owner afterwards.
-    pub owner_workstream_id: Option<String>,
+    /// Selected task before first binding; cleared after the initial tracking is consumed.
+    pub initial_workstream_id: Option<String>,
     pub identity_revision: u64,
     pub agent: Agent,
     pub cwd: Option<String>,
@@ -139,7 +139,7 @@ struct TerminalRecord {
     /// It also retains a switched-to identity while its source is not ingested.
     root_agent_session_id: Option<String>,
     /// One-shot task assignment for the launch's first native conversation.
-    pending_ownership: Option<PendingOwnership>,
+    pending_tracking: Option<PendingTracking>,
     identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
     scrollback: Scrollback,
     cols: u16,
@@ -149,7 +149,7 @@ struct TerminalRecord {
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
-struct PendingOwnership {
+struct PendingTracking {
     workstream_id: String,
     native_id: Option<String>,
 }
@@ -159,7 +159,7 @@ struct PendingOwnership {
 /// webview) and `None` in tests (emits are skipped, everything else runs).
 pub struct TerminalRegistry {
     records: Mutex<HashMap<String, std::sync::Arc<Mutex<TerminalRecord>>>>,
-    /// Prevent close/switch from racing the first binding's ownership write.
+    /// Prevent close/switch from racing the first binding's task tracking write.
     /// Database work happens without holding a terminal record or PTY lock.
     identity_mutations: Mutex<()>,
     /// Serializes NoEnding's own Resume launches; Agent-reported identity
@@ -377,7 +377,7 @@ impl TerminalRegistry {
                 .as_ref()
                 .is_some_and(|cwd| record.summary.cwd.as_ref() != Some(cwd));
             if identity_changed {
-                if let Some(pending) = &mut record.pending_ownership {
+                if let Some(pending) = &mut record.pending_tracking {
                     if pending
                         .native_id
                         .as_ref()
@@ -385,7 +385,7 @@ impl TerminalRegistry {
                     {
                         // The TUI switched before initial ingestion completed.
                         // The launch task never follows an unrelated conversation.
-                        record.pending_ownership = None;
+                        record.pending_tracking = None;
                     } else {
                         pending.native_id = Some(event.native_id.clone());
                     }
@@ -393,8 +393,8 @@ impl TerminalRegistry {
                 record.root_agent_session_id = Some(event.native_id.clone());
                 record.summary.session_id = None;
                 record.summary.session_title = None;
-                record.summary.owner_workstream_id = record
-                    .pending_ownership
+                record.summary.initial_workstream_id = record
+                    .pending_tracking
                     .as_ref()
                     .map(|pending| pending.workstream_id.clone());
             }
@@ -459,18 +459,15 @@ impl TerminalRegistry {
                 return;
             }
             record
-                .pending_ownership
+                .pending_tracking
                 .as_ref()
                 .filter(|pending| pending.native_id.as_deref() == Some(native_id))
                 .map(|pending| pending.workstream_id.clone())
         };
-        let current_owner = match db.inherit_terminal_owner(session, owner.as_deref()) {
-            Ok(owner) => owner,
-            Err(error) => {
-                eprintln!("[terminal] native binding failed: {error}");
-                return;
-            }
-        };
+        if let Err(error) = db.inherit_terminal_tracking(session, owner.as_deref()) {
+            eprintln!("[terminal] native binding failed: {error}");
+            return;
+        }
         let bound = {
             let Ok(records) = self.records.lock() else {
                 return;
@@ -482,8 +479,8 @@ impl TerminalRegistry {
                 return;
             };
             record.summary.session_id = Some(session.id.clone());
-            record.summary.owner_workstream_id = current_owner;
-            record.pending_ownership = None;
+            record.summary.initial_workstream_id = None;
+            record.pending_tracking = None;
             record.summary.session_title = session.title.clone();
             record.summary.identity_revision += 1;
             record.summary.clone()
@@ -656,12 +653,12 @@ impl TerminalRegistry {
     ) -> TerminalSummary {
         let terminal_id = summary.terminal_id.clone();
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
-            pending_ownership: summary
+            pending_tracking: summary
                 .session_id
                 .is_none()
-                .then(|| summary.owner_workstream_id.clone())
+                .then(|| summary.initial_workstream_id.clone())
                 .flatten()
-                .map(|workstream_id| PendingOwnership {
+                .map(|workstream_id| PendingTracking {
                     workstream_id,
                     native_id: root_agent_session_id.clone(),
                 }),
@@ -753,7 +750,7 @@ pub struct EmbeddedTarget<'a> {
     /// available in the ingested Session store.
     pub session_id: Option<&'a str>,
     /// New launches assign this task once; Resume reads its current owner.
-    pub owner_workstream_id: Option<&'a str>,
+    pub initial_workstream_id: Option<&'a str>,
     /// Prespecified ID for NEW, or the known native ID for Resume. Future
     /// Agent events replace this identity when its TUI switches conversations.
     pub root_agent_session_id: Option<&'a str>,
@@ -799,7 +796,7 @@ pub fn spawn_embedded(
     let summary = TerminalSummary {
         terminal_id: terminal_id.clone(),
         session_id: target.session_id.map(str::to_string),
-        owner_workstream_id: target.owner_workstream_id.map(str::to_string),
+        initial_workstream_id: target.initial_workstream_id.map(str::to_string),
         identity_revision: 0,
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -886,7 +883,7 @@ mod tests {
         EmbeddedTarget {
             registry,
             session_id: Some(session),
-            owner_workstream_id: None,
+            initial_workstream_id: None,
             root_agent_session_id: None,
             agent: Agent::Codex,
         }
@@ -907,7 +904,20 @@ mod tests {
 
     fn binding_db() -> crate::storage::Db {
         let dir = std::env::temp_dir().join(format!("noending-term-binding-{}", new_id()));
-        crate::storage::Db::open(&dir.join("db.sqlite")).unwrap()
+        let db = crate::storage::Db::open(&dir.join("db.sqlite")).unwrap();
+        let p = crate::domain::Project {
+            id: "native-project".into(),
+            name: "Native".into(),
+            git_id: None,
+            name_customized: false,
+            visibility: "normal".into(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        db.upsert_project(&p).unwrap();
+        crate::storage::workspace::insert_workspace_path_conn(&db.write(), &fixture_cwd(), &p.id)
+            .unwrap();
+        db
     }
 
     fn fixture_cwd() -> String {
@@ -939,7 +949,7 @@ mod tests {
             summary: TerminalSummary {
                 terminal_id: terminal_id.clone(),
                 session_id: session_id.map(str::to_string),
-                owner_workstream_id: owner.map(str::to_string),
+                initial_workstream_id: owner.map(str::to_string),
                 identity_revision: 0,
                 agent,
                 cwd: Some(fixture_cwd()),
@@ -949,7 +959,7 @@ mod tests {
                 session_title: None,
             },
             root_agent_session_id: native_id.map(str::to_string),
-            pending_ownership: owner.map(|owner| PendingOwnership {
+            pending_tracking: owner.map(|owner| PendingTracking {
                 workstream_id: owner.into(),
                 native_id: native_id.map(str::to_string),
             }),
@@ -1001,6 +1011,18 @@ mod tests {
             )
             .unwrap()
             .0;
+        let path = db
+            .list_workspace_paths()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.canonical_path == fixture_cwd())
+            .unwrap();
+        crate::storage::session_paths::attach_session_workspace_path_conn(
+            &db.write(),
+            &id,
+            Some(&path.id),
+        )
+        .unwrap();
         db.get_session(&id).unwrap().unwrap()
     }
 
@@ -1015,6 +1037,8 @@ mod tests {
             updated_at: now(),
         })
         .unwrap();
+        crate::workspace::workstream::set_workstream_projects(db, &id, &["native-project".into()])
+            .unwrap();
         id
     }
 
@@ -1022,7 +1046,9 @@ mod tests {
         db.get_session(&session.id)
             .unwrap()
             .unwrap()
-            .owner_workstream_id
+            .tracked_workstream_ids
+            .into_iter()
+            .next()
     }
 
     #[test]
@@ -1051,6 +1077,7 @@ mod tests {
                 .report_native_identity(&db, &terminal, &native_event("native-a"))
                 .unwrap();
             let b = ingested_native(&db, agent, "native-b");
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             assert!(registry
                 .attach(&terminal)
@@ -1074,6 +1101,7 @@ mod tests {
                 None,
                 "ingestion alone does not infer ownership from cwd or time"
             );
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             assert_eq!(owner(&db, &a).as_deref(), Some(first_task.as_str()));
             assert_eq!(
@@ -1081,27 +1109,25 @@ mod tests {
                     .attach(&terminal)
                     .unwrap()
                     .summary
-                    .owner_workstream_id
+                    .initial_workstream_id
                     .as_deref(),
-                Some(first_task.as_str())
+                None
             );
             assert!(crate::search::search(&db, "Initialtask", 50)
                 .unwrap()
                 .iter()
                 .any(|hit| hit.kind == "session" && hit.ref_id == a.id));
             // Clearing ownership explicitly cannot be undone by another lifecycle notice.
-            db.set_session_owner(&a.id, None).unwrap();
+            crate::storage::seed_tracking(&db, &a.id, None).unwrap();
             registry.report_native_identity(&db, &terminal, &native_event("native-a"));
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             assert_eq!(owner(&db, &a), None);
             // Switching to another conversation reads that conversation's current task.
             let current = registry
                 .report_native_identity(&db, &terminal, &native_event("native-b"))
                 .unwrap();
-            assert_eq!(
-                current.owner_workstream_id.as_deref(),
-                Some(second_task.as_str())
-            );
+            assert_eq!(current.initial_workstream_id.as_deref(), None);
             let c = ingested_native(&db, agent, "native-c");
             registry.report_native_identity(&db, &terminal, &native_event("native-c"));
             assert_eq!(owner(&db, &c), None);
@@ -1139,6 +1165,7 @@ mod tests {
             .find_session_by_root_agent_id(Agent::Codex, &native)
             .unwrap()
             .unwrap();
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(owner(&db, &session), None);
         assert!(registry
@@ -1200,6 +1227,7 @@ mod tests {
             &|_| {},
         )
         .unwrap();
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert!(
             db.find_session_by_root_agent_id(Agent::Codex, &native)
@@ -1219,6 +1247,7 @@ mod tests {
             .unwrap(),
             (1, 1)
         );
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         let session = db
             .find_session_by_root_agent_id(Agent::Codex, &native)
@@ -1260,17 +1289,25 @@ mod tests {
             Some(&chosen),
         );
         let session = ingested_native(&db, Agent::Codex, "existing");
-        db.set_session_owner(&session.id, Some(&explicit)).unwrap();
+        crate::storage::seed_tracking(&db, &session.id, Some(&explicit)).unwrap();
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
-        assert_eq!(owner(&db, &session).as_deref(), Some(explicit.as_str()));
+        assert_eq!(
+            db.get_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .tracked_workstream_ids
+                .len(),
+            2
+        );
         assert_eq!(
             registry
                 .attach(&terminal)
                 .unwrap()
                 .summary
-                .owner_workstream_id
+                .initial_workstream_id
                 .as_deref(),
-            Some(explicit.as_str())
+            None
         );
         let terminal = identity_terminal_with_owner(
             &registry,
@@ -1281,10 +1318,11 @@ mod tests {
         );
         db.delete_workstream(&chosen).unwrap();
         let session = ingested_native(&db, Agent::Pi, "deleted");
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         let current = registry.attach(&terminal).unwrap().summary;
         assert_eq!(current.session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(current.owner_workstream_id, None);
+        assert_eq!(current.initial_workstream_id, None);
         assert_eq!(owner(&db, &session), None);
     }
 
@@ -1296,7 +1334,8 @@ mod tests {
         let terminal =
             identity_terminal_with_owner(&registry, Agent::Codex, Some("retry"), None, Some(&task));
         let session = ingested_native(&db, Agent::Codex, "retry");
-        db.write().execute_batch("CREATE TRIGGER reject_owner BEFORE UPDATE OF owner_workstream_id ON sessions BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        db.write().execute_batch("CREATE TRIGGER reject_owner BEFORE INSERT ON session_workstreams BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert!(registry
             .attach(&terminal)
@@ -1312,6 +1351,7 @@ mod tests {
         db.write()
             .execute_batch("DROP TRIGGER reject_owner;")
             .unwrap();
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
             registry
@@ -1336,6 +1376,7 @@ mod tests {
         registry.close(&closed).unwrap();
         let session = ingested_native(&db, Agent::Pi, "closed");
         registry.finish_native_binding(&db, &delayed, "closed", &session);
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(owner(&db, &session), None);
         let switched =
@@ -1343,6 +1384,7 @@ mod tests {
         registry.report_native_identity(&db, &switched, &native_event("switched"));
         let original = ingested_native(&db, Agent::Pi, "original");
         let later = ingested_native(&db, Agent::Pi, "switched");
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(owner(&db, &original), None);
         assert_eq!(owner(&db, &later), None);
@@ -1373,7 +1415,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
-                owner_workstream_id: Some(&task),
+                initial_workstream_id: Some(&task),
                 root_agent_session_id: Some("spawned-native"),
                 agent: Agent::Pi,
             },
@@ -1381,7 +1423,10 @@ mod tests {
         .unwrap();
         let id = outcome.terminal_id.unwrap();
         let initial = registry.attach(&id).unwrap().summary;
-        assert_eq!(initial.owner_workstream_id.as_deref(), Some(task.as_str()));
+        assert_eq!(
+            initial.initial_workstream_id.as_deref(),
+            Some(task.as_str())
+        );
         assert!(initial.session_id.is_none());
         until("spawned terminal to exit", || {
             registry
@@ -1390,6 +1435,7 @@ mod tests {
                 .filter(|snapshot| !snapshot.summary.live)
         });
         let session = ingested_native(&db, Agent::Pi, "spawned-native");
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
         assert_eq!(
@@ -1408,6 +1454,7 @@ mod tests {
         let first = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
         let second = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
 
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         for id in [&first, &second] {
             let summary = registry.attach(id).unwrap().summary;
@@ -1480,11 +1527,13 @@ mod tests {
             assert!(waiting.session_title.is_none());
             assert!(registry.for_session(&a.id).is_none());
 
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             let still_waiting = registry.attach(&terminal).unwrap().summary;
             assert!(still_waiting.session_id.is_none());
             assert_eq!(still_waiting.identity_revision, waiting.identity_revision);
             let b = ingested_native(&db, agent, "native-b");
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             let bound = registry.attach(&terminal).unwrap().summary;
             assert_eq!(bound.session_id.as_deref(), Some(b.id.as_str()));
@@ -1578,6 +1627,7 @@ mod tests {
             current.identity_revision
         );
         let b = ingested_native(&db, Agent::Codex, "native-b");
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
             registry
@@ -1625,6 +1675,7 @@ mod tests {
             current.identity_revision
         );
         let new_a = ingested_native(&db, Agent::Codex, "native-a");
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
             registry
@@ -1672,6 +1723,7 @@ mod tests {
                 record.summary.created_at = ts.clone();
                 record.scrollback.push(prompt.as_bytes());
             }
+            attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             let summary = registry.attach(&terminal).unwrap().summary;
             assert!(summary.session_id.is_none());
@@ -1690,6 +1742,7 @@ mod tests {
         let claude_terminal =
             identity_terminal(&registry, Agent::ClaudeCode, Some("same-native"), None);
         let pi_terminal = identity_terminal(&registry, Agent::Pi, Some("same-native"), None);
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
             registry
@@ -1731,6 +1784,7 @@ mod tests {
         assert!(registry
             .report_native_identity(&db, &terminal, &native_event("native-a"))
             .is_none());
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert!(registry.attach(&terminal).is_err());
         assert!(registry.list().is_empty());
@@ -2009,7 +2063,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
-                owner_workstream_id: None,
+                initial_workstream_id: None,
                 root_agent_session_id: Some("root-born-identity"),
                 agent: Agent::Pi,
             },
@@ -2040,6 +2094,7 @@ mod tests {
             )
             .unwrap();
 
+        attach_fixture_paths(&db);
         registry.bind_discovered(&db);
 
         let bound = registry
@@ -2059,7 +2114,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: Some("s-live"),
-                owner_workstream_id: None,
+                initial_workstream_id: None,
                 root_agent_session_id: None,
                 agent: Agent::Codex,
             },
@@ -2077,5 +2132,28 @@ mod tests {
         assert!(registry.for_session("s-live").is_none());
         assert!(registry.attach(&id).is_err());
         assert!(registry.close(&id).is_none(), "closing twice is a no-op");
+    }
+}
+
+#[cfg(test)]
+fn attach_fixture_paths(db: &crate::storage::Db) {
+    let paths = db.list_workspace_paths().unwrap();
+    for session in db
+        .list_sessions(crate::storage::SessionFilter::default())
+        .unwrap()
+    {
+        if session.workspace_path_id.is_none() {
+            if let Some(path) = paths
+                .iter()
+                .find(|p| session.cwd.as_deref() == Some(p.canonical_path.as_str()))
+            {
+                crate::storage::session_paths::attach_session_workspace_path_conn(
+                    &db.write(),
+                    &session.id,
+                    Some(&path.id),
+                )
+                .unwrap();
+            }
+        }
     }
 }

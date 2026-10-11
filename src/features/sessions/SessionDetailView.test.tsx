@@ -9,7 +9,7 @@ import type {
   LocalDeletePreview,
   SessionDetail,
   SessionMessage,
-  Workstream,
+
 } from "../../types";
 
 // 只覆盖重构后的详情页：源会话状态、fork 链接、
@@ -43,7 +43,7 @@ vi.mock("../../api", () => ({
     listWorkstreams: vi.fn().mockResolvedValue([]),
     archiveSession: vi.fn(),
     restoreSession: vi.fn(),
-    setSessionOwnerWorkstream: vi.fn(),
+    setSessionTaskTracking: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
     refreshSession: vi.fn().mockResolvedValue({ queued: true }),
@@ -81,7 +81,7 @@ function session(id: string, over: Partial<Session> = {}): Session {
     cwd: null,
     project_id: null,
     workspace_path_id: null,
-    owner_workstream_id: null,
+    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: null,
     last_activity_at: null,
@@ -104,16 +104,6 @@ function session(id: string, over: Partial<Session> = {}): Session {
   };
 }
 
-function workstream(id: string, title: string): Workstream {
-  return {
-    id,
-    title,
-    description: "",
-    visibility: "normal",
-    created_at: "2026-09-21T00:00:00+00:00",
-    updated_at: "2026-09-21T00:00:00+00:00",
-  };
-}
 
 function message(
   sessionId: string,
@@ -140,7 +130,7 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
   return {
     session: me,
     messages: [],
-    owner_workstream: null,
+    tracked_workstreams: [],
     workspace_path: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
@@ -321,66 +311,6 @@ it("says the local data is unrecoverable when the root source is gone", async ()
 
   await screen.findByText(/本地数据删除后无法找回/);
   expect(screen.queryByText(/Root 源会话仍然存在/)).toBeNull();
-});
-
-// 所属任务（单 Owner）
-
-it("shows the one owner workstream and links to it", async () => {
-  const owner = workstream("w1", "会话与 Workstream 重构");
-  const { navigate } = await renderDetail(detail(session("me", { owner_workstream_id: "w1" }), {
-    owner_workstream: owner,
-  }));
-
-  screen.getByText("所属任务");
-  screen.getByText(owner.title);
-  // 点击整栏直接跳转
-  const row = document.querySelector(".rail-row") as HTMLElement;
-  expect(row).toBeTruthy();
-  fireEvent.click(row);
-  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "w1", initialTitle: "会话与 Workstream 重构" });
-
-  // 只有一个所属任务：没有「添加」多任务入口。
-  expect(screen.queryByRole("button", { name: /添加/ })).toBeNull();
-});
-
-it("marks an unowned session and offers 选择 instead of 添加", async () => {
-  await renderDetail(detail(session("me")));
-
-  screen.getByText("所属任务");
-  screen.getByText("未归属任务");
-  screen.getByRole("button", { name: "选择" });
-  expect(screen.queryByRole("button", { name: "更改" })).toBeNull();
-});
-
-it("replaces the owner through a single-choice modal", async () => {
-  const owner = workstream("w1", "旧任务");
-  vi.mocked(api.listWorkstreams).mockResolvedValue([owner, workstream("w2", "新任务")]);
-  vi.mocked(api.setSessionOwnerWorkstream).mockResolvedValue(session("me"));
-  await renderDetail(detail(session("me", { owner_workstream_id: "w1" }), { owner_workstream: owner }));
-
-  fireEvent.click(screen.getByRole("button", { name: "更改" }));
-  const dialog = await screen.findByRole("dialog", { name: "选择所属任务" });
-  // 单选：一次只能选一个。
-  const radios = dialog.querySelectorAll('input[type="radio"]');
-  expect(radios).toHaveLength(3);
-  fireEvent.click(screen.getByText("新任务"));
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-  await waitFor(() => expect(api.setSessionOwnerWorkstream).toHaveBeenCalledWith("me", "w2"));
-});
-
-it("clears the owner by choosing 未归属", async () => {
-  const owner = workstream("w1", "旧任务");
-  vi.mocked(api.listWorkstreams).mockResolvedValue([owner]);
-  vi.mocked(api.setSessionOwnerWorkstream).mockResolvedValue(session("me"));
-  await renderDetail(detail(session("me", { owner_workstream_id: "w1" }), { owner_workstream: owner }));
-
-  fireEvent.click(screen.getByRole("button", { name: "更改" }));
-  await screen.findByRole("dialog", { name: "选择所属任务" });
-  fireEvent.click(screen.getByText("未归属"));
-  fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-  await waitFor(() => expect(api.setSessionOwnerWorkstream).toHaveBeenCalledWith("me", null));
 });
 
 // Context 面板

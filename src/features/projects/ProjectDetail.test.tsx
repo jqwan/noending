@@ -92,7 +92,7 @@ function mockDetail(): ProjectDetailData {
         cwd: "/z/main/worktree",
         project_id: "p1",
         workspace_path_id: "wp-main",
-        owner_workstream_id: null,
+        tracked_workstream_ids: [],
         forked_from_session_id: null,
         started_at: "2026-10-01T00:00:00Z",
         last_activity_at: "2026-10-01T01:00:00Z",

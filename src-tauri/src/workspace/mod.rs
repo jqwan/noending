@@ -11,7 +11,8 @@
 //! and, on the user-intent side:
 //!
 //! ```text
-//! Workstream → WorkstreamPath (ordered) → WorkspacePath → Project
+//! Workstream → workstream_projects → Project
+//! Session → session_workstreams → Workstream
 //! Session    → workspace_path_id                          → Project
 //! ```
 //!
@@ -24,18 +25,17 @@
 //! * [`resolver`]   — observation only: canonicalize + Git detection + worktree
 //!   listing. Produces `WorkspaceObservation`, never writes.
 //! * [`project`]    — `ensure_workspace_path` and every Project-ownership rule
-//!   (auto-create, upgrade, merge, reassign, zero-path deletion).
-//! * [`workstream`] — the ordered WorkstreamPath list, archive state.
-//! * [`session`]    — Session→WorkspacePath attach and the derived Project cache.
+//!   (auto-create, upgrade, merge, reassign, explicit deletion).
+//! * [`workstream`] — explicit task/project memberships and archive state.
+//! * [`session`]    — Session→WorkspacePath attachment and task tracking.
 //!
 //! ## Rules this layer must never break
 //!
 //! * Losing `.git` changes `WorkspacePath.git_state` and nothing else — not the
 //!   path's Project, not the Project's `git_id`.
-//! * Discovering a worktree adds a `WorkspacePath`, never a `WorkstreamPath`.
-//! * Adding a `WorkstreamPath` never imports the Sessions under that path.
-//! * Removing a `WorkstreamPath` never changes a Session's Owner, cwd or
-//!   `workspace_path_id`.
+//! * Discovering a worktree adds a `WorkspacePath`, never a task association.
+//! * Task project edits neither import sessions nor change session tracking.
+//! * Session tracking never changes cwd or physical project membership.
 //! * A Home-level Git repository is not evidence, and the reserved app
 //!   paths under NoEnding Home never become a WorkspacePath.
 //! * Git detection runs *after* the database opens, in Workspace Reconcile —

@@ -228,7 +228,7 @@ const W_WORKSTREAM = 16;
 
 /**
  * Sessions 卡片：信息按卡片分组，随窗口宽度自适应，点击进入详情。
- * 一行最多一个任务：`session.owner_workstream_id` 指向的那一个。
+ * 显示会话跟踪的任务。
  */
 export default function SessionCards({
   sessions,
@@ -246,7 +246,7 @@ export default function SessionCards({
   terminals: externalTerminals,
 }: {
   sessions: Session[];
-  /** Workstream id → 标题；用于给 `owner_workstream_id` 一个可读名字。 */
+  /** Workstream id → 标题；用于解析跟踪任务的标题。 */
   workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
   viewMode?: "cards" | "list";
@@ -267,9 +267,7 @@ export default function SessionCards({
   const terminals = externalTerminals ?? polledTerminals;
   const rows = useMemo(
     () => sessions.map((s) => {
-      const wsTitle = s.owner_workstream_id
-        ? (workstreamTitleById.get(s.owner_workstream_id)?.trim() || UNNAMED_WORKSTREAM)
-        : null;
+      const wsTitle=s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)?.trim() || UNNAMED_WORKSTREAM).join("、") || null;
       return {
         session: s,
         workstream: wsTitle ? ellipsisTail(wsTitle, W_WORKSTREAM) : null,
@@ -292,7 +290,7 @@ export default function SessionCards({
               </span>
               <span className="session-list-meta">
                 <span>{agentDisplayLabel(s.agent)}</span>
-                <span title={workstreamFull ?? undefined}>{workstream ?? "未归属任务"}</span>
+                <span title={workstreamFull ?? undefined}>{workstream ?? "未跟踪任务"}</span>
                 {!project.dim && <span title={project.hint}>{project.text}</span>}
                 <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
               </span>
@@ -354,7 +352,7 @@ export default function SessionCards({
             <div className="session-card-prop" title={workstreamFull ?? undefined}>
               <Icon name="tasks" />
               <span className="truncate">
-                {workstream ?? "未归属任务"}
+                {workstream ?? "未跟踪任务"}
               </span>
             </div>
 

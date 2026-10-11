@@ -3,12 +3,7 @@ import SessionMiniList from "../sessions/SessionMiniList";
 import type { Session } from "../../types";
 import type { Route } from "../../app/routes";
 
-/**
- * Workstream 的 Sessions 段落，这一页的主角。列表口径是归属：
- * `owner_workstream_id == 当前 Workstream` 的 Sessions，所以同一个 Session
- * 不会同时出现在两个任务的列表里。展示与交互和项目详情的会话列表完全一致
- * （SessionMiniList：整行点击进详情，右侧提供继续会话按钮）。
- */
+/** 显式跟踪该任务的会话；一个会话可以同时出现在多个任务中。 */
 export default function WorkstreamSessions({ sessions, navigate, onNewSession, allowActions = true }: {
   sessions: Session[];
   navigate: (r: Route) => void;
@@ -33,7 +28,7 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
         )}
       </div>
 
-      <SessionMiniList sessions={sorted} emptyText="还没有会话归属到这项任务。" navigate={navigate} />
+      <SessionMiniList sessions={sorted} emptyText="还没有会话跟踪这项任务。" navigate={navigate} />
     </section>
   );
 }

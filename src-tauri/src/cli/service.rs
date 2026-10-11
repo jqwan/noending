@@ -107,7 +107,7 @@ pub(super) enum Command {
     CreateTask {
         title: String,
         description: String,
-        paths: Vec<String>,
+        projects: Vec<String>,
     },
     UpdateTask {
         id: String,
@@ -126,20 +126,12 @@ pub(super) enum Command {
     RegisterPath {
         path: String,
     },
-    TaskPaths {
+    TaskProjects {
         id: String,
     },
-    AddTaskPath {
+    SetTaskProjects {
         id: String,
-        path: String,
-    },
-    RemoveTaskPath {
-        id: String,
-        path_id: String,
-    },
-    ReorderTaskPaths {
-        id: String,
-        path_ids: Vec<String>,
+        projects: Vec<String>,
     },
     Attach {
         task: String,
@@ -168,9 +160,7 @@ impl Command {
                 | Self::Archive { .. }
                 | Self::RenameProject { .. }
                 | Self::RegisterPath { .. }
-                | Self::AddTaskPath { .. }
-                | Self::RemoveTaskPath { .. }
-                | Self::ReorderTaskPaths { .. }
+                | Self::SetTaskProjects { .. }
                 | Self::Attach { .. }
                 | Self::Detach { .. }
         )
@@ -352,7 +342,7 @@ impl Service {
                 match kind {
                     Kind::Session => Ok(session_value(&self.db.get_session(&id)?.unwrap())),
                     Kind::Task => Ok(
-                        json!({"task":self.db.get_workstream(&id)?,"paths":crate::workspace::workstream::list_workstream_path_views(&self.db,&id)?,"projects":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?,"sessions_command":format!("ne session list --task {id} --scope all")}),
+                        json!({"task":self.db.get_workstream(&id)?,"projects":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?,"sessions_command":format!("ne session list --task {id} --scope all")}),
                     ),
                     Kind::Project => {
                         let project = self.db.get_project(&id)?.unwrap();
@@ -482,17 +472,16 @@ impl Service {
             Command::CreateTask {
                 title,
                 description,
-                paths,
+                projects,
             } => {
-                let report = crate::workspace::workstream::create_workstream(
+                let task = crate::workspace::workstream::create_workstream(
                     &self.db,
-                    &*self.layer,
                     &title,
                     &description,
-                    &paths,
+                    &projects,
                 )?;
                 (self.changed)();
-                Ok(json!({"task":report.workstream,"paths":report.paths}))
+                Ok(json!({"task":task}))
             }
             Command::UpdateTask {
                 id,
@@ -547,73 +536,34 @@ impl Service {
                 (self.changed)();
                 Ok(json!({"path":path,"project":project}))
             }
-            Command::TaskPaths { id } => {
+            Command::TaskProjects { id } => {
                 self.require(Kind::Task, &id)?;
                 Ok(
-                    json!({"items":crate::workspace::workstream::list_workstream_path_views(&self.db,&id)?}),
+                    json!({"items":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?}),
                 )
             }
-            Command::AddTaskPath { id, path } => {
-                self.require(Kind::Task, &id)?;
-                let registered = self.register_path(&path)?;
-                let path = crate::workspace::workstream::add_registered_workstream_path(
-                    &self.db,
-                    &id,
-                    &registered.id,
-                )?;
+            Command::SetTaskProjects { id, projects } => {
+                crate::workspace::workstream::set_workstream_projects(&self.db, &id, &projects)?;
                 (self.changed)();
-                Ok(json!({"path":path}))
-            }
-            Command::RemoveTaskPath { id, path_id } => {
-                self.require(Kind::Task, &id)?;
-                let row = self
-                    .db
-                    .list_workstream_paths(&id)?
-                    .into_iter()
-                    .find(|p| p.workspace_path_id == path_id)
-                    .ok_or_else(|| CliError::new("scope_mismatch", "该目录未关联此任务"))?;
-                crate::workspace::workstream::remove_workstream_path(&self.db, &id, &row.id)?;
-                (self.changed)();
-                Ok(json!({"task_id":id,"workspace_path_id":path_id,"removed":true}))
-            }
-            Command::ReorderTaskPaths { id, path_ids } => {
-                self.require(Kind::Task, &id)?;
-                let paths = crate::workspace::workstream::reorder_workstream_paths(
-                    &self.db, &id, &path_ids,
-                )?;
-                (self.changed)();
-                Ok(json!({"items":paths}))
+                Ok(
+                    json!({"items":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?}),
+                )
             }
             Command::Attach { task, session } => {
                 self.require(Kind::Task, &task)?;
                 self.require(Kind::Session, &session)?;
-                let session =
-                    crate::workspace::session::set_session_owner(&self.db, &session, Some(&task))?;
+                let session = crate::workspace::session::set_session_tracking(
+                    &self.db, &session, &task, true,
+                )?;
                 (self.changed)();
                 Ok(session_value(&session))
             }
             Command::Detach { task, session } => {
                 self.require(Kind::Task, &task)?;
                 self.require(Kind::Session, &session)?;
-                // Compare within the write transaction so a newer reassignment
-                // can never be cleared by a stale detach request.
-                let mut conn = self.db.write();
-                let tx = conn.transaction()?;
-                let owner: Option<String> = tx.query_row(
-                    "SELECT owner_workstream_id FROM sessions WHERE id=?1",
-                    [&session],
-                    |r| r.get(0),
-                )?;
-                if owner.as_deref() != Some(&task) {
-                    return Err(CliError::new("scope_mismatch", "会话不属于此任务"));
-                }
-                // Owner mutation is the existing storage service; release the
-                // transaction only after applying the same business operation.
-                storage::set_session_owner_conn(&tx, &session, None)?;
-                tx.commit()?;
-                drop(conn);
+                crate::workspace::session::set_session_tracking(&self.db, &session, &task, false)?;
                 (self.changed)();
-                Ok(json!({"session_id":session,"task_id":null}))
+                Ok(json!({"session_id":session,"task_id":task,"tracked":false}))
             }
             Command::Jobs => {
                 Ok(json!({"items":self.jobs.lock().unwrap().values().cloned().collect::<Vec<_>>()}))
@@ -801,8 +751,8 @@ impl Service {
             .transpose()?;
         let agent = parse_agent(agent)?;
         let sql=match kind {
-            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR wp.project_id=?2) AND (?3 IS NULL OR s.owner_workstream_id=?3) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
-            Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_paths p JOIN workspace_paths wp ON wp.id=p.workspace_path_id WHERE p.workstream_id=s.id AND wp.project_id=?2)) AND (?5='all' OR (?5='archived' AND s.visibility='archived') OR (?5='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND ?4 IS NULL AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workstream_paths p JOIN workspace_paths wp ON wp.id=p.workspace_path_id WHERE p.workstream_id=s.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY s.id LIMIT ?6",
+            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR wp.project_id=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3)) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
+            Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p WHERE p.workstream_id=s.id AND p.project_id=?2)) AND (?5='all' OR (?5='archived' AND s.visibility='archived') OR (?5='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND ?4 IS NULL AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=s.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY s.id LIMIT ?6",
             Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND ?4 IS NULL AND (?5='all' OR (?5='archived' AND visibility='archived') OR (?5='unarchived' AND visibility='normal')) AND (?7 IS NULL OR instr(lower(name),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY id LIMIT ?6",
         };
         let sql = sql.replace(
@@ -865,5 +815,5 @@ fn parse_agent(agent: Option<String>) -> CliResult<Option<String>> {
         .transpose()
 }
 fn session_value(s: &crate::domain::Session) -> Value {
-    json!({"id":s.id,"title":s.title,"agent":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"task_id":s.owner_workstream_id,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
+    json!({"id":s.id,"title":s.title,"agent":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"task_ids":s.tracked_workstream_ids,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
 }

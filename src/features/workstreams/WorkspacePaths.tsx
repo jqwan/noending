@@ -2,15 +2,7 @@ import { ellipsisPathMiddle } from "../sessions/SessionTable";
 import { openPath } from "../../components/common";
 import type {
   WorkspaceGitState,
-  WorkstreamPathRow,
 } from "../../types";
-
-/**
- * 工作目录：一个 Workstream 的工作路径列表。
- *
- * 这一页同时展示：启动目录、Project 归属、增删路径只改这份配置（不删会话、
- * 不改已有会话的所属任务）。任何动作都要说清连带动了什么，失败留在原地说明原因。
- */
 
 /** Git 状态徽标。`git_state` 缺失时不猜。 */
 export function GitStateBadge({ state, kind }: {
@@ -96,45 +88,6 @@ export function PathText({
 }
 
 /** 只读：增 / 删 / 换序都在「••• → 编辑任务」里。 */
-export default function WorkstreamPathList({
-  paths,
-  error,
-}: {
-  /** null = 还没读到；[] 是合法的「无工作目录」状态。 */
-  paths: WorkstreamPathRow[] | null;
-  error?: string;
-}) {
-  const rows = paths ?? [];
-
-  return (
-    <section className="rail-section">
-      <div className="rail-head">
-        <div className="section-label" style={{ margin: 0 }}>工作目录</div>
-      </div>
-
-      {paths === null && <div className="muted small">读取工作目录…</div>}
-      {error && <PathError text={error} />}
-
-      {paths !== null && rows.length === 0 && (
-        <div className="l1-none">
-          未设置工作目录，新会话使用默认目录。
-        </div>
-      )}
-
-      {rows.map((p) => (
-        <div className="list-row" key={p.id} style={{ cursor: "default" }}>
-          <div className="grow" style={{ minWidth: 0 }}>
-            {/* 路径不用 .title（那是 nowrap + 尾部省略）：一条路径最有识别度的就是
-                末段，被 CSS 再截一次就等于把用户要找的东西吃掉。这里让它换行。 */}
-            <div style={{ overflowWrap: "anywhere" }}>
-              <PathText path={p.canonical_path} max={72} />
-            </div>
-          </div>
-        </div>
-      ))}
-    </section>
-  );
-}
 
 export function PathError({ text }: { text: string }) {
   return (

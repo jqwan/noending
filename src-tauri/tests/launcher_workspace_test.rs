@@ -26,10 +26,8 @@ use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::session::move_session_to_path_conn;
-use noending::workspace::workstream::{
-    add_workstream_path, create_workstream, remove_workstream_path, reorder_workstream_paths,
-};
-use noending::workspace::{normalize_path, path_identity, WorkspaceAttaching};
+use noending::workspace::workstream::create_workstream;
+use noending::workspace::{normalize_path, WorkspaceAttaching};
 
 const PROJECT: &str = "p-launcher-ws";
 
@@ -77,27 +75,13 @@ impl WorkspaceAttaching for LexicalPaths {
     }
 }
 
-fn path_id(db: &Db, canonical_path: &str) -> String {
-    //  — read the row through the key the app writes it with. A
-    // lookup by spelling can miss a row stored under another case, which is what
-    // a Windows host may now do to the same directory; a test that missed it
-    // would assert against nothing.
-    let id = path_identity(canonical_path);
-    db.get_workspace_path(&id)
-        .unwrap()
-        .unwrap_or_else(|| panic!("no WorkspacePath row for {canonical_path}"))
-        .id
-}
-
 fn ws_with_paths(db: &Db, title: &str, dirs: &[String]) -> String {
-    let initial: Vec<String> = dirs.first().map(|d| vec![d.clone()]).unwrap_or_default();
-    let id = create_workstream(db, &LexicalPaths, title, "", &initial)
-        .unwrap()
-        .workstream
-        .id;
-    for dir in dirs.iter().skip(1) {
-        add_workstream_path(db, &LexicalPaths, &id, dir).unwrap();
+    for dir in dirs {
+        LexicalPaths.ensure_path(&db.write(), dir).unwrap();
     }
+    let id = create_workstream(db, title, "", &[PROJECT.into()])
+        .unwrap()
+        .id;
     id
 }
 
@@ -189,56 +173,6 @@ fn is_stale(err: &str) -> bool {
 
 /// Display order cannot change the prepared launch directory or invalidate it.
 #[test]
-fn display_reordering_keeps_the_prepared_directory_and_launch_valid() {
-    let db = open_db("reorder");
-    seed_installation(&db, Agent::Codex);
-    let first = real_dir("reorder", "first");
-    let second = real_dir("reorder", "second");
-    let w = ws_with_paths(&db, "two paths", &[first.clone(), second.clone()]);
-    let launcher = launcher_in("reorder");
-    let workspace = LaunchWorkspace {
-        default_workspace: Some(real_dir("reorder", "default")),
-    };
-    let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, Some(&w), None, &workspace)
-        .unwrap();
-    assert_eq!(prepared.cwd, workspace.default_workspace);
-    reorder_workstream_paths(&db, &w, &[path_id(&db, &second), path_id(&db, &first)]).unwrap();
-    let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-        .unwrap();
-    assert!(result
-        .command_line
-        .ends_with(workspace.default_workspace.as_ref().unwrap()));
-}
-
-/// Task path membership does not override the explicitly selected directory.
-#[test]
-fn task_path_changes_do_not_override_an_explicit_directory_or_invalidate_it() {
-    let db = open_db("path-change");
-    seed_installation(&db, Agent::Codex);
-    let first = real_dir("path-change", "first");
-    let other = real_dir("path-change", "other");
-    let explicit = real_dir("path-change", "explicit");
-    let w = ws_with_paths(&db, "paths", &[first]);
-    let launcher = launcher_in("path-change");
-    let workspace = LaunchWorkspace::default();
-    let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, Some(&w), Some(&explicit), &workspace)
-        .unwrap();
-    let row = db.list_workstream_paths(&w).unwrap().remove(0);
-    remove_workstream_path(&db, &w, &row.id).unwrap();
-    add_workstream_path(&db, &LexicalPaths, &w, &other).unwrap();
-    let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-        .unwrap();
-    assert!(result.command_line.ends_with(&explicit));
-}
-
-/// "default workspace change makes plan stale". The default workspace is a
-/// Home fact with no DB row, so a DB-only fingerprint cannot see it — it is
-/// hashed as its own labelled input, which is why this launch is refused.
-#[test]
 fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     let db = open_db("default-ws");
     seed_installation(&db, Agent::Codex);
@@ -286,7 +220,7 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     let home_dir = real_dir("resume-cwd", "session-home");
     let s = session_row(&db, Some(&home_dir), None);
     let w = ws_with_paths(&db, "elsewhere", &[real_dir("resume-cwd", "ws-path")]);
-    db.set_session_owner(&s.id, Some(&w)).unwrap();
+    support::track(&db, &s.id, Some(&w)).unwrap();
 
     let launcher = launcher_in("resume-cwd");
     let prepared = launcher
@@ -382,7 +316,7 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
     let primary = real_dir("resume-fallback", "ws-primary");
     let s = session_row(&db, Some(&lost), None);
     let w = ws_with_paths(&db, "carries on", &[primary.clone()]);
-    db.set_session_owner(&s.id, Some(&w)).unwrap();
+    support::track(&db, &s.id, Some(&w)).unwrap();
 
     let workspace = LaunchWorkspace {
         default_workspace: Some(real_dir("resume-fallback", "default")),
@@ -495,7 +429,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     seed_installation(&db, Agent::Codex);
     let primary = real_dir("phantom", "primary");
     let w = ws_with_paths(&db, "watch it", &[primary.clone()]);
-    let paths_before = count(&db, "SELECT COUNT(*) FROM workstream_paths");
+    let paths_before = count(&db, "SELECT COUNT(*) FROM workstream_projects");
     let wp_before = count(&db, "SELECT COUNT(*) FROM workspace_paths");
 
     let launcher = launcher_in("phantom");
@@ -511,7 +445,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
 
     assert_eq!(count(&db, "SELECT COUNT(*) FROM sessions"), 0);
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM workstream_paths"),
+        count(&db, "SELECT COUNT(*) FROM workstream_projects"),
         paths_before,
         "prepare may not grow a Workstream's path list"
     );
@@ -539,7 +473,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
         "launching does not invent path rows"
     );
     assert_eq!(
-        count(&db, "SELECT COUNT(*) FROM workstream_paths"),
+        count(&db, "SELECT COUNT(*) FROM workstream_projects"),
         paths_before,
         "and does not invent WorkstreamPath rows either"
     );
@@ -564,37 +498,31 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     let home = workspace(Some(&default_ws));
     let no_home = LaunchWorkspace::default();
 
-    let cases: Vec<(
-        &LaunchWorkspace,
-        Option<String>,
-        Option<&str>,
-        CwdSource,
-        bool,
-    )> = vec![
+    let alias = format!("{primary}/.");
+    let cases = vec![
         (
             &home,
             Some(w.clone()),
-            Some("/typed/dir"),
+            Some(primary.as_str()),
             CwdSource::Explicit,
             false,
         ),
         (
             &home,
             Some(w.clone()),
-            None,
-            CwdSource::DefaultWorkspace,
+            Some(alias.as_str()),
+            CwdSource::Explicit,
             false,
         ),
         (&home, None, None, CwdSource::DefaultWorkspace, false),
-        (
-            &home,
-            Some(unmounted.clone()),
-            None,
-            CwdSource::DefaultWorkspace,
-            false,
-        ),
         (&no_home, None, None, CwdSource::Unresolved, false),
     ];
+    assert!(launcher
+        .prepare_new_in(&db, Agent::Codex, Some(&unmounted), None, &home)
+        .is_err());
+    assert!(launcher
+        .prepare_new_in(&db, Agent::Codex, Some(&w), Some("/typed/dir"), &home)
+        .is_err());
 
     for (at_launch, owner, explicit, source, fallback) in cases {
         let prepared = launcher
@@ -603,7 +531,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         assert_eq!(prepared.cwd_resolution.source, source);
         assert_eq!(prepared.cwd_resolution.fallback, fallback);
         assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
-        assert_eq!(prepared.owner_workstream_id, owner);
+        assert_eq!(prepared.initial_workstream_id, owner);
         let result = launcher
             .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open, None)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));

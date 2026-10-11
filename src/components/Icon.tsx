@@ -9,6 +9,7 @@ const paths = {
   plus: "M9 3v12M3 9h12",
   chevronRight: "M7 4l5 5-5 5",
   chevronDown: "M4.5 7l4.5 4.5 4.5-4.5",
+  promote: "M9 14V3M5 7l4-4 4 4M3 12v4h12v-4",
   arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",
   home: "M3 8l6-5 6 5v7H11v-4H7v4H3Z",
   search: "M12 12l4 4M13 8A5 5 0 1 1 3 8a5 5 0 0 1 10 0",

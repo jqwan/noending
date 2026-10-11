@@ -418,7 +418,7 @@ pub fn project_is_unowned(conn: &Connection, project_id: &str) -> Result<bool> {
 // one-way.
 
 /// A Project that had no Git family adopts one. `Project.id` does not change, so
-/// every Session, WorkstreamPath and audit reference keeps pointing at the same
+/// every Session and audit reference keeps pointing at the same
 /// row: this is why an upgrade is not a merge. Returns false when the Project
 /// already carries a family — a different decision, never taken here.
 pub fn adopt_git_identity_conn(conn: &Connection, project_id: &str, git_id: &str) -> Result<bool> {

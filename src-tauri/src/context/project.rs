@@ -39,7 +39,7 @@ impl ProjectInput {
         let paths = st
             .query_map([id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;
-        let mut tasks = crate::storage::workstream_paths::workstreams_for_project(conn, id)?;
+        let mut tasks = crate::storage::workstream_projects::workstreams_for_project(conn, id)?;
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
         let tasks: Vec<_> = tasks
             .into_iter()

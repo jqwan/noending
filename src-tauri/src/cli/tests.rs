@@ -66,6 +66,24 @@ impl Fixture {
             )
             .unwrap()
             .0;
+        let paths = self.db().list_workspace_paths().unwrap();
+        let path = if let Some(path) = paths.first() {
+            path.id.clone()
+        } else {
+            let directory = self.root.join("fixture-project");
+            std::fs::create_dir_all(&directory).unwrap();
+            self.call(&["path", "register", "--path", directory.to_str().unwrap()])
+                .unwrap()["path"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        crate::storage::session_paths::attach_session_workspace_path_conn(
+            &self.db().write(),
+            &id,
+            Some(&path),
+        )
+        .unwrap();
         self.ingest(&id, &format!("{}乙", "甲".repeat(2000)), "m1", 0);
         id
     }
@@ -281,25 +299,23 @@ fn cli_tasks_reuse_ownership_and_lists_paginate_without_losing_sessions() {
     let tid = task["task"]["id"].as_str().unwrap();
     let task2 = f.call(&["task", "create", "--title", "另一任务"]).unwrap();
     let tid2 = task2["task"]["id"].as_str().unwrap();
+    link_project(&f, tid, &sid);
     f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     let members = f.call(&["session", "list", "--task", tid]).unwrap();
     assert_eq!(members["items"].as_array().unwrap().len(), 1);
     assert_eq!(members["items"][0]["id"], sid);
+    link_project(&f, tid2, &sid);
     f.call(&["task", "attach", tid2, "--session", &sid])
         .unwrap();
-    assert_eq!(
-        f.call(&["task", "detach", tid, "--session", &sid])
-            .unwrap_err()
-            .code,
-        "scope_mismatch"
-    );
+    f.call(&["task", "detach", tid, "--session", &sid]).unwrap();
     assert_eq!(
         f.db()
             .get_session(&sid)
             .unwrap()
             .unwrap()
-            .owner_workstream_id
-            .as_deref(),
+            .tracked_workstream_ids
+            .first()
+            .map(String::as_str),
         Some(tid2)
     );
     f.call(&["task", "detach", tid2, "--session", &sid])
@@ -374,14 +390,17 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
     let f = Fixture::new();
     let directory = f.root.join("project");
     std::fs::create_dir_all(&directory).unwrap();
+    let registered = f
+        .call(&["path", "register", "--path", directory.to_str().unwrap()])
+        .unwrap();
     let task = f
         .call(&[
             "task",
             "create",
             "--title",
             "项目任务",
-            "--path",
-            directory.to_str().unwrap(),
+            "--project",
+            registered["project"]["id"].as_str().unwrap(),
         ])
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
@@ -398,6 +417,7 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             )
         })
         .unwrap();
+    link_project(&f, tid, &sid);
     f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     assert_eq!(
         f.call(&["project", "list"]).unwrap()["items"][0]["id"],
@@ -587,6 +607,7 @@ fn cli_global_search_filters_before_paging_and_excludes_retired_messages() {
         .call(&["task", "create", "--title", "SearchTask"])
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
+    link_project(&f, tid, &target);
     f.call(&["task", "attach", tid, "--session", &target])
         .unwrap();
     let first = f
@@ -691,6 +712,7 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
     let sid = f.session();
+    link_project(&f, tid, &sid);
     f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     f.call(&["task", "archive", tid]).unwrap();
     let before = f.changes.load(std::sync::atomic::Ordering::SeqCst);
@@ -777,198 +799,52 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
         f.call(&["session", "summary", &sid]).unwrap(),
         original_summary
     );
-    assert_eq!(f.call(&["session", "show", &sid]).unwrap()["task_id"], tid);
+    assert_eq!(
+        f.call(&["session", "show", &sid]).unwrap()["task_ids"],
+        json!([tid])
+    );
     f.call(&["session", "unarchive", &sid]).unwrap();
     assert!(f.call(&["session", "show", &sid]).unwrap()["archived_at"].is_null());
 }
 
 #[test]
-fn cli_directory_registration_and_task_paths_preserve_projects_sessions_and_disk() {
+fn cli_task_project_edits_and_directory_registration_preserve_session_tracking_and_disk() {
     let f = Fixture::new();
-    let first_dir = f.root.join("first directory");
-    let second_dir = f.root.join("second directory");
-    std::fs::create_dir(&first_dir).unwrap();
-    std::fs::create_dir(&second_dir).unwrap();
-    let first = f
-        .call(&["path", "register", "--path", first_dir.to_str().unwrap()])
-        .unwrap();
-    let p1 = first["path"]["id"].as_str().unwrap();
-    let pid = first["project"]["id"].as_str().unwrap();
-    assert!(first["project"]["git_id"].is_null());
-    assert_eq!(
-        f.call(&["path", "register", "--path", first_dir.to_str().unwrap()])
-            .unwrap()["path"]["id"],
-        p1
-    );
-    assert_eq!(f.db().list_projects().unwrap().len(), 1);
-    for path in [
-        "relative",
-        f.root.join("missing").to_str().unwrap(),
-        f.home.db_path.to_str().unwrap(),
-    ] {
-        assert_eq!(
-            f.call(&["path", "register", "--path", path])
-                .unwrap_err()
-                .code,
-            "invalid_arguments"
-        );
-    }
-    assert!(!f.root.join("missing").exists());
-    assert!(f
-        .call(&[
-            "path",
-            "register",
-            "--path",
-            f.home.data_dir.to_str().unwrap()
-        ])
-        .is_err());
-    let task = f.call(&["task", "create", "--title", "PathsTask"]).unwrap();
-    let tid = task["task"]["id"].as_str().unwrap();
     let sid = f.session();
-    f.db()
-        .tx(|tx| {
-            crate::storage::session_paths::attach_session_workspace_path_conn(tx, &sid, Some(p1))
-        })
-        .unwrap();
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
-    f.call(&[
-        "task",
-        "path",
-        "add",
-        tid,
-        "--path",
-        first_dir.to_str().unwrap(),
-    ])
-    .unwrap();
-    let second = f
-        .call(&[
-            "task",
-            "path",
-            "add",
-            tid,
-            "--path",
-            second_dir.to_str().unwrap(),
-        ])
-        .unwrap();
-    let p2 = second["path"]["workspace_path_id"].as_str().unwrap();
-    f.call(&[
-        "task",
-        "path",
-        "add",
-        tid,
-        "--path",
-        first_dir.to_str().unwrap(),
-    ])
-    .unwrap();
-    let paths = f.call(&["task", "path", "list", tid]).unwrap();
-    assert_eq!(paths["items"].as_array().unwrap().len(), 2);
-    assert_eq!(paths["items"][0]["workspace_path_id"], p1);
-    assert_eq!(paths["items"][1]["workspace_path_id"], p2);
-    assert_eq!(paths["items"][1]["position"], 1);
-    f.call(&[
-        "task",
-        "path",
-        "reorder",
-        tid,
-        "--path-id",
-        p2,
-        "--path-id",
-        p1,
-    ])
-    .unwrap();
-    for ids in [vec![p1], vec![p1, p1], vec![p1, "foreign"]] {
-        let mut args = vec!["task", "path", "reorder", tid];
-        for id in ids {
-            args.extend(["--path-id", id]);
-        }
-        assert!(f.call(&args).is_err());
-    }
-    assert_eq!(
-        f.call(&["task", "path", "list", tid]).unwrap()["items"][0]["workspace_path_id"],
-        p2
-    );
-    assert_eq!(
-        f.call(&["task", "path", "remove", tid, "--path-id", "foreign"])
-            .unwrap_err()
-            .code,
-        "scope_mismatch"
-    );
-    f.call(&["task", "path", "remove", tid, "--path-id", p1])
-        .unwrap();
-    let remaining = f.call(&["task", "path", "list", tid]).unwrap();
-    assert_eq!(remaining["items"].as_array().unwrap().len(), 1);
-    assert_eq!(remaining["items"][0]["workspace_path_id"], p2);
-    assert_eq!(remaining["items"][0]["position"], 0);
-    assert!(first_dir.is_dir());
-    assert!(f.db().get_workspace_path(p1).unwrap().is_some());
-    let session = f.db().get_session(&sid).unwrap().unwrap();
-    assert_eq!(session.workspace_path_id.as_deref(), Some(p1));
-    assert_eq!(session.owner_workstream_id.as_deref(), Some(tid));
-    assert_eq!(
-        f.call(&["session", "messages", &sid]).unwrap()["through_sequence"],
-        1
-    );
-
-    let renamed = f
-        .call(&["project", "rename", pid, "--name", "CustomProjectMarker"])
-        .unwrap();
-    assert_eq!(renamed["project"]["name"], "CustomProjectMarker");
-    assert_eq!(renamed["project"]["name_customized"], true);
-    assert_eq!(renamed["project"]["git_id"], first["project"]["git_id"]);
-    let registered = f
-        .call(&["path", "register", "--path", first_dir.to_str().unwrap()])
-        .unwrap();
-    assert_eq!(registered["project"]["id"], pid);
-    assert_eq!(registered["project"]["name"], "CustomProjectMarker");
-    assert_eq!(
-        f.call(&["search", "--query", "CustomProjectMarker", "--project", pid])
-            .unwrap()["items"][0]["session_id"],
-        sid
-    );
-    f.call(&["project", "archive", pid]).unwrap();
-    assert!(f.call(&["project", "list"]).unwrap()["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|p| p["id"] != pid));
-    assert!(
-        f.call(&["project", "list", "--scope", "archived"]).unwrap()["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["id"] == pid)
-    );
-    assert!(
-        f.call(&["project", "list", "--scope", "all"]).unwrap()["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["id"] == pid)
-    );
-    assert_eq!(
-        f.db().get_workstream(tid).unwrap().unwrap().visibility,
-        "normal"
-    );
-    assert!(f
+    let pid = f
         .db()
         .get_session(&sid)
         .unwrap()
         .unwrap()
-        .archived_at
-        .is_none());
-    f.call(&["project", "unarchive", pid]).unwrap();
-    assert!(f.call(&["project", "list"]).unwrap()["items"]
+        .project_id
+        .unwrap();
+    let task = f
+        .call(&["task", "create", "--title", "Scope", "--project", &pid])
+        .unwrap();
+    let tid = task["task"]["id"].as_str().unwrap();
+    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
+    assert_eq!(
+        f.call(&["task", "project", "list", tid]).unwrap()["items"][0]["id"],
+        pid
+    );
+    f.call(&["task", "project", "set", tid]).unwrap();
+    assert!(f.call(&["task", "project", "list", tid]).unwrap()["items"]
         .as_array()
         .unwrap()
-        .iter()
-        .any(|p| p["id"] == pid));
-    let conn = f.db().read();
-    let title: String = conn
-        .query_row(
-            "SELECT title FROM search_index WHERE kind='project' AND ref_id=?1",
-            [pid],
-            |r| r.get(0),
-        )
+        .is_empty());
+    assert_eq!(f.db().sessions_for_workstream(tid).unwrap().len(), 1);
+    f.call(&["task", "detach", tid, "--session", &sid]).unwrap();
+    assert!(f.call(&["task", "attach", tid, "--session", &sid]).is_err());
+    assert!(f.root.join("fixture-project").is_dir());
+}
+
+fn link_project(f: &Fixture, task: &str, session: &str) {
+    let project = f
+        .db()
+        .get_session(session)
+        .unwrap()
+        .unwrap()
+        .project_id
         .unwrap();
-    assert_eq!(title, "CustomProjectMarker");
+    crate::workspace::workstream::set_workstream_projects(f.db(), task, &[project]).unwrap();
 }

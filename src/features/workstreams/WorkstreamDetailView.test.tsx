@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
 import { api } from "../../api";
-import type { WorkstreamContext, WorkstreamContextView, WorkstreamPathRow } from "../../types";
+import type { WorkstreamContext, WorkstreamContextView } from "../../types";
 
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
@@ -21,12 +21,8 @@ vi.mock("../../api", () => ({
       failed_sessions: [],
       remaining_pending: 0, preference_error: null,
     }),
-    listWorkstreamPaths: vi.fn(),
     getDefaultAgent: vi.fn().mockResolvedValue(null),
     updateWorkstream: vi.fn(),
-    addWorkstreamPath: vi.fn(),
-    removeWorkstreamPath: vi.fn(),
-    reorderWorkstreamPaths: vi.fn(),
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
@@ -36,7 +32,6 @@ vi.mock("../../api", () => ({
 
 beforeEach(() => {
   vi.mocked(api.getWorkstreamContext).mockReset().mockResolvedValue(context());
-  vi.mocked(api.listWorkstreamPaths).mockReset().mockResolvedValue(PATHS);
   vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(contextState());
 });
 afterEach(() => {
@@ -44,20 +39,6 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
-
-const PATHS: WorkstreamPathRow[] = [
-  {
-    id: "wp-main",
-    workstream_id: "w1",
-    workspace_path_id: "p-main",
-    position: 0,
-    created_at: "",
-    canonical_path: "/repo/main",
-    project_id: "pr",
-    project_name: "Main",
-    exists: true,
-  },
-];
 
 function context(): WorkstreamContext {
   return {
@@ -69,7 +50,7 @@ function context(): WorkstreamContext {
       created_at: "2026-09-21T00:00:00+00:00",
       updated_at: "2026-09-21T00:00:00+00:00",
     },
-    projects: [],
+    projects: [{id:"pr",name:"Main"}],
     sessions: [],
   };
 }
@@ -88,7 +69,6 @@ function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamCont
 
 async function renderDetail(navigate = vi.fn()) {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
-  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   // 逐个测试独立：默认「已是最新」，pending 用例自己覆盖。
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
@@ -113,7 +93,7 @@ it("renders the returned task sessions and navigates to the selected session", a
     cwd: "/repo/main",
     project_id: "pr",
     workspace_path_id: "p-main",
-    owner_workstream_id: "w1",
+    tracked_workstream_ids: ["w1"],
     forked_from_session_id: null,
     started_at: "2026-09-21T00:00:00+00:00",
     last_activity_at: "2026-09-21T00:00:00+00:00",
@@ -131,15 +111,14 @@ it("renders the returned task sessions and navigates to the selected session", a
         source_tail_hash: "",
         fact_generation: 1,
         latest_message_seq: 2,
-    
+
   }];
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
-  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   const navigate = vi.fn();
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
 
   await screen.findByText("任务概览");
-  // 只有 owner Sessions 会出现在这里（后端按 owner_workstream_id 过滤）。
+  // 只有跟踪此任务的会话会出现在这里。
   screen.getByText("会话");
   fireEvent.click(screen.getByText("归属于本任务的会话"));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
@@ -155,12 +134,11 @@ it("opens the 新建任务 form, prefilled with the current task", async () => {
   screen.getByDisplayValue("整理 API 设计");
   within(dialog).getByText("Main");
   screen.getByRole("button", { name: "保存" });
-  screen.getByRole("button", { name: "新增项目" });
+  screen.getByRole("button", { name: "新增目录…" });
 });
 
 it("shows 更新摘要 with the pending-session count and calls the explicit update", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
-  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   const state: WorkstreamContextView = contextState({
     context_revision: 2,
     pending: true,
@@ -191,7 +169,6 @@ it("hides 更新摘要 when the Context is already up to date", async () => {
 
 it("offers a copyable operation id after a structured Context update failure", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
-  vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
   vi.mocked(api.updateWorkstreamContext).mockRejectedValue({
     code: "cli_timeout",

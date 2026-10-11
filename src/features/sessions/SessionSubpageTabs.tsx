@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import SessionTaskTracking from "./SessionTaskTracking";
 import Icon from "../../components/Icon";
 import type { Route, SessionEntry } from "../../app/routes";
 import type { Agent } from "../../types";
@@ -85,6 +86,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
           aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(value => !value)}><Icon name="chevronDown" /></button>}
       </>}
     </div>
+    <SessionTaskTracking key={sessionId} sessionId={sessionId} navigate={navigate}/>
     {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}

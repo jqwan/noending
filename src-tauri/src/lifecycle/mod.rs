@@ -58,7 +58,7 @@ pub fn archive_session(db: &Db, session_id: &str) -> Result<Session> {
         .ok_or_else(|| other("Session 不存在"))
 }
 
-/// Archive → Normal: same Session id; Owner, members, messages,
+/// Archive → Normal: same Session id; tracking, members, messages,
 /// cursors and the Context frontier were never touched. The next reconcile
 /// simply continues. Search and Context were never disabled.
 pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {

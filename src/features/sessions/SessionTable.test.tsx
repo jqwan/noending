@@ -19,7 +19,7 @@ async function renderCards(element: Parameters<typeof render>[0]) {
   await act(async () => { view = render(element); });
   return view;
 }
-const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", started_at: "2026-09-21T00:00:00Z" } as Session;
+const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", tracked_workstream_ids: [], started_at: "2026-09-21T00:00:00Z" } as unknown as Session;
 it("opens details separately from resume and trash actions", async () => {
   const open = vi.fn(); const resume = vi.fn(); const trash = vi.fn();
   const terminalResume = vi.fn();
@@ -44,8 +44,8 @@ it("limits initial rows and reveals more without losing sessions", async () => {
 it("shows the single owner workstream and marks the unowned case", async () => {
   await renderCards(<SessionCards
     sessions={[
-      { ...session, id: "owned", title: "有归属", owner_workstream_id: "w1" },
-      { ...session, id: "free", title: "没归属", owner_workstream_id: null },
+      { ...session, id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] },
+      { ...session, id: "free", title: "没归属", tracked_workstream_ids: [] },
     ]}
     workstreamTitleById={new Map([["w1", "会话重构"]])}
     projectNameById={new Map()}
@@ -53,7 +53,7 @@ it("shows the single owner workstream and marks the unowned case", async () => {
 
   // 一行最多一个任务：标题只有一个，没有「+N」这种多任务计数。
   screen.getByText("会话重构");
-  screen.getByText("未归属任务");
+  screen.getByText("未跟踪任务");
   expect(screen.queryByText(/\+\d/)).toBeNull();
 });
 
@@ -79,7 +79,7 @@ it("prefers terminal capability regardless of old preferences, and uses desktop 
 
   // Terminal-only formats follow the same rule.
   localStorage.setItem("noending.continue_mode", "desktop");
-  const claudeSession = { ...session, id: "claude-1", agent: "claude_code" } as Session;
+  const claudeSession = { ...session, id: "claude-1", agent: "claude_code" } as unknown as Session;
   rerender(
     <SessionCards
       sessions={[claudeSession]}
@@ -92,7 +92,7 @@ it("prefers terminal capability regardless of old preferences, and uses desktop 
     />
   );
   expect(screen.getByLabelText("在终端中继续修复布局")).toBeTruthy();
-  const desktopSession = { ...session, id: "desktop", agent: "workbuddy" } as Session;
+  const desktopSession = { ...session, id: "desktop", agent: "workbuddy" } as unknown as Session;
   rerender(<SessionCards sessions={[desktopSession]} workstreamTitleById={new Map()} projectNameById={new Map()}
     onOpen={() => {}} onResume={onResume} onArchive={() => {}} onTerminalResume={onTerminalResume} />);
   fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续修复布局" }));
@@ -129,8 +129,8 @@ it("displays running terminal state on the continue button when session has a li
   const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
   const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
   const terminals: TerminalSummary[] = [
-    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", owner_workstream_id: null, identity_revision: 0 },
-    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", owner_workstream_id: null, identity_revision: 0 },
+    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_id: null, identity_revision: 0 },
+    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", initial_workstream_id: null, identity_revision: 0 },
   ];
   await renderCards(
     <SessionCards

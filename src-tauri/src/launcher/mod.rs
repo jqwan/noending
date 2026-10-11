@@ -5,7 +5,7 @@
 //!
 //! Resume: starts the Agent in the Session's own directory. Neither flow
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
-//! cwd, runtime, Owner) and an optional first user turn for New.
+//! cwd, runtime, initial tracking task) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
 //! Assistant sessions use ordinary directory instructions; only the CLI file
 //! transport directory is additionally writable for sandboxed agents.
@@ -146,9 +146,8 @@ pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    /// The single Owner Workstream of this launch, or `None`.
-    /// A Session has at most one, so there is no "extra" list.
-    pub owner_workstream_id: Option<String>,
+    /// Optional initial tracking task for New; Resume does not carry a task.
+    pub initial_workstream_id: Option<String>,
     /// The directory the Agent WILL start in — authoritative. Since
     /// the spawn step uses this value and nothing else: `launch_prepared` no
     /// longer re-reads `sessions.cwd`, because re-reading let background
@@ -236,18 +235,18 @@ impl SessionLauncher {
         &self,
         db: &Db,
         agent: Agent,
-        owner_workstream_id: Option<&str>,
+        initial_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
-        self.prepare_new_with_runtime_in(db, agent, owner_workstream_id, cwd, workspace, None)
+        self.prepare_new_with_runtime_in(db, agent, initial_workstream_id, cwd, workspace, None)
     }
 
     pub fn prepare_new_with_runtime_in(
         &self,
         db: &Db,
         agent: Agent,
-        owner_workstream_id: Option<&str>,
+        initial_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
         runtime_override: Option<&AgentRuntimeOverrides>,
@@ -255,19 +254,24 @@ impl SessionLauncher {
         if !crate::agent_runtime::store::launch_enabled(db, agent)? {
             return Err(other("该 Agent 已关闭用于新建会话，请在代理设置中启用"));
         }
-        // A Workstream is the Owner (or there is none): an Owner that was
-        // deleted mid-flight leaves nothing to launch against.
-        if let Some(ws_id) = owner_workstream_id {
-            require_unarchived_owner(db, ws_id)?;
+        // Validate the optional initial task before preparing the launch.
+        if let Some(ws_id) = initial_workstream_id {
+            require_unarchived_task(db, ws_id)?;
         }
 
         let resolution = resolve_new_cwd(cwd, workspace)?;
+        validate_initial_task(
+            db,
+            initial_workstream_id,
+            resolution.cwd.as_deref(),
+            workspace,
+        )?;
         let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
         let fingerprint = compute_state_fingerprint_with_runtime(
             db,
             "new",
             None,
-            owner_workstream_id,
+            initial_workstream_id,
             agent,
             workspace,
             &resolution,
@@ -279,7 +283,7 @@ impl SessionLauncher {
             mode: "new".into(),
             agent,
             session_id: None,
-            owner_workstream_id: owner_workstream_id.map(str::to_string),
+            initial_workstream_id: initial_workstream_id.map(str::to_string),
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -293,10 +297,10 @@ impl SessionLauncher {
     }
 
     /// Prepare Resume Session:
-    /// Uses the Session's current Owner Workstream and captures the
+    /// Preserves the Session's task tracking and captures the
     /// fingerprint. NO Context is built and NO Source is scanned.
     ///
-    /// INVARIANT: Zero premature side effects. Does NOT change ownership and
+    /// INVARIANT: Zero premature side effects. Does NOT change task tracking and
     /// does NOT write any file.
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone
@@ -355,7 +359,6 @@ impl SessionLauncher {
             return Err(other("会话已在已归档，无法继续；请先恢复会话"));
         }
 
-        let owner = session.owner_workstream_id.clone();
         let resolution = resolve_resume_cwd(db, session_id, workspace)?;
         // The Continue route rides on the session's SOURCE FORMAT: it tells
         // whether the Agent's CLI can resume at all and how
@@ -378,7 +381,7 @@ impl SessionLauncher {
             db,
             "resume",
             Some(session_id),
-            owner.as_deref(),
+            None,
             session.agent,
             workspace,
             &resolution,
@@ -389,7 +392,7 @@ impl SessionLauncher {
             mode: "resume".into(),
             agent: session.agent,
             session_id: Some(session_id.to_string()),
-            owner_workstream_id: owner,
+            initial_workstream_id: None,
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -469,7 +472,7 @@ impl SessionLauncher {
             db,
             &prepared.mode,
             prepared.session_id.as_deref(),
-            prepared.owner_workstream_id.as_deref(),
+            prepared.initial_workstream_id.as_deref(),
             prepared.agent,
             workspace,
             &resolution,
@@ -488,9 +491,15 @@ impl SessionLauncher {
             crate::assistant::cli_writable_directories(&self.runtime_dir, prepared.cwd.as_deref());
 
         if prepared.mode == "new" {
-            if let Some(owner) = prepared.owner_workstream_id.as_deref() {
-                require_unarchived_owner(db, owner)?;
+            if let Some(owner) = prepared.initial_workstream_id.as_deref() {
+                require_unarchived_task(db, owner)?;
             }
+            validate_initial_task(
+                db,
+                prepared.initial_workstream_id.as_deref(),
+                prepared.cwd.as_deref(),
+                workspace,
+            )?;
             let install = resolve_install(db, prepared.agent)?;
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
@@ -531,7 +540,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
-                        owner_workstream_id: prepared.owner_workstream_id.as_deref(),
+                        initial_workstream_id: prepared.initial_workstream_id.as_deref(),
                         root_agent_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
@@ -543,12 +552,12 @@ impl SessionLauncher {
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: public_command_line.unwrap_or(outcome.command_line),
-                note: if prepared.owner_workstream_id.is_some() && prepared.embedded {
-                    "会话摄入并绑定终端后，将归属所选任务。".into()
-                } else if prepared.owner_workstream_id.is_some() {
-                    "已在外部终端启动；摄入后请手动设置所属任务。".into()
+                note: if prepared.initial_workstream_id.is_some() && prepared.embedded {
+                    "会话摄入并绑定终端后，将跟踪所选任务。".into()
+                } else if prepared.initial_workstream_id.is_some() {
+                    "已在外部终端启动；摄入后请手动添加跟踪任务。".into()
                 } else {
-                    "已直接启动；本次未选择所属任务。".into()
+                    "已直接启动；本次未选择跟踪任务。".into()
                 },
                 terminal_id: outcome.terminal_id,
             })
@@ -623,7 +632,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
-                        owner_workstream_id: session.owner_workstream_id.as_deref(),
+                        initial_workstream_id: None,
                         root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
@@ -653,11 +662,11 @@ impl SessionLauncher {
         &self,
         db: &Db,
         agent: Agent,
-        owner_workstream_id: Option<&str>,
+        initial_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
-        let prepared = self.prepare_new_in(db, agent, owner_workstream_id, cwd, workspace)?;
+        let prepared = self.prepare_new_in(db, agent, initial_workstream_id, cwd, workspace)?;
         // One-shot launches have no embedded surface: the terminal subpage
         // attach protocol only exists for prepared resume launches.
         self.launch_prepared_in(db, &prepared, workspace, None)
@@ -693,7 +702,7 @@ pub fn compute_state_fingerprint(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    owner_workstream_id: Option<&str>,
+    initial_workstream_id: Option<&str>,
     agent: Agent,
     workspace: &LaunchWorkspace,
 ) -> Result<String> {
@@ -709,7 +718,7 @@ pub fn compute_state_fingerprint(
         db,
         mode,
         session_id,
-        owner_workstream_id,
+        initial_workstream_id,
         agent,
         workspace,
         &resolution,
@@ -719,12 +728,12 @@ pub fn compute_state_fingerprint(
 /// the full fingerprint. Everything that decides what the Agent receives:
 ///
 /// * the Agent runtime override intent;
-/// * the Owner Workstream (or none): title / description / `updated_at`;
+/// * the initially selected task (or none): title / description / `updated_at`;
 /// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all
 ///   (note 4);
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
-///   its source cursor, its **`workspace_path_id`**, its Owner Workstream and
+///   its source cursor, its **`workspace_path_id`**, its native identity and
 ///   its launch identity.
 ///
 /// Every added input is labelled and terminated by `|`. Task directory display
@@ -733,7 +742,7 @@ pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    owner_workstream_id: Option<&str>,
+    initial_workstream_id: Option<&str>,
     agent: Agent,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
@@ -742,7 +751,7 @@ pub fn compute_state_fingerprint_in(
         db,
         mode,
         session_id,
-        owner_workstream_id,
+        initial_workstream_id,
         agent,
         workspace,
         resolution,
@@ -769,7 +778,7 @@ fn compute_state_fingerprint_with_runtime(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    owner_workstream_id: Option<&str>,
+    initial_workstream_id: Option<&str>,
     agent: Agent,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
@@ -807,8 +816,8 @@ fn compute_state_fingerprint_with_runtime(
     // The directory the Agent will actually start in, and why.
     hasher.update(resolution.fingerprint_input());
 
-    if let Some(ws_id) = owner_workstream_id {
-        hasher.update(b"owner:");
+    if let Some(ws_id) = initial_workstream_id {
+        hasher.update(b"initial_task:");
         hasher.update(ws_id.as_bytes());
         hasher.update(b":");
         if let Some(ws) = db.get_workstream(ws_id)? {
@@ -872,14 +881,6 @@ fn compute_state_fingerprint_with_runtime(
                 hasher.update(b"session_exists:0:");
                 hasher.update(b"|");
             }
-            // The Session's Owner Workstream is part of the launch state: an
-            // owner edit between Preview and Launch must abort, not resume
-            // against a different Context route.
-            hasher.update(b"session_owner:");
-            if let Some(owner) = db.get_session(sid)?.and_then(|s| s.owner_workstream_id) {
-                hasher.update(owner.as_bytes());
-            }
-            hasher.update(b"|");
         }
     }
 
@@ -1047,31 +1048,32 @@ fn recompute_launch_cwd(
     resolve_new_cwd(None, workspace)
 }
 
-/// Is the Session still the one a preparation was built for? True only while it
-/// exists, is not trashed, and still names `owner` as its Owner Workstream.
-///
-/// The post-build half of the prepare-time CAS: sync and the user's edits run
-/// without the DB lock, so between the read that decided `owner` and the read
-/// that produced the bundle the row can move. Public because the rule is worth
-/// pinning directly — a Session missing this check resumes under an Owner it no
-/// longer has.
-pub fn preparation_matches_current_owner(
-    db: &Db,
-    session_id: &str,
-    owner: Option<&str>,
-) -> Result<bool> {
-    Ok(db
-        .get_session(session_id)?
-        .map(|s| !s.is_archived() && s.owner_workstream_id.as_deref() == owner)
-        .unwrap_or(false))
-}
-
-fn require_unarchived_owner(db: &Db, owner: &str) -> Result<()> {
+fn require_unarchived_task(db: &Db, owner: &str) -> Result<()> {
     let task = db
         .get_workstream(owner)?
-        .ok_or_else(|| other("所选任务已不存在，请重新选择所属任务"))?;
+        .ok_or_else(|| other("所选任务已不存在，请重新选择跟踪任务"))?;
     if task.visibility == crate::domain::workstream_visibility::ARCHIVED {
         return Err(other("已归档的任务不能新建会话，请先取消归档"));
+    }
+    Ok(())
+}
+
+fn validate_initial_task(
+    db: &Db,
+    task: Option<&str>,
+    cwd: Option<&str>,
+    _workspace: &LaunchWorkspace,
+) -> Result<()> {
+    let Some(task) = task else {
+        return Ok(());
+    };
+    require_unarchived_task(db, task)?;
+    let cwd = cwd.ok_or_else(|| other("请先选择项目目录"))?;
+    let path_id = crate::workspace::path_identity_of(cwd).ok_or_else(|| other("工作目录无效"))?;
+    let conn = db.read();
+    let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=?1 AND wp.id=?2)",rusqlite::params![task,path_id],|r|r.get(0))?;
+    if !eligible {
+        return Err(other("所选任务未关联工作目录所属项目"));
     }
     Ok(())
 }

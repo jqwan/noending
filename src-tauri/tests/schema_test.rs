@@ -151,6 +151,7 @@ fn fresh_database_uses_current_format_generation() {
         "session_deletion_jobs",
         "project_resources",
         "project_affinity_evidence",
+        "workstream_paths",
         "session_workstream_bindings",
         "session_binding_removals",
         // 统计功能退役（2026-09-29）：连用量快照与事件账本一起退场。
@@ -185,7 +186,7 @@ fn fresh_database_uses_current_format_generation() {
         ("projects", "archived"),
         ("workstreams", "project_id"),
         ("workstreams", "default_cwd"),
-        ("workstream_paths", "source"),
+        ("sessions", "owner_workstream_id"),
     ] {
         assert!(
             !has_column(&db.read(), table, column),
@@ -215,6 +216,8 @@ fn fresh_database_uses_current_format_generation() {
     // shape exists, and the session row carries the flattened source, cursor
     // and fact-frontier columns.
     for object in [
+        "session_workstreams",
+        "workstream_projects",
         "session_messages",
         "session_message_projection",
         "session_contexts",
@@ -271,8 +274,8 @@ fn fresh_database_uses_current_format_generation() {
             "sessions.archived_at is the single lifecycle authority"
         );
         assert!(
-            has_column(&conn, "sessions", "owner_workstream_id"),
-            "sessions.owner_workstream_id is missing"
+            has_column(&conn, "sessions", "workspace_path_id"),
+            "sessions.workspace_path_id is missing"
         );
     }
 }

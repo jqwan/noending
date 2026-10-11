@@ -2210,3 +2210,19 @@ button.btn.ghost.terminal-exited,
 .new-session-runtime[open] summary { margin-bottom: 12px; }
 .new-session-runtime .row { gap: 10px; flex-wrap: wrap; }
 .agent-detail-sources .agent-source-row { flex-wrap: wrap; }
+
+.session-tracking-panel {
+  position: fixed;
+  top: 104px;
+  bottom: 0;
+  right: 0;
+  width: min(360px, 85vw);
+  z-index: 35;
+  padding: 20px;
+  overflow: auto;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-default);
+  box-shadow: -8px 0 24px #0000000c;
+}
+.session-tracking-panel .rail-row { gap: 6px; }
+.session-tracking-panel .grow { flex: 1; min-width: 0; white-space: normal; text-align: left; }
