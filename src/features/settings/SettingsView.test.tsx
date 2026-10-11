@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SettingsView from "./SettingsView";
 import { api } from "../../api";
+import type { Preference } from "../../types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn().mockResolvedValue("/custom/storage/dir"),
@@ -9,6 +10,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("../../api", () => ({
   api: {
+    listPreferences: vi.fn().mockResolvedValue([]),
+    savePreference: vi.fn(),
+    deletePreference: vi.fn(),
     getWorkspaceSettings: vi.fn().mockResolvedValue({
       noending_home: "/tmp/noending",
       default_workspace: "/tmp/noending/workspace",
@@ -68,8 +72,11 @@ it("opens modal to change data storage directory and can submit new path", async
   expect(api.setNoendingHome).toHaveBeenCalledWith("/custom/storage/dir");
 });
 
-const templates = {session: "默认会话要求", task: "默认任务要求", project: "默认项目要求"};
+const templates = {session: "默认会话要求", task: "默认任务要求", project: "默认项目要求", preferences: "默认偏好要求"};
 beforeEach(() => {
+  vi.mocked(api.listPreferences).mockReset().mockResolvedValue([]);
+  vi.mocked(api.savePreference).mockReset();
+  vi.mocked(api.deletePreference).mockReset();
   vi.mocked(api.getSummaryPromptSettings).mockReset().mockResolvedValue({templates: {...templates}, defaults: {...templates}});
   vi.mocked(api.setSummaryPromptTemplate).mockReset();
   vi.mocked(api.previewSummaryPrompt).mockReset().mockResolvedValue("完整提示词预览与文件协议");
@@ -115,4 +122,47 @@ it("restores defaults explicitly, retains edits after save failure and rejects a
   expect(api.setSummaryPromptTemplate).toHaveBeenLastCalledWith("session", templates.session);
   fireEvent.change(editor, {target: {value: "  "}});
   expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true);
+});
+
+it("lets users edit and delete locked preferences and create new locked items", async () => {
+  let items: Preference[] = [{ id: "locked", project_id: null, content: "原有锁定偏好", locked: true }];
+  vi.mocked(api.listPreferences).mockImplementation(async () => [...items]);
+  vi.mocked(api.savePreference).mockImplementation(async (id, projectId, content, locked) => {
+    const item = { id: id ?? "new", project_id: projectId, content, locked };
+    items = [...items.filter(p => p.id !== item.id), item];
+    return item;
+  });
+  vi.mocked(api.deletePreference).mockImplementation(async id => { items = items.filter(p => p.id !== id); });
+  render(<SettingsView navigate={vi.fn()} />);
+  await screen.findByText("原有锁定偏好");
+  fireEvent.click(screen.getByRole("button", {name: "编辑偏好：原有锁定偏好"}));
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好 / 准则"}), {target: {value: "用户修改的锁定偏好"}});
+  fireEvent.click(screen.getByRole("button", {name: "保存"}));
+  await screen.findByText("用户修改的锁定偏好");
+  expect(api.savePreference).toHaveBeenCalledWith("locked", null, "用户修改的锁定偏好", true);
+  fireEvent.click(screen.getByRole("button", {name: "删除偏好：用户修改的锁定偏好"}));
+  await waitFor(() => expect(screen.queryByText("用户修改的锁定偏好")).toBeNull());
+  fireEvent.click(screen.getByRole("button", {name: "新增"}));
+  const save = screen.getByRole("button", {name: "保存"});
+  expect(save).toHaveProperty("disabled", true);
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好 / 准则"}), {target: {value: "新偏好"}});
+  fireEvent.click(screen.getByRole("checkbox", {name: "锁定，禁止 Agent 修改或删除"}));
+  fireEvent.click(save);
+  await screen.findByText("新偏好");
+  expect(api.savePreference).toHaveBeenLastCalledWith(null, null, "新偏好", true);
+  fireEvent.click(screen.getByRole("button", {name: "解锁"}));
+  await screen.findByRole("button", {name: "锁定"});
+  expect(api.savePreference).toHaveBeenLastCalledWith("new", null, "新偏好", false);
+});
+
+it("edits the shared preference extraction template without changing summary templates", async () => {
+  render(<SettingsView navigate={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", {name: "查看与编辑"}));
+  await screen.findByRole("textbox", {name: "会话摘要要求模板"});
+  fireEvent.click(screen.getByRole("tab", {name: "偏好提取"}));
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好提取要求模板"}), {target: {value: "只提取明确的长期约定"}});
+  vi.mocked(api.setSummaryPromptTemplate).mockResolvedValue({templates: {...templates, preferences: "只提取明确的长期约定"}, defaults: {...templates}});
+  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
+  await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
+  expect(api.setSummaryPromptTemplate).toHaveBeenCalledWith("preferences", "只提取明确的长期约定");
 });

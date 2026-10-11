@@ -4,6 +4,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
+import PreferenceList from "../preferences/PreferenceList";
 import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { httpsRemoteUrl } from "./remoteUrl";
@@ -180,6 +181,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <div className="project-detail-layout">
       <div>
       <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
+      <PreferenceList key={`preferences-${projectId}`} projectId={projectId} />
       <section className="rail-section">
         <div className="section-label">任务</div>
 

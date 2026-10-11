@@ -4,7 +4,7 @@ import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import type { SummaryPromptKind, SummaryPromptSettings as PromptSettings, SummaryPromptTemplates } from "../../types";
 
-const labels: Record<SummaryPromptKind, string> = { session: "会话", task: "任务", project: "项目" };
+const labels: Record<SummaryPromptKind, string> = { session: "会话", task: "任务", project: "项目", preferences: "偏好" };
 
 export default function SummaryPromptSettings() {
   const [open, setOpen] = useState(false);
@@ -12,8 +12,8 @@ export default function SummaryPromptSettings() {
     <h3>摘要提取提示词</h3>
     <div className="row-line">
       <div style={{ minWidth: 0, flex: 1 }}>
-        <div className="settings-row-label">会话、任务与项目摘要模板</div>
-        <div className="settings-row-hint">调整摘要内容与写作要求，预览完整提示词。</div>
+        <div className="settings-row-label">摘要与偏好提取模板</div>
+        <div className="settings-row-hint">调整摘要写作与偏好提取要求，预览完整提示词。</div>
       </div>
       <button className="btn small" onClick={() => setOpen(true)}>查看与编辑</button>
     </div>
@@ -81,10 +81,10 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
       {error ? <div role="alert"><p>{error}</p><button className="btn small" onClick={() => setLoadAttempt(n => n + 1)}>重试</button></div> : <p className="muted" role="status">正在读取模板…</p>}
     </> : <>
       <div className="row" role="tablist" aria-label="摘要类型" style={{ gap: 8 }}>
-        {(Object.keys(labels) as SummaryPromptKind[]).map(type => <button key={type} role="tab" aria-selected={kind === type} className={`btn small ${kind === type ? "primary" : "ghost"}`} disabled={busy} onClick={() => { setKind(type); setError(""); }}>{labels[type]}摘要</button>)}
+        {(Object.keys(labels) as SummaryPromptKind[]).map(type => <button key={type} role="tab" aria-selected={kind === type} className={`btn small ${kind === type ? "primary" : "ghost"}`} disabled={busy} onClick={() => { setKind(type); setError(""); }}>{labels[type]}{type === "preferences" ? "提取" : "摘要"}</button>)}
       </div>
       <p className="muted small">
-        编辑摘要内容与写作要求。会话模板同时用于任务、项目提取中的会话摘要步骤。完整提示词中的文件处理流程和结果格式由系统提供。
+        编辑摘要写作或偏好提取要求。偏好模板用于所有摘要提取；会话模板同时用于任务、项目提取中的会话摘要步骤。完整提示词中的文件处理流程和结果格式由系统提供。
       </p>
       <div className="row" style={{ gap: 8, marginBottom: 12 }}>
         <button className={`btn small ${!previewing ? "primary" : "ghost"}`} aria-pressed={!previewing} onClick={() => setPreviewing(false)}>编辑模板</button>
@@ -93,9 +93,9 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
       </div>
       {previewing ? <>
         <p className="muted small">预览使用当前类型的编辑内容，其他要求使用已保存模板；文件路径以占位符展示。</p>
-        <pre className="summary-prompt-preview" aria-label={`${labels[kind]}摘要完整提示词`}>{preview || (error ? "预览失败" : "正在生成预览…")}</pre>
+        <pre className="summary-prompt-preview" aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}完整提示词`}>{preview || (error ? "预览失败" : "正在生成预览…")}</pre>
       </> : <label className="field">
-        <span>{labels[kind]}摘要要求模板</span>
+        <span>{labels[kind]}{kind === "preferences" ? "提取" : "摘要"}要求模板</span>
         <textarea className="summary-prompt-editor" value={drafts[kind]} disabled={busy} onChange={e => { setDrafts({ ...drafts, [kind]: e.target.value }); setError(""); }} />
       </label>}
       {error && <p role="alert" className="danger">{error}</p>}

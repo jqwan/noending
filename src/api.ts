@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
+  Preference, Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
   CreateWorkstreamReport,
   IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
@@ -14,6 +14,13 @@ import type {
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamUpdateOutcome,
 } from "./types";
+
+/** Notify mounted preference lists after summary or user writes. */
+async function invokeWithPreferences<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const result = await invoke<T>(command, args);
+  window.dispatchEvent(new Event("noending:preferences"));
+  return result;
+}
 
 export const api = {
   // Projects — v0.2 derives them from WorkspacePaths; reads and rename are the
@@ -153,23 +160,28 @@ export const api = {
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
   /** 当前摘要与增量消息整合，最多启动一次 Agent。 */
   updateSessionContext: (sessionId: string) =>
-    invoke<SessionUpdateOutcome>("update_session_context", { sessionId }),
+    invokeWithPreferences<SessionUpdateOutcome>("update_session_context", { sessionId }),
   /** 从完整有效历史重新生成，不沿用当前摘要。 */
   regenerateSessionContext: (sessionId: string) =>
-    invoke<SessionUpdateOutcome>("regenerate_session_context", { sessionId }),
+    invokeWithPreferences<SessionUpdateOutcome>("regenerate_session_context", { sessionId }),
   /** 一次点击 → 最多一次模型调用 → 相关 Session 摘要与 Workstream 状态一起更新。 */
   updateWorkstreamContext: (workstreamId: string) =>
-    invoke<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
+    invokeWithPreferences<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
 
   getProjectContextState: (projectId: string) =>
     invoke<ProjectContextView>("get_project_context_state", { projectId }),
   updateProjectContext: (projectId: string) =>
-    invoke<ProjectUpdateOutcome>("update_project_context", { projectId }),
+    invokeWithPreferences<ProjectUpdateOutcome>("update_project_context", { projectId }),
   regenerateProjectContext: (projectId: string) =>
-    invoke<ProjectUpdateOutcome>("regenerate_project_context", { projectId }),
+    invokeWithPreferences<ProjectUpdateOutcome>("regenerate_project_context", { projectId }),
 
   regenerateWorkstreamContext: (workstreamId: string) =>
-    invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
+    invokeWithPreferences<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
+
+  listPreferences: (projectId: string | null) => invoke<Preference[]>("list_preferences", { projectId }),
+  savePreference: (id: string | null, projectId: string | null, content: string, locked: boolean) =>
+    invokeWithPreferences<Preference>("save_preference", { id, projectId, content, locked }),
+  deletePreference: (id: string) => invokeWithPreferences<void>("delete_preference", { id }),
 
   getSummaryPromptSettings: () =>
     invoke<SummaryPromptSettings>("get_summary_prompt_settings"),

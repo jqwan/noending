@@ -54,6 +54,7 @@ export default function WorkstreamDetailView({
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
   const [ctxUpdating, setCtxUpdating] = useState(false);
+  const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(() => cached?.paths ?? null);
   const [pathsError, setPathsError] = useState("");
@@ -99,6 +100,7 @@ export default function WorkstreamDetailView({
     }
     setLoadError("");
     setCtxUpdateError(null);
+    setPreferenceError(null);
     setFailedSessions([]);
     setCtxUpdating(false);
     setPathsError("");
@@ -188,11 +190,13 @@ export default function WorkstreamDetailView({
     if (ctxUpdating) return;
     setCtxUpdating(true);
     setCtxUpdateError(null);
+    setPreferenceError(null);
     setFailedSessions([]);
     try {
       const out = await (regenerate ? api.regenerateWorkstreamContext(workstreamId) : api.updateWorkstreamContext(workstreamId));
       if (currentWorkstreamId.current !== workstreamId) return;
       setFailedSessions(out.failed_sessions);
+      setPreferenceError(out.preference_error);
       showToast(
         out.status === "no_change"
           ? "摘要无变化"
@@ -427,6 +431,7 @@ export default function WorkstreamDetailView({
           {ctxState?.pending && <p className="muted">有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
           {ctxState?.summary ? <div className="md-body" style={{ maxWidth: "72ch", overflowWrap: "anywhere" }}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{ctxState.summary}</ReactMarkdown></div> : <p className="muted">尚无任务摘要</p>}
           {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
+          {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
           {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
         </section>
 

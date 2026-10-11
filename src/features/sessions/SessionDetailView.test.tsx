@@ -33,7 +33,7 @@ vi.mock("../../api", () => ({
       updated_at: null,
       pending: false,
     }),
-    regenerateSessionContext: vi.fn().mockResolvedValue({ session_id: "", status: "updated", revision: 1 }),
+    regenerateSessionContext: vi.fn().mockResolvedValue({ session_id: "", status: "updated", revision: 1, preference_error: null }),
     updateSessionContext: vi.fn().mockResolvedValue({
       session_id: "",
       status: "updated",
@@ -56,8 +56,8 @@ beforeEach(() => {
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
-  vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
-  vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2 });
+  vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1, preference_error: null });
+  vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2, preference_error: null });
   vi.mocked(api.listProjects).mockResolvedValue([]);
   vi.mocked(api.listWorkstreams).mockResolvedValue([]);
   vi.mocked(api.refreshSession).mockResolvedValue({ queued: true });
@@ -450,14 +450,14 @@ it("allows regenerating a current summary without pending messages", async () =>
   }));
 
   expect(screen.queryByRole("button", { name: "更新摘要" })).toBeNull();
-  let finish!: (value: { session_id: string; status: "updated"; revision: number }) => void;
+  let finish!: (value: { session_id: string; status: "updated"; revision: number; preference_error: string | null }) => void;
   vi.mocked(api.regenerateSessionContext).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
   const regenerate = screen.getByRole("button", { name: "重新生成" });
   fireEvent.click(regenerate);
   expect(regenerate).toHaveProperty("disabled", true);
   await waitFor(() => expect(api.regenerateSessionContext).toHaveBeenCalledWith("me"));
   expect(api.updateSessionContext).not.toHaveBeenCalled();
-  await act(async () => finish({ session_id: "me", status: "updated", revision: 2 }));
+  await act(async () => finish({ session_id: "me", status: "updated", revision: 2, preference_error: null }));
   await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
 });
 

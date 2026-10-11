@@ -22,6 +22,7 @@ pub struct ProjectUpdateOutcome {
     pub skipped_session_ids: Vec<String>,
     pub failed_sessions: Vec<SessionFailure>,
     pub remaining_pending: usize,
+    pub preference_error: Option<String>,
 }
 
 struct ProjectInput {
@@ -131,6 +132,7 @@ pub(super) fn extract_project(
                     skipped_session_ids: vec![],
                     failed_sessions: vec![],
                     remaining_pending: 0,
+                    preference_error: None,
                 },
                 "no_change",
             ));
@@ -143,17 +145,19 @@ pub(super) fn extract_project(
         let policy = crate::workspace::wiring::HomePolicy::new(home.unwrap());
         let kind = crate::workspace::project::project_kind(&input.project, &input.paths, &policy);
         let batch = run_batch(
+            db,
             id,
             "project",
             serde_json::json!({"type":"project","name":input.project.name,"kind":kind,"working_directories":input.paths,"related_tasks":input.tasks,"current_summary":if regenerate || state.summary.is_empty(){None}else{Some(&state.summary)}}),
             &state.summary,
             &snapshots,
+            regenerate,
             launch,
             operation,
             runner,
         )?;
         operation.set_stage("database_commit");
-        let (revision, updated) = db.tx(|tx| {
+        let (revision, updated, preference_error) = db.tx(|tx| {
             if get_project_conn(tx, id)?.is_none()
                 || repo::state(tx, id)?.revision != state.revision
                 || ProjectInput::read(tx, id)?.fingerprint != input.fingerprint
@@ -186,7 +190,7 @@ pub(super) fn extract_project(
                 consumed.push((s.session.id.clone(), revision));
             }
             let revision = repo::commit(tx, id, &input.fingerprint, &batch.summary, &consumed)?;
-            Ok((revision, updated))
+            Ok((revision, updated, batch.preferences.apply(tx)?))
         })?;
         let status = if !batch.failed.is_empty() {
             ContextUpdateStatus::Partial
@@ -204,6 +208,7 @@ pub(super) fn extract_project(
                 skipped_session_ids: batch.skipped,
                 failed_sessions: batch.failed,
                 remaining_pending: project_context_view(db, id)?.pending_sessions,
+                preference_error,
             },
             match status {
                 ContextUpdateStatus::Partial => "partial",

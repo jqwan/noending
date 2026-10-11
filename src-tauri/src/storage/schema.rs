@@ -52,7 +52,8 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// v4 — remove launch intents; embedded terminals assign ownership by native ID.
 /// v5 — current session/task/project Markdown summaries; retire Context history,
 /// items, conflicts and review; task consumption no longer duplicates fact generations.
-pub const DATABASE_FORMAT_VERSION: i64 = 5;
+/// v6 — current user/project preferences with user-controlled Agent locks.
+pub const DATABASE_FORMAT_VERSION: i64 = 6;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -381,6 +382,15 @@ const CURRENT_SCHEMA: &str = r#"
       source TEXT,
       last_verified_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS preferences (
+      id TEXT PRIMARY KEY,
+      project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+      content TEXT NOT NULL CHECK(length(trim(content)) > 0),
+      locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0, 1)),
+      revision INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_preferences_project ON preferences(project_id);
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL

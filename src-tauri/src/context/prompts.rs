@@ -16,12 +16,20 @@ const SESSION_REQUIREMENTS: &str = r#"摘要正文使用 Markdown，建议不超
 const TASK_REQUIREMENTS: &str = "使用 Markdown，建议不超过 1000 字符（含空格与标点）。精简但保留关键事实，不凑字数。\n从任务整体呈现目标、当前进展、关键结果、有效决定与约束、未解决问题和下一步；只写有依据的内容，不固定栏目。\n结论在前，以短段落为主，适量加粗；需要时使用简短小标题或列表。综合会话成果，不逐个复述，不写过程流水账。\n已有摘要仅供参考，根据材料修正失效表述，保留有效信息。区分要求、建议、决定、计划、已完成与待验证，不虚构进展，不自行裁定未解决的分歧。沿用材料的主要语言，路径、命令和配置项用行内代码。";
 const PROJECT_REQUIREMENTS: &str = "使用 Markdown，建议不超过 1000 字符（含空格与标点）。精简但保留关键事实，不凑字数。\n从项目整体呈现用途与目标、当前进展、关键成果、有效决定和约束、未解决问题及下一步；只写材料支持的内容，不固定栏目。\n结论在前，以短段落为主，适量加粗，需要时使用简短小标题或列表。综合跨目录和会话的成果，不逐个复述任务或会话，不写过程流水账。\n把已有摘要与当前材料整合为完整摘要，修正已失效的表述，保留有效信息。区分要求、建议、决定、计划、已完成与待验证，不虚构进展，不自行裁定未解决分歧。任务背景不代表任务已完成。沿用材料的主要语言，路径、命令和配置项用行内代码。";
 
+const PREFERENCE_REQUIREMENTS: &str = r#"在生成摘要的同时，检查本次读取的用户原始消息是否包含需要新增、修改或删除的长期偏好或项目准则。只提取用户明确表达、适合后续持续适用的要求，一条表达一个要求，正文简明、独立、可执行。
+不得仅凭已有摘要推断偏好，不将 Agent 建议、普通事实、当前进度、临时操作或单次任务要求保存为偏好。无法确定长期适用性或作用范围时不新增。
+跨项目的习惯和要求归入用户偏好；明确针对某项目的约定归入该项目。不能仅因消息出现在项目内，就提升为用户偏好。只使用输入列出的项目 ID。
+对照已有条目去重，已有条目已能表达相同要求时不新增；用户明确补充或纠正已有要求时优先修改。仅在用户明确撤销或明确用新要求取代旧要求时删除，不因未再次提及或不适合当前任务而删除。
+保留原有适用条件，不扩大范围，不加入推测。不得新增近义条目变相改写锁定条目，无法消解的冲突不变更。没有符合条件的变更时输出空 changes 数组。
+现有偏好仅用于去重、识别变更对象，不作为摘要写作或提取约束，锁定只表示 Agent 不能修改或删除该条目。"#;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptKind {
     Session,
     Task,
     Project,
+    Preferences,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +38,7 @@ pub struct PromptTemplates {
     pub session: String,
     pub task: String,
     pub project: String,
+    pub preferences: String,
 }
 impl Default for PromptTemplates {
     fn default() -> Self {
@@ -37,12 +46,13 @@ impl Default for PromptTemplates {
             session: SESSION_REQUIREMENTS.into(),
             task: TASK_REQUIREMENTS.into(),
             project: PROJECT_REQUIREMENTS.into(),
+            preferences: PREFERENCE_REQUIREMENTS.into(),
         }
     }
 }
 impl PromptTemplates {
     pub fn validate(&self) -> Result<()> {
-        for text in [&self.session, &self.task, &self.project] {
+        for text in [&self.session, &self.task, &self.project, &self.preferences] {
             if text.trim().is_empty() {
                 return Err(other("摘要要求模板不能为空"));
             }
@@ -54,6 +64,7 @@ impl PromptTemplates {
             PromptKind::Session => &self.session,
             PromptKind::Task => &self.task,
             PromptKind::Project => &self.project,
+            PromptKind::Preferences => &self.preferences,
         }
     }
 }
@@ -66,6 +77,8 @@ struct Overrides {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preferences: Option<String>,
 }
 impl Overrides {
     fn effective(self) -> PromptTemplates {
@@ -74,6 +87,7 @@ impl Overrides {
             session: self.session.unwrap_or(default.session),
             task: self.task.unwrap_or(default.task),
             project: self.project.unwrap_or(default.project),
+            preferences: self.preferences.unwrap_or(default.preferences),
         }
     }
 }
@@ -120,8 +134,9 @@ pub fn save(db: &Db, kind: PromptKind, template: Option<&str>) -> Result<PromptS
             PromptKind::Session => overrides.session = custom,
             PromptKind::Task => overrides.task = custom,
             PromptKind::Project => overrides.project = custom,
+            PromptKind::Preferences => overrides.preferences = custom,
         }
-        if overrides.session.is_none() && overrides.task.is_none() && overrides.project.is_none() {
+        if overrides.session.is_none() && overrides.task.is_none() && overrides.project.is_none() && overrides.preferences.is_none() {
             tx.execute("DELETE FROM settings WHERE key=?1", [SETTINGS_KEY])?;
         } else {
             tx.execute(

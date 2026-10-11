@@ -19,7 +19,7 @@ vi.mock("../../api", () => ({
       updated_sessions: [],
       skipped_session_ids: [],
       failed_sessions: [],
-      remaining_pending: 0,
+      remaining_pending: 0, preference_error: null,
     }),
     listWorkstreamPaths: vi.fn(),
     getDefaultAgent: vi.fn().mockResolvedValue(null),
@@ -174,7 +174,7 @@ it("shows 更新摘要 with the pending-session count and calls the explicit upd
     updated_sessions: ["s1", "s2"],
     skipped_session_ids: [],
     failed_sessions: [],
-    remaining_pending: 0,
+    remaining_pending: 0, preference_error: null,
   });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
@@ -214,7 +214,7 @@ it("offers a copyable operation id after a structured Context update failure", a
 });
 
 it("renders Markdown and regenerates through the separate action even when up to date", async () => {
-  vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0 });
+  vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0, preference_error: null });
   await renderDetail();
   expect(screen.getByText("当前进展").tagName).toBe("STRONG");
   fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
@@ -224,7 +224,7 @@ it("renders Markdown and regenerates through the separate action even when up to
 
 it("keeps the task summary visible and reports failed sessions after a partial update", async () => {
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
-  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1 });
+  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1, preference_error: null });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByRole("button", { name: "更新摘要" });
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));

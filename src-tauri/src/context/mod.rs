@@ -1,6 +1,7 @@
 //! Explicit current-summary reads and extraction. One user action launches one
 //! Agent; model replies and files validate before a snapshot-guarded transaction.
 pub(crate) mod diagnostics;
+mod preferences;
 mod project;
 pub mod prompts;
 pub mod summary;
@@ -48,6 +49,7 @@ pub struct SessionUpdateOutcome {
     pub session_id: String,
     pub status: ContextUpdateStatus,
     pub revision: i64,
+    pub preference_error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkstreamUpdateOutcome {
@@ -58,6 +60,7 @@ pub struct WorkstreamUpdateOutcome {
     pub skipped_session_ids: Vec<String>,
     pub failed_sessions: Vec<SessionFailure>,
     pub remaining_pending: usize,
+    pub preference_error: Option<String>,
 }
 
 struct SessionSnapshot {
@@ -110,15 +113,16 @@ impl SessionSnapshot {
     }
     fn validate(&self, conn: &rusqlite::Connection, owner: Option<&str>) -> Result<()> {
         let current = get_session_context_conn(conn, &self.session.id)?;
-        let identity: Option<(i64, Option<String>)> = conn
+        let identity: Option<(i64, Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT fact_generation, owner_workstream_id FROM sessions WHERE id = ?1",
+                "SELECT fact_generation, owner_workstream_id, (SELECT project_id FROM workspace_paths WHERE id=sessions.workspace_path_id) FROM sessions WHERE id = ?1",
                 [&self.session.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         if current.as_ref().map(|c| c.revision).unwrap_or(0) != self.revision()
             || identity.as_ref().map(|i| i.0) != Some(self.generation)
+            || identity.as_ref().and_then(|i| i.2.as_ref()) != self.session.project_id.as_ref()
             || owner
                 .is_some_and(|owner| identity.as_ref().and_then(|i| i.1.as_deref()) != Some(owner))
         {
@@ -333,6 +337,7 @@ fn extract_session(
                         ContextUpdateStatus::NoChange
                     },
                     revision,
+                    preference_error: None,
                 },
                 if snapshot.pending() {
                     "updated"
@@ -342,6 +347,9 @@ fn extract_session(
             ));
         }
         let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
+        let preference_snapshot =
+            preferences::Snapshot::read(db, snapshot.session.project_id.clone())?;
+        files.write_preferences(&preference_snapshot)?;
         files.write_session(
             &snapshot.session,
             if regenerate {
@@ -363,18 +371,23 @@ fn extract_session(
         )?;
         operation.set_stage("output_validation");
         let reply = summary::parse_session_reply(&raw).map_err(invalid)?;
-        let (fields, status) = match reply {
-            SessionReply::Completed {} => (
+        let (fields, status, preference_reply) = match reply {
+            SessionReply::Completed { preferences } => (
                 files
                     .read_result(&files.session_result(id))
                     .map_err(invalid)?,
                 ContextUpdateStatus::Updated,
+                preferences,
             ),
-            SessionReply::Skipped { .. } => {
+            SessionReply::Skipped { preferences, .. } => {
                 files
                     .require_absent(&files.session_result(id))
                     .map_err(invalid)?;
-                (snapshot.retained(), ContextUpdateStatus::Skipped)
+                (
+                    snapshot.retained(),
+                    ContextUpdateStatus::Skipped,
+                    preferences,
+                )
             }
             SessionReply::Failed { .. } => {
                 files
@@ -385,23 +398,30 @@ fn extract_session(
                 )));
             }
         };
+        let pending_preferences = preferences::Pending::read(
+            preference_snapshot,
+            &files.preference_result(),
+            preference_reply,
+        );
         operation.set_stage("database_commit");
-        let revision = db.tx(|tx| {
+        let (revision, preference_error) = db.tx(|tx| {
             snapshot.validate(tx, None)?;
-            commit_session_context_conn(
+            let revision = commit_session_context_conn(
                 tx,
                 id,
                 &fields,
                 snapshot.revision(),
                 snapshot.generation,
                 snapshot.latest,
-            )
+            )?;
+            Ok((revision, pending_preferences.apply(tx)?))
         })?;
         Ok((
             SessionUpdateOutcome {
                 session_id: id.into(),
                 status,
                 revision,
+                preference_error,
             },
             if status == ContextUpdateStatus::Skipped {
                 "skipped"
@@ -446,23 +466,26 @@ fn extract_task(
                     skipped_session_ids: vec![],
                     failed_sessions: vec![],
                     remaining_pending: 0,
+                    preference_error: None,
                 },
                 "no_change",
             ));
         }
         let batch = run_batch(
+            db,
             id,
             "task",
             serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
             "working_directories":paths,"current_summary":if regenerate || state.summary.is_empty() {None} else {Some(&state.summary)}}),
             &state.summary,
             &snapshots,
+            regenerate,
             launch,
             operation,
             runner,
         )?;
         operation.set_stage("database_commit");
-        let (revision, updated) = db.tx(|tx| {
+        let (revision, updated, preference_error) = db.tx(|tx| {
             let current = get_workstream_context_state_conn(tx, id)?;
             let current_ws: Option<(String, String)> = tx
                 .query_row(
@@ -522,7 +545,7 @@ fn extract_task(
             }
             context_repo::delete_unowned_workstream_frontiers_conn(tx, id)?;
             let revision = commit_workstream_summary_conn(tx, id, &batch.summary)?;
-            Ok((revision, updated))
+            Ok((revision, updated, batch.preferences.apply(tx)?))
         })?;
         let status = if !batch.failed.is_empty() {
             ContextUpdateStatus::Partial
@@ -540,6 +563,7 @@ fn extract_task(
                 skipped_session_ids: batch.skipped,
                 failed_sessions: batch.failed,
                 remaining_pending: workstream_context_view(db, id)?.pending_sessions,
+                preference_error,
             },
             match status {
                 ContextUpdateStatus::Partial => "partial",
@@ -557,19 +581,28 @@ struct BatchOutput {
     failed: Vec<SessionFailure>,
     skipped: Vec<String>,
     target_skipped: bool,
+    preferences: preferences::Pending,
 }
 fn run_batch(
+    db: &Db,
     id: &str,
     kind: &str,
     header: serde_json::Value,
     current_summary: &str,
     snapshots: &[SessionSnapshot],
+    regenerate: bool,
     launch: &ContextLaunchConfig,
     operation: &mut diagnostics::ContextOperation,
     runner: &mut ContextRunner<'_>,
 ) -> Result<BatchOutput> {
     let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
     let files = files_for(operation, &format!("{kind}-{id}"), &ids)?;
+    let projects = snapshots
+        .iter()
+        .filter_map(|s| s.session.project_id.clone())
+        .chain((kind == "project").then(|| id.to_string()));
+    let preference_snapshot = preferences::Snapshot::read(db, projects)?;
+    files.write_preferences(&preference_snapshot)?;
     let mut records = vec![header];
     let mut targets = HashSet::new();
     for s in snapshots {
@@ -578,9 +611,17 @@ fn run_batch(
             targets.insert(s.session.id.clone());
             files.write_session(&s.session, s.current_summary(), s.from, &s.messages)?;
         }
+        let preference_input_file = if regenerate {
+            let messages = db.get_messages_after(&s.session.id, 0, s.latest)?;
+            files.write_preference_session(&s.session, &messages)?;
+            Some(files.preference_session_input(&s.session.id))
+        } else {
+            None
+        };
         records.push(
-            serde_json::json!({"type":"session","session_id":s.session.id,"title":s.session.title,
+            serde_json::json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
                 "need_update":need_update,"current_summary":s.current_summary(),
+                "preference_input_file":preference_input_file,
                 "input_file":need_update.then(||files.session_input(&s.session.id)),
                 "result_file":need_update.then(||files.session_result(&s.session.id))}),
         );
@@ -597,18 +638,21 @@ fn run_batch(
     )?;
     operation.set_stage("output_validation");
     let reply = summary::parse_batch_reply(&raw).map_err(invalid)?;
-    let (failed, skipped, target_skipped) = match reply {
+    let (failed, skipped, target_skipped, preference_reply) = match reply {
         BatchReply::Completed {
             skipped_session_ids,
-        } => (vec![], skipped_session_ids, false),
+            preferences,
+        } => (vec![], skipped_session_ids, false, preferences),
         BatchReply::Partial {
             failed_sessions,
             skipped_session_ids,
-        } => (failed_sessions, skipped_session_ids, false),
+            preferences,
+        } => (failed_sessions, skipped_session_ids, false, preferences),
         BatchReply::Skipped {
             skipped_session_ids,
+            preferences,
             ..
-        } => (vec![], skipped_session_ids, true),
+        } => (vec![], skipped_session_ids, true, preferences),
         BatchReply::Failed { .. } => {
             files
                 .require_absent(&files.batch_result(kind, id))
@@ -663,7 +707,13 @@ fn run_batch(
         };
         results.insert(s.session.id.clone(), fields);
     }
+    let preferences = preferences::Pending::read(
+        preference_snapshot,
+        &files.preference_result(),
+        preference_reply,
+    );
     Ok(BatchOutput {
+        preferences,
         _files: files,
         results,
         summary: target_summary,

@@ -2229,3 +2229,14 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 .summary-prompt-editor { min-height: 280px; resize: vertical; line-height: 1.7; }
 .summary-prompt-preview { max-height: 50vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); font-size: 12px; line-height: 1.7; }
 .summary-prompt-actions { gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }
+
+.preference-section { margin: 24px 0; }
+.preference-section .rail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preference-section h3 { margin: 0; }
+.preference-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.preference-row .grow { min-width: 0; flex: 1; }
+.preference-row .badge { margin-left: 8px; }
+.preference-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .preference-row { align-items: flex-start; flex-wrap: wrap; }
+}

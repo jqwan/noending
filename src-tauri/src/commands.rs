@@ -266,6 +266,40 @@ pub async fn regenerate_project_context(
     .await?
 }
 
+#[tauri::command]
+pub fn list_preferences(
+    state: State<AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<crate::storage::preferences::Preference>> {
+    with_db(&state, |db| {
+        crate::storage::preferences::list_items(db, project_id.as_deref())
+    })
+}
+#[tauri::command]
+pub fn save_preference(
+    state: State<AppState>,
+    id: Option<String>,
+    project_id: Option<String>,
+    content: String,
+    locked: bool,
+) -> Result<crate::storage::preferences::Preference> {
+    with_db(&state, |db| {
+        crate::storage::preferences::save_item(
+            db,
+            id.as_deref(),
+            project_id.as_deref(),
+            &content,
+            locked,
+        )
+    })
+}
+#[tauri::command]
+pub fn delete_preference(state: State<AppState>, id: String) -> Result<()> {
+    with_db(&state, |db| {
+        crate::storage::preferences::delete_item(db, &id)
+    })
+}
+
 /// Summary templates and previews are pure reads; previews never invoke an Agent.
 #[tauri::command]
 pub fn get_summary_prompt_settings(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import PreferenceList from "../preferences/PreferenceList";
 import SummaryPromptSettings from "./SummaryPromptSettings";
 import PageHeader from "../../layout/PageHeader";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";
@@ -24,6 +25,7 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
       <div className="settings-pane" style={{ marginTop: 18 }}>
         <AppearanceSettings />
         <SummaryPromptSettings />
+        <PreferenceList projectId={null} />
         <ContextDiagnosticsSettings />
         <WorkspaceStorageSettings />
       </div>

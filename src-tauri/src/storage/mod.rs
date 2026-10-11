@@ -20,6 +20,7 @@ use crate::error::{other, Result};
 // The WorkspacePath registry, ordered WorkstreamPath list and Session→path
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
+pub mod preferences;
 pub mod project_context_repo;
 pub mod schema;
 pub mod session_lifecycle;

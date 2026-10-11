@@ -349,6 +349,7 @@ export interface SessionUpdateOutcome {
   session_id: string;
   status: ContextUpdateStatus;
   revision: number;
+  preference_error: string | null;
 }
 
 export interface WorkstreamUpdateOutcome {
@@ -360,6 +361,7 @@ export interface WorkstreamUpdateOutcome {
   failed_sessions: { session_id: string; error: string }[];
   /** 本次调用后仍待更新的 Session 数。 */
   remaining_pending: number;
+  preference_error: string | null;
 }
 
 /** `get_ingestion_status`：最近一次后台摄入任务的结果。 */
@@ -629,9 +631,17 @@ export interface AgentStatusEntry {
 }
 
 /** Summary requirements are editable; file/response protocols are fixed. */
-export type SummaryPromptKind = "session" | "task" | "project";
+export type SummaryPromptKind = "session" | "task" | "project" | "preferences";
 export type SummaryPromptTemplates = Record<SummaryPromptKind, string>;
 export interface SummaryPromptSettings {
   templates: SummaryPromptTemplates;
   defaults: SummaryPromptTemplates;
+}
+
+/** Current rules; lock restricts Agent writes only. */
+export interface Preference {
+  id: string;
+  project_id: string | null;
+  content: string;
+  locked: boolean;
 }
