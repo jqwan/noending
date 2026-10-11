@@ -76,6 +76,7 @@ impl AgentRuntimeOverrides {
             effort: o.effort,
             root_session_id: None,
             initial_message: None,
+            writable_directories: Vec::new(),
         }
     }
 }

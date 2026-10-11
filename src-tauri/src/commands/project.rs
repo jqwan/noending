@@ -46,6 +46,7 @@ pub struct ProjectCardData {
     pub name: String,
     pub name_customized: bool,
     pub kind: ProjectKind,
+    pub builtin_assistant: bool,
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
@@ -183,6 +184,10 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
             let session_activity = session_activity.get(&p.id).cloned().flatten();
             let workstream_activity = workstream_activity.get(&p.id).cloned().flatten();
             ProjectCardData {
+                builtin_assistant: crate::workspace::project::is_assistant_project(
+                    search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
+                    policy,
+                ),
                 kind: project_kind(
                     &p,
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),

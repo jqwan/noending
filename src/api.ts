@@ -273,14 +273,7 @@ export const api = {
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
 
-  assistantSend: (sessionId: string | null, text: string) =>
-    invoke<{ session_id: string; content: string; runtime: string }>("assistant_send", { sessionId, text }),
-  assistantMessages: (sessionId: string) =>
-    invoke<import("./types").AssistantMessage[]>("assistant_messages", { sessionId }),
-  assistantConfigGet: () => invoke<{ agent: string }>("assistant_config_get"),
-  assistantConfigSet: (agent: string) => invoke<void>("assistant_config_set", { agent }),
-  assistantExecuteAction: (actionJson: string) =>
-    invoke<{ ok: boolean; kind: string; launched_via: string; note: string }>("assistant_execute_action", { actionJson }),
+  assistantWorkspace: () => invoke<import("./types").AssistantWorkspace>("assistant_workspace"),
 };
 
 export type { Agent };

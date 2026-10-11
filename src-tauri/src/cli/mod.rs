@@ -223,3 +223,12 @@ pub(crate) fn shell_quote(path: &Path) -> String {
 }
 #[cfg(test)]
 mod tests;
+
+/// Managed private entry tied to this running Home, without changing PATH.
+pub fn install_workspace_entry(
+    directory: &std::path::Path,
+    connection: &std::path::Path,
+    exe: &std::path::Path,
+) -> CliResult<serde_json::Value> {
+    installation::run_connected(directory, "update", Some(connection), Some(exe))
+}

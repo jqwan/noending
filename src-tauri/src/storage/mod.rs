@@ -1267,76 +1267,6 @@ impl Db {
 
     // Assistant
 
-    pub fn ensure_assistant_session(&self, session_id: Option<&str>) -> Result<String> {
-        let conn = self.write();
-        if let Some(id) = session_id {
-            let exists = conn
-                .query_row(
-                    "SELECT 1 FROM assistant_sessions WHERE id = ?1",
-                    params![id],
-                    |_| Ok(()),
-                )
-                .optional()?;
-            if exists.is_some() {
-                return Ok(id.to_string());
-            }
-        }
-        let id = new_id();
-        conn.execute(
-            "INSERT INTO assistant_sessions (id, title, created_at) VALUES (?1, ?2, ?3)",
-            params![id, "Assistant", now()],
-        )?;
-        Ok(id)
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn insert_assistant_message(
-        &self,
-        session_id: &str,
-        role: &str,
-        content: &str,
-        action_json: Option<&str>,
-        runtime: Option<&str>,
-    ) -> Result<(String, String)> {
-        let conn = self.write();
-        let id = new_id();
-        let ts = now();
-        conn.execute(
-            "INSERT INTO assistant_messages (id, session_id, role, content, action_json, runtime, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, session_id, role, content, action_json, runtime, ts],
-        )?;
-        Ok((id, ts))
-    }
-
-    pub fn list_assistant_messages(
-        &self,
-        session_id: &str,
-        limit: i64,
-    ) -> Result<Vec<AssistantMessageRow>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT id, session_id, role, content, action_json, runtime, created_at
-             FROM assistant_messages WHERE session_id = ?1 ORDER BY created_at LIMIT ?2",
-        )?;
-        let rows = st
-            .query_map(params![session_id, limit], |r| {
-                Ok(AssistantMessageRow {
-                    id: r.get(0)?,
-                    session_id: r.get(1)?,
-                    role: r.get(2)?,
-                    content: r.get(3)?,
-                    action_json: r.get(4)?,
-                    runtime: r.get(5)?,
-                    created_at: r.get(6)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    // Agent installations cache
-
     pub fn save_installation(
         &self,
         i: &crate::platform::exec_resolver::AgentInstallation,
@@ -2090,17 +2020,6 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
         origin: r.get(4)?,
         created_at: r.get(5)?,
     })
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AssistantMessageRow {
-    pub id: String,
-    pub session_id: String,
-    pub role: String,
-    pub content: String,
-    pub action_json: Option<String>,
-    pub runtime: Option<String>,
-    pub created_at: String,
 }
 
 #[derive(Debug, Default, Clone)]

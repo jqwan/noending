@@ -34,6 +34,7 @@ export interface ProjectCardData {
   name: string;
   name_customized: boolean;
   kind: ProjectKind;
+  builtin_assistant?: boolean;
   path_count: number;
   missing_path_count: number;
   workstream_count: number;
@@ -151,6 +152,7 @@ export interface WorkspaceSettings {
 export interface ProjectDetailData {
   project: Project;
   kind: ProjectKind;
+  builtin_assistant?: boolean;
   workspace_paths: WorkspacePath[];
   workstreams: ProjectWorkstreamRow[];
   sessions: Session[];
@@ -553,14 +555,9 @@ export interface TerminalSnapshot extends TerminalSummary {
   rows: number;
 }
 
-export interface AssistantMessage {
-  id: string;
-  session_id: string;
-  role: "user" | "assistant";
-  content: string;
-  action_json: string | null;
-  runtime: string | null;
-  created_at: string;
+export interface AssistantWorkspace {
+  project: Project;
+  directory: string;
 }
 
 export const AGENT_LABELS: Record<Agent, string> = {

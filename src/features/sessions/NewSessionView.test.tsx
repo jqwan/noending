@@ -763,3 +763,26 @@ describe("NewSessionView runtime selection", () => {
   });
 
 });
+
+it("launches an ordinary assistant conversation without a separate target or agent exclusion", async () => {
+  const navigate = vi.fn();
+  const workspace: import("../../types").AssistantWorkspace = {
+    project: { id: "assistant-project", name: "我的助手", git_id: null, name_customized: true, created_at: "", updated_at: "" },
+    directory: "/tmp/custom-home/assistant"
+  };
+  vi.mocked(api.listProjectCards).mockResolvedValue([{ id: "target-project", name: "真实项目", kind: "git", search_paths: ["/repo/target"], representative_paths: ["/repo/target"] }] as never);
+  vi.mocked(api.getDefaultAgent).mockResolvedValue("antigravity");
+  vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "assistant-terminal", note: "", command_line: "", launched_via: "embedded" });
+  await act(async () => { render(<NewSessionView navigate={navigate} assistantWorkspace={workspace} />); });
+  expect(screen.queryByLabelText("所属任务（可选）")).toBeNull();
+  expect([...screen.getByLabelText("Agent").querySelectorAll("option")].map(o => o.value)).toEqual(["codex", "claude_code", "pi", "antigravity"]);
+  expect(screen.queryByLabelText("助手目标范围")).toBeNull();
+  expect(api.listProjectCards).not.toHaveBeenCalled();
+  expect(api.listWorkstreamCards).not.toHaveBeenCalled();
+  expect(api.prepareNewSession).toHaveBeenLastCalledWith("antigravity", null, workspace.directory);
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "查询这个项目的进展" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).not.toHaveProperty("disabled", true));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "发送" })); });
+  expect(api.launchEmbeddedNew).toHaveBeenCalledWith("antigravity", null, workspace.directory, "查询这个项目的进展", undefined);
+  expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "assistant-terminal", assistant: true });
+});

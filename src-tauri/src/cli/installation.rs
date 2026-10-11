@@ -12,8 +12,16 @@ const MARKER: &str = "#!/bin/sh\n# NoEnding CLI launcher v1\n";
 #[cfg(windows)]
 const MARKER: &str = "@echo off\r\nrem NoEnding CLI launcher v1\r\n";
 
-fn launchers(directory: &Path) -> CliResult<Vec<(PathBuf, String)>> {
-    let exe = executable()?.canonicalize()?;
+fn launchers(
+    directory: &Path,
+    connection: Option<&Path>,
+    exe: Option<&Path>,
+) -> CliResult<Vec<(PathBuf, String)>> {
+    let exe = exe
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(executable)?
+        .canonicalize()?;
     Ok(["ne", "noending"]
         .iter()
         .map(|name| {
@@ -21,7 +29,13 @@ fn launchers(directory: &Path) -> CliResult<Vec<(PathBuf, String)>> {
             {
                 (
                     directory.join(name),
-                    format!("{MARKER}exec {} --cli \"$@\"\n", shell_quote(&exe)),
+                    format!(
+                        "{MARKER}exec {} --cli{} \"$@\"\n",
+                        shell_quote(&exe),
+                        connection
+                            .map(|p| format!(" --connection {}", shell_quote(p)))
+                            .unwrap_or_default()
+                    ),
                 )
             }
             #[cfg(windows)]
@@ -29,8 +43,14 @@ fn launchers(directory: &Path) -> CliResult<Vec<(PathBuf, String)>> {
                 (
                     directory.join(format!("{name}.cmd")),
                     format!(
-                        "{MARKER}\"{}\" --cli %*\r\n",
-                        exe.to_string_lossy().replace('%', "%%")
+                        "{MARKER}\"{}\" --cli{} %*\r\n",
+                        exe.to_string_lossy().replace('%', "%%"),
+                        connection
+                            .map(|p| format!(
+                                " --connection \"{}\"",
+                                p.to_string_lossy().replace('%', "%%")
+                            ))
+                            .unwrap_or_default()
                     ),
                 )
             }
@@ -39,7 +59,16 @@ fn launchers(directory: &Path) -> CliResult<Vec<(PathBuf, String)>> {
 }
 
 pub(super) fn run(directory: &Path, action: &str) -> CliResult<Value> {
-    let launchers = launchers(directory)?;
+    run_connected(directory, action, None, None)
+}
+
+pub(super) fn run_connected(
+    directory: &Path,
+    action: &str,
+    connection: Option<&Path>,
+    exe: Option<&Path>,
+) -> CliResult<Value> {
+    let launchers = launchers(directory, connection, exe)?;
     let mut existing = Vec::new();
     let mut statuses = Vec::new();
     for (path, script) in &launchers {
@@ -105,6 +134,18 @@ pub(super) fn run(directory: &Path, action: &str) -> CliResult<Value> {
             if old.is_some() {
                 std::fs::remove_file(path)?;
             }
+            continue;
+        }
+        #[cfg(unix)]
+        let current_executable = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path)
+                .ok()
+                .is_some_and(|m| m.permissions().mode() & 0o111 != 0)
+        };
+        #[cfg(not(unix))]
+        let current_executable = true;
+        if old.as_deref() == Some(script.as_bytes()) && current_executable {
             continue;
         }
         let temp = path.with_extension(format!("{}.tmp", crate::storage::new_id()));

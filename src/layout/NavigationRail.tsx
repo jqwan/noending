@@ -5,15 +5,15 @@ import type { Route } from "../app/routes";
 export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "assistant" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
-  return ["new-session", "sessions", "session", "terminal"].includes(route.view);
+  return ["new-session", "sessions", "session", "terminal", "assistant"].includes(route.view);
 }
 
 export function getRouteSection(route: Route): RailSection | null {
+  if (route.view === "assistant" || route.assistant) return "assistant";
   if (isSessionRoute(route)) return "sessions";
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
   if (route.view === "projects" || route.view === "project") return "projects";
   if (route.view === "agents") return "agents";
-  if (route.view === "assistant") return "assistant";
   if (route.view === "settings") return "settings";
   return null;
 }
@@ -29,7 +29,7 @@ export function getSectionRootRoute(section: RailSection): Route {
     case "agents":
       return { view: "agents" };
     case "assistant":
-      return { view: "assistant" };
+      return { view: "sessions", assistant: true };
     case "settings":
       return { view: "settings" };
   }
@@ -66,7 +66,7 @@ export default function NavigationRail({ route, navigate }: {
       navigate(getSectionRootRoute(targetSection));
     } else {
       // 点击固定栏其他图标，跳转到上次离开该图标界面时的某个子界面（若无记录则跳看板）
-      navigate(lastRoutes.current[targetSection] ?? getSectionRootRoute(targetSection));
+      navigate(lastRoutes.current[targetSection] ?? (targetSection === "assistant" ? { view: "assistant" } : getSectionRootRoute(targetSection)));
     }
   };
 
@@ -76,11 +76,11 @@ export default function NavigationRail({ route, navigate }: {
     icon: IconName;
     active: boolean;
   }> = [
-    { section: "sessions", label: "会话", icon: "chat", active: isSessionRoute(route) },
+    { section: "sessions", label: "会话", icon: "chat", active: currentSection === "sessions" },
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
     { section: "agents", label: "代理", icon: "bot", active: route.view === "agents" },
-    { section: "assistant", label: "助手", icon: "spark", active: route.view === "assistant" },
+    { section: "assistant", label: "助手", icon: "spark", active: currentSection === "assistant" },
   ];
 
   return (

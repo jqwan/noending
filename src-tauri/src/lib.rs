@@ -106,6 +106,13 @@ pub fn run() {
                 }
             }
 
+            {
+                let state: tauri::State<commands::AppState> = app.state();
+                if let Err(error) = assistant::ensure_workspace(&state.db, &home, &layer) {
+                    eprintln!("[noending] Assistant workspace unavailable: {error}");
+                }
+            }
+
             // make pre-existing messages searchable (idempotent)
             {
                 let state: tauri::State<commands::AppState> = app.state();
@@ -249,11 +256,7 @@ pub fn run() {
             commands::get_agent_runtime_settings,
             commands::set_agent_runtime_overrides,
             commands::refresh_agent_runtime_options,
-            commands::assistant_send,
-            commands::assistant_messages,
-            commands::assistant_config_get,
-            commands::assistant_config_set,
-            commands::assistant_execute_action,
+            commands::assistant_workspace,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

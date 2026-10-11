@@ -1512,6 +1512,7 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
+            "builtin_assistant",
             "kind",
             "project",
             "remote_url",

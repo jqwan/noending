@@ -7,6 +7,8 @@
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
 //! cwd, runtime, Owner) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
+//! Assistant sessions use ordinary directory instructions; only the CLI file
+//! transport directory is additionally writable for sandboxed agents.
 //!
 //! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
@@ -481,7 +483,9 @@ impl SessionLauncher {
 
         // Preview = Launch: the argv comes from the frozen intent, not from
         // whatever Settings holds right now.
-        let runtime_opts = prepared.runtime.exec_options();
+        let mut runtime_opts = prepared.runtime.exec_options();
+        runtime_opts.writable_directories =
+            crate::assistant::cli_writable_directories(&self.runtime_dir, prepared.cwd.as_deref());
 
         if prepared.mode == "new" {
             if let Some(owner) = prepared.owner_workstream_id.as_deref() {
@@ -497,7 +501,6 @@ impl SessionLauncher {
             // discovered session by exact match. codex / agy generate their
             // own ids, so they remain unbound until a trustworthy native
             // identity is available; discovery never guesses from messages.
-            let mut runtime_opts = prepared.runtime.exec_options();
             let expected_root_session_id =
                 adapter.supports_prespecified_session_id().then(|| new_id());
             runtime_opts.root_session_id = expected_root_session_id.clone();

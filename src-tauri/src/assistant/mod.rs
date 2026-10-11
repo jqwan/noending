@@ -1,286 +1,102 @@
-//! Workspace Assistant — Interactive Mode.
-//!
-//! The assistant's intelligence runs through the user's own agent CLI in
-//! headless mode (codex exec / claude -p / pi -p), fed with a retrieval
-//! snapshot from the same Domain API the background sync uses. Proposed
-//! write-actions come back as a fenced `noending-action` JSON block that
-//! the UI must confirm before execution (policy: 技术实现).
-
+//! Built-in path-backed Assistant project. Native Agent sessions own conversation
+//! history; NoEnding supplies directory instructions and CLI access.
+use crate::{
+    domain::Project,
+    error::{other, Result},
+    storage::Db,
+    workspace::{home::NoEndingHome, wiring::WorkspaceLayer},
+};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::error::{other, Result};
-use crate::storage::{AssistantMessageRow, Db};
-use crate::sync::extractor::CliExtractor;
+static FILE_PREPARATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct ActionProposal {
-    pub action: String, // launch_new_session | resume_session
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// The single Owner Workstream for a new Session, or none.
-    #[serde(default)]
-    pub owner_workstream_id: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
+const SKILL: &str = include_str!("../../skills/noending-assistant/SKILL.md");
+const CLI_DOC: &str = include_str!("../../../docs/cli.md");
+const ENTRY: &str = "<!-- NoEnding managed assistant entry -->\n# 助手工作目录\n\n此目录承载 NoEnding 内置助手的原生 Agent 会话。开始工作前读取 skills/noending-assistant/SKILL.md 和 USER.md；使用 bin/ne（Windows 为 bin/ne.cmd）查询或编辑工作区；临时产物放 tmp/，自行使用唯一文件名。操作对象由用户消息明确，必要时通过 CLI 查询确认。用户自定义要求写在 USER.md，应用更新会保留它。\n";
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AssistantReply {
-    pub session_id: String,
-    pub content: String,
-    pub action: Option<ActionProposal>,
-    pub runtime: String,
+pub struct AssistantWorkspace {
+    pub project: Project,
+    pub directory: String,
+}
+pub fn directory(home: &NoEndingHome) -> PathBuf {
+    home.root.join("assistant")
 }
 
-const ACTION_FENCE_BEGIN: &str = "```noending-action";
-const ACTION_FENCE_END: &str = "```";
-
-fn split_action(text: &str) -> (String, Option<ActionProposal>) {
-    if let Some(start) = text.find(ACTION_FENCE_BEGIN) {
-        let after = &text[start + ACTION_FENCE_BEGIN.len()..];
-        if let Some(end) = after.find(ACTION_FENCE_END) {
-            let json = after[..end].trim();
-            let content = format!(
-                "{}{}",
-                &text[..start],
-                &after[end + ACTION_FENCE_END.len()..]
-            )
-            .trim()
-            .to_string();
-            match serde_json::from_str::<ActionProposal>(json) {
-                Ok(a) => return (content, Some(a)),
-                Err(e) => {
-                    eprintln!("[assistant] action parse failed: {}", e);
-                    return (text.trim().to_string(), None);
-                }
-            }
-        }
+fn write_managed(path: &Path, text: &str) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_file()) {
+        return Err(other(format!("助手文件不是普通文件：{}", path.display())));
     }
-    (text.trim().to_string(), None)
+    if std::fs::read_to_string(path).ok().as_deref() != Some(text) {
+        std::fs::write(path, text)?;
+    }
+    Ok(())
 }
-
-const SYSTEM_INSTRUCTIONS: &str = r#"你是 NoEnding 的 Workspace Assistant。NoEnding 是一个以 Workstream Context 为核心的本地多 Agent 工作空间：Project 是 WorkspacePath 的物理聚合（描述这次执行在哪个目录 / 仓库），Workstream 是跨目录、跨 Project 的持续工作目标，保存当前 Markdown 摘要，Session 是 Codex / Claude Code / Pi 的一次实际执行，最多属于一个 Workstream（Owner）。
-
-规则：
-1. 基于下方「领域快照」回答用户问题，语言跟随用户；找不到就说找不到，不要编造；
-2. 只做只读分析。如果用户的意图需要执行写操作（启动会话 / 恢复会话），不要描述执行过程，而是在回复末尾输出一个动作块：
-```noending-action
-{"action":"launch_new_session","agent":"claude_code","owner_workstream_id":"<id>","cwd":"/可选"}
-```
-或
-{"action":"resume_session","session_id":"<id>"}
-3. action/agent 取值只能用快照里给出的 id 和 codex/claude_code/pi；
-4. 保持简洁克制，不使用夸张营销语言。"#;
-
-fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
-    let mut snap = String::new();
-
-    snap.push_str("== Workstreams ==\n");
-    for w in db.list_workstreams(None)?.into_iter().take(20) {
-        snap.push_str(&format!(
-            "- id={} | {} | visibility={} | {}\n",
-            w.id,
-            w.title,
-            w.visibility,
-            if w.description.is_empty() {
-                ""
-            } else {
-                &w.description
-            }
-        ));
-        let context = db.get_workstream_context_state(&w.id)?;
-        if !context.summary.is_empty() {
-            snap.push_str(&format!("摘要：{}\n", context.summary));
-        }
+/// Install only managed resources; preserve USER.md and arbitrary user files.
+pub fn prepare_files(home: &NoEndingHome) -> Result<()> {
+    let _files = FILE_PREPARATION
+        .lock()
+        .map_err(|_| other("助手资源准备被中断，请重试"))?;
+    let root = directory(home);
+    let references = root.join("skills/noending-assistant/references");
+    std::fs::create_dir_all(&references)?;
+    std::fs::create_dir_all(root.join("tmp"))?;
+    write_managed(&root.join("AGENTS.md"), ENTRY)?;
+    write_managed(&root.join("CLAUDE.md"), "<!-- NoEnding managed assistant entry -->\n读取 AGENTS.md，并按它加载助手说明和用户自定义要求。\n")?;
+    write_managed(&root.join("skills/noending-assistant/SKILL.md"), SKILL)?;
+    write_managed(&references.join("cli.md"), CLI_DOC)?;
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(root.join("USER.md"))
+    {
+        Ok(mut file) => file.write_all(b"# Assistant instructions\n\n")?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
     }
-
-    snap.push_str("\n== 相关检索命中 ==\n");
-    let hits = crate::search::search(db, query, 8)?;
-    if hits.is_empty() {
-        snap.push_str("(none)\n");
-    }
-    for h in &hits {
-        snap.push_str(&format!(
-            "- [{}] {} | parent={}\n",
-            h.kind, h.title, h.parent_id
-        ));
-    }
-
-    Ok(snap)
+    crate::cli::install_workspace_entry(
+        &root.join("bin"),
+        &home.runtime_dir.join("cli.json"),
+        &crate::cli::executable()?,
+    )
+    .map_err(|e| other(e.to_string()))?;
+    Ok(())
 }
-
-fn build_conversation_history(msgs: &[AssistantMessageRow]) -> String {
-    let start = msgs.len().saturating_sub(6);
-    let mut out = String::new();
-    for m in &msgs[start..] {
-        out.push_str(&format!(
-            "{}: {}\n",
-            if m.role == "user" {
-                "用户"
-            } else {
-                "Assistant"
-            },
-            crate::adapters::truncate_text(&m.content, 500)
-        ));
-    }
-    out
+pub fn ensure_workspace(
+    db: &Db,
+    home: &NoEndingHome,
+    layer: &WorkspaceLayer,
+) -> Result<AssistantWorkspace> {
+    prepare_files(home)?;
+    let root = directory(home).to_string_lossy().to_string();
+    let projection = layer.projection();
+    let observation = projection.observer().observe(&root);
+    let path =
+        crate::workspace::project::ensure_workspace_path(db, &observation, projection.policy())?;
+    let project = db
+        .get_project(&path.project_id)?
+        .ok_or_else(|| other("助手项目未注册"))?;
+    db.set_setting("builtin.assistant.project_id", &project.id)?;
+    Ok(AssistantWorkspace {
+        project,
+        directory: root.clone(),
+    })
 }
-
-/// `runtime/` is ephemeral and may have been cleaned since startup, so the
-/// exec cwd must exist before the child spawns into it.
-fn ensure_exec_cwd(cwd: &Path) -> Result<()> {
-    std::fs::create_dir_all(cwd)
-        .map_err(|e| other(format!("无法创建助手工作目录 {}: {}", cwd.display(), e)))
-}
-
-pub struct AssistantService;
-
-impl AssistantService {
-    /// One interactive turn: retrieve → CLI headless call → parse action.
-    ///
-    /// `exec_cwd` is the fixed working directory every headless call runs in
-    /// (the Home's `runtime/assistant`); adapters keep `cwd: None` because
-    /// their other headless caller, the Context extractor, must stay cwd-less.
-    pub fn chat(
-        db: &Db,
-        session_id: Option<&str>,
-        user_text: &str,
-        exec_cwd: &Path,
-    ) -> Result<AssistantReply> {
-        let user_text = user_text.trim();
-        if user_text.is_empty() {
-            return Err(other("消息不能为空"));
-        }
-        let sid = db.ensure_assistant_session(session_id)?;
-        db.insert_assistant_message(&sid, "user", user_text, None, None)?;
-
-        let history = build_conversation_history(&db.list_assistant_messages(&sid, 50)?);
-        let snapshot = build_domain_snapshot(db, user_text)?;
-        let prompt = format!(
-            "{sys}\n\n== 领域快照 ==\n{snap}\n\n== 对话历史 ==\n{hist}\n\n用户: {q}",
-            sys = SYSTEM_INSTRUCTIONS,
-            snap = snapshot,
-            hist = history,
-            q = user_text
-        );
-
-        let (content, runtime) = match CliExtractor::try_from_settings(db)? {
-            Some(cli) if crate::adapters::adapter_for(cli.agent).detect().is_some() => {
-                ensure_exec_cwd(exec_cwd)?;
-                let install = crate::platform::exec_resolver::resolve(cli.agent)?;
-                let adapter = crate::adapters::adapter_for(cli.agent);
-                let mut cmd = adapter.build_exec_command(&install, &cli.opts, &prompt)?;
-                cmd.cwd = Some(exec_cwd.to_path_buf());
-                let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
-                let text = crate::platform::exec_runner::clean_exec_stdout(&out.stdout);
-                if text.is_empty() {
-                    (
-                        "（模型返回为空，请重试，或到 Settings → Agents 调整该 Agent 的 Runtime。）".to_string(),
-                        "empty".to_string(),
-                    )
-                } else {
-                    (text, cli.name())
-                }
-            }
-            _ => {
-                // no LLM configured: fall back to pure retrieval answer
-                let hits = crate::search::search(db, user_text, 8)?;
-                let text = if hits.is_empty() {
-                    "尚未选择助手的 Agent，或该 Agent CLI 未安装，且检索没有命中。请在 Settings → Agents 配置。".to_string()
-                } else {
-                    format!(
-                        "尚未选择助手的 Agent（或该 Agent CLI 未安装），以下是通过检索找到的相关内容：\n{}",
-                        hits.iter()
-                            .map(|h| format!(
-                                "- [{}] {}",
-                                h.kind,
-                                crate::adapters::truncate_text(&h.title, 80)
-                            ))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )
-                };
-                (text, "retrieval-only".to_string())
-            }
-        };
-
-        let (content, action) = split_action(&content);
-        let action_json = action
-            .as_ref()
-            .map(|a| serde_json::to_string(a).unwrap_or_default());
-        db.insert_assistant_message(
-            &sid,
-            "assistant",
-            &content,
-            action_json.as_deref(),
-            Some(&runtime),
-        )?;
-
-        Ok(AssistantReply {
-            session_id: sid,
-            content,
-            action,
-            runtime,
-        })
+/// Codex sandbox needs file IPC access outside the working directory. Ordinary
+/// launches keep their existing permissions; no per-conversation state is created.
+pub fn cli_writable_directories(runtime: &Path, cwd: Option<&str>) -> Vec<String> {
+    let Some(parent) = runtime.parent() else {
+        return Vec::new();
+    };
+    let Some(home) = NoEndingHome::new(&parent.to_string_lossy(), None) else {
+        return Vec::new();
+    };
+    let root = directory(&home);
+    if cwd.is_some_and(|cwd| crate::workspace::identity::is_within(cwd, &root.to_string_lossy())) {
+        vec![runtime.join("cli").to_string_lossy().into_owned()]
+    } else {
+        Vec::new()
     }
-
-    /// Execute a user-confirmed action proposal via the Session Launcher.
-    ///
-    /// The launcher and the tier-3 [`crate::launcher::LaunchWorkspace`] are
-    /// injected rather than built here: an Assistant launch must resolve its
-    /// directory through the same Home the New Session modal previewed, and
-    /// `NoEnding Home` is a fact only the command layer holds.
-    pub fn execute_action(
-        db: &Db,
-        action: &ActionProposal,
-        launcher: &crate::launcher::SessionLauncher,
-        workspace: &crate::launcher::LaunchWorkspace,
-    ) -> Result<serde_json::Value> {
-        match action.action.as_str() {
-            "launch_new_session" => {
-                let agent = action
-                    .agent
-                    .as_deref()
-                    .and_then(crate::domain::Agent::parse)
-                    .ok_or_else(|| other("动作缺少有效 agent"))?;
-                let r = launcher.new_session_in(
-                    db,
-                    agent,
-                    action.owner_workstream_id.as_deref(),
-                    action.cwd.as_deref(),
-                    workspace,
-                )?;
-                Ok(
-                    serde_json::json!({ "ok": true, "kind": "launch", "launched_via": r.launched_via, "note": r.note }),
-                )
-            }
-            "resume_session" => {
-                let sid = action
-                    .session_id
-                    .as_deref()
-                    .ok_or_else(|| other("动作缺少 session_id"))?;
-                let r = launcher.resume_session_in(db, sid, workspace)?;
-                Ok(
-                    serde_json::json!({ "ok": true, "kind": "resume", "launched_via": r.launched_via, "note": r.note }),
-                )
-            }
-            other_action => Err(other(format!("未知动作: {}", other_action))),
-        }
-    }
-}
-
-/// Convenience for tests / debugging: run a bare prompt through the
-/// configured assistant CLI and return cleaned stdout.
-#[allow(dead_code)]
-pub fn raw_prompt(db: &Db, prompt: &str) -> Result<String> {
-    let cli = CliExtractor::try_from_settings(db)?
-        .ok_or_else(|| other("助手未选择 Agent（Settings → Agents 配置 Runtime）"))?;
-    let install = crate::platform::exec_resolver::resolve(cli.agent)?;
-    let adapter = crate::adapters::adapter_for(cli.agent);
-    let cmd = adapter.build_exec_command(&install, &cli.opts, prompt)?;
-    let out = crate::platform::exec_runner::run_headless(&cmd, 180)?;
-    Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
 }

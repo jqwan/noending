@@ -86,6 +86,9 @@ pub trait WorkspacePolicy {
     fn default_workspace(&self) -> Option<String> {
         None
     }
+    fn assistant_workspace(&self) -> Option<String> {
+        None
+    }
     /// Is this directory actually on this machine right now?
     ///
     /// Existence is an *observation*, and this layer never reads the
@@ -104,6 +107,11 @@ pub struct UnrestrictedWorkspace;
 /// takes priority; callers apply this only after ruling out a Git identity.
 pub fn chat_bucket_label(canonical: &str, policy: &dyn WorkspacePolicy) -> Option<&'static str> {
     if policy
+        .assistant_workspace()
+        .is_some_and(|root| is_within(canonical, &root))
+    {
+        Some("NoEnding Assistant")
+    } else if policy
         .default_workspace()
         .is_some_and(|root| is_within(canonical, &root))
     {
@@ -320,7 +328,8 @@ pub fn ensure_workspace_path_conn(
                     // everything else becomes its own path-backed Project.
                     match chat_bucket_label(&canonical, policy) {
                         Some(label) => {
-                            app_chat_bucket_project(conn, label, &canonical, &mut effect)?.id
+                            app_chat_bucket_project(conn, label, &canonical, policy, &mut effect)?
+                                .id
                         }
                         None => create_project_row(conn, &canonical, None, &mut effect)?.id,
                     }
@@ -678,8 +687,18 @@ fn app_chat_bucket_project(
     conn: &Connection,
     label: &str,
     seed_path: &str,
+    policy: &dyn WorkspacePolicy,
     effect: &mut ProjectionEffect,
 ) -> Result<Project> {
+    if label == "NoEnding Assistant" {
+        if let Some(root) = policy.assistant_workspace() {
+            if let Some(path) = get_workspace_path_conn(conn, &path_identity(&root))? {
+                if let Some(project) = get_project_conn(conn, &path.project_id)? {
+                    return Ok(project);
+                }
+            }
+        }
+    }
     if let Some(existing) = find_chat_bucket_project_conn(conn, label)? {
         return Ok(existing);
     }
@@ -919,6 +938,13 @@ pub fn gc_unreferenced_workspace_paths_conn(
     path_ids: &[String],
 ) -> Result<GcOutcome> {
     let mut outcome = GcOutcome::default();
+    let assistant_project: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'builtin.assistant.project_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     for path_id in path_ids {
         let Some(path) = get_workspace_path_conn(conn, path_id)? else {
             continue; // already gone; a replay must not fail
@@ -927,7 +953,8 @@ pub fn gc_unreferenced_workspace_paths_conn(
             continue;
         }
         if path.exists
-            && get_project_conn(conn, &path.project_id)?.is_some_and(|p| p.git_id.is_some())
+            && (assistant_project.as_deref() == Some(path.project_id.as_str())
+                || get_project_conn(conn, &path.project_id)?.is_some_and(|p| p.git_id.is_some()))
         {
             continue;
         }
@@ -1129,6 +1156,7 @@ pub struct ProjectWorkstream {
 pub struct ProjectDetail {
     pub project: Project,
     pub kind: ProjectKind,
+    pub builtin_assistant: bool,
     pub workspace_paths: Vec<WorkspacePath>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<Session>,
@@ -1176,7 +1204,15 @@ pub fn project_detail(
         }
         None => None,
     };
+    let builtin_assistant = is_assistant_project(
+        &workspace_paths
+            .iter()
+            .map(|p| p.canonical_path.clone())
+            .collect::<Vec<_>>(),
+        policy,
+    );
     Ok(Some(ProjectDetail {
+        builtin_assistant,
         project,
         kind,
         workspace_paths,
@@ -1369,4 +1405,10 @@ mod tests {
         assert_eq!(pick_canonical(&plain, &same_age).0.id, "a");
         assert_eq!(pick_canonical(&same_age, &plain).0.id, "a");
     }
+}
+
+pub fn is_assistant_project(paths: &[String], policy: &dyn WorkspacePolicy) -> bool {
+    policy
+        .assistant_workspace()
+        .is_some_and(|root| paths.iter().any(|p| is_within(p, &root)))
 }

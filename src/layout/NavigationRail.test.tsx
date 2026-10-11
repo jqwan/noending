@@ -88,3 +88,20 @@ it("sanitizes modal actions when remembering last route", () => {
   fireEvent.click(screen.getByRole("button", { name: "任务" }));
   expect(navigate).toHaveBeenCalledWith({ view: "workstreams" });
 });
+
+it("remembers assistant and ordinary session pages independently", () => {
+  const navigate = vi.fn();
+  const ordinary: Route = { view: "session", sessionId: "regular" };
+  const assistant: Route = { view: "terminal", terminalId: "assistant-terminal", assistant: true };
+  const { rerender } = render(<NavigationRail route={ordinary} navigate={navigate} />);
+  rerender(<NavigationRail route={assistant} navigate={navigate} />);
+  expect(screen.getByRole("button", { name: "助手" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(navigate).toHaveBeenLastCalledWith(ordinary);
+  fireEvent.click(screen.getByRole("button", { name: "助手" }));
+  expect(navigate).toHaveBeenLastCalledWith({ view: "sessions", assistant: true });
+  rerender(<NavigationRail route={{ view: "projects" }} navigate={navigate} />);
+  fireEvent.click(screen.getByRole("button", { name: "助手" }));
+  expect(navigate).toHaveBeenLastCalledWith(assistant);
+});

@@ -2,12 +2,6 @@
 use noending::adapters::ExecOptions;
 use noending::domain::Agent;
 use noending::platform::exec_runner::{clean_exec_stdout, run_headless};
-use noending::storage::{new_id, Db};
-fn temp_db() -> Db {
-    let dir = std::env::temp_dir().join(format!("noending-llm-test-{}", new_id()));
-    Db::open(&dir.join("test.db")).expect("temp db")
-}
-
 // Real-model smoke tests (#[ignore]: need the authenticated agent CLIs)
 
 #[test]
@@ -36,47 +30,84 @@ fn real_pi_local_qwen_headless() {
     );
 }
 
-#[test]
-#[ignore = "requires installed, authenticated Codex CLI and a model call"]
-fn real_codex_assistant_chat_roundtrip() {
-    let db = temp_db();
-    assert!(
-        noending::adapters::adapter_for(Agent::Codex)
-            .detect()
-            .is_some(),
-        "Codex CLI required"
-    );
-    db.set_setting("assistant.agent", "codex").unwrap();
-    let ws = noending::domain::Workstream {
-        id: "ws-chat-1".into(),
-        title: "NoEnding 品牌".into(),
-        description: "整理品牌视觉与文案".into(),
-        visibility: "normal".into(),
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    db.upsert_workstream(&ws).unwrap();
+struct AssistantFixture {
+    root: std::path::PathBuf,
+    server: Option<noending::cli::Server>,
+    db: Option<std::sync::Arc<noending::storage::Db>>,
+}
+impl Drop for AssistantFixture {
+    fn drop(&mut self) {
+        drop(self.server.take());
+        drop(self.db.take());
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
-    let reply = noending::assistant::AssistantService::chat(
-        &db,
-        None,
-        "现在有哪些 Workstream？用一句话概括。",
-        &std::env::temp_dir().join("noending-assistant"),
+#[test]
+#[ignore = "requires installed, authenticated Codex CLI, gpt-6-luna and a model call"]
+fn real_codex_assistant_queries_workspace_through_cli() {
+    use noending::{
+        assistant, cli,
+        storage::{new_id, now, Db},
+        workspace::{home::NoEndingHome, wiring::WorkspaceLayer},
+    };
+    let root = std::env::temp_dir().join(format!("noending-live-assistant-{}", new_id()));
+    let home = NoEndingHome::new(root.to_str().unwrap(), None).unwrap();
+    home.ensure_dirs().unwrap();
+    let db = std::sync::Arc::new(Db::open(&home.db_path).unwrap());
+    let layer = std::sync::Arc::new(WorkspaceLayer::new(&home));
+    let mut fixture = AssistantFixture {
+        root,
+        server: None,
+        db: Some(db.clone()),
+    };
+    let task_id = new_id();
+    let task_title = format!("隔离助手测试-{}", new_id());
+    db.upsert_workstream(&noending::domain::Workstream {
+        id: task_id.clone(),
+        title: task_title.clone(),
+        description: "仅用于 CLI 查询验证".into(),
+        visibility: "normal".into(),
+        created_at: now(),
+        updated_at: now(),
+    })
+    .unwrap();
+    fixture.server = Some(cli::start(db.clone(), home.clone(), layer.clone(), || {}).unwrap());
+    let workspace = assistant::ensure_workspace(&db, &home, &layer).unwrap();
+    cli::install_workspace_entry(
+        &std::path::Path::new(&workspace.directory).join("bin"),
+        &home.runtime_dir.join("cli.json"),
+        std::path::Path::new(env!("CARGO_BIN_EXE_ne")),
     )
-    .expect("assistant chat should succeed");
-    println!("assistant: {} [runtime={}]", reply.content, reply.runtime);
+    .unwrap();
+    let install =
+        noending::platform::exec_resolver::resolve(Agent::Codex).expect("Codex CLI required");
+    let command = noending::adapters::adapter_for(Agent::Codex)
+        .build_context_extraction_command(
+            &install,
+            &ExecOptions {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("high".into()),
+                writable_directories: assistant::cli_writable_directories(
+                    &home.runtime_dir,
+                    Some(&workspace.directory),
+                ),
+                ..Default::default()
+            },
+            "查询整个工作区当前的任务，只回复查到的任务标题与任务 ID。不要直接访问数据库。",
+            std::path::Path::new(&workspace.directory),
+        )
+        .unwrap();
+    let output = run_headless(&command, 180).expect("Codex query");
+    let answer = clean_exec_stdout(&output.stdout);
+    println!("Assistant fixture answer: {answer}");
     assert!(
-        reply.runtime.starts_with("cli:codex:"),
-        "unexpected fallback: {}",
-        reply.runtime
-    );
-    assert!(!reply.content.is_empty());
-    assert!(
-        reply.content.contains("品牌") || reply.content.contains("Workstream"),
-        "answer should reference the workstream list"
+        answer.contains(&task_id),
+        "must retrieve the unpredictable task ID through CLI: {answer}"
     );
     assert!(
-        reply.action.is_none(),
-        "a read-only question must not propose actions"
+        answer.contains(&task_title),
+        "must retrieve the unpredictable task title through CLI: {answer}"
     );
+    drop(db);
 }

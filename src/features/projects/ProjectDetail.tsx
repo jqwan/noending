@@ -213,12 +213,12 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <section className="rail-section">
         <div className="rail-head">
           <div className="section-label" style={{ margin: 0 }}>会话</div>
-          {!isChatDirectoryProject({ ...detail.project, kind: detail.kind }) && (
+          {(detail.builtin_assistant || !isChatDirectoryProject({ ...detail.project, kind: detail.kind })) && (
             <button
               className="btn ghost icon-button"
               title="新建会话"
               aria-label="新建会话"
-              onClick={() => navigate({ view: "new-session", projectId: project.id })}
+              onClick={() => navigate(detail.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: project.id })}
             >
               <Icon name="plus" />
             </button>
@@ -236,7 +236,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         <div className="section-label">属性</div>
         <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span className={`badge ${detail.kind === "git" ? "accent" : ""}`}>
-            {projectKindLabels[detail.kind]}
+            {detail.builtin_assistant ? "内置助手" : projectKindLabels[detail.kind]}
           </span>
           {project.name_customized && <span className="small muted">自定义名称</span>}
         </div>

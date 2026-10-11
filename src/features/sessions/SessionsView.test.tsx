@@ -149,3 +149,19 @@ it("renders divider between scope switcher and action buttons in header", async 
   expect(scopeGroup.compareDocumentPosition(divider!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(divider!.compareDocumentPosition(newBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
+
+it("assistant delete-all only removes archived sessions in the host project", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ id: "assistant-archived", title: "归档助手", project_id: "assistant-project", workspace_path_id: "assistant-path", archived_at: "2026-10-11" }),
+    session({ id: "regular-archived", title: "归档普通会话", project_id: "regular-project", workspace_path_id: "regular-path", archived_at: "2026-10-11" }),
+  ]);
+  vi.mocked(api.permanentlyDeleteSession).mockReset().mockResolvedValue({ purged: true } as never);
+  await act(async () => { render(<SessionsView navigate={navigate} scope="archived" assistantMode assistantProjectId="assistant-project" />); });
+  await screen.findByText("归档助手");
+  expect(screen.queryByText("归档普通会话")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "删除全部" }));
+  const buttons = screen.getAllByRole("button", { name: "删除全部" });
+  await act(async () => { fireEvent.click(buttons[buttons.length - 1]); });
+  expect(api.permanentlyDeleteSession).toHaveBeenCalledTimes(1);
+  expect(api.permanentlyDeleteSession).toHaveBeenCalledWith("assistant-archived");
+});

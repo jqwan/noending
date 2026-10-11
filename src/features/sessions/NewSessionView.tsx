@@ -13,6 +13,7 @@ import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
 import { ellipsisPathMiddle } from "./SessionTable";
 import {
   AGENT_LABELS,
+  type AssistantWorkspace,
   type Agent,
   type AgentStatusEntry,
   type AgentRuntimeOverrides,
@@ -32,6 +33,7 @@ export type NewSessionViewProps = {
   /** 预置选中的项目 ID；省略或 "none" = 未归属项目，使用默认工作目录。 */
   projectId?: string | null;
   navigate: (r: Route) => void;
+  assistantWorkspace?: AssistantWorkspace;
 };
 
 const STANDALONE = "none";
@@ -45,7 +47,9 @@ export default function NewSessionView({
   agent: initialAgent,
   projectId: initialProjectId,
   navigate,
+  assistantWorkspace,
 }: NewSessionViewProps) {
+  const allowedAgents = CLI_AGENTS;
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
   const [ownerWorkstreamId, setOwnerWorkstreamId] = useState(
@@ -56,7 +60,7 @@ export default function NewSessionView({
   );
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
-    if (initialAgent && CLI_AGENTS.includes(initialAgent)) {
+    if (initialAgent && allowedAgents.includes(initialAgent)) {
       return initialAgent;
     }
     return "codex";
@@ -115,35 +119,37 @@ export default function NewSessionView({
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .listWorkstreamCards()
-      .then((ws) => {
-        if (!cancelled) {
-          const normal = ws.filter((w) => w.visibility === "normal");
-          setWorkstreams(normal);
-          if ((!initialProjectId || initialProjectId === UNASSIGNED_PROJECT) && workstreamId && workstreamId !== STANDALONE) {
-            const targetWs = normal.find((w) => w.id === workstreamId);
-            if (targetWs?.projects.length === 1) {
-              setSelectedProjectId(targetWs.projects[0].id);
+    if (!assistantWorkspace) {
+      api
+        .listWorkstreamCards()
+        .then((ws) => {
+          if (!cancelled) {
+            const normal = ws.filter((w) => w.visibility === "normal");
+            setWorkstreams(normal);
+            if ((!initialProjectId || initialProjectId === UNASSIGNED_PROJECT) && workstreamId && workstreamId !== STANDALONE) {
+              const targetWs = normal.find((w) => w.id === workstreamId);
+              if (targetWs?.projects.length === 1) {
+                setSelectedProjectId(targetWs.projects[0].id);
+              }
             }
           }
-        }
-      })
-      .catch(console.error);
+        })
+        .catch(console.error);
 
-    api
-      .listProjectCards()
-      .then((cards) => {
-        if (!cancelled) setProjects(cards);
-      })
-      .catch(console.error);
+      api
+        .listProjectCards()
+        .then((cards) => {
+          if (!cancelled) setProjects(cards);
+        })
+        .catch(console.error);
+    }
 
     api
       .getAgentStatus()
       .then((status) => { if (!cancelled) setAgentStatus(status); })
       .catch(console.error);
 
-    api
+    if (!assistantWorkspace) api
       .getWorkspaceSettings?.()
       ?.then((s) => {
         if (!cancelled && s?.default_workspace) {
@@ -156,22 +162,22 @@ export default function NewSessionView({
       api
         .getDefaultAgent()
         .then((def) => {
-          if (!cancelled && !agentChanged.current && def && CLI_AGENTS.includes(def)) {
+          if (!cancelled && !agentChanged.current && def && allowedAgents.includes(def)) {
             setSelectedAgent(def);
           }
         })
         .catch(console.error);
     }
     return () => { cancelled = true; };
-  }, [initialAgent, workstreamId, initialProjectId]);
+  }, [initialAgent, workstreamId, initialProjectId, assistantWorkspace]);
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
-        (a) => agentStatus[a]?.terminal_cli && agentStatus[a]?.launch_enabled
+        (a) => allowedAgents.includes(a) && agentStatus[a]?.terminal_cli && agentStatus[a]?.launch_enabled
       )
-    : CLI_AGENTS;
+    : allowedAgents;
 
-  const agentAvailable = !agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.launch_enabled);
+  const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.launch_enabled));
   useEffect(() => {
     if (agentStatus && !agentAvailable && cliAgents.length) {
       setSelectedAgent(cliAgents[0]);
@@ -229,9 +235,9 @@ export default function NewSessionView({
   }, [probeTarget, selectedProject?.kind, dirGitStates]);
 
   // 未归属项目由后端解析当前默认工作目录，与任务关联保持独立。
-  const launchCwd = isUnassignedProject
+  const launchCwd = assistantWorkspace?.directory ?? (isUnassignedProject
     ? undefined
-    : projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
+    : projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0]);
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!selectedAgent || !agentAvailable) return null;
@@ -320,7 +326,7 @@ export default function NewSessionView({
     setError("");
     try {
       const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
-      const r = launchRuntime ? await api.launchEmbeddedNew(selectedAgent, ownerId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
+      const r = assistantWorkspace ? await api.launchEmbeddedNew(selectedAgent, null, launchCwd, message, launchRuntime) : launchRuntime ? await api.launchEmbeddedNew(selectedAgent, ownerId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
         selectedAgent,
         ownerId,
         launchCwd,
@@ -328,7 +334,7 @@ export default function NewSessionView({
       );
       announceLaunch("启动", r);
       if (r.terminal_id) {
-        navigate({ view: "terminal", terminalId: r.terminal_id });
+        navigate({ view: "terminal", terminalId: r.terminal_id, ...(assistantWorkspace ? { assistant: true } : {}) });
       } else {
         throw new Error("未返回新会话终端");
       }
@@ -350,7 +356,7 @@ export default function NewSessionView({
 
   const projectLabel = isUnassignedProject ? "无项目" : (selectedProject?.name ?? "无项目");
 
-  const currentDir = isUnassignedProject ? defaultWorkspace : launchCwd || "";
+  const currentDir = assistantWorkspace?.directory ?? (isUnassignedProject ? defaultWorkspace : launchCwd || "");
   const dirLabel = useMemo(() => {
     if (!currentDir) return "默认工作目录";
     return ellipsisPathMiddle(currentDir, 42);
@@ -369,12 +375,18 @@ export default function NewSessionView({
         <div className="new-session-heading">
           <div className="new-session-heading-title">
             <SidebarLogo size={36} />
-            <h1 id="new-session-title">开启新会话</h1>
+            <h1 id="new-session-title">{assistantWorkspace ? "新助手会话" : "开启新会话"}</h1>
           </div>
-          <p className="new-session-subtitle">选择目标任务与执行项目，立即启动 Agent 展开工作</p>
+          <p className="new-session-subtitle">{assistantWorkspace ? "查询工作区资料，整理摘要与偏好，管理项目、任务和会话" : "选择目标任务与执行项目，立即启动 Agent 展开工作"}</p>
         </div>
 
         <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
+          {assistantWorkspace ? <div className="new-session-context">
+            <button type="button" className="btn small ghost" title="打开助手目录；自定义说明写在 USER.md" onClick={() => {
+              void api.openPath(assistantWorkspace.directory).catch(reason => showToast(`无法打开助手目录：${String(reason)}`));
+            }}><Icon name="folder" />{assistantWorkspace.project.name}</button>
+          </div> : (
+
           <div className="new-session-context">
             <div
               className={`new-session-picker new-session-task has-custom-menu${taskMenuOpen ? " open" : ""}`}
@@ -678,6 +690,7 @@ export default function NewSessionView({
               );
             })()}
           </div>
+          )}
 
           <details className="new-session-runtime" open={runtimeOpen} onToggle={(e) => setRuntimeOpen(e.currentTarget.open)}>
             <summary>模型与推理设置 · {runtimeMode === "native" ? "Agent 默认" : runtimeMode === "custom" ? runtimeOverride.model ?? "单次设置" : "使用代理页设置"}</summary>
@@ -696,11 +709,12 @@ export default function NewSessionView({
             <p className="muted small">仅影响这次新建会话，不修改代理页设置。</p>
           </details>
           {!agentAvailable && <p role="alert">没有启用的新建会话代理，请前往代理设置启用。</p>}
+
           <div className="new-session-composer" aria-busy={busy}>
             <textarea
               autoFocus
               aria-label="首条消息"
-              placeholder="描述你想完成的任务…"
+              placeholder={assistantWorkspace ? "询问资料或描述你想要完成的工作…" : "描述你想完成的任务…"}
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => {

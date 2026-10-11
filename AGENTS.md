@@ -28,7 +28,7 @@ Key areas:
 * `sync/` — synchronization and extraction
 * `context/` — explicit Context update service and read projections
 * `agent_runtime/` — Agent runtime configuration (Agent owns defaults, NoEnding owns overrides)
-* `assistant/` — Workspace Assistant (Interactive Mode, driven through the user's own Agent CLI)
+* `assistant/` — built-in Assistant project, managed capabilities and per-session targets; native Agent sessions reuse the launcher and ingestion
 * `search/` — FTS5 search
 * `launcher/` — New / Resume launch flows
 * `lifecycle/` — session lifecycle

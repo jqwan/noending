@@ -252,6 +252,7 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                   <Icon name="project" />
                   <span>{c.name}</span>
                   <span className="badge">{projectKindLabels[c.kind]}</span>
+                  {c.builtin_assistant && <span className="badge accent">内置助手</span>}
                   {c.missing_path_count > 0 && (
                     <span className="badge warn">{c.missing_path_count} 个目录缺失</span>
                   )}
@@ -274,13 +275,13 @@ export default function ProjectsView({ navigate }: { navigate: (r: Route) => voi
                 )}
               </button>
               <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
-                {!isChatDirectoryProject(c) && (
+                {(c.builtin_assistant || !isChatDirectoryProject(c)) && (
                   <button
                     type="button"
                     className="btn small ghost icon-button"
                     aria-label="新建会话"
                     title="新建会话"
-                    onClick={() => navigate({ view: "new-session", projectId: c.id })}
+                    onClick={() => navigate(c.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: c.id })}
                   >
                     <Icon name="plus" />
                   </button>
@@ -318,6 +319,7 @@ function ProjectCard({ card, navigate }: {
         <div className="ws-card-title" title={card.name}><Icon name="project" />{card.name}</div>
         <div className="ws-card-side">
           <span className="badge">{projectKindLabels[card.kind]}</span>
+          {card.builtin_assistant && <span className="badge accent">内置助手</span>}
           {card.missing_path_count > 0 && (
             <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
           )}
@@ -341,13 +343,13 @@ function ProjectCard({ card, navigate }: {
       <div className="ws-card-meta">
         <span className="muted small">{timeAgo(card.last_activity_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-          {!isChatDirectoryProject(card) && (
+          {(card.builtin_assistant || !isChatDirectoryProject(card)) && (
             <button
               type="button"
               className="btn small ghost icon-button"
               aria-label="新建会话"
               title="新建会话"
-              onClick={() => navigate({ view: "new-session", projectId: card.id })}
+              onClick={() => navigate(card.builtin_assistant ? { view: "assistant" } : { view: "new-session", projectId: card.id })}
             >
               <Icon name="plus" />
             </button>

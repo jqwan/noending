@@ -116,6 +116,7 @@ fn codex_renders_model_and_reasoning_effort() {
         effort: Some("high".into()),
         root_session_id: None,
         initial_message: None,
+        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::Codex, &opts),
@@ -137,6 +138,7 @@ fn claude_renders_model_and_effort() {
         effort: Some("high".into()),
         root_session_id: None,
         initial_message: None,
+        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::ClaudeCode, &opts),
@@ -162,6 +164,7 @@ fn pi_renders_provider_model_and_thinking() {
         effort: Some("low".into()),
         root_session_id: None,
         initial_message: None,
+        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::Pi, &opts),
@@ -193,6 +196,7 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
             effort: None,
             root_session_id: None,
             initial_message: None,
+            writable_directories: Vec::new(),
         },
     );
     assert!(args.iter().any(|a| a == value), "{args:?}");
@@ -312,4 +316,23 @@ fn agents_without_a_cli_refuse_to_build_a_command() {
         // And detection never claims an installation either.
         assert!(adapter_for(agent).detect().is_none(), "{agent:?}");
     }
+}
+
+#[test]
+fn codex_cli_transport_is_writable_on_new_and_resume_without_changing_user_input() {
+    let options = ExecOptions {
+        writable_directories: vec!["/path with spaces/ipc".into()],
+        initial_message: Some("原始首条消息".into()),
+        ..Default::default()
+    };
+    let new = new_args(Agent::Codex, &options);
+    assert_eq!(new.last().unwrap(), "原始首条消息");
+    let resume = resume_args(Agent::Codex, &options);
+    for args in [new, resume.clone()] {
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--add-dir", "/path with spaces/ipc"]));
+    }
+    assert!(!resume.iter().any(|arg| arg == "原始首条消息"));
+    assert!(resume.iter().any(|arg| arg == "agent-session-id"));
 }

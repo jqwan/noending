@@ -7,7 +7,7 @@
 //! This file owns the shared state and helpers the submodules borrow.
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
@@ -56,15 +56,6 @@ fn launcher_for(app: &AppHandle) -> crate::launcher::SessionLauncher {
 fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome> {
     app.try_state::<crate::workspace::home::NoEndingHome>()
         .map(|h| h.inner().clone())
-}
-
-/// The Workspace Assistant's fixed headless exec cwd (`<Home>/runtime/assistant`).
-/// The temp-dir fallback mirrors [`launcher_for`]: a chat turn must not fail
-/// because Home state was never registered.
-fn assistant_exec_cwd(app: &AppHandle) -> std::path::PathBuf {
-    noending_home(app)
-        .map(|h| h.assistant_exec_dir())
-        .unwrap_or_else(|| std::env::temp_dir().join("noending-assistant"))
 }
 
 /// tier 3 — the non-database fact a launch needs.
@@ -1047,73 +1038,16 @@ pub async fn refresh_agent_runtime_options(
 
 // ---------------- Assistant ----------------
 
-/// Async on purpose: the assistant's model call blocks for up to the CLI
-/// timeout, so the body goes through [`run_on_blocking_worker`] and the UI
-/// thread stays responsive (same seam as [`update_session_context`]).
 #[tauri::command]
-pub async fn assistant_send(
+pub async fn assistant_workspace(
     app: AppHandle,
     state: State<'_, AppState>,
-    session_id: Option<String>,
-    text: String,
-) -> Result<crate::assistant::AssistantReply> {
-    let db = state.inner().db.clone();
-    let exec_cwd = assistant_exec_cwd(&app);
-    let reply = run_on_blocking_worker(move || {
-        crate::assistant::AssistantService::chat(&db, session_id.as_deref(), &text, &exec_cwd)
-    })
-    .await
-    .and_then(|reply| reply)?;
-    let _ = app.emit("assistant-reply", &reply);
-    Ok(reply)
-}
-
-#[tauri::command]
-pub fn assistant_messages(
-    state: State<AppState>,
-    session_id: String,
-) -> Result<Vec<crate::storage::AssistantMessageRow>> {
-    with_db(&state, |db| db.list_assistant_messages(&session_id, 200))
-}
-
-#[tauri::command]
-pub fn assistant_config_get(
-    state: State<AppState>,
-) -> Result<crate::sync::extractor::AssistantConfig> {
-    with_db(&state, |db| {
-        Ok(crate::sync::extractor::AssistantConfig::from_settings(db))
-    })
-}
-
-/// The Assistant's only runtime choice is *which* Agent answers; model /
-/// effort 一律沿用 Agent 默认值。
-#[tauri::command]
-pub fn assistant_config_set(state: State<AppState>, agent: String) -> Result<()> {
-    with_db(&state, |db| {
-        if agent != "none" {
-            let parsed = agent_of(&agent)?;
-            // 助手经由 Agent CLI 执行；桌面端 Agent 没有命令行可跑。
-            if !crate::adapters::adapter_for(parsed).has_terminal_cli() {
-                return Err(other("该 Agent 只有桌面端，助手无法调用"));
-            }
-        }
-        crate::sync::extractor::AssistantConfig { agent }.save(db)
-    })
-}
-
-#[tauri::command]
-pub fn assistant_execute_action(
-    app: AppHandle,
-    state: State<AppState>,
-    action_json: String,
-) -> Result<serde_json::Value> {
-    let action: crate::assistant::ActionProposal =
-        serde_json::from_str(&action_json).map_err(|e| other(format!("动作解析失败: {}", e)))?;
-    let launcher = launcher_for(&app);
-    let workspace = launch_workspace(&app);
-    with_db(&state, |db| {
-        crate::assistant::AssistantService::execute_action(db, &action, &launcher, &workspace)
-    })
+    layer: State<'_, std::sync::Arc<crate::workspace::wiring::WorkspaceLayer>>,
+) -> Result<crate::assistant::AssistantWorkspace> {
+    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 未初始化"))?;
+    let db = state.db.clone();
+    let layer = layer.inner().clone();
+    run_on_blocking_worker(move || crate::assistant::ensure_workspace(&db, &home, &layer)).await?
 }
 
 /// The async seam test: the refresh command's blocking CLI probe must run on

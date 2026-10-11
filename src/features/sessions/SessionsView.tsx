@@ -33,12 +33,15 @@ export function clearSessionsCache() {
   cachedWorkstreamTitleById = new Map();
 }
 
-export default function SessionsView({ navigate, scope }: {
+export default function SessionsView({ navigate, scope, assistantMode = false, assistantProjectId }: {
   navigate: (r: Route) => void;
   scope?: SessionScope;
+  assistantMode?: boolean;
+  assistantProjectId?: string;
 }) {
+  const statePrefix = assistantMode ? "assistant.sessions" : "sessions";
   const [archivedMode, setArchivedMode] = useState(scope === "archived");
-  const [sessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
+  const [allSessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
   const [projects, setProjects] = useState<Project[]>(cachedProjects);
   /** Workstream id → 标题：`session.owner_workstream_id` 只有一个 id，名字在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
@@ -46,11 +49,11 @@ export default function SessionsView({ navigate, scope }: {
    *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
   const [sources, setSources] = useState<IngestSource[] | null>(cachedSources);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [query, setQuery] = useViewState("sessions.query", "");
-  const [agent, setAgent] = useViewState<"all" | Agent>("sessions.agent", "all");
-  const [projectId, setProjectId] = useViewState("sessions.projectId", "all");
-  const [wsFilter, setWsFilter] = useViewState("sessions.wsFilter", "all");
-  const [viewMode, setViewMode] = useViewState<"cards" | "list">("sessions.viewMode", "cards");
+  const [query, setQuery] = useViewState(`${statePrefix}.query`, "");
+  const [agent, setAgent] = useViewState<"all" | Agent>(`${statePrefix}.agent`, "all");
+  const [projectId, setProjectId] = useViewState(`${statePrefix}.projectId`, "all");
+  const [wsFilter, setWsFilter] = useViewState(`${statePrefix}.wsFilter`, "all");
+  const [viewMode, setViewMode] = useViewState<"cards" | "list">(`${statePrefix}.viewMode`, "cards");
   const [archiveSessionId, setArchiveSessionId] = useState<string | null>(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [unarchiveBusy, setUnarchiveBusy] = useState(false);
@@ -113,6 +116,8 @@ export default function SessionsView({ navigate, scope }: {
     setSessions(isArchived ? cachedArchivedSessions : cachedNormalSessions);
   }, [scope]);
 
+  const sessions = useMemo(() => allSessions === null ? null : assistantMode ? allSessions.filter(s => assistantProjectId && s.project_id === assistantProjectId) : allSessions, [allSessions, assistantMode, assistantProjectId]);
+
   const projectNameById = useMemo(
     () => new Map(projects.map((p) => [p.id, p.name])),
     [projects],
@@ -130,7 +135,7 @@ export default function SessionsView({ navigate, scope }: {
   }, [sessions, workstreamTitleById]);
 
   const filtersActive =
-    query.trim() !== "" || agent !== "all" || projectId !== "all"
+    query.trim() !== "" || agent !== "all" || (!assistantMode && projectId !== "all")
     || wsFilter !== "all";
 
   const shown = useMemo(() => {
@@ -142,7 +147,7 @@ export default function SessionsView({ navigate, scope }: {
       // 徽章说"历史标签，已不决定任何事"的行不能一边显示成无归属、一边又被筛进来
       // （M34 / M29：一个视图不能两个真相）。
       .filter((s) =>
-        projectId === "all" ? true : projectId === "none"
+        assistantMode || projectId === "all" ? true : projectId === "none"
           ? !s.workspace_path_id || !s.project_id
           : !!s.workspace_path_id && s.project_id === projectId
       )
@@ -175,7 +180,7 @@ export default function SessionsView({ navigate, scope }: {
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById]);
+  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById, assistantMode]);
 
   /** 行内「继续」：直接在会话格式对应的桌面应用里打开（无预览）；格式没有
    *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
@@ -259,8 +264,8 @@ export default function SessionsView({ navigate, scope }: {
    *  来源读不到时退回中性说法，不宣称没被证实的事。 */
   const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
   const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
-  const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
-  const emptyHint = noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
+  const emptyTitle = assistantMode ? "还没有助手会话" : noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
+  const emptyHint = assistantMode ? "新建助手会话，查询或管理工作区资料。" : noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
     ? `来源目录不存在：${missingSourcePath}` : "新建会话，或检查会话来源。";
 
   const loadFailedState = (
@@ -270,12 +275,12 @@ export default function SessionsView({ navigate, scope }: {
     />
   );
 
-  const scrollRef = useViewScroll("sessions.scroll", sessions !== null);
+  const scrollRef = useViewScroll(`${statePrefix}.scroll`, sessions !== null);
 
   return (
     <div className="main board-page" ref={scrollRef}>
       <PageHeader
-        title="会话"
+        title={assistantMode ? "助手会话" : "会话"}
         actions={
           <>
             {/* 两个归档范围共用同一套卡片和列表。 */}
@@ -315,7 +320,7 @@ export default function SessionsView({ navigate, scope }: {
                 className="btn ghost icon-button"
                 aria-label="新建会话"
                 title="新建会话"
-                onClick={() => navigate({ view: "new-session" })}
+                onClick={() => navigate(assistantMode ? { view: "assistant" } : { view: "new-session" })}
               >
                 <Icon name="plus" />
               </button>
@@ -351,7 +356,7 @@ export default function SessionsView({ navigate, scope }: {
                 <option value="unassigned">未归属任务</option>
               </select>
             </label>
-            <label className="ws-control">
+            {!assistantMode && (<label className="ws-control">
               <span className="muted small">项目</span>
               <select
                 value={projectId}
@@ -362,6 +367,7 @@ export default function SessionsView({ navigate, scope }: {
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </label>
+            )}
             {filtersActive && (
               <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
             )}
@@ -424,10 +430,10 @@ export default function SessionsView({ navigate, scope }: {
               hint={archivedMode ? "归档的会话会显示在这里，可以取消归档或永久删除。" : emptyHint}
               actions={!archivedMode ? (
                 <>
-                  <button className="btn small" onClick={() => navigate({ view: "agents" })}>
+                  {!assistantMode && <button className="btn small" onClick={() => navigate({ view: "agents" })}>
                     配置会话来源
-                  </button>
-                  <button className="btn small" onClick={() => navigate({ view: "new-session" })}>新建会话</button>
+                  </button>}
+                  <button className="btn small" onClick={() => navigate(assistantMode ? { view: "assistant" } : { view: "new-session" })}>新建会话</button>
                 </>
               ) : undefined}
             />

@@ -265,3 +265,58 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
     assert!(!success);
     assert_eq!(error["error"]["code"], "app_unavailable");
 }
+
+#[test]
+fn assistant_launchers_use_their_explicit_home_connection_and_literal_arguments() {
+    let f = Fixture::new();
+    let directory = f.root.join("assistant's tools with spaces");
+    cli::install_workspace_entry(
+        &directory,
+        &f.home.runtime_dir.join("cli.json"),
+        Path::new(env!("CARGO_BIN_EXE_ne")),
+    )
+    .unwrap();
+    for name in ["ne", "noending"] {
+        #[cfg(not(windows))]
+        let mut command = Command::new(directory.join(name));
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd.exe");
+            command.args([
+                "/C",
+                directory.join(format!("{name}.cmd")).to_str().unwrap(),
+            ]);
+            command
+        };
+        let output = command
+            .args([
+                "preference",
+                "add",
+                "--scope",
+                "user",
+                "--content",
+                "literal $() `text`\n中文 ' quotes",
+                "--request-id",
+                "assistant-launcher",
+            ])
+            .env("NOENDING_HOME", f.root.join("wrong-home"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["data"]["content"],
+            "literal $() `text`\n中文 ' quotes"
+        );
+    }
+    assert_eq!(
+        noending::storage::preferences::list_items(f.db.as_ref().unwrap(), None)
+            .unwrap()
+            .len(),
+        1
+    );
+}

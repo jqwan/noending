@@ -3,7 +3,7 @@ import { api } from "../api";
 import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import AgentIcon from "../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData, type AgentStatusEntry } from "../types";
+import { AGENT_LABELS, type AssistantWorkspace, type Agent, type TerminalSummary, type Session, type WorkstreamCardData, type ProjectCardData, type AgentStatusEntry } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { capsOf, FORMAT_CAPS } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
@@ -576,19 +576,22 @@ const MAX_GROUP_SESSIONS_DEFAULT = 5;
  * 会话侧边栏：新建、会话看板、最近会话与保留终端的统一列表。
  * 工作区导航由最左侧固定图标栏提供；切换工作区时保留本栏的数据与分组状态。
  */
-export default function Sidebar({ route, navigate, collapsed = false, hidden = false }: {
+export default function Sidebar({ route, navigate, collapsed = false, hidden = false, assistantMode = false, assistantWorkspace }: {
   route: Route;
   navigate: (r: Route) => void;
   collapsed?: boolean;
   hidden?: boolean;
+  assistantMode?: boolean;
+  assistantWorkspace?: AssistantWorkspace | null;
 }) {
+  const statePrefix = assistantMode ? "assistant.sidebar" : "sidebar";
   const agentStatus = useAgentStatus();
   const [terminalsLoading, setTerminalsLoading] = useState(true);
-  const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [allTerminals, setTerminals] = useState<TerminalSummary[]>([]);
+  const [allSessions, setSessions] = useState<Session[]>([]);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [groupBy, setGroupBy] = useViewState<SidebarGroupBy>("sidebar.recent.groupBy", "workstream");
+  const [groupBy, setGroupBy] = useViewState<SidebarGroupBy>(`${statePrefix}.recent.groupBy`, "workstream");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [expandedGroupSessions, setExpandedGroupSessions] = useState<Record<string, boolean>>({});
 
@@ -631,9 +634,9 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   useEffect(() => onEvent(EVT_TERMINALS, refreshSessions), [refreshSessions]);
   useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
 
-  const [filters, setFilters] = useViewState<SidebarFilterKey[]>("sidebar.recent.filters", []);
+  const [filters, setFilters] = useViewState<SidebarFilterKey[]>(`${statePrefix}.recent.filters`, []);
   const [showSessionIcons, setShowSessionIcons] = useViewState<boolean>(
-    "sidebar.recent.showSessionIcons",
+    `${statePrefix}.recent.showSessionIcons`,
     true,
   );
   const [filterOpen, setFilterOpen] = useState(false);
@@ -684,7 +687,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   }, [projects]);
 
   const [pinnedSessionIds, setPinnedSessionIds] = useState<string[]>(getStoredPinnedSessions);
-  const [pinnedCollapsed, setPinnedCollapsed] = useViewState<boolean>("sidebar.pinned.collapsed", false);
+  const [pinnedCollapsed, setPinnedCollapsed] = useViewState<boolean>(`${statePrefix}.pinned.collapsed`, false);
 
   const isSessionPinned = useCallback(
     (s: { id: string; sessionId: string | null }) => {
@@ -711,11 +714,20 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     });
   }, []);
 
-  const [sortBy, setSortBy] = useViewState<SidebarSortKey>("sidebar.recent.sortBy", "createdAt");
+  const [sortBy, setSortBy] = useViewState<SidebarSortKey>(`${statePrefix}.recent.sortBy`, "createdAt");
 
   const currentSortOpt = useMemo(() => {
     return SIDEBAR_SORT_OPTIONS.find((opt) => opt.key === sortBy) ?? SIDEBAR_SORT_OPTIONS[0];
   }, [sortBy]);
+
+  const sessions = useMemo(() => assistantMode ? allSessions.filter(s => assistantWorkspace && s.project_id === assistantWorkspace.project.id) : allSessions, [allSessions, assistantMode, assistantWorkspace]);
+  const terminals = useMemo(() => assistantMode ? allTerminals.filter(t => {
+    if (!assistantWorkspace) return false;
+    if (t.session_id) return sessions.some(s => s.id === t.session_id);
+    const cwd = t.cwd?.replace(/\\/g, "/").replace(/\/$/, "");
+    const root = assistantWorkspace.directory.replace(/\\/g, "/").replace(/\/$/, "");
+    return cwd === root || cwd?.startsWith(`${root}/`);
+  }) : allTerminals, [allTerminals, assistantMode, assistantWorkspace, sessions]);
 
   const allMergedSessions = useMemo(() => {
     return mergeSidebarSessions(
@@ -791,8 +803,8 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       <div className="sidebar-top">
         <button
           type="button"
-          className={`sidebar-top-btn ${route.view === "new-session" ? "active" : ""}`}
-          onClick={() => navigate({ view: "new-session" })}
+          className={`sidebar-top-btn ${route.view === "new-session" || route.view === "assistant" ? "active" : ""}`}
+          onClick={() => navigate(assistantMode ? { view: "assistant" } : { view: "new-session" })}
         >
           <span className="sidebar-header-icon">
             <Icon name="chatPlus" />

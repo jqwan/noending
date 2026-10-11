@@ -7,11 +7,10 @@
 //! * [`run_headless`] — the Agent-CLI policy on top of it (a bad exit becomes an
 //!   error the UI can show).
 //!
-//! The Workspace Assistant runs its intelligence through the very same
-//! agent CLIs the user already has authenticated — `codex exec`,
-//! `claude -p`, `pi -p --no-session` — instead of requiring separate
-//! LLM API keys. This module runs those commands as child processes
-//! with a hard timeout and returns stdout.
+//! Explicit summary extraction uses authenticated Agent CLIs (`codex exec`,
+//! `claude -p`, `pi -p --no-session`). This module runs those commands as child
+//! processes with a hard timeout and returns stdout. Interactive Assistant
+//! conversations use the ordinary launcher and terminal instead.
 
 use std::io::Read;
 use std::path::Path;

@@ -274,6 +274,10 @@ fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
     if let Some(e) = &opts.effort {
         args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", e)]);
     }
+    for directory in &opts.writable_directories {
+        args.extend(["--add-dir".into(), directory.clone()]);
+    }
+
     args
 }
 
