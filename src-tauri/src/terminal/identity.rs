@@ -2,7 +2,7 @@
 //!
 //! Nothing is inferred from terminal output or message text. Each embedded
 //! launch gets its own authenticated loopback listener and temporary, explicit
-//! CLI resources. Antigravity uses a dedicated persistent plugin, gated by
+//! CLI resources. Antigravity uses a dedicated global plugin, gated by
 //! per-launch environment; existing user configuration is never replaced.
 
 mod antigravity;

@@ -1,5 +1,5 @@
 //! Antigravity CLI's named hooks have no per-launch configuration flag.
-//! Keep one neutral plugin in its CLI-only store; listener credentials live
+//! Keep one neutral plugin in the global customization root; listener credentials live
 //! exclusively in each PTY's environment, never in the shared hook file.
 
 use super::*;
@@ -74,11 +74,15 @@ pub(super) fn hook_event(
     // CLI and IDE hooks have the same shape. Require this CLI's explicit
     // transcript location and native root relation before changing identity.
     let transcript = Path::new(value.get("transcriptPath")?.as_str()?);
-    let expected = store_root
+    let logs = store_root
         .join("brain")
         .join(native_id)
-        .join(".system_generated/logs/transcript.jsonl");
-    if transcript != expected
+        .join(".system_generated/logs");
+    // agy sends the full transcript in lifecycle payloads; its exported
+    // transcript is a separate file in the same conversation directory.
+    let valid_transcript = transcript == logs.join("transcript_full.jsonl")
+        || transcript == logs.join("transcript.jsonl");
+    if !valid_transcript
         || !crate::adapters::antigravity::is_root_conversation(store_root, native_id)
     {
         return None;
@@ -102,7 +106,13 @@ pub(super) fn install_plugin(store_root: &Path, executable: &Path) -> Result<()>
     let _guard = INSTALL_LOCK
         .lock()
         .map_err(|_| other("identity plugin lock poisoned"))?;
-    let plugin = store_root.join("plugins").join(PLUGIN);
+    // The CLI data store's plugins can appear in the hook listing without
+    // participating in model execution. agy resolves executable customizations
+    // from ~/.gemini/config, beside ~/.gemini/antigravity-cli.
+    let plugin = store_root
+        .with_file_name("config")
+        .join("plugins")
+        .join(PLUGIN);
     // Own a separate package; never merge or replace the user's hooks.json,
     // settings.json, import manifest, or other plugins.
     std::fs::create_dir_all(&plugin)?;
@@ -132,7 +142,16 @@ pub(super) fn install_plugin(store_root: &Path, executable: &Path) -> Result<()>
             "name":PLUGIN,
             "description":"Native session notifications for NoEnding embedded terminals"
         }))?,
-    )
+    )?;
+    let legacy = store_root.join("plugins").join(PLUGIN);
+    if std::fs::read(legacy.join(".noending-managed"))
+        .ok()
+        .as_deref()
+        == Some(b"noending-terminal-identity-v1\n")
+    {
+        std::fs::remove_dir_all(legacy)?;
+    }
+    Ok(())
 }
 
 fn replace_owned(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -189,8 +208,10 @@ mod tests {
     struct Store(PathBuf);
     impl Store {
         fn new() -> Self {
-            let root =
+            let base =
                 std::env::temp_dir().join(format!("noending-agy-{}", crate::storage::new_id()));
+            create_private_dir(&base).unwrap();
+            let root = base.join("antigravity-cli");
             create_private_dir(&root).unwrap();
             let conn = rusqlite::Connection::open(root.join("conversation_summaries.db")).unwrap();
             conn.execute_batch("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, parent_conversation_id TEXT)").unwrap();
@@ -206,7 +227,7 @@ mod tests {
     }
     impl Drop for Store {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
     }
 
@@ -214,7 +235,8 @@ mod tests {
         serde_json::json!({
             "conversationId":id,
             "workspacePaths":[root.to_string_lossy()],
-            "transcriptPath":root.join("brain").join(id).join(".system_generated/logs/transcript.jsonl"),
+            // Captured from agy 1.3.3's real PreInvocation and Stop payloads.
+            "transcriptPath":root.join("brain").join(id).join(".system_generated/logs/transcript_full.jsonl"),
             "invocationNum":0,"initialNumSteps":3,
             "lastAssistantMessage":"private response"
         })
@@ -240,6 +262,31 @@ mod tests {
             )
             .is_none());
             assert!(hook_event(input(&store.0.join("ide"), ROOT_A), source, &store.0).is_none());
+
+            let mut exported = input(&store.0, ROOT_A);
+            exported["transcriptPath"] = serde_json::json!(store
+                .0
+                .join("brain")
+                .join(ROOT_A)
+                .join(".system_generated/logs/transcript.jsonl"));
+            assert!(hook_event(exported, source, &store.0).is_some());
+
+            for invalid in [
+                store
+                    .0
+                    .join("brain")
+                    .join(ROOT_B)
+                    .join(".system_generated/logs/transcript_full.jsonl"),
+                store
+                    .0
+                    .join("brain")
+                    .join(ROOT_A)
+                    .join(".system_generated/logs/other.jsonl"),
+            ] {
+                let mut input = input(&store.0, ROOT_A);
+                input["transcriptPath"] = serde_json::json!(invalid);
+                assert!(hook_event(input, source, &store.0).is_none());
+            }
         }
         assert!(hook_event(input(&store.0, ROOT_A), "PreToolUse", &store.0).is_none());
         assert!(hook_event(input(&store.0, ROOT_B), "PreInvocation", &store.0).is_some());
@@ -279,9 +326,15 @@ mod tests {
         assert_eq!(first.command.args, original.args);
         assert_eq!(second.command.args, original.args);
         assert_ne!(first.environment, second.environment);
-        let hooks =
-            std::fs::read_to_string(store.0.join("plugins").join(PLUGIN).join("hooks.json"))
-                .unwrap();
+        let hooks = std::fs::read_to_string(
+            store
+                .0
+                .with_file_name("config")
+                .join("plugins")
+                .join(PLUGIN)
+                .join("hooks.json"),
+        )
+        .unwrap();
         for prepared in [&first, &second] {
             let target: Target = serde_json::from_str(&prepared.environment[0].1).unwrap();
             assert!(!hooks.contains(&target.token));
@@ -319,7 +372,8 @@ mod tests {
     fn plugin_install_preserves_user_configuration_and_other_packages() {
         let store = Store::new();
         let settings = store.0.join("settings.json");
-        let other = store.0.join("plugins/user-plugin");
+        let config = store.0.with_file_name("config");
+        let other = config.join("plugins/user-plugin");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(
             &settings,
@@ -327,15 +381,24 @@ mod tests {
         )
         .unwrap();
         std::fs::write(other.join("hooks.json"), b"user hooks").unwrap();
+        let legacy = store.0.join("plugins").join(PLUGIN);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join(".noending-managed"),
+            b"noending-terminal-identity-v1\n",
+        )
+        .unwrap();
+        std::fs::write(legacy.join("hooks.json"), b"old managed hooks").unwrap();
         let before = std::fs::read(&settings).unwrap();
         install_plugin(&store.0, Path::new("first app")).unwrap();
         install_plugin(&store.0, Path::new("updated app")).unwrap();
         assert_eq!(std::fs::read(&settings).unwrap(), before);
+        assert!(!legacy.exists());
         assert_eq!(
             std::fs::read(other.join("hooks.json")).unwrap(),
             b"user hooks"
         );
-        let plugin = store.0.join("plugins").join(PLUGIN);
+        let plugin = config.join("plugins").join(PLUGIN);
         let hooks: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin.join("hooks.json")).unwrap()).unwrap();
         assert!(hooks[PLUGIN]["PreInvocation"][0]["command"].is_string());
