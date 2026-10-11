@@ -163,9 +163,13 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
 #[test]
 fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files() {
     let f = Fixture::new();
+    let app_directory = f.root.join("app with spaces");
+    std::fs::create_dir_all(&app_directory).unwrap();
+    let installed_exe = app_directory.join(if cfg!(windows) { "ne.exe" } else { "ne" });
+    std::fs::copy(env!("CARGO_BIN_EXE_ne"), &installed_exe).unwrap();
     let missing = f.root.join("not-installed");
     let (success, status) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "status", "--dir", missing.to_str().unwrap()],
     );
     assert!(success);
@@ -177,7 +181,7 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
     assert!(!missing.exists());
     let directory = f.root.join("bin with space");
     let (success, result) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "install", "--dir", directory.to_str().unwrap()],
     );
     assert!(success);
@@ -197,13 +201,13 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
         assert_eq!(value["data"]["connected"], true);
     }
     let (success, error) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "install", "--dir", directory.to_str().unwrap()],
     );
     assert!(!success);
     assert_eq!(error["error"]["code"], "already_exists");
     let (success, status) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "status", "--dir", directory.to_str().unwrap()],
     );
     assert!(success);
@@ -217,11 +221,11 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
     #[cfg(windows)]
     let launcher = directory.join("ne.cmd");
     let original = std::fs::read_to_string(&launcher).unwrap();
-    let outdated = original.replace(env!("CARGO_BIN_EXE_ne"), "/old/app/ne");
+    let outdated = original.replacen(" --cli", " --obsolete-cli", 1);
     assert_ne!(original, outdated);
     std::fs::write(&launcher, outdated).unwrap();
     let (success, _) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "update", "--dir", directory.to_str().unwrap()],
     );
     assert!(success);
@@ -229,7 +233,7 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
     std::fs::write(&launcher, "unrelated command").unwrap();
     for action in ["update", "uninstall"] {
         let (success, error) = f.run(
-            Path::new(env!("CARGO_BIN_EXE_ne")),
+            &installed_exe,
             &["cli", action, "--dir", directory.to_str().unwrap()],
         );
         assert!(!success);
@@ -248,7 +252,7 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
         std::os::unix::fs::symlink(&outside, &launcher).unwrap();
         for action in ["update", "uninstall"] {
             let (success, error) = f.run(
-                Path::new(env!("CARGO_BIN_EXE_ne")),
+                &installed_exe,
                 &["cli", action, "--dir", directory.to_str().unwrap()],
             );
             assert!(!success);
@@ -259,13 +263,13 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
         std::fs::write(&launcher, &original).unwrap();
     }
     let (success, _) = f.run(
-        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &installed_exe,
         &["cli", "uninstall", "--dir", directory.to_str().unwrap()],
     );
     assert!(success);
     assert!(!launcher.exists());
     f.server.as_ref().unwrap().shutdown();
-    let (success, error) = f.run(Path::new(env!("CARGO_BIN_EXE_ne")), &["status"]);
+    let (success, error) = f.run(&installed_exe, &["status"]);
     assert!(!success);
     assert_eq!(error["error"]["code"], "app_unavailable");
 }

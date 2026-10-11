@@ -12,6 +12,19 @@ const MARKER: &str = "#!/bin/sh\n# NoEnding CLI launcher v1\n";
 #[cfg(windows)]
 const MARKER: &str = "@echo off\r\nrem NoEnding CLI launcher v1\r\n";
 
+#[cfg(windows)]
+fn batch_quote_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    // canonicalize() adds a verbatim prefix, which cmd.exe cannot execute.
+    // Keep network paths as UNC rather than dropping their server/share root.
+    let text = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    };
+    format!("\"{}\"", text.replace('%', "%%"))
+}
+
 fn launchers(
     directory: &Path,
     connection: Option<&Path>,
@@ -43,13 +56,10 @@ fn launchers(
                 (
                     directory.join(format!("{name}.cmd")),
                     format!(
-                        "{MARKER}\"{}\" --cli{} %*\r\n",
-                        exe.to_string_lossy().replace('%', "%%"),
+                        "{MARKER}{} --cli{} %*\r\n",
+                        batch_quote_path(&exe),
                         connection
-                            .map(|p| format!(
-                                " --connection \"{}\"",
-                                p.to_string_lossy().replace('%', "%%")
-                            ))
+                            .map(|p| format!(" --connection {}", batch_quote_path(p)))
                             .unwrap_or_default()
                     ),
                 )
