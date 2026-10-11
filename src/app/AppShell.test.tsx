@@ -22,7 +22,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn() } }));
-vi.mock("../layout/Sidebar", () => ({ default: ({ hidden }: { hidden: boolean }) => <aside aria-label="会话侧边栏" hidden={hidden} /> }));
+vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
   const [draft, setDraft] = useState("");
@@ -54,20 +54,34 @@ it("starts on the new-session page", () => {
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
 });
 
-it("keeps icon navigation fixed and shows the session sidebar only in the session section", () => {
+it("keeps icon navigation fixed and allows toggling the session sidebar in any section", () => {
   render(<AppShell />);
   const rail = screen.getByRole("navigation", { name: "工作区导航" });
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
+  expect(screen.getByRole("separator")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "收起侧边栏" })).toBeTruthy();
+
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
-  expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
-  expect(screen.queryByRole("separator")).toBeNull();
-  expect(screen.queryByRole("button", { name: "收起侧边栏" })).toBeNull();
   expect(screen.getByRole("navigation", { name: "工作区导航" })).toBe(rail);
-  fireEvent.click(screen.getByRole("button", { name: "首页" }));
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+
+  // In projects section, session sidebar is still available and can be collapsed
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
+  expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
+  expect(screen.queryByRole("separator")).toBeNull();
+  expect(screen.getByRole("button", { name: "展开侧边栏" })).toBeTruthy();
+
+  // Re-expand in projects section
+  fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
+  expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
+  expect(screen.getByRole("separator")).toBeTruthy();
+
+  // Clicking 会话 in rail navigates to sessions board
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
+  expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
 });
 
 it("preserves the session page's unsent state while switching sections or viewing global search", () => {
@@ -78,9 +92,17 @@ it("preserves the session page's unsent state while switching sections or viewin
   expect(screen.getByRole("dialog", { name: "全局搜索" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "查看搜索结果" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("search");
-  expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "首页" }));
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   expect((screen.getByRole("textbox", { name: "会话草稿" }) as HTMLInputElement).value).toBe("未发送的消息");
+});
+
+it("opens command palette when clicking the search button at the top", () => {
+  render(<AppShell />);
+  expect(screen.queryByRole("dialog", { name: "全局搜索" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+  expect(screen.getByRole("dialog", { name: "全局搜索" })).toBeTruthy();
 });
 
 it.each([
@@ -92,8 +114,10 @@ it.each([
   act(() => sessionNavigation.navigate!(route));
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
   fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
   fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
-  fireEvent.click(screen.getByRole("button", { name: "首页" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
 });
 
@@ -103,8 +127,8 @@ it("remembers a background launch result without changing the current section", 
   fireEvent.click(screen.getByRole("button", { name: "代理" }));
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
-  fireEvent.click(screen.getByRole("button", { name: "首页" }));
-  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "t-created" });
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
 });
 
 it("remembers keyboard resizing, clamps width, and resets on double click", () => {

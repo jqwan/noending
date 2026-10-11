@@ -3,7 +3,8 @@ import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
 import { continueSessionDesktopWithToast, useAgentStatus } from "./continueDesktop";
-import { AGENT_LABELS, type Session } from "../../types";
+import { AGENT_LABELS, type Session, type TerminalSummary } from "../../types";
+import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
 
 /**
@@ -11,13 +12,16 @@ import type { Route } from "../../app/routes";
  * 展示与交互两处逐字节一致——Agent 图标 + 标题一行，右侧相对时间与继续会话按钮；
  * 默认 12 条，「查看全部 / 收起」展开。
  */
-export default function SessionMiniList({ sessions, emptyText, navigate }: {
+export default function SessionMiniList({ sessions, emptyText, navigate, terminals: externalTerminals }: {
   sessions: Session[];
   emptyText: string;
   navigate: (r: Route) => void;
+  terminals?: TerminalSummary[];
 }) {
   const [showAll, setShowAll] = useState(false);
   const agentStatus = useAgentStatus();
+  const { terminals: polledTerminals } = useSessionTerminals();
+  const terminals = externalTerminals ?? polledTerminals;
 
   return (
     <>
@@ -38,6 +42,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate }: {
                 agentStatus={agentStatus}
                 onResume={continueSessionDesktopWithToast}
                 navigate={navigate}
+                terminals={terminals}
               />
             </span>
           </div>
