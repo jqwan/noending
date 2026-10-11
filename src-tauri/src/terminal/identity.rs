@@ -652,8 +652,8 @@ mod tests {
     #[test]
     fn fragmented_identity_notification_waits_for_the_complete_payload() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // Complete connection setup before testing the nonblocking read.
         let (mut server, _) = listener.accept().unwrap();
         // macOS and Windows can inherit the listener's nonblocking mode.
         // Force that mode so the same transport contract is tested everywhere.
