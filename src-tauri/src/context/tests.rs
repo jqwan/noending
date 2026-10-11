@@ -16,13 +16,13 @@ fn test_workstream() -> Workstream {
     }
 }
 
-struct ServiceFixture {
+pub(super) struct ServiceFixture {
     db: Option<Db>,
     root: PathBuf,
 }
 
 impl ServiceFixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "noending-context-service-{}",
             crate::storage::new_id()
@@ -32,15 +32,15 @@ impl ServiceFixture {
         Self { db: Some(db), root }
     }
 
-    fn db(&self) -> &Db {
+    pub(super) fn db(&self) -> &Db {
         self.db.as_ref().unwrap()
     }
 
-    fn home(&self) -> NoEndingHome {
+    pub(super) fn home(&self) -> NoEndingHome {
         NoEndingHome::new(self.root.join("home").to_str().unwrap(), None).unwrap()
     }
 
-    fn add_session(&self, message_count: usize, message_size: usize) -> String {
+    pub(super) fn add_session(&self, message_count: usize, message_size: usize) -> String {
         let db = self.db();
         let root_id = format!("context-service-root-{}", crate::storage::new_id());
         let session_id = db
@@ -103,11 +103,7 @@ impl Drop for ServiceFixture {
 }
 
 fn records(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    tools::read_input(path)
 }
 fn empty_preferences(dir: &Path) {
     std::fs::write(dir.join("preferences.result.json"), r#"{"changes":[]}"#).unwrap();
@@ -126,7 +122,7 @@ fn task(f: &ServiceFixture, ids: &[&str]) -> Workstream {
     }
     ws
 }
-fn append(f: &ServiceFixture, id: &str, text: &str, rewrite: bool) {
+pub(super) fn append(f: &ServiceFixture, id: &str, text: &str, rewrite: bool) {
     let old = f.db().get_session(id).unwrap().unwrap().source_cursor();
     f.db()
         .commit_ingest(
@@ -154,7 +150,7 @@ fn append(f: &ServiceFixture, id: &str, text: &str, rewrite: bool) {
         )
         .unwrap();
 }
-fn seed(f: &ServiceFixture, id: &str, body: &str) {
+pub(super) fn seed(f: &ServiceFixture, id: &str, body: &str) {
     let (generation, latest) = f.db().get_session_ingest_state(id).unwrap();
     f.db()
         .tx(|tx| {
@@ -227,7 +223,7 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
             assert_eq!(reconstructed, "x".repeat(6000));
         }
         assert_eq!(input.last().unwrap()["marker"], "END_OF_SESSION_INPUT");
-        assert!(prompt.contains(&format!("session-{id}.jsonl")));
+        assert!(prompt.contains("SKILL.md"));
         assert!(!prompt.contains(&"x".repeat(6000)));
         result(dir, "session", &id, &long);
         empty_preferences(dir);
@@ -323,7 +319,7 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
         result(dir, "session", &a, "会话 A 新结论");
         result(dir, "task", &ws.id, "结合 A 与 B 的旧结论");
         empty_preferences(dir);
-        Ok(json!({"status":"partial","preferences":{"status":"completed"},"failed_sessions":[{"session_id":b,"error":"读取失败"}],"skipped_session_ids":[]}).to_string())
+        Ok(json!({"status":"partial","preferences":{"status":"completed"},"failed_sessions":[{"session_id":b,"error":"读取失败"}],"skipped_session_ids":[]}).to_string().into())
     };
     let out = extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
     assert_eq!(calls, 1);
@@ -341,8 +337,13 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
     );
     assert!(session_context_view(f.db(), &b).unwrap().pending);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        assert!(!dir.join(format!("session-{a}.jsonl")).exists());
-        assert!(dir.join(format!("session-{b}.jsonl")).exists());
+        assert!(!tools::input_available(
+            &dir.join(format!("session-{a}.jsonl"))
+        ));
+        assert!(tools::input_available(
+            &dir.join(format!("session-{b}.jsonl"))
+        ));
+        assert!(!records(&dir.join(format!("session-{b}.jsonl"))).is_empty());
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(input[0]["current_summary"], "结合 A 与 B 的旧结论");
         result(dir, "session", &b, "B 新结论");
@@ -374,7 +375,7 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         result(dir, "task", &ws.id, "任务当前结论");
         empty_preferences(dir);
-        Ok(json!({"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[id]}).to_string())
+        Ok(json!({"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[id]}).to_string().into())
     };
     let out = extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
     assert_eq!(out.skipped_session_ids, vec![id.clone()]);
@@ -392,7 +393,9 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(input[0]["current_summary"], Value::Null);
-        assert!(!dir.join(format!("session-{id}.jsonl")).exists());
+        assert!(!tools::input_available(
+            &dir.join(format!("session-{id}.jsonl"))
+        ));
         empty_preferences(dir);
         Ok(r#"{"status":"skipped","preferences":{"status":"completed"},"reason":"no_summary_content","skipped_session_ids":[]}"#.into())
     };
@@ -796,9 +799,13 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         })
         .unwrap();
     let mut calls = 0;
-    let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         calls += 1;
-        assert!(prompt.contains("END_OF_PROJECT_INPUT"));
+        assert!(std::fs::read_to_string(
+            dir.join("noending-extraction/references/requirements.md")
+        )
+        .unwrap()
+        .contains("项目材料"));
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(input[0]["related_tasks"][0]["task_id"], ws.id);
         assert_eq!(input[0]["related_tasks"][0]["title"], ws.title);
@@ -812,7 +819,9 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
             vec![a.as_str(), b.as_str()]
         );
         assert!(!input.iter().any(|r| r["session_id"] == outside));
-        assert!(!dir.join(format!("session-{outside}.jsonl")).exists());
+        assert!(!tools::input_available(
+            &dir.join(format!("session-{outside}.jsonl"))
+        ));
         assert!(input
             .iter()
             .any(|r| r["session_id"] == b && r["current_summary"] == "已有 B 摘要"));
@@ -820,11 +829,13 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         assert_eq!(b_record["summary_through_at"], "2026-09-01T00:00:00Z");
         assert_eq!(b_record["last_message_at"], "2026-10-01T00:00:00Z");
         assert_eq!(input[0]["current_summary"], Value::Null);
-        assert!(!dir.join(format!("task-{}.jsonl", ws.id)).exists());
+        assert!(!tools::input_available(
+            &dir.join(format!("task-{}.jsonl", ws.id))
+        ));
         result(dir, "session", &a, "A 已完成");
         result(dir, "project", &p.id, "项目当前结论");
         empty_preferences(dir);
-        Ok(json!({"status":"partial","preferences":{"status":"completed"},"failed_sessions":[{"session_id":b,"error":"读取失败"}],"skipped_session_ids":[]}).to_string())
+        Ok(json!({"status":"partial","preferences":{"status":"completed"},"failed_sessions":[{"session_id":b,"error":"读取失败"}],"skipped_session_ids":[]}).to_string().into())
     };
     let out = project::extract_project(f.db(), &p.id, Some(&home), false, &mut runner).unwrap();
     assert_eq!(calls, 1);
@@ -855,7 +866,9 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         let a_record = input.iter().find(|r| r["session_id"] == a).unwrap();
         assert_eq!(a_record["summary_through_at"], "2026-09-01T00:00:00Z");
         assert_eq!(a_record["last_message_at"], "2026-09-01T00:00:00Z");
-        assert!(!dir.join(format!("session-{a}.jsonl")).exists());
+        assert!(!tools::input_available(
+            &dir.join(format!("session-{a}.jsonl"))
+        ));
         result(dir, "session", &b, "B 已更新");
         result(dir, "project", &p.id, "project searchable conclusion");
         empty_preferences(dir);
@@ -1214,23 +1227,14 @@ fn configured_templates_reach_actual_session_task_project_calls_and_previews() {
     ] {
         let preview = summary::preview_prompt(kind, &templates);
         assert!(preview.contains(custom));
-        assert!(preview.contains("{{输入文件路径}}"));
+        assert!(preview.contains("{{输入查询名称}}"));
         assert!(preview.contains("{{结果文件路径}}"));
-        assert!(preview.contains(r#"{"summary":"完整 Markdown 摘要"}"#));
-        let single = r#"{"status":"completed","preferences":{"status":"completed"}}"#;
-        let batch = r#"{"status":"completed","skipped_session_ids":[],"preferences":{"status":"completed"}}"#;
-        match kind {
-            PromptKind::Task | PromptKind::Project => {
-                assert!(preview.contains(batch));
-                assert!(!preview.contains(single));
-            }
-            PromptKind::Session | PromptKind::Preferences => {
-                assert!(preview.contains(single));
-                assert!(!preview.contains(batch));
-            }
-        }
+        assert!(preview.contains("extraction"));
     }
-    let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let prompt =
+            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
+                .unwrap();
         assert!(prompt.contains("SESSION CUSTOM"));
         assert!(prompt.contains("PREFERENCES CUSTOM"));
         assert!(prompt.contains(&format!("session-{s}.jsonl")));
@@ -1240,7 +1244,10 @@ fn configured_templates_reach_actual_session_task_project_calls_and_previews() {
         Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
     };
     extract_session(f.db(), &s, Some(&home), false, &mut runner).unwrap();
-    let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let prompt =
+            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
+                .unwrap();
         assert!(prompt.contains("SESSION CUSTOM"));
         assert!(prompt.contains("PREFERENCES CUSTOM"));
         assert!(prompt.contains("TASK CUSTOM"));
@@ -1251,7 +1258,10 @@ fn configured_templates_reach_actual_session_task_project_calls_and_previews() {
         Ok(r#"{"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[]}"#.into())
     };
     extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
-    let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let prompt =
+            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
+                .unwrap();
         assert!(prompt.contains("SESSION CUSTOM"));
         assert!(prompt.contains("PREFERENCES CUSTOM"));
         assert!(prompt.contains("PROJECT CUSTOM"));
@@ -1316,10 +1326,7 @@ fn session_skip_can_apply_global_and_project_preferences_in_same_invocation() {
     let mut calls = 0;
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         calls += 1;
-        let input: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("preferences.input.json")).unwrap(),
-        )
-        .unwrap();
+        let input = records(&dir.join("preferences.input.json")).remove(0);
         assert_eq!(input["projects"][0]["project_id"], p.id);
         assert!(input["user"]
             .as_array()
@@ -1433,53 +1440,108 @@ fn invalid_preference_files_and_changes_preserve_summaries_without_partial_write
 }
 
 #[test]
-fn preference_snapshot_rejects_user_edits_deletes_locks_and_concurrent_additions() {
+fn preference_changes_use_current_locks_without_rejecting_concurrent_edits() {
     use crate::storage::preferences as repo;
-    for mutation in ["edit", "delete", "lock", "add", "edit-and-restore"] {
-        let f = ServiceFixture::new();
-        let home = f.home();
-        let id = f.add_session(1, 10);
-        let item = repo::save_item(f.db(), None, None, "原要求", false).unwrap();
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-            match mutation {
-                "edit" => {
-                    repo::save_item(f.db(), Some(&item.id), None, "用户新要求", false).unwrap();
+    for action in ["update", "delete"] {
+        for mutation in [
+            "edit",
+            "delete",
+            "lock",
+            "add",
+            "edit-and-restore",
+            "unlock",
+            "unrelated-lock",
+            "unrelated-delete",
+        ] {
+            let f = ServiceFixture::new();
+            let home = f.home();
+            let id = f.add_session(1, 10);
+            let item = repo::save_item(f.db(), None, None, "原要求", mutation == "unlock").unwrap();
+            let other = repo::save_item(f.db(), None, None, "其他要求", false).unwrap();
+            let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+                match mutation {
+                    "edit" => {
+                        repo::save_item(f.db(), Some(&item.id), None, "用户新要求", false).unwrap();
+                    }
+                    "delete" => {
+                        repo::delete_item(f.db(), &item.id).unwrap();
+                    }
+                    "lock" => {
+                        repo::save_item(f.db(), Some(&item.id), None, &item.content, true).unwrap();
+                    }
+                    "add" => {
+                        repo::save_item(f.db(), None, None, "并发新增", false).unwrap();
+                    }
+                    "unlock" => {
+                        repo::save_item(f.db(), Some(&item.id), None, &item.content, false)
+                            .unwrap();
+                    }
+                    "unrelated-lock" => {
+                        repo::save_item(f.db(), Some(&other.id), None, &other.content, true)
+                            .unwrap();
+                    }
+                    "unrelated-delete" => {
+                        repo::delete_item(f.db(), &other.id).unwrap();
+                    }
+                    _ => {
+                        repo::save_item(f.db(), Some(&item.id), None, "暂时编辑", false).unwrap();
+                        repo::save_item(f.db(), Some(&item.id), None, &item.content, false)
+                            .unwrap();
+                    }
                 }
-                "delete" => {
-                    repo::delete_item(f.db(), &item.id).unwrap();
-                }
-                "lock" => {
-                    repo::save_item(f.db(), Some(&item.id), None, &item.content, true).unwrap();
-                }
-                "add" => {
-                    repo::save_item(f.db(), None, None, "并发新增", false).unwrap();
-                }
-                _ => {
-                    repo::save_item(f.db(), Some(&item.id), None, "暂时编辑", false).unwrap();
-                    repo::save_item(f.db(), Some(&item.id), None, &item.content, false).unwrap();
-                }
-            }
-            result(dir, "session", &id, "摘要可保存");
-            preference_result(
-                dir,
-                json!([{"scope":"user","action":"update","id":item.id,"content":"Agent 旧结果"}]),
+                result(dir, "session", &id, "摘要可保存");
+                let change = if action == "update" {
+                    json!({"scope":"user","action":"update","id":item.id,"content":"Agent 更新"})
+                } else {
+                    json!({"scope":"user","action":"delete","id":item.id})
+                };
+                preference_result(
+                    dir,
+                    json!([{"scope":"user","action":"add","content":"Agent 新增"}, change]),
+                );
+                Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+            };
+            let out = extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
+            let rejected = matches!(mutation, "delete" | "lock");
+            assert_eq!(
+                out.preference_error.is_some(),
+                rejected,
+                "{mutation}/{action}"
             );
-            Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
-        };
-        let out = extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
-        assert!(out.preference_error.is_some(), "{mutation}");
-        assert!(repo::list_items(f.db(), None)
-            .unwrap()
-            .iter()
-            .all(|p| p.content != "Agent 旧结果"));
-        assert_eq!(
-            session_context_view(f.db(), &id)
-                .unwrap()
-                .fields
-                .unwrap()
-                .summary,
-            "摘要可保存"
-        );
+            let current = repo::get(&f.db().read(), &item.id).unwrap();
+            if mutation == "lock" {
+                let current = current.unwrap();
+                assert!(current.locked);
+                assert_eq!(current.content, "原要求");
+            } else if mutation == "delete" || action == "delete" {
+                assert!(current.is_none());
+            } else {
+                let current = current.unwrap();
+                assert!(!current.locked);
+                assert_eq!(current.content, "Agent 更新");
+            }
+            let items = repo::list_items(f.db(), None).unwrap();
+            assert_eq!(items.iter().any(|p| p.content == "Agent 新增"), !rejected);
+            if mutation == "add" {
+                assert!(items.iter().any(|p| p.content == "并发新增"));
+            }
+            let other_current = repo::get(&f.db().read(), &other.id).unwrap();
+            if mutation == "unrelated-delete" {
+                assert!(other_current.is_none());
+            } else {
+                let other_current = other_current.unwrap();
+                assert_eq!(other_current.content, "其他要求");
+                assert_eq!(other_current.locked, mutation == "unrelated-lock");
+            }
+            assert_eq!(
+                session_context_view(f.db(), &id)
+                    .unwrap()
+                    .fields
+                    .unwrap()
+                    .summary,
+                "摘要可保存"
+            );
+        }
     }
 }
 
@@ -1496,10 +1558,7 @@ fn task_and_project_calls_each_emit_one_preference_result_for_their_project_scop
     let mut calls = 0;
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         calls += 1;
-        let input: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("preferences.input.json")).unwrap(),
-        )
-        .unwrap();
+        let input = records(&dir.join("preferences.input.json")).remove(0);
         assert_eq!(input["projects"].as_array().unwrap().len(), 2);
         result(dir, "session", &a, "A");
         result(dir, "session", &b, "B");
@@ -1524,10 +1583,7 @@ fn task_and_project_calls_each_emit_one_preference_result_for_their_project_scop
     append(&f, &a, "项目偏好调整", false);
     let q_item = repo::list_items(f.db(), Some(&q.id)).unwrap().remove(0);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let input: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("preferences.input.json")).unwrap(),
-        )
-        .unwrap();
+        let input = records(&dir.join("preferences.input.json")).remove(0);
         assert_eq!(input["projects"].as_array().unwrap().len(), 1);
         assert_eq!(input["projects"][0]["project_id"], p.id);
         result(dir, "session", &a, "A 更新");
@@ -1584,4 +1640,75 @@ fn task_and_project_calls_each_emit_one_preference_result_for_their_project_scop
         .unwrap()
         .iter()
         .any(|p| p.content == "从原始消息重试的准则"));
+}
+
+#[test]
+fn final_reply_controls_commit_and_failed_calls_leave_results_unsaved() {
+    let f = ServiceFixture::new();
+    let home = f.home();
+    let id = f.add_session(2, 20);
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "session", &id, "已校验摘要");
+        preference_result(
+            dir,
+            json!([{"scope":"user","action":"add","content":"偏好 A"}]),
+        );
+        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+    };
+    let outcome = extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
+    assert_eq!(outcome.status, ContextUpdateStatus::Updated);
+    assert_eq!(
+        f.db()
+            .get_session_context(&id)
+            .unwrap()
+            .unwrap()
+            .fields
+            .summary,
+        "已校验摘要"
+    );
+    append(&f, &id, "新消息", false);
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "session", &id, "不会保存");
+        empty_preferences(dir);
+        Ok("已完成".into())
+    };
+    assert_eq!(
+        code(extract_session(
+            f.db(),
+            &id,
+            Some(&home),
+            false,
+            &mut runner
+        )),
+        "invalid_output"
+    );
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "session", &id, "不会保存");
+        empty_preferences(dir);
+        append(&f, &id, "改写历史", true);
+        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+    };
+    assert_eq!(
+        code(extract_session(
+            f.db(),
+            &id,
+            Some(&home),
+            false,
+            &mut runner
+        )),
+        "stale_snapshot"
+    );
+    assert_eq!(
+        f.db()
+            .get_session_context(&id)
+            .unwrap()
+            .unwrap()
+            .fields
+            .summary,
+        "已校验摘要"
+    );
+    assert_eq!(
+        crate::storage::preferences::list_items(f.db(), None).unwrap()[0].content,
+        "偏好 A"
+    );
 }

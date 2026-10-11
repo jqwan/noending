@@ -452,9 +452,9 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
             "--output-format".into(),
             "text".into(),
             "--tools".into(),
-            "Read,Write".into(),
+            "Read,Write,Bash".into(),
             "--allowedTools".into(),
-            "Read,Write".into(),
+            "Read,Write,Bash".into(),
         ];
         args.extend(runtime_args(opts));
         // Variadic --tools/--allowedTools must not consume the prompt.

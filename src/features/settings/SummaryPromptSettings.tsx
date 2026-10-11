@@ -84,7 +84,7 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
         {(Object.keys(labels) as SummaryPromptKind[]).map(type => <button key={type} role="tab" aria-selected={kind === type} className={`btn small ${kind === type ? "primary" : "ghost"}`} disabled={busy} onClick={() => { setKind(type); setError(""); }}>{labels[type]}{type === "preferences" ? "提取" : "摘要"}</button>)}
       </div>
       <p className="muted small">
-        编辑摘要写作或偏好提取要求。偏好模板用于所有摘要提取；会话模板同时用于任务、项目提取中的会话摘要步骤。完整提示词中的文件处理流程和结果格式由系统提供。
+        编辑摘要写作或偏好提取要求。偏好模板用于所有摘要提取；会话模板同时用于任务、项目提取中的会话摘要步骤。完整提示词中的查询流程、回复协议和结果格式由系统提供。
       </p>
       <div className="row" style={{ gap: 8, marginBottom: 12 }}>
         <button className={`btn small ${!previewing ? "primary" : "ghost"}`} aria-pressed={!previewing} onClick={() => setPreviewing(false)}>编辑模板</button>

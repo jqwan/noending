@@ -310,9 +310,9 @@ impl crate::adapters::AgentAdapter for PiAdapter {
         runtime_dir: &Path,
     ) -> Result<AgentCommand> {
         let mut cmd = self.build_exec_command(install, opts, prompt)?;
-        // Disable default tools; explicitly enable file reads and result writes.
+        // Explicit tools for skill reads, result writes and the scoped query CLI.
         cmd.args
-            .splice(3..3, ["--tools".into(), "read,write".into()]);
+            .splice(3..3, ["--tools".into(), "read,write,bash".into()]);
         cmd.cwd = Some(runtime_dir.to_path_buf());
         Ok(cmd)
     }

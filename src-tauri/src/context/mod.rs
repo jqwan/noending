@@ -4,15 +4,14 @@ pub(crate) mod diagnostics;
 mod preferences;
 mod project;
 pub mod prompts;
+mod query;
 pub mod summary;
-use crate::domain::{
-    ContextUpdateError, ContextUpdateStatus, Session, SessionContextFields, SessionContextRecord,
-    SessionMessage,
-};
+pub mod tools;
+use crate::domain::{ContextUpdateError, ContextUpdateStatus, Session, SessionContextFields};
 use crate::error::{other, AppError, Result};
 use crate::storage::context_repo::{
-    self, commit_session_context_conn, commit_workstream_summary_conn, get_session_context_conn,
-    get_workstream_context_state_conn, projection_ids_conn, set_workstream_frontier_conn,
+    self, commit_session_context_conn, commit_workstream_summary_conn,
+    get_workstream_context_state_conn, set_workstream_frontier_conn,
 };
 use crate::storage::Db;
 use crate::sync::extractor::{self, AssistantConfig, CliExtractor};
@@ -63,101 +62,80 @@ pub struct WorkstreamUpdateOutcome {
     pub preference_error: Option<String>,
 }
 
+#[derive(Clone)]
 struct SessionSnapshot {
     session: Session,
-    existing: Option<SessionContextRecord>,
+    revision: i64,
+    summary_generation: Option<i64>,
     generation: i64,
     latest: i64,
     from: i64,
-    messages: Vec<SessionMessage>,
     summary_through_at: Option<String>,
+    last_message_at: Option<String>,
 }
 impl SessionSnapshot {
     fn read(db: &Db, session: Session, regenerate: bool) -> Result<Self> {
-        let existing = db.get_session_context(&session.id)?;
-        let (generation, latest) = db.get_session_ingest_state(&session.id)?;
+        let conn = db.read();
+        let tx = conn.unchecked_transaction()?;
+        let existing: Option<(i64, i64, i64)> = tx.query_row(
+            "SELECT revision,ingest_generation,processed_through_seq FROM session_contexts WHERE session_id=?1",
+            [&session.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        let (generation, latest) =
+            crate::storage::context_repo::get_ingest_state_conn(&tx, &session.id)?;
         let from = existing
-            .as_ref()
-            .filter(|c| !regenerate && c.ingest_generation == generation)
-            .map(|c| c.processed_through_seq)
-            .unwrap_or(0);
-        let messages = db.get_messages_after(&session.id, from, latest.saturating_sub(from))?;
-        let summary_through_at = if from > 0 {
-            db.get_messages_after(&session.id, from - 1, 1)?
-                .into_iter()
-                .next()
-                .and_then(|m| m.ts)
-        } else {
-            None
-        };
+            .filter(|c| !regenerate && c.1 == generation)
+            .map_or(0, |c| c.2);
+        let summary_through_at = query::message_time(&tx, &session.id, from)?;
+        let last_message_at = query::message_time(&tx, &session.id, latest)?;
+        tx.commit()?;
         Ok(Self {
             session,
-            existing,
+            revision: existing.map_or(0, |c| c.0),
+            summary_generation: existing.map(|c| c.1),
             generation,
             latest,
             from,
-            messages,
             summary_through_at,
+            last_message_at,
         })
     }
     fn last_message_at(&self) -> Option<&str> {
-        match self.messages.last() {
-            Some(message) => message.ts.as_deref(),
-            None => self.summary_through_at.as_deref(),
-        }
+        self.last_message_at.as_deref()
     }
     fn revision(&self) -> i64 {
-        self.existing.as_ref().map(|c| c.revision).unwrap_or(0)
-    }
-    fn current_summary(&self) -> Option<&str> {
-        self.existing
-            .as_ref()
-            .filter(|c| !c.fields.summary.is_empty())
-            .map(|c| c.fields.summary.as_str())
+        self.revision
     }
     fn pending(&self) -> bool {
-        !self.messages.is_empty()
+        self.latest > self.from
             || self
-                .existing
-                .as_ref()
-                .is_some_and(|c| c.ingest_generation != self.generation)
+                .summary_generation
+                .is_some_and(|g| g != self.generation)
     }
-    fn retained(&self) -> SessionContextFields {
-        SessionContextFields {
-            summary: self.current_summary().unwrap_or_default().to_string(),
-        }
+    fn retained(&self, conn: &rusqlite::Connection) -> Result<SessionContextFields> {
+        Ok(SessionContextFields {
+            summary: query::target_summary(conn, "session", &self.session.id, self.revision())?
+                .unwrap_or_default(),
+        })
     }
     fn validate(&self, conn: &rusqlite::Connection, owner: Option<&str>) -> Result<()> {
-        let current = get_session_context_conn(conn, &self.session.id)?;
-        let identity: Option<(i64, Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT fact_generation, owner_workstream_id, (SELECT project_id FROM workspace_paths WHERE id=sessions.workspace_path_id) FROM sessions WHERE id = ?1",
-                [&self.session.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        if current.as_ref().map(|c| c.revision).unwrap_or(0) != self.revision()
-            || identity.as_ref().map(|i| i.0) != Some(self.generation)
-            || identity.as_ref().and_then(|i| i.2.as_ref()) != self.session.project_id.as_ref()
-            || owner
-                .is_some_and(|owner| identity.as_ref().and_then(|i| i.1.as_deref()) != Some(owner))
-        {
-            return Err(stale());
-        }
-        let ids = projection_ids_conn(conn, &self.session.id)?;
-        let upper = self.from + self.messages.len() as i64;
-        if ids.len() < upper as usize
-            || self
-                .messages
-                .iter()
-                .enumerate()
-                .any(|(i, m)| ids.get(self.from as usize + i) != Some(&m.id))
-        {
+        let identity: Option<(i64, i64, Option<String>, Option<String>, i64)> = conn.query_row(
+            "SELECT fact_generation,COALESCE((SELECT revision FROM session_contexts WHERE session_id=sessions.id),0),owner_workstream_id,(SELECT project_id FROM workspace_paths WHERE id=sessions.workspace_path_id),latest_message_seq FROM sessions WHERE id=?1",
+            [&self.session.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+        ).optional()?;
+        if identity.as_ref().is_none_or(|i| {
+            i.0 != self.generation
+                || i.1 != self.revision()
+                || i.3 != self.session.project_id
+                || i.4 < self.latest
+                || owner.is_some_and(|owner| i.2.as_deref() != Some(owner))
+        }) {
             return Err(stale());
         }
         Ok(())
     }
 }
+
 use rusqlite::OptionalExtension;
 fn stale() -> AppError {
     AppError::context(ContextUpdateError::ConcurrencyConflict(
@@ -328,14 +306,14 @@ fn extract_session(
     with_operation(db, id, home, "session", |launch, operation| {
         let session = db.get_session(id)?.ok_or_else(|| other("会话不存在"))?;
         let snapshot = SessionSnapshot::read(db, session, regenerate)?;
-        if snapshot.messages.is_empty() {
+        if snapshot.latest == snapshot.from {
             let revision = if snapshot.pending() {
                 db.tx(|tx| {
                     snapshot.validate(tx, None)?;
                     commit_session_context_conn(
                         tx,
                         id,
-                        &snapshot.retained(),
+                        &snapshot.retained(tx)?,
                         snapshot.revision(),
                         snapshot.generation,
                         0,
@@ -363,26 +341,16 @@ fn extract_session(
             ));
         }
         let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
-        let preference_snapshot =
-            preferences::Snapshot::read(db, snapshot.session.project_id.clone())?;
-        files.write_preferences(&preference_snapshot)?;
-        files.write_session(
-            &snapshot.session,
-            if regenerate {
-                None
-            } else {
-                snapshot.current_summary()
-            },
-            snapshot.from,
-            &snapshot.messages,
-            snapshot.summary_through_at.as_deref(),
-        )?;
+        let projects: Vec<_> = snapshot.session.project_id.clone().into_iter().collect();
+        files.add_preferences(&projects);
+        files.add_session(&snapshot, !regenerate, false);
         let mut cli = require_cli(launch, operation)?;
         cli.timeout_secs = 300;
         let raw = run_context_once(
+            db,
             &cli,
             &files.session_prompt(id, &launch.templates),
-            &files.dir,
+            &files,
             operation,
             runner,
         )?;
@@ -401,7 +369,7 @@ fn extract_session(
                     .require_absent(&files.session_result(id))
                     .map_err(invalid)?;
                 (
-                    snapshot.retained(),
+                    snapshot.retained(&db.read())?,
                     ContextUpdateStatus::Skipped,
                     preferences,
                 )
@@ -416,8 +384,8 @@ fn extract_session(
             }
         };
         let pending_preferences = preferences::Pending::read(
-            preference_snapshot,
-            &files.preference_result(),
+            projects,
+            files.read_text_result(&files.preference_result()),
             preference_reply,
         );
         operation.set_stage("database_commit");
@@ -464,7 +432,7 @@ fn extract_task(
 ) -> Result<WorkstreamUpdateOutcome> {
     with_operation(db, id, home, "workstream", |launch, operation| {
         let ws = db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
-        let state = db.get_workstream_context_state(id)?;
+        let state = query::task_state(&db.read(), id)?;
         let paths = task_paths(&db.read(), id)?;
         let snapshots = db
             .sessions_for_workstream(id)?
@@ -472,8 +440,17 @@ fn extract_task(
             .map(|s| SessionSnapshot::read(db, s, false))
             .collect::<Result<Vec<_>>>()?;
         let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
-        let view = workstream_context_view(db, id)?;
-        if !regenerate && !view.pending {
+        let frontiers = db.workstream_frontiers(id)?;
+        let pending = state.input_revision != state.consumed_input_revision
+            || frontiers.len() != snapshots.len()
+            || snapshots.iter().any(|s| {
+                s.pending()
+                    || frontiers
+                        .iter()
+                        .find(|f| f.session_id == s.session.id)
+                        .is_none_or(|f| f.session_context_revision != s.revision())
+            });
+        if !regenerate && !pending {
             return Ok((
                 WorkstreamUpdateOutcome {
                     workstream_id: id.into(),
@@ -493,8 +470,8 @@ fn extract_task(
             id,
             "task",
             serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
-            "working_directories":paths,"current_summary":if regenerate || state.summary.is_empty() {None} else {Some(&state.summary)}}),
-            &state.summary,
+            "working_directories":paths}),
+            state.context_revision,
             &snapshots,
             regenerate,
             launch,
@@ -605,7 +582,7 @@ fn run_batch(
     id: &str,
     kind: &str,
     header: serde_json::Value,
-    current_summary: &str,
+    target_revision: i64,
     snapshots: &[SessionSnapshot],
     regenerate: bool,
     launch: &ContextLaunchConfig,
@@ -614,15 +591,16 @@ fn run_batch(
 ) -> Result<BatchOutput> {
     let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
     let files = files_for(operation, &format!("{kind}-{id}"), &ids)?;
-    let projects = snapshots
+    let mut projects: Vec<_> = snapshots
         .iter()
         .filter_map(|s| s.session.project_id.clone())
-        .chain((kind == "project").then(|| id.to_string()));
-    let preference_snapshot = preferences::Snapshot::read(db, projects)?;
-    files.write_preferences(&preference_snapshot)?;
-    let mut records = vec![header];
+        .chain((kind == "project").then(|| id.to_string()))
+        .collect();
+    projects.sort();
+    projects.dedup();
+    files.add_preferences(&projects);
     let mut targets = HashSet::new();
-    let mut ordered: Vec<_> = snapshots.iter().collect();
+    let mut ordered = snapshots.to_vec();
     ordered.sort_by_cached_key(|s| {
         (
             s.last_message_at()
@@ -631,41 +609,23 @@ fn run_batch(
             s.session.id.clone(),
         )
     });
-    for s in ordered {
-        let need_update = !s.messages.is_empty();
-        if need_update {
+    for s in &ordered {
+        if s.latest > s.from {
             targets.insert(s.session.id.clone());
-            files.write_session(
-                &s.session,
-                s.current_summary(),
-                s.from,
-                &s.messages,
-                s.summary_through_at.as_deref(),
-            )?;
+            files.add_session(s, true, false);
         }
-        let preference_input_file = if regenerate {
-            let messages = db.get_messages_after(&s.session.id, 0, s.latest)?;
-            files.write_preference_session(&s.session, &messages)?;
-            Some(files.preference_session_input(&s.session.id))
-        } else {
-            None
-        };
-        records.push(
-            serde_json::json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
-                "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at,
-                "need_update":need_update,"current_summary":s.current_summary(),
-                "preference_input_file":preference_input_file,
-                "input_file":need_update.then(||files.session_input(&s.session.id)),
-                "result_file":need_update.then(||files.session_result(&s.session.id))}),
-        );
+        if regenerate {
+            files.add_session(s, false, true);
+        }
     }
-    files.write_batch(kind, id, &records)?;
+    files.add_batch(kind, id, header, target_revision, regenerate, ordered);
     let mut cli = require_cli(launch, operation)?;
     cli.timeout_secs = 900;
     let raw = run_context_once(
+        db,
         &cli,
         &files.batch_prompt(kind, id, &launch.templates),
-        &files.dir,
+        &files,
         operation,
         runner,
     )?;
@@ -713,7 +673,7 @@ fn run_batch(
         files
             .require_absent(&files.batch_result(kind, id))
             .map_err(invalid)?;
-        current_summary.to_string()
+        query::target_summary(&db.read(), kind, id, target_revision)?.unwrap_or_default()
     } else {
         files
             .read_result(&files.batch_result(kind, id))
@@ -736,13 +696,13 @@ fn run_batch(
                     .require_absent(&files.session_result(&s.session.id))
                     .map_err(invalid)?;
             }
-            s.retained()
+            s.retained(&db.read())?
         };
         results.insert(s.session.id.clone(), fields);
     }
     let preferences = preferences::Pending::read(
-        preference_snapshot,
-        &files.preference_result(),
+        projects,
+        files.read_text_result(&files.preference_result()),
         preference_reply,
     );
     Ok(BatchOutput {
@@ -819,26 +779,34 @@ fn require_cli(
 }
 
 fn run_context_once(
+    db: &Db,
     cli: &CliExtractor,
     prompt: &str,
-    runtime_dir: &std::path::Path,
+    files: &ExtractionFiles,
     operation: &mut diagnostics::ContextOperation,
     runner: &mut ContextRunner<'_>,
 ) -> Result<String> {
     operation.record_invocation_config(cli.agent, &cli.opts);
     operation.set_stage("model_call");
-    match runner(cli, prompt, runtime_dir) {
-        Ok(raw) => {
-            operation.set_cli_result(true, Some(0), None);
-            Ok(raw)
+    tools::run(db, files, prompt, |tool_prompt| {
+        // Service test runners simulate the Agent; use the real query bridge
+        // to acknowledge their material reads. Production reads are on demand.
+        #[cfg(test)]
+        tools::read_all_for_test(&files.dir);
+        match runner(cli, tool_prompt, &files.dir) {
+            Ok(raw) => {
+                operation.set_cli_result(true, Some(0), None);
+                operation.set_stage("output_validation");
+                Ok(raw)
+            }
+            Err(failure) => {
+                operation.set_cli_result(failure.spawned, failure.exit_code, failure.io_error_kind);
+                let (code, message) = diagnostics::cli_failure(failure.kind);
+                operation.fail_with("model_call", code, message);
+                Err(other("context model call failed"))
+            }
         }
-        Err(failure) => {
-            operation.set_cli_result(failure.spawned, failure.exit_code, failure.io_error_kind);
-            let (code, message) = diagnostics::cli_failure(failure.kind);
-            operation.fail_with("model_call", code, message);
-            Err(other("context model call failed"))
-        }
-    }
+    })
 }
 
 #[cfg(test)]

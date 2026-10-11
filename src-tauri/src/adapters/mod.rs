@@ -1067,7 +1067,7 @@ mod context_extraction_command_tests {
                 vec![
                     "--no-session-persistence",
                     "--tools",
-                    "Read,Write",
+                    "Read,Write,Bash",
                     "--allowedTools",
                     "--",
                     "--model",
@@ -1088,7 +1088,7 @@ mod context_extraction_command_tests {
                     "--no-session",
                     "--no-tools",
                     "--tools",
-                    "read,write",
+                    "read,write,bash",
                     "--provider",
                     "provider-pi",
                     "--model",

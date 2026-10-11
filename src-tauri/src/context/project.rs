@@ -119,10 +119,25 @@ pub(super) fn extract_project(
     with_operation(db, id, home, "project", |launch, operation| {
         let (input, state) = {
             let conn = db.read();
-            (ProjectInput::read(&conn, id)?, repo::state(&conn, id)?)
+            (
+                ProjectInput::read(&conn, id)?,
+                query::project_state(&conn, id)?,
+            )
         };
-        let view = project_context_view(db, id)?;
-        if !regenerate && !view.pending {
+        let snapshots = input
+            .session_ids
+            .iter()
+            .map(|sid| SessionSnapshot::read(db, db.get_session(sid)?.ok_or_else(stale)?, false))
+            .collect::<Result<Vec<_>>>()?;
+        let frontiers = repo::frontiers(&db.read(), id)?;
+        let pending = input.fingerprint != state.input_fingerprint
+            || snapshots.iter().any(|s| {
+                s.pending()
+                    || frontiers
+                        .get(&s.session.id)
+                        .is_none_or(|r| *r != s.revision())
+            });
+        if !regenerate && !pending {
             return Ok((
                 ProjectUpdateOutcome {
                     project_id: id.into(),
@@ -137,19 +152,14 @@ pub(super) fn extract_project(
                 "no_change",
             ));
         }
-        let snapshots = input
-            .session_ids
-            .iter()
-            .map(|sid| SessionSnapshot::read(db, db.get_session(sid)?.ok_or_else(stale)?, false))
-            .collect::<Result<Vec<_>>>()?;
         let policy = crate::workspace::wiring::HomePolicy::new(home.unwrap());
         let kind = crate::workspace::project::project_kind(&input.project, &input.paths, &policy);
         let batch = run_batch(
             db,
             id,
             "project",
-            serde_json::json!({"type":"project","name":input.project.name,"kind":kind,"working_directories":input.paths,"related_tasks":input.tasks,"current_summary":if regenerate || state.summary.is_empty(){None}else{Some(&state.summary)}}),
-            &state.summary,
+            serde_json::json!({"type":"project","name":input.project.name,"kind":kind,"working_directories":input.paths,"related_tasks":input.tasks}),
+            state.revision,
             &snapshots,
             regenerate,
             launch,

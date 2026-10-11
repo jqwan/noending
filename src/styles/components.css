@@ -784,6 +784,16 @@
 .md-body .md-link { color: var(--accent); }
 .md-body .md-img { color: var(--text-muted); font-size: 12px; }
 
+.md-body .summary-topic { margin: 16px 0 10px; }
+.md-body .summary-topic:first-child { margin-top: 0; }
+.md-body .summary-topic > summary { cursor: pointer; margin-bottom: 6px; }
+.md-body .summary-topic > summary::marker { color: var(--text-muted); font-size: 11px; }
+.md-body .summary-topic > summary > :is(h1, h2, h3, h4, h5, h6) {
+  display: inline; margin: 0;
+}
+.md-body .summary-topic > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.md-body .summary-topic > :last-child { margin-bottom: 0; }
+
 /* ---------- Session conversation reader ---------- */
 /* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
    最新、向上翻页时也能原地锚住。 */

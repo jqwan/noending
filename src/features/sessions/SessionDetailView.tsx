@@ -1,5 +1,4 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import SummaryMarkdown from "./SummaryMarkdown";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
@@ -7,7 +6,7 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SessionMessage, { MD_COMPONENTS, messageData, type SessionMessageData } from "./SessionMessage";
+import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
@@ -397,9 +396,9 @@ export default function SessionDetailView({
       )}
       {sessionCtx?.fields ? (
         <div className="md-body" style={{ marginTop: 10, overflowWrap: "anywhere" }}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+          <SummaryMarkdown>
             {sessionCtx.fields.summary}
-          </ReactMarkdown>
+          </SummaryMarkdown>
         </div>
       ) : (
         <div className="l1-none" style={{ marginTop: 8 }}>
