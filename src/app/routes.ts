@@ -25,15 +25,13 @@ export type ViewAction = "new";
 export type SessionScope = "unarchived" | "archived";
 export type WorkstreamScope = "unarchived" | "archived";
 
-export type WorkstreamEntry = "review" | "conflicts";
-
 /** 会话页的历史消息入口。终端实例由 terminal_id 路由标识，与详情、历史消息共用顶部导航。 */
 export type SessionEntry = "conversation";
 
 export type Route =
   | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
-  | { view: "workstream"; workstreamId: string; entry?: WorkstreamEntry; initialTitle?: string }
+  | { view: "workstream"; workstreamId: string; initialTitle?: string }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
   | {
       view: "session";

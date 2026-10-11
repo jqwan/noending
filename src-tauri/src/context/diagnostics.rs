@@ -230,9 +230,7 @@ fn safe_error(error: &AppError, stage: &str) -> (&'static str, &'static str) {
             ContextUpdateError::ConcurrencyConflict(_) => {
                 ("stale_snapshot", "内容已变化，请重新更新。")
             }
-            ContextUpdateError::InputTooLarge(_) => {
-                ("input_too_large", "待处理内容超过单次更新上限。")
-            }
+
             ContextUpdateError::Storage(_) => ("storage_failed", "保存 Context 失败，请重试。"),
         };
     }

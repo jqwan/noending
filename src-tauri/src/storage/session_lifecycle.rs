@@ -75,11 +75,8 @@ pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeletionCounts {
     pub message_count: i64,
-    /// Committed Session Context rows and their revision history.
+    /// Current Session Context row.
     pub session_context_count: i64,
-    /// Revisions whose provenance will be redacted to `deleted_session`
-    /// (their content survives — only the source pointers die).
-    pub context_revision_redaction_count: i64,
 }
 
 impl PermanentDeletionCounts {
@@ -90,191 +87,35 @@ impl PermanentDeletionCounts {
         Ok(Self {
             message_count: count("SELECT COUNT(*) FROM session_messages WHERE session_id = ?1")?,
             session_context_count: count(
-                "SELECT (SELECT COUNT(*) FROM session_contexts WHERE session_id = ?1)
-                      + (SELECT COUNT(*) FROM session_context_revisions WHERE session_id = ?1)",
+                "SELECT COUNT(*) FROM session_contexts WHERE session_id = ?1",
             )?,
-            context_revision_redaction_count: count_redactable_revisions_conn(conn, session_id)?,
         })
     }
-}
-
-// Provenance redaction
-
-/// Session-linked provenance keys, collected while the summaries and the
-/// message store are still readable. A revision can cite either a raw message
-/// (`session-message:<id>`) or a specific Session Context revision
-/// (`session-context:<session id>:<revision>`).
-struct SessionProvenance {
-    refs: Vec<String>,
-}
-
-fn collect_session_provenance(conn: &Connection, session_id: &str) -> Result<SessionProvenance> {
-    let mut refs = Vec::new();
-    {
-        let mut st = conn.prepare("SELECT id FROM session_messages WHERE session_id = ?1")?;
-        let rows = st.query_map(params![session_id], |r| r.get::<_, String>(0))?;
-        for id in rows {
-            refs.push(format!("session-message:{}", id?));
-        }
-    }
-    {
-        let mut st =
-            conn.prepare("SELECT revision FROM session_context_revisions WHERE session_id = ?1")?;
-        let rows = st.query_map(params![session_id], |r| r.get::<_, i64>(0))?;
-        for revision in rows {
-            refs.push(format!("session-context:{}:{}", session_id, revision?));
-        }
-    }
-    Ok(SessionProvenance { refs })
-}
-
-/// Every string inside a revision's metadata that claims to reference a
-/// session message: `provenance.source_ref`, top-level `source_refs` and
-/// `audit.source_refs` (the three shapes writers actually produce).
-fn metadata_message_refs(metadata: &serde_json::Value) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(s) = metadata
-        .get("provenance")
-        .and_then(|p| p.get("source_ref"))
-        .and_then(|v| v.as_str())
-    {
-        out.push(s.to_string());
-    }
-    for arr in [
-        metadata.get("source_refs"),
-        metadata.get("audit").and_then(|a| a.get("source_refs")),
-    ] {
-        if let Some(arr) = arr.and_then(|v| v.as_array()) {
-            for v in arr {
-                if let Some(s) = v.as_str() {
-                    out.push(s.to_string());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// A revision belongs to the dying session when its `source_ref` resolves to
-/// one of its messages / summary revisions, or its metadata mentions one of
-/// those refs.
-fn revision_matches_provenance(
-    source_ref: Option<&str>,
-    metadata: &serde_json::Value,
-    prov: &SessionProvenance,
-) -> bool {
-    if let Some(r) = source_ref {
-        if prov.refs.iter().any(|e| e == r) {
-            return true;
-        }
-    }
-    metadata_message_refs(metadata)
-        .iter()
-        .any(|m| prov.refs.iter().any(|e| e == m))
-}
-
-/// The scrubbed metadata: session-derived references removed, authority /
-/// actor / status audit preserved (authority resolution reads
-/// `provenance.authority` and `audit.actor` — dropping those would degrade
-/// every redacted revision to `unknown`).
-fn redacted_metadata(metadata: &serde_json::Value) -> String {
-    let mut m = metadata.clone();
-    if let Some(obj) = m.as_object_mut() {
-        obj.remove("source_refs");
-        if let Some(audit) = obj.get_mut("audit").and_then(|a| a.as_object_mut()) {
-            audit.remove("source_refs");
-        }
-        if let Some(prov) = obj.get_mut("provenance").and_then(|p| p.as_object_mut()) {
-            prov.remove("source_ref");
-            prov.insert(
-                "source_type".to_string(),
-                serde_json::json!("deleted_session"),
-            );
-        }
-    }
-    m.to_string()
-}
-
-/// How many revisions would be redacted for this session (preview).
-pub fn count_redactable_revisions_conn(conn: &Connection, session_id: &str) -> Result<i64> {
-    let prov = collect_session_provenance(conn, session_id)?;
-    if prov.refs.is_empty() {
-        return Ok(0);
-    }
-    let mut st = conn.prepare("SELECT source_ref, metadata FROM context_item_revisions")?;
-    let rows = st.query_map([], |r| {
-        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))
-    })?;
-    let mut n = 0i64;
-    for row in rows {
-        let (source_ref, metadata) = row?;
-        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap_or_default();
-        if revision_matches_provenance(source_ref.as_deref(), &meta, &prov) {
-            n += 1;
-        }
-    }
-    Ok(n)
-}
-
-/// The redaction half of the permanent LOCAL purge: rewrite every
-/// session-linked revision in place to `source_type = 'deleted_session'`,
-/// `source_ref = NULL`, metadata scrubbed. Runs INSIDE the purge transaction,
-/// while the message and summary refs are still resolvable. The one in-place
-/// `UPDATE` the append-only revisions table ever receives — scoped to
-/// provenance only (content and title survive).
-pub fn redact_session_provenance_conn(tx: &Transaction, session_id: &str) -> Result<usize> {
-    let prov = collect_session_provenance(tx, session_id)?;
-    if prov.refs.is_empty() {
-        return Ok(0);
-    }
-    let mut st = tx.prepare("SELECT id, source_ref, metadata FROM context_item_revisions")?;
-    let mut matches: Vec<(String, String)> = Vec::new();
-    let rows = st.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, Option<String>>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (id, source_ref, metadata) = row?;
-        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap_or_default();
-        if revision_matches_provenance(source_ref.as_deref(), &meta, &prov) {
-            matches.push((id, redacted_metadata(&meta)));
-        }
-    }
-    drop(st);
-
-    let mut n = 0usize;
-    for (id, meta_json) in matches {
-        n += tx.execute(
-            "UPDATE context_item_revisions
-             SET source_type = 'deleted_session', source_ref = NULL, metadata = ?2
-             WHERE id = ?1",
-            params![id, meta_json],
-        )?;
-    }
-    Ok(n)
 }
 
 // Permanent local purge
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
-/// Callers have already required Archive. Returns the number of redacted
-/// revisions. Never touches Workstreams, WorkstreamPaths, WorkspacePaths,
-/// Projects, surviving Context content, or the Agent's side.
-pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usize> {
-    // 1+2. Redact Context provenance while the refs still resolve.
-    let redacted = redact_session_provenance_conn(tx, session_id)?;
+/// Callers have already required Archive. Other sessions, physical paths,
+/// task summaries and Agent-owned sources survive; the owner task becomes pending.
+pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()> {
+    // Removing a session changes the owner task's summary input.
+    if let Some(owner) = tx
+        .query_row(
+            "SELECT owner_workstream_id FROM sessions WHERE id = ?1",
+            params![session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    {
+        crate::storage::bump_input_revision_conn(tx, &owner)?;
+    }
 
-    // 4. The Session's summaries, their revision history, and its place in
+    // 4. The Session's current summary and its place in
     //    every Workstream's consumption frontier.
     tx.execute(
         "DELETE FROM session_contexts WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    tx.execute(
-        "DELETE FROM session_context_revisions WHERE session_id = ?1",
         params![session_id],
     )?;
     tx.execute(
@@ -286,8 +127,7 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 6. The conversation store: THIS session's history ends here, after every
-    //    surviving provenance pointer was redacted.
+    // The conversation store goes with the session.
     tx.execute(
         "DELETE FROM session_messages WHERE session_id = ?1",
         params![session_id],
@@ -298,5 +138,5 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<usi
     // rolls the whole purge back, never a half-deleted session in search.
     unindex_session_conn(tx, session_id)?;
 
-    Ok(redacted)
+    Ok(())
 }

@@ -4,7 +4,7 @@
 //! Division of labor, mirroring the architecture boundaries:
 //! - **this module** owns the rules — which transitions are legal, when a
 //!   local purge is allowed, what the preview must contain;
-//! - **storage::session_lifecycle** owns the SQL (guarded flips, redaction,
+//! - **storage::session_lifecycle** owns the SQL (guarded flips,
 //!   purge);
 //! - **the Agent adapter** owns the source verdict — this module NEVER
 //!   touches the Agent's files, because there is nothing to touch:
@@ -45,7 +45,6 @@ pub struct LocalDeletePreview {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PermanentDeleteResult {
     pub purged: bool,
-    pub redacted_revisions: usize,
 }
 
 /// Archive without changing messages, Context, search or the Agent source.
@@ -105,13 +104,9 @@ pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<Loc
     })
 }
 
-/// Execute the permanent LOCAL deletion: ONE SQLite transaction that redacts
-/// provenance and deletes every session-owned row ('s fixed order).
+/// Delete the session and its local data in one transaction.
 pub fn permanently_delete_session(db: &Db, session_id: &str) -> Result<PermanentDeleteResult> {
     let session = require_archived(db, session_id)?;
-    let redacted = db.tx(|tx| session_lifecycle::purge_session_data_conn(tx, &session.id))?;
-    Ok(PermanentDeleteResult {
-        purged: true,
-        redacted_revisions: redacted,
-    })
+    db.tx(|tx| session_lifecycle::purge_session_data_conn(tx, &session.id))?;
+    Ok(PermanentDeleteResult { purged: true })
 }

@@ -7,32 +7,19 @@ import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import {
-  KIND_LABELS,
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
   type WorkstreamContextView,
   type WorkstreamPathRow,
-  type WorkstreamReviewSummary,
-  type WorkstreamReviewWindow,
 } from "../../types";
-import type { Route, WorkstreamEntry } from "../../app/routes";
-import WorkstreamContext from "./WorkstreamContext";
+import type { Route } from "../../app/routes";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { MD_COMPONENTS } from "../sessions/SessionMessage";
 import WorkstreamSessions from "./WorkstreamSessions";
 import WorkstreamPathList from "./WorkspacePaths";
-import NeedsAttentionSection from "./NeedsAttentionSection";
-import ConflictReviewModal from "./ConflictReviewModal";
-import RecentChangesTimeline from "./RecentChangesTimeline";
-import SinceLastReview from "./SinceLastReview";
 
-/**
- * Workstream Detail：持续相关 Sessions 的组织容器。
- *
- * Context 只读呈现（`get_workstream_context_state`），人工纠正永远可用；仅当有相关
- * 变化（pending）时才出现「更新状态」按钮，一次点击同时更新相关 Session 摘要与状态。
- * 启动 / 编辑入口唯一，分别挂 New Session Modal 与 WorkstreamFormModal。
- * v0.2 边界：工作目录是有序 WorkstreamPath 列表；Project 是只读投影（取第 1 条路径）；
- * 归档 / 恢复 / 永久删除是三个单向命令，不是一枚翻转开关。
- */
+/** Task organization and the current Markdown summary. All reads are pure. */
 export const workstreamDetailCache = new Map<
   string,
   {
@@ -49,23 +36,25 @@ export function clearWorkstreamDetailCache() {
 export default function WorkstreamDetailView({
   workstreamId,
   initialTitle,
-  entry,
   navigate,
   goBack,
 }: {
   workstreamId: string;
   initialTitle?: string;
-  entry?: WorkstreamEntry;
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
+  const currentWorkstreamId = useRef(workstreamId);
+  currentWorkstreamId.current = workstreamId;
   const cached = workstreamDetailCache.get(workstreamId);
   const [loadError, setLoadError] = useState("");
   const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(() => cached?.ctx ?? null);
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
+  const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
   const [ctxUpdating, setCtxUpdating] = useState(false);
+  const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [paths, setPaths] = useState<WorkstreamPathRow[] | null>(() => cached?.paths ?? null);
   const [pathsError, setPathsError] = useState("");
@@ -111,6 +100,9 @@ export default function WorkstreamDetailView({
     }
     setLoadError("");
     setCtxUpdateError(null);
+    setPreferenceError(null);
+    setFailedSessions([]);
+    setCtxUpdating(false);
     setPathsError("");
     setMenuOpen(false);
     setEditing(false);
@@ -154,10 +146,10 @@ export default function WorkstreamDetailView({
     };
   }, [workstreamId, retry]);
 
-  // Background refresh only re-reads the projection; the intelligence panels own
-  // their own (frozen-window) refresh so this page never touches ReviewState.
+  // Background refresh only reads task data and summary state.
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then((c) => {
+      if (currentWorkstreamId.current !== workstreamId) return;
       setCtx(c);
       const prev = workstreamDetailCache.get(workstreamId);
       workstreamDetailCache.set(workstreamId, {
@@ -168,6 +160,7 @@ export default function WorkstreamDetailView({
     }).catch(console.error);
 
     api.getWorkstreamContextState(workstreamId).then((s) => {
+      if (currentWorkstreamId.current !== workstreamId) return;
       setCtxState(s);
       const prev = workstreamDetailCache.get(workstreamId);
       if (prev) {
@@ -176,6 +169,7 @@ export default function WorkstreamDetailView({
     }).catch(console.error);
 
     api.listWorkstreamPaths(workstreamId).then((rows) => {
+      if (currentWorkstreamId.current !== workstreamId) return;
       setPaths(rows);
       setPathsError("");
       const prev = workstreamDetailCache.get(workstreamId);
@@ -183,6 +177,7 @@ export default function WorkstreamDetailView({
         workstreamDetailCache.set(workstreamId, { ...prev, paths: rows });
       }
     }).catch((e) => {
+      if (currentWorkstreamId.current !== workstreamId) return;
       setPaths(null);
       setPathsError(`读取工作目录失败：${String(e)}`);
     });
@@ -191,38 +186,37 @@ export default function WorkstreamDetailView({
   useRefreshSignal(refresh);
 
   /** 一次点击 → 相关 Session 摘要与 Workstream 状态一起更新（后端一次模型调用）。 */
-  const updateContext = async () => {
+  const updateContext = async (regenerate = false) => {
     if (ctxUpdating) return;
     setCtxUpdating(true);
     setCtxUpdateError(null);
+    setPreferenceError(null);
+    setFailedSessions([]);
     try {
-      const out = await api.updateWorkstreamContext(workstreamId);
+      const out = await (regenerate ? api.regenerateWorkstreamContext(workstreamId) : api.updateWorkstreamContext(workstreamId));
+      if (currentWorkstreamId.current !== workstreamId) return;
+      setFailedSessions(out.failed_sessions);
+      setPreferenceError(out.preference_error);
       showToast(
         out.status === "no_change"
-          ? "状态无变化"
+          ? "摘要无变化"
           : out.remaining_pending > 0
-            ? `已更新状态（待更新 ${out.remaining_pending}）`
-            : "已更新状态",
+            ? `已更新摘要（待更新 ${out.remaining_pending}）`
+            : out.status === "skipped" ? "没有新的摘要内容" : "已更新摘要",
       );
       refresh();
     } catch (e) {
       console.error(e);
-      setCtxUpdateError(contextUpdateErrorDetails(e));
+      if (currentWorkstreamId.current === workstreamId) setCtxUpdateError(contextUpdateErrorDetails(e));
     } finally {
-      setCtxUpdating(false);
+      if (currentWorkstreamId.current === workstreamId) setCtxUpdating(false);
     }
   };
 
-  /** 复制当前 Context：投影按可读文本整段给出去。 */
+  /** Copy the current summary as Markdown. */
   const copyContext = async () => {
-    const sections = ctxState?.sections ?? [];
-    const text = sections.length === 0
-      ? "（当前没有 Context 条目）"
-      : sections
-        .map((s) => `${KIND_LABELS[s.kind] ?? s.kind}：${s.title}\n${s.content}`.trim())
-        .join("\n\n");
-    const ok = await copyToClipboard(text);
-    showToast(ok ? "已复制 Context" : "复制失败");
+    const ok = await copyToClipboard(ctxState?.summary ?? "");
+    showToast(ok ? "已复制摘要" : "复制失败");
   };
 
   // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
@@ -366,7 +360,7 @@ export default function WorkstreamDetailView({
             </button>
             {!archived && (
               <button className="btn ghost icon-button" aria-label="归档"
-                title="归档：保留路径、会话与 Context，归档后不能新建会话。"
+                title="归档：保留路径、会话与摘要，归档后不能新建会话。"
                 onClick={() => setConfirmArchive(true)}>
                 <Icon name="archive" />
               </button>
@@ -425,19 +419,21 @@ export default function WorkstreamDetailView({
           allowActions={!archived}
         />
 
-        {/* Context：只读当前状态 + 显式更新 + 人工纠正 */}
-        <IntelligenceSections
-          ctx={ctx}
-          entry={entry}
-          workstreamId={workstreamId}
-          navigate={navigate}
-          onChanged={refresh}
-          ctxState={ctxState}
-          ctxUpdating={ctxUpdating}
-          ctxUpdateError={ctxUpdateError}
-          onCopyContext={copyContext}
-          onUpdateContext={updateContext}
-        />
+        <section className="rail-section">
+          <div className="rail-head">
+            <div className="section-label" style={{ margin: 0 }}>任务摘要</div>
+            <div className="actions">
+              {ctxState?.summary && <button className="btn small ghost" onClick={copyContext}>复制</button>}
+              {ctxState?.pending && <button className="btn small primary" disabled={ctxUpdating} onClick={() => updateContext()}>{ctxUpdating ? "更新中…" : "更新摘要"}</button>}
+              <button className="btn small ghost" disabled={ctxUpdating} onClick={() => updateContext(true)}>重新生成</button>
+            </div>
+          </div>
+          {ctxState?.pending && <p className="muted">有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
+          {ctxState?.summary ? <div className="md-body" style={{ maxWidth: "72ch", overflowWrap: "anywhere" }}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{ctxState.summary}</ReactMarkdown></div> : <p className="muted">尚无任务摘要</p>}
+          {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
+          {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
+          {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
+        </section>
 
         </div>
         <aside className="task-detail-aside">
@@ -512,7 +508,7 @@ export default function WorkstreamDetailView({
           </div>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             将<b>删除</b>：<span className="mono">{workstream.title}</span> 本身、它的有序工作目录列表、
-            它名下的全部 Context 条目与 Revision、冲突记录与解决历史、以及审阅状态（ReviewState）。
+            它的当前摘要与摘要处理进度。
           </p>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             将<b>保留</b>：它引用过的 Sessions 与这些 Session 的完整事件历史、原始 Agent
@@ -537,218 +533,6 @@ export default function WorkstreamDetailView({
         </Modal>
       )}
     </div>
-  );
-}
-
-/** Context 段落：当前状态只读呈现 + 显式「更新状态」，以及审查 / 冲突 /
- *  变更这些由本页命令驱动的面板（人工纠正始终可用）。 */
-function IntelligenceSections({
-  ctx,
-  entry,
-  workstreamId,
-  navigate,
-  onChanged,
-  ctxState,
-  ctxUpdating,
-  ctxUpdateError,
-  onCopyContext,
-  onUpdateContext,
-}: {
-  ctx: WorkstreamContextData;
-  entry?: WorkstreamEntry;
-  workstreamId: string;
-  initialTitle?: string;
-  navigate: (r: Route) => void;
-  onChanged: () => void;
-  ctxState: WorkstreamContextView | null;
-  ctxUpdating: boolean;
-  ctxUpdateError: ReturnType<typeof contextUpdateErrorDetails> | null;
-  onCopyContext: () => void;
-  onUpdateContext: () => void;
-}) {
-  const [reviewWindow, setReviewWindow] = useState<WorkstreamReviewWindow | null>(null);
-  const [reviewSummary, setReviewSummary] = useState<WorkstreamReviewSummary | null>(null);
-  const [reviewDirty, setReviewDirty] = useState(false);
-  const [markingReviewed, setMarkingReviewed] = useState(false);
-  const [focusedItemId, setFocusedItemId] = useState<string | null>(null);
-  const [reviewingConflict, setReviewingConflict] = useState(false);
-  const [reviewingConflictId, setReviewingConflictId] = useState<string | undefined>(undefined);
-
-  const reviewWindowRef = useRef<WorkstreamReviewWindow | null>(null);
-  reviewWindowRef.current = reviewWindow;
-  const consumedEntryRef = useRef(false);
-
-  useEffect(() => {
-    consumedEntryRef.current = false;
-  }, [workstreamId]);
-
-  // Auto-open conflict review modal if entry === "conflicts" and open conflicts exist (one-shot navigation intent)
-  useEffect(() => {
-    if (!consumedEntryRef.current && entry === "conflicts" && ctx && (ctx.conflicts?.length ?? 0) > 0) {
-      consumedEntryRef.current = true;
-      setReviewingConflict(true);
-    }
-  }, [entry, ctx]);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      api.getWorkstreamReviewWindow(workstreamId),
-      api.getWorkstreamReviewSummary(workstreamId),
-    ]).then(([w, s]) => {
-      if (!cancelled) {
-        setReviewWindow(w);
-        setReviewSummary(s);
-        setReviewDirty(s.unseen_change_count !== w.unseen_changes.length);
-      }
-    }).catch(console.error);
-    return () => {
-      cancelled = true;
-    };
-  }, [workstreamId]);
-
-  // Regular contextual or background refresh:
-  // Updates summary, but preserves the frozen reviewWindow!
-  const refreshSummary = useCallback(() => {
-    api.getWorkstreamReviewSummary(workstreamId).then((s) => {
-      setReviewSummary(s);
-      const cur = reviewWindowRef.current;
-      if (cur && s.unseen_change_count > cur.unseen_changes.length) {
-        setReviewDirty(true);
-      }
-    }).catch(console.error);
-  }, [workstreamId]);
-
-  useRefreshSignal(refreshSummary);
-
-  // Explicit user refresh of review window
-  const handleRefreshReview = useCallback(async () => {
-    try {
-      const [w, s] = await Promise.all([
-        api.getWorkstreamReviewWindow(workstreamId),
-        api.getWorkstreamReviewSummary(workstreamId),
-      ]);
-      setReviewWindow(w);
-      setReviewSummary(s);
-      setReviewDirty(s.unseen_change_count !== w.unseen_changes.length);
-    } catch (err) {
-      console.error("Failed to refresh review window:", err);
-    }
-  }, [workstreamId]);
-
-  // Mark reviewed action:
-  // Critical invariant: uses observed reviewWindow.mark_through, NOT a newly fetched frontier!
-  const handleMarkReviewed = useCallback(async () => {
-    if (!reviewWindow || markingReviewed) return;
-    const observed = reviewWindow;
-    setMarkingReviewed(true);
-    try {
-      await api.markWorkstreamReviewed(workstreamId, observed.mark_through);
-      const [nextWindow, nextSummary] = await Promise.all([
-        api.getWorkstreamReviewWindow(workstreamId),
-        api.getWorkstreamReviewSummary(workstreamId),
-      ]);
-      setReviewWindow(nextWindow);
-      setReviewSummary(nextSummary);
-      setReviewDirty(nextSummary.unseen_change_count !== nextWindow.unseen_changes.length);
-    } catch (err) {
-      console.error("Failed to mark workstream reviewed:", err);
-    } finally {
-      setMarkingReviewed(false);
-    }
-  }, [workstreamId, reviewWindow, markingReviewed]);
-
-  return (
-    <>
-      {/* Context 段落并入主栏后纵向堆叠：当前事实在上，冲突 / 变更在下。 */}
-      <div className="ws-context-stack">
-      <div>
-        {ctxState && (
-          <div style={{ marginBottom: 18 }}>
-            <div className="row between" style={{ alignItems: "center" }}>
-              <div className="section-label" style={{ margin: 0 }}>当前 Context</div>
-              <div className="row" style={{ gap: 8 }}>
-                <button className="btn small ghost" onClick={onCopyContext}>复制</button>
-                {ctxState.pending && (
-                  <button className="btn small primary" disabled={ctxUpdating} onClick={onUpdateContext}>
-                    {ctxUpdating ? "更新中…" : "更新状态"}
-                  </button>
-                )}
-              </div>
-            </div>
-            {ctxState.pending ? (
-              <div className="small muted" style={{ marginTop: 4 }}>
-                {ctxState.pending_sessions > 0
-                  ? `${ctxState.pending_sessions} 个会话有新内容待并入。`
-                  : "有新内容待并入。"}
-              </div>
-            ) : (
-              <div className="small muted" style={{ marginTop: 4 }}>
-                已是最新（rev {ctxState.context_revision}）。
-              </div>
-            )}
-            {ctxUpdateError && (
-              <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
-                <span>{ctxUpdateError.message}{ctxUpdateError.operationId ? ` · 操作 ID ${ctxUpdateError.operationId}` : ""}</span>
-                {ctxUpdateError.operationId && (
-                  <button className="btn small ghost" onClick={async () => {
-                    const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError));
-                    showToast(ok ? "已复制错误详情" : "复制失败");
-                  }}>复制错误详情</button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-        {reviewWindow && reviewSummary && (
-          <SinceLastReview
-            window={reviewWindow}
-            summary={reviewSummary}
-            dirty={reviewDirty}
-            marking={markingReviewed}
-            onMarkReviewed={handleMarkReviewed}
-            onRefresh={handleRefreshReview}
-            onOpenItem={(itemId) => {
-              setFocusedItemId(null);
-              setTimeout(() => setFocusedItemId(itemId), 20);
-            }}
-            onOpenConflict={(conflictId) => {
-              setReviewingConflictId(conflictId);
-              setReviewingConflict(true);
-            }}
-          />
-        )}
-        <WorkstreamContext
-          ctx={ctx}
-          focusedItemId={focusedItemId}
-          onChanged={onChanged}
-          onNavigateSession={(sessionId) => navigate({ view: "session", sessionId })}
-        />
-      </div>
-      <div>
-        <NeedsAttentionSection
-          conflicts={ctx.conflicts ?? []}
-          onReview={() => {
-            setReviewingConflictId(undefined);
-            setReviewingConflict(true);
-          }}
-        />
-        <RecentChangesTimeline changes={ctx.recent_changes ?? []} />
-      </div>
-      </div>
-
-      {reviewingConflict && (
-        <ConflictReviewModal
-          cases={ctx.conflict_cases ?? []}
-          initialConflictId={reviewingConflictId}
-          onClose={() => {
-            setReviewingConflict(false);
-            setReviewingConflictId(undefined);
-          }}
-          onChanged={onChanged}
-        />
-      )}
-    </>
   );
 }
 

@@ -62,7 +62,7 @@ fn split_action(text: &str) -> (String, Option<ActionProposal>) {
     (text.trim().to_string(), None)
 }
 
-const SYSTEM_INSTRUCTIONS: &str = r#"你是 NoEnding 的 Workspace Assistant。NoEnding 是一个以 Workstream Context 为核心的本地多 Agent 工作空间：Project 是 WorkspacePath 的物理聚合（描述这次执行在哪个目录 / 仓库），Workstream 是跨目录、跨 Project 的持续工作目标，保存持续演进的语义上下文（Goal / Current State / Constraints / Decisions / Open Questions + 扩展条目），Session 是 Codex / Claude Code / Pi 的一次实际执行，最多属于一个 Workstream（Owner）。
+const SYSTEM_INSTRUCTIONS: &str = r#"你是 NoEnding 的 Workspace Assistant。NoEnding 是一个以 Workstream Context 为核心的本地多 Agent 工作空间：Project 是 WorkspacePath 的物理聚合（描述这次执行在哪个目录 / 仓库），Workstream 是跨目录、跨 Project 的持续工作目标，保存当前 Markdown 摘要，Session 是 Codex / Claude Code / Pi 的一次实际执行，最多属于一个 Workstream（Owner）。
 
 规则：
 1. 基于下方「领域快照」回答用户问题，语言跟随用户；找不到就说找不到，不要编造；
@@ -91,6 +91,10 @@ fn build_domain_snapshot(db: &Db, query: &str) -> Result<String> {
                 &w.description
             }
         ));
+        let context = db.get_workstream_context_state(&w.id)?;
+        if !context.summary.is_empty() {
+            snap.push_str(&format!("摘要：{}\n", context.summary));
+        }
     }
 
     snap.push_str("\n== 相关检索命中 ==\n");

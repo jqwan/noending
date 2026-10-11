@@ -64,18 +64,15 @@ fn card_stats_follow_sessions_and_active_state() {
     set_owner(&database, &older.id, &w.id);
     set_owner(&database, &newer.id, &w.id);
 
-    let item = noending::sync::create_item(
-        &database,
-        &w.id,
-        "current_state",
-        "标题行",
-        "修复 source-driven identity migration",
-        "agent_statement",
-        "manual",
-        &[],
-        "user",
-    )
-    .unwrap();
+    database
+        .tx(|tx| {
+            noending::storage::context_repo::commit_workstream_summary_conn(
+                tx,
+                &w.id,
+                "修复 source-driven identity migration",
+            )
+        })
+        .unwrap();
 
     let cards = noending::commands::workstream_cards(&database).unwrap();
     let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
@@ -84,13 +81,17 @@ fn card_stats_follow_sessions_and_active_state() {
     assert_eq!(latest.id, newer.id, "latest session = most recent activity");
     assert_eq!(latest.agent, "codex");
     assert_eq!(
-        card.current_state.as_deref(),
+        card.summary.as_deref(),
         Some("修复 source-driven identity migration")
     );
     // the context edit is the newest work signal, later than both sessions
     assert_eq!(
         card.last_activity_at.as_deref(),
-        Some(item.updated_at.as_str())
+        database
+            .get_workstream_context_state(&w.id)
+            .unwrap()
+            .updated_at
+            .as_deref()
     );
 }
 
@@ -102,7 +103,7 @@ fn zero_session_workstream_is_a_legal_card_without_resume_target() {
     let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
     assert_eq!(card.session_count, 0);
     assert!(card.latest_session.is_none());
-    assert!(card.current_state.is_none());
+    assert!(card.summary.is_none());
     // no work signal yet → no "Last active"; sorting still surfaces the
     // card via the updated_at fallback
     assert!(card.last_activity_at.is_none());
@@ -167,37 +168,34 @@ fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstall
 }
 
 #[test]
-fn resolved_state_items_no_longer_feed_the_card() {
-    let database = db("resolved");
+fn replacing_summary_updates_card_and_search_without_retaining_old_text() {
+    let database = db("replacement");
     let w = workstream(&database, "Initial UI Redesign");
-    let item = noending::sync::create_item(
-        &database,
-        &w.id,
-        "current_state",
-        "旧状态",
-        "旧状态内容",
-        "agent_statement",
-        "manual",
-        &[],
-        "user",
-    )
-    .unwrap();
-    noending::sync::create_item(
-        &database,
-        &w.id,
-        "current_state",
-        "新状态",
-        "新状态内容",
-        "agent_statement",
-        "manual",
-        &[],
-        "user",
-    )
-    .unwrap();
-    // only the newest ACTIVE item counts; the older one resolved away
-    database.set_item_status(&item.id, "resolved").unwrap();
-
+    database
+        .tx(|tx| {
+            noending::storage::context_repo::commit_workstream_summary_conn(
+                tx,
+                &w.id,
+                "obsolete_fact",
+            )
+        })
+        .unwrap();
+    database
+        .tx(|tx| {
+            noending::storage::context_repo::commit_workstream_summary_conn(
+                tx,
+                &w.id,
+                "current_fact",
+            )
+        })
+        .unwrap();
     let cards = noending::commands::workstream_cards(&database).unwrap();
-    let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
-    assert_eq!(card.current_state.as_deref(), Some("新状态内容"));
+    assert_eq!(cards[0].summary.as_deref(), Some("current_fact"));
+    assert!(noending::search::search(&database, "obsolete_fact", 10)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        noending::search::search(&database, "current_fact", 10).unwrap()[0].ref_id,
+        w.id
+    );
 }

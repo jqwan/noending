@@ -11,13 +11,15 @@ vi.mock("../../api", () => ({
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
     getWorkstreamContext: vi.fn(),
     getWorkstreamContextState: vi.fn().mockResolvedValue(null),
+    regenerateWorkstreamContext: vi.fn(),
     updateWorkstreamContext: vi.fn().mockResolvedValue({
       workstream_id: "",
       status: "updated",
       context_revision: 1,
       updated_sessions: [],
-      mutations_applied: 0,
-      remaining_pending: 0,
+      skipped_session_ids: [],
+      failed_sessions: [],
+      remaining_pending: 0, preference_error: null,
     }),
     listWorkstreamPaths: vi.fn(),
     getDefaultAgent: vi.fn().mockResolvedValue(null),
@@ -28,26 +30,7 @@ vi.mock("../../api", () => ({
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
-    // 挂载时读取的 Review 面板（SinceLastReview）默认空窗。
-    getWorkstreamReviewWindow: vi.fn().mockResolvedValue({
-      state: { workstream_id: "w1", frontier: { through_at: "", boundary_change_ids: [] }, reviewed_at: "" },
-      unseen_changes: [],
-      mark_through: { through_at: "", boundary_change_ids: [] },
-    }),
-    getWorkstreamReviewSummary: vi.fn().mockResolvedValue({
-      workstream_id: "w1",
-      unseen_change_count: 0,
-      open_conflict_count: 0,
-      new_facts: 0,
-      updated_facts: 0,
-      resolved_items: 0,
-      superseded_items: 0,
-      last_unseen_change_at: null,
-      reviewed_at: "",
-      has_updates: false,
-      needs_attention: false,
-    }),
-    markWorkstreamReviewed: vi.fn(),
+
   },
 }));
 
@@ -87,24 +70,16 @@ function context(): WorkstreamContext {
       updated_at: "2026-09-21T00:00:00+00:00",
     },
     projects: [],
-    core: [],
-    items: [],
     sessions: [],
-    conflicts: [],
-    relations: [],
-    recent_changes: [],
   };
 }
 
 function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
   return {
     workstream_id: "w1",
-    title: "接口设计",
-    description: "整理 API 设计",
-    sections: [],
+    summary: "**当前进展**：接口设计已确定。",
+    updated_at: null,
     context_revision: 1,
-    input_revision: 1,
-    consumed_input_revision: 1,
     pending: false,
     pending_sessions: 0,
     ...over,
@@ -183,13 +158,11 @@ it("opens the 新建任务 form, prefilled with the current task", async () => {
   screen.getByRole("button", { name: "新增项目" });
 });
 
-it("shows 更新状态 with the pending-session count and calls the explicit update", async () => {
+it("shows 更新摘要 with the pending-session count and calls the explicit update", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
   vi.mocked(api.listWorkstreamPaths).mockResolvedValue(PATHS);
   const state: WorkstreamContextView = contextState({
     context_revision: 2,
-    input_revision: 5,
-    consumed_input_revision: 3,
     pending: true,
     pending_sessions: 2,
   });
@@ -199,20 +172,21 @@ it("shows 更新状态 with the pending-session count and calls the explicit upd
     status: "updated",
     context_revision: 3,
     updated_sessions: ["s1", "s2"],
-    mutations_applied: 2,
-    remaining_pending: 0,
+    skipped_session_ids: [],
+    failed_sessions: [],
+    remaining_pending: 0, preference_error: null,
   });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
 
-  screen.getByText("2 个会话有新内容待并入。");
-  fireEvent.click(screen.getByRole("button", { name: "更新状态" }));
+  screen.getByText("有待更新内容，涉及 2 个会话");
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await waitFor(() => expect(api.updateWorkstreamContext).toHaveBeenCalledWith("w1"));
 });
 
-it("hides 更新状态 when the Context is already up to date", async () => {
+it("hides 更新摘要 when the Context is already up to date", async () => {
   await renderDetail();
-  expect(screen.queryByRole("button", { name: "更新状态" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "更新摘要" })).toBeNull();
 });
 
 it("offers a copyable operation id after a structured Context update failure", async () => {
@@ -230,11 +204,31 @@ it("offers a copyable operation id after a structured Context update failure", a
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
 
-  fireEvent.click(screen.getByRole("button", { name: "更新状态" }));
-  await screen.findByText(/Agent CLI 超时.*操作 ID 123e4567-e89b-12d3-a456-426614174001/);
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
+  await screen.findByText("Agent CLI 超时，请重试或检查 CLI 状态。");
   fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
     "Agent CLI 超时，请重试或检查 CLI 状态。\n错误代码：cli_timeout\n操作 ID：123e4567-e89b-12d3-a456-426614174001",
   ));
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+});
+
+it("renders Markdown and regenerates through the separate action even when up to date", async () => {
+  vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0, preference_error: null });
+  await renderDetail();
+  expect(screen.getByText("当前进展").tagName).toBe("STRONG");
+  fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
+  await waitFor(() => expect(api.regenerateWorkstreamContext).toHaveBeenCalledWith("w1"));
+  expect(api.updateWorkstreamContext).not.toHaveBeenCalled();
+});
+
+it("keeps the task summary visible and reports failed sessions after a partial update", async () => {
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
+  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1, preference_error: null });
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByRole("button", { name: "更新摘要" });
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
+  await screen.findByText("s-failed：无法完整读取消息");
+  expect(screen.getByText("当前进展")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "更新摘要" }) as HTMLButtonElement).disabled).toBe(false);
 });

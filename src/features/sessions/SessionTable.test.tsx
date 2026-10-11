@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionCards from "./SessionTable";
-import type { Session } from "../../types";
+import type { Session, TerminalSummary } from "../../types";
 import { viewState } from "../../hooks/useViewState";
 vi.mock("../../api", () => ({
   api: {
@@ -123,4 +123,32 @@ it("disables archived session continuation in both card and list terminal modes"
   rerender(<SessionCards {...props} viewMode="list" />);
   assertBlocked();
   localStorage.removeItem("noending.continue_mode");
+});
+
+it("displays running terminal state on the continue button when session has a live terminal", async () => {
+  const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
+  const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
+  const terminals: TerminalSummary[] = [
+    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", owner_workstream_id: null, identity_revision: 0 },
+    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", owner_workstream_id: null, identity_revision: 0 },
+  ];
+  await renderCards(
+    <SessionCards
+      sessions={[sLive, sExited]}
+      terminals={terminals}
+      workstreamTitleById={new Map()}
+      projectNameById={new Map()}
+      onOpen={vi.fn()}
+      onResume={vi.fn()}
+      onArchive={vi.fn()}
+      onTerminalResume={vi.fn()}
+    />
+  );
+  const liveBtn = screen.getByRole("button", { name: "在终端中继续活跃终端会话" });
+  expect(liveBtn.className).toContain("terminal-running");
+  expect(liveBtn.title).toContain("切回终端 · 运行中");
+
+  const exitedBtn = screen.getByRole("button", { name: "在终端中继续退出终端会话" });
+  expect(exitedBtn.className).toContain("terminal-exited");
+  expect(exitedBtn.title).toBe("唤起终端");
 });

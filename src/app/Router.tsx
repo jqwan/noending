@@ -45,7 +45,6 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
           key={route.workstreamId}
           initialTitle={route.initialTitle ?? workstreamDetailCache.get(route.workstreamId)?.ctx.workstream.title}
           workstreamId={route.workstreamId}
-          entry={route.entry}
           navigate={navigate}
           goBack={goBack}
         />

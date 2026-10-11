@@ -98,8 +98,7 @@ function workstreamCard(over: Partial<WorkstreamCardData> = {}): WorkstreamCardD
     visibility: "normal",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    current_state: null,
-    goal: null,
+    summary: null,
     last_activity_at: new Date().toISOString(),
     session_count: 1,
     latest_session: null,
@@ -135,12 +134,6 @@ describe("Sidebar navigation", () => {
     expect(newSession.className).toContain("active");
     fireEvent.click(newSession);
     expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
-  });
-
-  it("opens the sessions board from the session sidebar", async () => {
-    const navigate = renderSidebar();
-    fireEvent.click(await screen.findByRole("button", { name: "会话" }));
-    expect(navigate).toHaveBeenCalledWith({ view: "sessions" });
   });
 });
 
@@ -244,47 +237,78 @@ describe("Sidebar unified sessions", () => {
 });
 
 describe("Sidebar 最近活动", () => {
-  it("renders empty state when there are no sessions within the last 7 days", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({
-        id: "s-old",
-        title: "较旧的会话",
-        last_conversation_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
-      }),
-    ]);
+  it("renders empty state when there are no sessions", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([]);
 
     renderSidebar();
-    expect(await screen.findByText("最近 7 天无新消息")).toBeTruthy();
-    expect(screen.queryByText("较旧的会话")).toBeNull();
+    expect(await screen.findByText("暂无会话")).toBeTruthy();
   });
 
-  it("filters sessions to last 7 days and excludes trashed sessions", async () => {
+  it("displays 工作区 title and supports filtering by 最近5天, 未归档, 可终端继续", async () => {
     const activeRecent = session({
       id: "s-recent",
       title: "近期活跃会话",
+      agent: "codex",
       last_conversation_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
     });
     const oldSession = session({
       id: "s-old",
-      title: "过期会话",
+      title: "较旧会话",
+      agent: "codex",
       last_conversation_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
     });
-    const trashedSession = session({
-      id: "s-trash",
-      title: "已删除会话",
+    const archivedSession = session({
+      id: "s-archived",
+      title: "已归档会话",
+      agent: "codex",
       last_conversation_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
       archived_at: new Date().toISOString(),
     });
+    const desktopOnlySession = session({
+      id: "s-desktop",
+      title: "桌面代理会话",
+      agent: "qoder",
+      last_conversation_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
+    });
 
-    vi.mocked(api.listSessions).mockResolvedValue([activeRecent, oldSession, trashedSession]);
+    vi.mocked(api.listSessions).mockResolvedValue([activeRecent, oldSession, archivedSession, desktopOnlySession]);
     vi.mocked(api.listWorkstreamCards).mockResolvedValue([
       workstreamCard({ id: "ws-1", title: "测试任务" }),
     ]);
 
     renderSidebar();
-    expect(await screen.findByText("近期活跃会话")).toBeTruthy();
-    expect(screen.queryByText("过期会话")).toBeNull();
-    expect(screen.queryByText("已删除会话")).toBeNull();
+
+    // 1. Header shows "工作区"
+    expect(await screen.findByText("工作区")).toBeTruthy();
+
+    // 2. Default: shows all sessions (not restricted to 7 days)
+    expect(screen.getByText("近期活跃会话")).toBeTruthy();
+    expect(screen.getByText("较旧会话")).toBeTruthy();
+    expect(screen.getByText("已归档会话")).toBeTruthy();
+    expect(screen.getByText("桌面代理会话")).toBeTruthy();
+
+    // 3. Open filter menu
+    const filterBtn = screen.getByRole("button", { name: "筛选会话" });
+    fireEvent.click(filterBtn);
+    expect(screen.getByRole("menu")).toBeTruthy();
+
+    // 4. Filter by 最近5天
+    const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
+    fireEvent.click(filterRecentBtn);
+    expect(screen.getByText("近期活跃会话")).toBeTruthy();
+    expect(screen.queryByText("较旧会话")).toBeNull();
+
+    // 5. Multi-select: Filter by 未归档
+    const filterUnarchivedBtn = screen.getByRole("menuitemcheckbox", { name: "未归档" });
+    fireEvent.click(filterUnarchivedBtn);
+    expect(screen.getByText("近期活跃会话")).toBeTruthy();
+    expect(screen.queryByText("已归档会话")).toBeNull();
+
+    // 6. Multi-select: Filter by 可终端继续
+    const filterCanContinueBtn = screen.getByRole("menuitemcheckbox", { name: "可终端继续" });
+    fireEvent.click(filterCanContinueBtn);
+    expect(screen.getByText("近期活跃会话")).toBeTruthy();
+    expect(screen.queryByText("桌面代理会话")).toBeNull();
   });
 
   it("groups by workstream by default and navigates to session detail on click", async () => {
@@ -306,6 +330,45 @@ describe("Sidebar 最近活动", () => {
 
     fireEvent.click(sessionItem);
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+  });
+
+  it("navigates to session when clicking the row edge/container", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-edge",
+        title: "边缘点击会话",
+        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ]);
+    const navigate = renderSidebar();
+    const rowTitle = await screen.findByText("边缘点击会话");
+    const rowContainer = rowTitle.closest(".sidebar-recent-item")!;
+    fireEvent.click(rowContainer);
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-edge" }));
+  });
+
+  it("enables marquee scrolling on hover when title overflows", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-long",
+        title: "这是一个特别长特别长的超出会话标题用于测试文字滚动效果",
+        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ]);
+    renderSidebar();
+    const rowTitle = await screen.findByText("这是一个特别长特别长的超出会话标题用于测试文字滚动效果");
+    const titleContainer = rowTitle.closest(".sidebar-session-title") as HTMLElement;
+    const rowContainer = rowTitle.closest(".sidebar-recent-item")!;
+
+    Object.defineProperty(titleContainer, "scrollWidth", { configurable: true, value: 300 });
+    Object.defineProperty(titleContainer, "clientWidth", { configurable: true, value: 150 });
+
+    fireEvent.mouseEnter(rowContainer);
+    expect(titleContainer.className).toContain("scrolling");
+    expect(titleContainer.style.getPropertyValue("--overflow-width")).toBe("186px");
+
+    fireEvent.mouseLeave(rowContainer);
+    expect(titleContainer.className).not.toContain("scrolling");
   });
 
   it("keeps an unbound terminal in its selected task and retains that group after ingestion", async () => {
@@ -454,14 +517,14 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("第二条会话")).toBeTruthy();
   });
 
-  it("determines recent sessions strictly by last_conversation_at, ignoring last_activity_at", async () => {
+  it("determines recent sessions strictly by last_conversation_at when filtering by recent 5 days", async () => {
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
     const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
 
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
         id: "s-claude-recent-conv",
-        title: "近7天有新消息的会话",
+        title: "近5天有新消息的会话",
         agent: "claude_code",
         last_conversation_at: twoDaysAgo,
       }),
@@ -483,12 +546,120 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
+    const filterBtn = screen.getByRole("button", { name: "筛选会话" });
+    fireEvent.click(filterBtn);
+    const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
+    fireEvent.click(filterRecentBtn);
+
     const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
     fireEvent.click(agentToggle);
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
-    expect(screen.getByText("近7天有新消息的会话")).toBeTruthy();
+    expect(screen.getByText("近5天有新消息的会话")).toBeTruthy();
     expect(screen.queryByText("仅有文件活动但无新消息的会话")).toBeNull();
     expect(screen.queryByText("从未有对话的会话")).toBeNull();
+  });
+
+  it("sorts sessions within a group by started_at / created_at desc", async () => {
+    const olderCreated = session({
+      id: "s-older-created",
+      title: "更早创建但最近聊天的会话",
+      agent: "codex",
+      owner_workstream_id: "ws-1",
+      started_at: "2026-10-01T10:00:00.000Z",
+      last_conversation_at: "2026-10-10T12:00:00.000Z",
+    });
+    const newerCreated = session({
+      id: "s-newer-created",
+      title: "更晚创建但较早聊天的会话",
+      agent: "codex",
+      owner_workstream_id: "ws-1",
+      started_at: "2026-10-05T10:00:00.000Z",
+      last_conversation_at: "2026-10-06T12:00:00.000Z",
+    });
+
+    vi.mocked(api.listSessions).mockResolvedValue([olderCreated, newerCreated]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "测试排序任务" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("测试排序任务");
+
+    const links = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
+    expect(links[0].textContent).toContain("更晚创建但较早聊天的会话");
+    expect(links[1].textContent).toContain("更早创建但最近聊天的会话");
+  });
+
+  it("sorts project and workstream groups by created_at desc", async () => {
+    const wsOld = workstreamCard({ id: "ws-old", title: "旧任务", created_at: "2026-09-01T00:00:00Z" });
+    const wsNew = workstreamCard({ id: "ws-new", title: "新任务", created_at: "2026-10-01T00:00:00Z" });
+
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-ws-old", title: "旧任务会话", owner_workstream_id: "ws-old" }),
+      session({ id: "s-ws-new", title: "新任务会话", owner_workstream_id: "ws-new" }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([wsOld, wsNew]);
+
+    renderSidebar();
+    await screen.findByText("新任务");
+
+    const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    expect(groupHeaders[0].textContent).toContain("新任务");
+    expect(groupHeaders[1].textContent).toContain("旧任务");
+  });
+
+  it("sorts agent groups by terminal capability first, then by name", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-qoder", title: "Qoder会话", agent: "qoder" }),
+      session({ id: "s-dsh", title: "DSH会话", agent: "dsh" }),
+      session({ id: "s-claude", title: "Claude会话", agent: "claude_code" }),
+      session({ id: "s-codex", title: "Codex会话", agent: "codex" }),
+    ]);
+
+    renderSidebar();
+    const agentRadio = screen.getByRole("radio", { name: "按代理归类" });
+    fireEvent.click(agentRadio);
+
+    await screen.findByRole("button", { name: /Claude Code/ });
+    const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    const titles = groupHeaders.map(h => h.textContent);
+    expect(titles[0]).toContain("Claude Code");
+    expect(titles[1]).toContain("Codex");
+    expect(titles[2]).toContain("DSH");
+    expect(titles[3]).toContain("Qoder");
+  });
+
+  it("differentiates running vs exited terminal continue buttons with status classes", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-live", title: "运行中会话", agent: "codex" }),
+      session({ id: "s-exited", title: "已退出会话", agent: "codex" }),
+    ]);
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-live", session_id: "s-live", live: true }),
+      terminal({ terminal_id: "t-exited", session_id: "s-exited", live: false }),
+    ]);
+
+    renderSidebar({ view: "terminal", terminalId: "t-live" });
+
+    const liveBtn = await screen.findByRole("button", { name: /终端 · 运行中：运行中会话/ });
+    expect(liveBtn.className).toContain("terminal-running");
+    expect(liveBtn.className).toContain("active");
+
+    const exitedBtn = await screen.findByRole("button", { name: /终端 · 已退出：已退出会话/ });
+    expect(exitedBtn.className).toContain("terminal-exited");
+    expect(exitedBtn.className).not.toContain("active");
+
+    const liveRow = liveBtn.closest(".sidebar-recent-item")!;
+    const liveDot = liveRow.querySelector(".sidebar-session-link .sidebar-session-dot");
+    expect(liveDot).toBeTruthy();
+    expect(liveDot?.className).toContain("running");
+    const liveTitle = liveRow.querySelector(".sidebar-session-title")!;
+    expect(liveTitle.compareDocumentPosition(liveDot!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const exitedRow = exitedBtn.closest(".sidebar-recent-item")!;
+    const exitedDot = exitedRow.querySelector(".sidebar-session-link .sidebar-session-dot");
+    expect(exitedDot).toBeTruthy();
+    expect(exitedDot?.className).toContain("exited");
   });
 });

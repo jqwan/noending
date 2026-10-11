@@ -3,15 +3,15 @@ import { timeAgo } from "../../components/common";
 import type { Route } from "../../app/routes";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
-/** 卡片摘要：优先 Agent 的 current_state，退回用户写的描述与目标。 */
+/** 卡片摘要：优先当前摘要，退回用户描述。 */
 export function cardSummaryLine(card: WorkstreamCardData): string {
-  return card.current_state || card.description || card.goal || "";
+  return card.summary || card.description || "";
 }
 
 /** 检索字段必须与 placeholder 声明的一致：命中一个页面上看不见的字段，
  *  等于给用户一个无法解释的结果。 */
 export function cardSearchFields(card: WorkstreamCardData): (string | null | undefined)[] {
-  return [card.title, card.description, ...card.projects.map((p) => p.name), card.current_state, card.goal];
+  return [card.title, card.description, ...card.projects.map((p) => p.name), card.summary];
 }
 
 export function searchFieldHint(): string {

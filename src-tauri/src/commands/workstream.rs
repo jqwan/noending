@@ -194,10 +194,7 @@ pub struct WorkstreamCardView {
     #[serde(flatten)]
     pub workstream: Workstream,
     pub projects: Vec<workstream::WorkstreamProject>,
-    /// L1 Current State text (content, falling back to its title).
-    pub current_state: Option<String>,
-    /// L1 Goal text — the card's last content fallback.
-    pub goal: Option<String>,
+    pub summary: Option<String>,
     /// max(session activity, context edit, workstream update).
     pub last_activity_at: Option<String>,
     pub session_count: i64,
@@ -250,7 +247,8 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
     let mut cards = Vec::new();
     for w in db.list_workstreams(None)? {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
-        let items_activity = db.workstream_items_last_update(&w.id)?;
+        let context = db.get_workstream_context_state(&w.id)?;
+        let summary_activity = context.updated_at;
         let paths = db.list_workstream_paths(&w.id)?;
         let projects = workstream::projects_for_workstream(db, &w.id)?;
         // "Last active" only follows real work signals (session activity,
@@ -258,13 +256,12 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         // Workstream look freshly active. Sorting still falls back to
         // updated_at so a brand-new Workstream surfaces at the top.
         let mut last_activity_at = None;
-        for candidate in [&session_activity, &items_activity] {
+        for candidate in [&session_activity, &summary_activity] {
             last_activity_at = later_ts(&last_activity_at, candidate);
         }
         cards.push(WorkstreamCardView {
             projects,
-            current_state: db.workstream_state_text(&w.id, "current_state")?,
-            goal: db.workstream_state_text(&w.id, "goal")?,
+            summary: (!context.summary.is_empty()).then_some(context.summary),
             last_activity_at,
             session_count,
             latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),

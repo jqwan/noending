@@ -841,6 +841,10 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
     // `reassign_workspace_path_project_conn` already moved each
     // path's derived Session cache AND its Workstream search parents, so there is
     // no second pass to make — one door, one job, no half-updated middle state.
+    conn.execute(
+        "UPDATE preferences SET project_id=?1,revision=revision+1 WHERE project_id=?2",
+        rusqlite::params![survivor.id, loser.id],
+    )?;
     let deleted = retire_project_if_unowned(conn, &loser.id)?;
     if !deleted {
         return Err(other(format!(

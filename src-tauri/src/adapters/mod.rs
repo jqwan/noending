@@ -1050,6 +1050,8 @@ mod context_extraction_command_tests {
                 },
                 vec![
                     "--ephemeral",
+                    "-s",
+                    "workspace-write",
                     "-m",
                     "model-codex",
                     "model_reasoning_effort=\"high\"",
@@ -1064,6 +1066,10 @@ mod context_extraction_command_tests {
                 },
                 vec![
                     "--no-session-persistence",
+                    "--tools",
+                    "Read,Write",
+                    "--allowedTools",
+                    "--",
                     "--model",
                     "model-claude",
                     "--effort",
@@ -1081,6 +1087,8 @@ mod context_extraction_command_tests {
                 vec![
                     "--no-session",
                     "--no-tools",
+                    "--tools",
+                    "read,write",
                     "--provider",
                     "provider-pi",
                     "--model",

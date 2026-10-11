@@ -160,7 +160,7 @@ export function looksLikeMarkdown(text: string): boolean {
 /** 刻意退化两个元素（转录是我们不控制的内容）：
  *  a   —— 点链接会把整个应用导航走（也没装外链插件），只留文字；
  *  img —— 不因一条转录去请求远程地址（本地优先不该外连），显示 alt 与 URL。 */
-const MD_COMPONENTS: Components = {
+export const MD_COMPONENTS: Components = {
   a: ({ href, children }) => <span className="md-link" title={href}>{children}</span>,
   img: ({ src, alt }) => <span className="md-img">[{alt || "图片"}] {src}</span>,
 };

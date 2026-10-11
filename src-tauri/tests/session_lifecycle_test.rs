@@ -1,17 +1,7 @@
-//! Session lifecycle — Trash / Restore / permanent LOCAL delete.
-//!
-//! Trash is a thin filter: it decides which lists a Session appears in and
-//! freezes its Context extraction. Everything else keeps following the source —
-//! ingestion still commits, ownership still matches, and the Agent source
-//! file is never touched (NoEnding never deletes an Agent-owned source). Restore
-//! keeps the same id, Owner, messages, cursors and Context frontier, then
-//! reindexes. Permanent delete is a NoEnding-LOCAL purge (no job, no filesystem
-//! step, no crash recovery), allowed only for a TRASHED session whose ROOT source
-//! the adapter freshly confirmed Missing; it removes exactly the session-owned
-//! rows, redacts Context provenance in place, and leaves no tombstone.
-//!
-//! Adapter verdicts are driven with REAL files via `inspect_file_source`; only
-//! temp dirs are used, never the real ~/.codex, ~/.claude or ~/.pi.
+//! Session archive, restore and permanent local deletion. Archive blocks continuation
+//! while preserving ingestion, summaries, ownership and Agent source files.
+//! Permanent deletion removes session-owned data only, from archived sessions.
+//! Adapter source verdicts are exercised with temporary real files.
 
 use noending::domain::{Agent, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
@@ -166,31 +156,6 @@ fn context_frontier(db: &Db, session_id: &str) -> i64 {
 
 /// A context item whose head revision points at one of the session's messages
 /// (current provenance spelling).
-fn context_item_pointing_at(
-    db: &Db,
-    ws_id: &str,
-    session_id: &str,
-) -> (String, noending::domain::SessionMessage) {
-    let messages = db.get_messages(session_id, None, 10).unwrap();
-    let message = messages.first().expect("a committed message").clone();
-    let message_ref = format!("session-message:{}", message.id);
-    let item = noending::sync::create_item(
-        db,
-        ws_id,
-        "decision",
-        "Use SQLite",
-        "storage decision from the session",
-        "agent_statement",
-        "session_message",
-        &[message_ref],
-        "agent",
-    )
-    .unwrap();
-    (item.id, message)
-}
-
-// lifecycle trash / restore
-
 #[test]
 fn archive_keeps_every_fact_and_never_touches_the_source() {
     let db = open_db("trash-freezes");
@@ -453,150 +418,53 @@ fn permanent_delete_purges_local_rows_only() {
     let db = open_db("full-purge");
     let dir = TempDir::new("purge-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
-    let source_file = PathBuf::from(&s.source_path);
     commit_message(&db, &s.id, "决定使用 SQLite 存储", 100);
     let ws = workstream(&db, "Surviving WS");
     set_owner(&db, &s.id, &ws.id);
-    let (item_id, _) = context_item_pointing_at(&db, &ws.id, &s.id);
-    // Stats via the production delta path.
-    db.commit_ingest(
-        &s.id,
-        &[],
-        &noending::domain::SourceCursorUpdate {
-            file_identity: "identity".into(),
-            generation: 1,
-            byte_offset: 100,
-            last_seen_size: 100,
-            mtime: None,
-            start_byte_offset: 100,
-            prefix_hash: String::new(),
-        },
-    )
-    .unwrap();
     set_context_frontier(&db, &s.id, 1);
-
-    // …another session's context must NOT be redacted.
-    let other_dir = TempDir::new("purge-other-src");
+    let other_dir = TempDir::new("purge-other");
     let other = seeded_session(&db, &other_dir, SourceKind::File);
-    commit_message(&db, &other.id, "另一个会话的消息", 100);
-    let (other_item, _) = context_item_pointing_at(&db, &ws.id, &other.id);
-
-    // Trashed + root missing → purge allowed.
+    commit_message(&db, &other.id, "保留其他会话", 100);
+    set_context_frontier(&db, &other.id, 1);
     lifecycle::archive_session(&db, &s.id).unwrap();
-    std::fs::remove_file(&source_file).unwrap();
-
     let preview = lifecycle::get_session_local_delete_preview(&db, &s.id).unwrap();
-    assert_eq!(preview.root_source_status, SourceAvailability::Missing);
     assert_eq!(preview.counts.message_count, 1);
-    assert!(preview.counts.session_context_count >= 1);
-
+    assert_eq!(preview.counts.session_context_count, 1);
     assert!(
-        preview.counts.context_revision_redaction_count >= 1,
-        "the item revision pointing at this session is counted: {:?}",
-        preview.counts
+        lifecycle::permanently_delete_session(&db, &s.id)
+            .unwrap()
+            .purged
     );
-
-    let result = lifecycle::permanently_delete_session(&db, &s.id).unwrap();
-    assert!(result.purged);
-    assert!(result.redacted_revisions >= 1);
-
-    // Every session-owned row is gone ('s fixed order).
-    assert!(db.get_session(&s.id).unwrap().is_none(), "session row gone");
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?",
-            &s.id
-        ),
-        0,
-        "conversation gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_contexts WHERE session_id = ?",
-            &s.id
-        ),
-        0,
-        "session summary gone"
-    );
-    assert_eq!(
-        count(
-            &db,
-            "SELECT COUNT(*) FROM session_context_revisions WHERE session_id = ?",
-            &s.id
-        ),
-        0,
-        "summary revision history gone"
-    );
-
+    assert!(db.get_session(&s.id).unwrap().is_none());
+    for table in [
+        "session_messages",
+        "session_contexts",
+        "session_message_projection",
+        "workstream_session_frontiers",
+    ] {
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?"),
+                &s.id
+            ),
+            0
+        );
+    }
     assert_eq!(
         count(
             &db,
             "SELECT COUNT(*) FROM search_index WHERE parent_id = ?",
             &s.id
         ),
-        0,
-        "no FTS row survives the purge"
+        0
     );
-
-    // Surviving context: content preserved, provenance redacted.
-    let rev_id: String = db
-        .read()
-        .query_row(
-            "SELECT current_revision_id FROM context_items WHERE id = ?1",
-            [&item_id],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let source = db.get_context_revision_source(&rev_id).unwrap().unwrap();
-    assert_eq!(source.source_type.as_deref(), Some("deleted_session"));
-    assert!(source.source_ref.is_none(), "the message ref dies");
-    assert!(source.session_id.is_none(), "no session may resolve");
-    let rev = db.get_revision(&rev_id).unwrap().unwrap();
-    assert_eq!(rev.title, "Use SQLite", "the title survives");
-    assert_eq!(
-        rev.content, "storage decision from the session",
-        "the content survives"
-    );
-    // The redaction keeps authority/actor — the provenance the authority
-    // resolver reads is scrubbed of refs only.
-    let metadata: serde_json::Value = rev.metadata;
-    assert_eq!(
-        metadata["provenance"]["authority"], "agent_statement",
-        "authority survives the redaction"
-    );
-    assert_eq!(metadata["provenance"]["actor"], "agent", "actor survives");
-    assert_eq!(
-        metadata["provenance"]["source_type"], "deleted_session",
-        "the redaction is recorded in the provenance too"
-    );
-
-    // The OTHER session's identical-looking context is untouched, its source
-    // file still on disk, and the Workstream survives.
-    let other_rev_id: String = db
-        .read()
-        .query_row(
-            "SELECT current_revision_id FROM context_items WHERE id = ?1",
-            [&other_item],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let other_source = db
-        .get_context_revision_source(&other_rev_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        other_source.source_type.as_deref(),
-        Some("session_message"),
-        "only the dying session's provenance is redacted"
-    );
+    assert!(PathBuf::from(&s.source_path).exists());
     assert!(db.get_session(&other.id).unwrap().is_some());
+    assert_eq!(context_frontier(&db, &other.id), 1);
     assert!(db.get_workstream(&ws.id).unwrap().is_some());
 }
 
-/// A source that reappeared between preview and execute does not block the
-/// purge: the verdict is copy for the dialog, not a gate.
 #[test]
 fn a_reappearing_source_does_not_block_the_purge() {
     let db = open_db("fresh-recheck");

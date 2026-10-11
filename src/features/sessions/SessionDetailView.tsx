@@ -1,3 +1,5 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
@@ -5,7 +7,7 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { Modal, contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
+import SessionMessage, { MD_COMPONENTS, messageData, type SessionMessageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
@@ -20,7 +22,6 @@ import {
 import {
   type Agent,
   type Project,
-  type SessionContextFields,
   type SessionContextView,
   type SessionDetail,
   type Workstream,
@@ -50,10 +51,11 @@ export default function SessionDetailView({
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const [ownerOpen, setOwnerOpen] = useState(false);
-  /** Context：纯读取的四字段摘要 + 显式「生成 / 更新摘要」。 */
+  /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
   const [ctxBusy, setCtxBusy] = useState(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
+  const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const currentSessionId = useRef(sessionId);
   // 已归档动作（Session Lifecycle & Deletion）：执行中的 busy、
@@ -69,6 +71,7 @@ export default function SessionDetailView({
 
   useEffect(() => {
     setCtxError(null);
+    setPreferenceError(null);
     setCtxReadError(null);
     setCtxBusy(false);
     if (currentSessionId.current !== sessionId) {
@@ -146,22 +149,28 @@ export default function SessionDetailView({
   }
   const { session, owner_workstream } = detail;
 
-  /** 一次点击 → 最多一次模型调用 → 一份新的四字段摘要。失败按后端原因给可行动文案。 */
-  const updateSummary = async () => {
+  /** 一次点击 → 最多启动一次 Agent → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
+  const updateSummary = async (regenerate = false) => {
     if (ctxBusy) return;
     const updateSessionId = sessionId;
     setCtxBusy(true);
     setCtxReadError(null);
     setCtxError(null);
+    setPreferenceError(null);
     try {
-      const out = await api.updateSessionContext(updateSessionId);
+      const out = regenerate
+        ? await api.regenerateSessionContext(updateSessionId)
+        : await api.updateSessionContext(updateSessionId);
       if (currentSessionId.current !== updateSessionId) return;
+      setPreferenceError(out.preference_error);
       showToast(
         out.status === "no_change"
           ? "没有新内容，摘要保持不变"
-          : out.status === "partial"
+          : out.status === "skipped"
+            ? "没有新的摘要内容"
+            : out.status === "partial"
             ? "已更新摘要（还有内容待下次更新）"
-            : "已更新摘要",
+            : regenerate ? "已重新生成摘要" : "已更新摘要",
       );
       refresh();
     } catch (e) {
@@ -174,10 +183,10 @@ export default function SessionDetailView({
     }
   };
 
-  /** 复制当前摘要：四字段按可读文本整段给出去。 */
+  /** 复制当前摘要：保留 Markdown 原文。 */
   const copyContext = async () => {
     if (!sessionCtx?.fields) return;
-    const ok = await copyToClipboard(sessionContextText(sessionCtx.fields));
+    const ok = await copyToClipboard(sessionCtx.fields.summary);
     showToast(ok ? "已复制 Context" : "复制失败");
   };
 
@@ -222,12 +231,12 @@ export default function SessionDetailView({
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
   const hasMessages = messages.length > 0 || detail.ingested_message_sequence > 0;
 
-  /** 按钮只在真的有内容可更新时出现：需要已读到 Context、有消息，且无摘要或有增量。
-      归档不影响摘要更新。 */
+  /** 更新处理增量；重新生成即使没有增量也可从完整历史重建。归档不影响这两项操作。 */
   const canUpdateSummary =
     sessionCtx !== null
     && hasMessages
-    && (sessionCtx.fields === null || sessionCtx.pending);
+    && sessionCtx.pending;
+  const canRegenerateSummary = sessionCtx !== null && hasMessages;
 
   /** 源会话：会话自己的源文件 + 详情加载时的新鲜结论。 */
   const sourceMissing = detail.source_status === "missing";
@@ -340,9 +349,7 @@ export default function SessionDetailView({
         </div>
       )}
 
-      {/* Context：四字段只读 + 复制 + 显式「生成 / 更新摘要」。
-          只有当有消息、且（还没有摘要 或 有新消息待并入）时才出现按钮——
-          没有内容可更新时不摆一个按不动的按钮。 */}
+      {/* 当前摘要只读；更新合并增量，重新生成从完整历史重建。 */}
       <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
         <div className="section-label" style={{ margin: 0 }}>Context</div>
         <div className="row" style={{ gap: 8 }}>
@@ -354,9 +361,14 @@ export default function SessionDetailView({
           >
             复制
           </button>
+          {canRegenerateSummary && (
+            <button className="btn small ghost" disabled={ctxBusy} onClick={() => updateSummary(true)}>
+              重新生成
+            </button>
+          )}
           {canUpdateSummary && (
-            <button className="btn small primary" disabled={ctxBusy} onClick={updateSummary}>
-              {ctxBusy ? "更新中…" : sessionCtx?.fields ? "更新摘要" : "生成摘要"}
+            <button className="btn small primary" disabled={ctxBusy} onClick={() => updateSummary()}>
+              {ctxBusy ? "更新中…" : "更新摘要"}
             </button>
           )}
         </div>
@@ -371,6 +383,7 @@ export default function SessionDetailView({
           {ctxReadError.message}
         </div>
       )}
+      {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
       {ctxError && (
         <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
           <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
@@ -383,19 +396,10 @@ export default function SessionDetailView({
         </div>
       )}
       {sessionCtx?.fields ? (
-        <div style={{ display: "grid", gap: 12, marginTop: 10, maxWidth: "72ch" }}>
-          <ContextField label="Summary / Current State">
-            {sessionCtx.fields.summary_current_state.trim() || "—"}
-          </ContextField>
-          <ContextField label="Decisions">
-            <ContextList items={sessionCtx.fields.decisions} />
-          </ContextField>
-          <ContextField label="Open Questions">
-            <ContextList items={sessionCtx.fields.open_questions} />
-          </ContextField>
-          <ContextField label="Next Steps">
-            <ContextList items={sessionCtx.fields.next_steps} />
-          </ContextField>
+        <div className="md-body" style={{ marginTop: 10, maxWidth: "72ch", overflowWrap: "anywhere" }}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+            {sessionCtx.fields.summary}
+          </ReactMarkdown>
         </div>
       ) : (
         <div className="l1-none" style={{ marginTop: 8 }}>
@@ -721,44 +725,6 @@ function Field({
       <div style={{ minWidth: 0 }}>{children}</div>
     </>
   );
-}
-
-/** 一个只读 Context 字段：标签 + 值。 */
-function ContextField({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="muted small">{label}</div>
-      <div className="small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{children}</div>
-    </div>
-  );
-}
-
-/** 字符串数组字段：空数组不冒称有内容。 */
-function ContextList({ items }: { items: string[] }) {
-  if (items.length === 0) return <span className="muted">—</span>;
-  return (
-    <ul style={{ margin: 0, paddingLeft: 18 }}>
-      {items.map((item, i) => <li key={i}>{item}</li>)}
-    </ul>
-  );
-}
-
-/** 复制用的纯文本渲染：四字段按可读顺序整段给出去。 */
-function sessionContextText(f: SessionContextFields): string {
-  const list = (xs: string[]) => (xs.length > 0 ? xs.map((x) => `- ${x}`).join("\n") : "—");
-  return [
-    "Summary / Current State:",
-    f.summary_current_state.trim() || "—",
-    "",
-    "Decisions:",
-    list(f.decisions),
-    "",
-    "Open Questions:",
-    list(f.open_questions),
-    "",
-    "Next Steps:",
-    list(f.next_steps),
-  ].join("\n");
 }
 
 /**

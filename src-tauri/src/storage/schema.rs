@@ -50,7 +50,10 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// v2 — Workstream has only archive state; Session trash becomes archived_at.
 /// v3 — remove unused fields and the Session Project cache; slim FTS metadata.
 /// v4 — remove launch intents; embedded terminals assign ownership by native ID.
-pub const DATABASE_FORMAT_VERSION: i64 = 4;
+/// v5 — current session/task/project Markdown summaries; retire Context history,
+/// items, conflicts and review; task consumption no longer duplicates fact generations.
+/// v6 — current user/project preferences with user-controlled Agent locks.
+pub const DATABASE_FORMAT_VERSION: i64 = 6;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -212,7 +215,7 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 /// schema.
 ///
 /// Agent facts and rebuildable projections coexist with NoEnding-owned state.
-/// Tasks, ownership, archive state, Context history and settings must be
+/// Tasks, ownership, archive state, current summaries and settings must be
 /// preserved explicitly when replacing the database.
 const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS projects (
@@ -319,66 +322,24 @@ const CURRENT_SCHEMA: &str = r#"
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_message
       ON session_message_projection(session_id, session_message_id);
-    -- Workstream Context content authority: items + revisions + conflicts.
-    CREATE TABLE IF NOT EXISTS context_items (
-      id TEXT PRIMARY KEY,
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-      kind TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active',
-      authority TEXT NOT NULL DEFAULT 'system_observed',
-      created_by TEXT NOT NULL DEFAULT 'unknown',
-      current_revision_id TEXT,
-      supersedes_item_id TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS context_item_revisions (
-      id TEXT PRIMARY KEY,
-      item_id TEXT NOT NULL REFERENCES context_items(id),
-      title TEXT NOT NULL,
-      content TEXT NOT NULL DEFAULT '',
-      metadata TEXT NOT NULL DEFAULT '{}',
-      source_type TEXT,
-      source_ref TEXT,
-      created_at TEXT NOT NULL
-    );
     -- The Logical Session's Context: system-derived, read-only, one current
-    -- row per Session. No row means "never generated". The four JSON columns
-    -- are the fixed summary structure; revision is the CAS guard, and
+    -- row per Session. No row means "never generated". Summary is Markdown;
+    -- revision is the CAS guard, and
     -- (ingest_generation, processed_through_seq) is the Session frontier in
     -- CURRENT-message-projection ordinals.
     CREATE TABLE IF NOT EXISTS session_contexts (
       session_id TEXT PRIMARY KEY
         REFERENCES sessions(id) ON DELETE CASCADE,
-      summary_current_state TEXT NOT NULL DEFAULT '',
-      decisions TEXT NOT NULL DEFAULT '[]',
-      open_questions TEXT NOT NULL DEFAULT '[]',
-      next_steps TEXT NOT NULL DEFAULT '[]',
+      summary TEXT NOT NULL DEFAULT '',
       revision INTEGER NOT NULL DEFAULT 0,
       ingest_generation INTEGER NOT NULL DEFAULT 0,
       processed_through_seq INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
-    -- Append-only history of every committed Session Context, so a
-    -- Workstream update can cite `session-context:<id>:<revision>` and prove
-    -- which summary it consumed.
-    CREATE TABLE IF NOT EXISTS session_context_revisions (
-      session_id TEXT NOT NULL
-        REFERENCES sessions(id) ON DELETE CASCADE,
-      revision INTEGER NOT NULL,
-      summary_current_state TEXT NOT NULL DEFAULT '',
-      decisions TEXT NOT NULL DEFAULT '[]',
-      open_questions TEXT NOT NULL DEFAULT '[]',
-      next_steps TEXT NOT NULL DEFAULT '[]',
-      ingest_generation INTEGER NOT NULL DEFAULT 0,
-      processed_through_seq INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      PRIMARY KEY (session_id, revision)
-    );
     -- The Workstream side of the two-level revision scheme.
-    -- context_revision guards all ContextItem writes (manual + AI);
-    -- input_revision marks manual Context edits / Owner-set / title /
-    -- description changes that need re-synthesis; AI records the
+    -- context_revision guards summary writes;
+    -- input_revision marks Owner-set / paths / title /
+    -- description changes that leave inputs pending; AI records the
     -- input_revision it consumed so its own success does not leave the
     -- Workstream "pending" again. Created as (0, 1, 0) so the first explicit
     -- generation is allowed.
@@ -386,7 +347,9 @@ const CURRENT_SCHEMA: &str = r#"
       workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id),
       context_revision INTEGER NOT NULL DEFAULT 0,
       input_revision INTEGER NOT NULL DEFAULT 0,
-      consumed_input_revision INTEGER NOT NULL DEFAULT 0
+      consumed_input_revision INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      updated_at TEXT
     );
     -- What the Workstream has already consumed from each Owner Session.
     -- Written in the same transaction as a combined update; a Session that
@@ -395,9 +358,22 @@ const CURRENT_SCHEMA: &str = r#"
       workstream_id TEXT NOT NULL REFERENCES workstreams(id),
       session_id TEXT NOT NULL REFERENCES sessions(id),
       session_context_revision INTEGER NOT NULL DEFAULT 0,
-      ingest_generation INTEGER NOT NULL DEFAULT 0,
-      consumed_through_seq INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (workstream_id, session_id)
+    );
+    -- One current project summary, an input fingerprint and consumed session
+    -- summary revisions. Metadata changes mark pending, never discard a summary.
+    CREATE TABLE IF NOT EXISTS project_context_state (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      context_revision INTEGER NOT NULL DEFAULT 0,
+      input_fingerprint TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS project_session_frontiers (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      session_context_revision INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (project_id, session_id)
     );
     CREATE TABLE IF NOT EXISTS agent_installations (
       agent TEXT PRIMARY KEY,
@@ -406,23 +382,18 @@ const CURRENT_SCHEMA: &str = r#"
       source TEXT,
       last_verified_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS preferences (
+      id TEXT PRIMARY KEY,
+      project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+      content TEXT NOT NULL CHECK(length(trim(content)) > 0),
+      locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0, 1)),
+      revision INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_preferences_project ON preferences(project_id);
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS context_conflicts (
-      id TEXT PRIMARY KEY,
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id),
-      left_item_id TEXT NOT NULL REFERENCES context_items(id),
-      right_item_id TEXT,
-      conflict_type TEXT NOT NULL DEFAULT 'authority',
-      status TEXT NOT NULL DEFAULT 'open',
-      resolution TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      left_revision_id TEXT,
-      right_revision_id TEXT,
-      candidate_snapshot_json TEXT
     );
     CREATE TABLE IF NOT EXISTS ingest_sources (
       id TEXT PRIMARY KEY,
@@ -434,9 +405,6 @@ const CURRENT_SCHEMA: &str = r#"
       UNIQUE(agent, path)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
-    CREATE INDEX IF NOT EXISTS idx_item_revisions_item ON context_item_revisions(item_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_conflicts_workstream ON context_conflicts(workstream_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_items_workstream ON context_items(workstream_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_owner_workstream ON sessions(owner_workstream_id);
     CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
       ON workstream_session_frontiers(session_id);
@@ -455,24 +423,6 @@ const CURRENT_SCHEMA: &str = r#"
       runtime TEXT,
       created_at TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS context_conflict_events (
-      id TEXT PRIMARY KEY,
-      conflict_id TEXT NOT NULL REFERENCES context_conflicts(id),
-      previous_status TEXT NOT NULL,
-      new_status TEXT NOT NULL,
-      resolution TEXT,
-      actor TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      snapshot_json TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_conflict_events_conflict ON context_conflict_events(conflict_id);
-    CREATE TABLE IF NOT EXISTS workstream_review_state (
-      workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id) ON DELETE CASCADE,
-      reviewed_through_at TEXT NOT NULL,
-      reviewed_boundary_change_ids TEXT NOT NULL DEFAULT '[]',
-      reviewed_at TEXT NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS git_identities (
       id TEXT PRIMARY KEY,
       common_dir TEXT NOT NULL UNIQUE,

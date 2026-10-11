@@ -99,7 +99,7 @@ fn ws_row(db: &Db, title: &str) -> Workstream {
 }
 
 #[test]
-fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
+fn an_empty_replacement_generation_preserves_the_current_session_summary() {
     let db = open_db("empty-generation-context");
     let (session, _) = support::seed_conversation(
         &db,
@@ -117,7 +117,7 @@ fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
             tx,
             &session.id,
             &SessionContextFields {
-                summary_current_state: "summary of old transcript".into(),
+                summary: "summary of old transcript".into(),
                 ..Default::default()
             },
             0,
@@ -159,7 +159,10 @@ fn an_empty_replacement_generation_invalidates_the_old_session_summary() {
 
     let view = noending::context::session_context_view(&db, &session.id).unwrap();
     assert!(!view.pending);
-    assert_eq!(view.fields.unwrap(), SessionContextFields::default());
+    assert_eq!(
+        view.fields.as_ref().unwrap().summary,
+        "summary of old transcript"
+    );
     assert_eq!(view.ingest_generation, initial_generation + 1);
 }
 
@@ -169,14 +172,19 @@ fn count(db: &Db, table: &str) -> i64 {
         .unwrap()
 }
 
-/// (context_items, context_item_revisions, context_conflicts, session_contexts)
-/// — every row an AI Context update would write. Ingestion must leave all four
-/// at zero.
-fn context_footprint(db: &Db) -> (i64, i64, i64, i64) {
+/// Ingestion may write facts, but never summaries or task consumption progress.
+fn context_footprint(db: &Db) -> (i64, i64, i64) {
+    let summaries = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM workstream_context_state WHERE summary != ''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     (
-        count(db, "context_items"),
-        count(db, "context_item_revisions"),
-        count(db, "context_conflicts"),
+        count(db, "workstream_session_frontiers"),
+        summaries,
         count(db, "session_contexts"),
     )
 }
@@ -233,15 +241,17 @@ fn ingestion_writes_facts_and_zero_context() {
     );
 
     // The Context footprint is exactly zero: no AI call, no Context write.
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0), "zero Context writes");
-    assert_eq!(count(&db, "session_context_revisions"), 0);
+    assert_eq!(context_footprint(&db), (0, 0, 0), "zero Context writes");
     assert!(
         db.get_session_context(&s.id).unwrap().is_none(),
         "no Session summary was ever generated"
     );
     assert!(
-        db.items_for_workstream(&ws.id, true).unwrap().is_empty(),
-        "the Owner Workstream got no items"
+        db.get_workstream_context_state(&ws.id)
+            .unwrap()
+            .summary
+            .is_empty(),
+        "the Owner Workstream got no summary"
     );
     assert!(
         db.workstream_frontiers(&ws.id).unwrap().is_empty(),
@@ -313,7 +323,7 @@ fn rescanning_an_unchanged_source_adds_nothing() {
 
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(db.message_projection_ids(&s.id).unwrap().len(), 3);
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+    assert_eq!(context_footprint(&db), (0, 0, 0));
 }
 
 /// A source that grew between passes contributes exactly its new delta, and
@@ -345,7 +355,7 @@ fn appended_source_ingests_only_the_delta() {
         generation,
         "an append extends the current generation"
     );
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+    assert_eq!(context_footprint(&db), (0, 0, 0));
     assert_eq!(
         db.get_workstream_context_state(&ws.id)
             .unwrap()
@@ -384,7 +394,7 @@ fn archived_session_still_ingests_its_source() {
             > cursor_before.byte_offset,
         "the session cursor advances exactly as it would for an active session"
     );
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+    assert_eq!(context_footprint(&db), (0, 0, 0));
 }
 
 /// `refresh_session` is the per-Session incremental entry point (Resume
@@ -403,7 +413,7 @@ fn refresh_session_ingests_incrementally_and_writes_no_context() {
         "nothing new on an unchanged source"
     );
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
-    assert_eq!(context_footprint(&db), (0, 0, 0, 0));
+    assert_eq!(context_footprint(&db), (0, 0, 0));
 }
 
 /// The Conversation reader: a preview is the TAIL of the conversation, and the

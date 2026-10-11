@@ -693,16 +693,14 @@ pub fn compute_state_fingerprint(
 
 /// the full fingerprint. Everything that decides what the Agent receives:
 ///
-/// * the delivery level and the Agent runtime override intent;
-/// * the Owner Workstream (or none): title / description / `updated_at`, its
-///   active Context items with their current revisions, its open conflicts —
-///   and its Context inputs;
+/// * the Agent runtime override intent;
+/// * the Owner Workstream (or none): title / description / `updated_at`;
 /// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all
 ///   (note 4);
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
 ///   its source cursor, its **`workspace_path_id`**, its Owner Workstream and
-///   its delivery snapshots.
+///   its launch identity.
 ///
 /// Every added input is labelled and terminated by `|`. Task directory display
 /// order is not a launch input; changing it does not invalidate a preview.
@@ -758,40 +756,6 @@ pub fn compute_state_fingerprint_in(
             hasher.update(b"|");
         } else {
             hasher.update(b"exists:0:");
-            hasher.update(b"|");
-        }
-        let mut items = db.items_for_workstream(ws_id, true)?;
-        items.sort_by(|a, b| a.0.id.cmp(&b.0.id));
-        for (item, rev) in items {
-            hasher.update(item.id.as_bytes());
-            hasher.update(b"|");
-            hasher.update(item.status.as_bytes());
-            hasher.update(b"|");
-            if let Some(rid) = &item.current_revision_id {
-                hasher.update(rid.as_bytes());
-                hasher.update(b"|");
-            }
-            hasher.update(rev.id.as_bytes());
-            hasher.update(b"|");
-            hasher.update(rev.title.as_bytes());
-            hasher.update(b"|");
-            hasher.update(rev.content.as_bytes());
-            hasher.update(b"|");
-            hasher.update(rev.created_at.as_bytes());
-            hasher.update(b"|");
-        }
-        let mut confs = db.conflicts_for_workstream(ws_id, true)?;
-        confs.sort_by(|a, b| a.id.cmp(&b.id));
-        for c in confs {
-            hasher.update(c.id.as_bytes());
-            hasher.update(b"|");
-            hasher.update(c.status.as_bytes());
-            hasher.update(b"|");
-            if let Some(res) = &c.resolution {
-                hasher.update(res.as_bytes());
-                hasher.update(b"|");
-            }
-            hasher.update(c.updated_at.as_bytes());
             hasher.update(b"|");
         }
     }
