@@ -58,6 +58,15 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+// Let Rust apply batch-file quoting on Windows. Passing a .cmd path as an
+// ordinary cmd.exe /C argument uses the wrong escaping for paths with spaces.
+fn installed_command(directory: &Path, name: &str) -> Command {
+    #[cfg(not(windows))]
+    let path = directory.join(name);
+    #[cfg(windows)]
+    let path = directory.join(format!("{name}.cmd"));
+    Command::new(path)
+}
 #[test]
 fn console_and_desktop_entries_share_json_contract_without_starting_another_app() {
     let f = Fixture::new();
@@ -74,6 +83,8 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
         assert_eq!(error["ok"], false);
         assert_eq!(error["error"]["code"], "invalid_arguments");
     }
+    // Native executable arguments retain multiline content on both platforms.
+    let content = "literal $() `text`\n中文 ' quotes";
     let (_, added) = f.run(
         Path::new(env!("CARGO_BIN_EXE_ne")),
         &[
@@ -82,12 +93,12 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
             "--scope",
             "user",
             "--content",
-            "真实 CLI 请求",
+            content,
             "--request-id",
             "pref-process",
         ],
     );
-    assert_eq!(added["data"]["content"], "真实 CLI 请求");
+    assert_eq!(added["data"]["content"], content);
     let (success, repeated) = f.run(
         Path::new(env!("CARGO_BIN_EXE_noending")),
         &[
@@ -96,7 +107,7 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
             "--scope",
             "user",
             "--content",
-            "真实 CLI 请求",
+            content,
             "--request-id",
             "pref-process",
         ],
@@ -172,23 +183,16 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
     assert!(success);
     assert_eq!(result["data"]["commands"].as_array().unwrap().len(), 2);
     for name in ["ne", "noending"] {
-        #[cfg(not(windows))]
-        let mut command = Command::new(directory.join(name));
-        #[cfg(windows)]
-        let mut command = {
-            let mut c = Command::new("cmd.exe");
-            c.args([
-                "/C",
-                directory.join(format!("{name}.cmd")).to_str().unwrap(),
-            ]);
-            c
-        };
-        let output = command
+        let output = installed_command(&directory, name)
             .args(["status"])
             .env("NOENDING_HOME", &f.home.root)
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["data"]["connected"], true);
     }
@@ -276,26 +280,17 @@ fn assistant_launchers_use_their_explicit_home_connection_and_literal_arguments(
         Path::new(env!("CARGO_BIN_EXE_ne")),
     )
     .unwrap();
+    // Batch files cannot carry CR/LF arguments; the native entries cover those above.
+    let content = "literal $() `text` 中文 ' quotes";
     for name in ["ne", "noending"] {
-        #[cfg(not(windows))]
-        let mut command = Command::new(directory.join(name));
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = Command::new("cmd.exe");
-            command.args([
-                "/C",
-                directory.join(format!("{name}.cmd")).to_str().unwrap(),
-            ]);
-            command
-        };
-        let output = command
+        let output = installed_command(&directory, name)
             .args([
                 "preference",
                 "add",
                 "--scope",
                 "user",
                 "--content",
-                "literal $() `text`\n中文 ' quotes",
+                content,
                 "--request-id",
                 "assistant-launcher",
             ])
@@ -308,10 +303,7 @@ fn assistant_launchers_use_their_explicit_home_connection_and_literal_arguments(
             String::from_utf8_lossy(&output.stderr)
         );
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            result["data"]["content"],
-            "literal $() `text`\n中文 ' quotes"
-        );
+        assert_eq!(result["data"]["content"], content);
     }
     assert_eq!(
         noending::storage::preferences::list_items(f.db.as_ref().unwrap(), None)
