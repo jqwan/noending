@@ -168,7 +168,12 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   return (
     <div className="main project-detail">
       <PageHeader
-        title={<span style={{ overflowWrap: "anywhere" }}>{project.name}</span>}
+        title={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere" }}>
+            <Icon name="project" />
+            <span>{project.name}</span>
+          </span>
+        }
         actions={
           <>
           <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}

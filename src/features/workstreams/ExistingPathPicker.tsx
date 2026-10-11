@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api";
+import Icon from "../../components/Icon";
 import { Modal, openPath } from "../../components/common";
 import type { RecentWorkspacePath } from "../../types";
 
@@ -36,7 +37,10 @@ export default function ExistingPathPicker({ exclude, onClose, onSelect }: {
                   checked={added || selected.includes(p.path)}
                   onChange={e => setSelected(old => e.target.checked ? [...old, p.path] : old.filter(path => path !== p.path))}
                 />
-                <span className="existing-path-info mono" title={p.path} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{p.path}</span>
+                <span className="existing-path-info mono path-text-with-icon" title={p.path} style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+                  <Icon name="folder" />
+                  <span className="truncate">{p.path}</span>
+                </span>
                 <span
                   role="button"
                   tabIndex={0}

@@ -64,6 +64,7 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
 
     await screen.findByText("NoEnding");
+    expect(screen.queryByText("/Users/me/code/noending")).toBeNull();
     expect(api.listProjectCards).toHaveBeenCalledTimes(1);
     expect(api.getProjectDetail).not.toHaveBeenCalled();
   });

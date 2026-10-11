@@ -54,6 +54,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 /// items, conflicts and review; task consumption no longer duplicates fact generations.
 /// v6 — current user/project preferences with user-controlled Agent locks.
 /// v7 — independent project archive state and explicit project deletion.
+/// v8 — direct task/project membership and many-to-many session/task tracking.
 pub const DATABASE_FORMAT_VERSION: i64 = 8;
 
 /// Open an existing current-format database, or create one.

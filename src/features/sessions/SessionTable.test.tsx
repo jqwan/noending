@@ -41,7 +41,7 @@ it("limits initial rows and reveals more without losing sessions", async () => {
   fireEvent.click(screen.getByText("显示更多（剩余 1）"));
   expect(screen.getByText("会话100")).toBeTruthy();
 });
-it("shows the single owner workstream and marks the unowned case", async () => {
+it("shows the single owner workstream and omits unowned workstream row", async () => {
   await renderCards(<SessionCards
     sessions={[
       { ...session, id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] },
@@ -51,11 +51,25 @@ it("shows the single owner workstream and marks the unowned case", async () => {
     projectNameById={new Map()}
     onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
 
-  // 一行最多一个任务：标题只有一个，没有「+N」这种多任务计数。
+  // 有归属会话显示任务标题，没归属会话不显示未归属任务
   screen.getByText("会话重构");
-  screen.getByText("未跟踪任务");
+  expect(screen.queryByText("未归属任务")).toBeNull();
   expect(screen.queryByText(/\+\d/)).toBeNull();
 });
+
+it("displays full workstream title without truncating to 16 characters in JS", async () => {
+  const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";
+  await renderCards(<SessionCards
+    sessions={[
+      { ...session, id: "s-long-ws", title: "长任务会话", tracked_workstream_ids: ["w-long"] },
+    ]}
+    workstreamTitleById={new Map([["w-long", longTitle]])}
+    projectNameById={new Map()}
+    onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
+
+  expect(screen.getByText(longTitle)).toBeTruthy();
+});
+
 
 it("prefers terminal capability regardless of old preferences, and uses desktop for desktop-only formats", async () => {
   const onTerminalResume = vi.fn();

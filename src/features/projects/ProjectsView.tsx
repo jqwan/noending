@@ -7,7 +7,6 @@ import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
-import { PathText } from "../workstreams/WorkspacePaths";
 import { EVT_SYNCED, type Route } from "../../app/routes";
 import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal } from "./ProjectLifecycleActions";
 import type { ProjectCardData, ProjectKind } from "../../types";
@@ -297,7 +296,8 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 </div>
                 {c.representative_paths.length > 0 && (
                   <div className="project-list-path mono" title={c.representative_paths[0]}>
-                    {c.representative_paths[0]}
+                    <Icon name="folder" />
+                    <span>{c.representative_paths[0]}</span>
                     {c.path_count > 1 && (
                       <span className="muted" style={{ marginLeft: 6 }}>
                         另有 {c.path_count - 1} 个目录
@@ -337,7 +337,6 @@ function ProjectCard({ card, navigate, onChanged }: {
   onChanged: () => void;
   navigate: (r: Route) => void;
 }) {
-  const restPaths = Math.max(0, card.path_count - 1);
   return (
     <article
       className="ws-card full project-card"
@@ -353,7 +352,10 @@ function ProjectCard({ card, navigate, onChanged }: {
       }}
     >
       <div className="ws-card-head">
-        <div className="ws-card-title" title={card.name}><Icon name="project" />{card.name}</div>
+        <div className="ws-card-title" title={card.name}>
+          <Icon name="project" />
+          <span className="truncate">{card.name}</span>
+        </div>
         <div className="ws-card-side">
           <span className="badge">{projectKindLabels[card.kind]}</span>
           {card.purpose && <span className="badge accent">{projectPurposeLabels[card.purpose]}</span>}
@@ -361,15 +363,6 @@ function ProjectCard({ card, navigate, onChanged }: {
             <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
           )}
         </div>
-      </div>
-
-      <div className="project-card-path">
-        {card.representative_paths.slice(0, 1).map((p) => (
-          <div key={p} className="small" style={{ marginBottom: 2 }}>
-            <PathText path={p} interactive={false} />
-          </div>
-        ))}
-        {restPaths > 0 && <div className="muted small">另有 {restPaths} 个目录</div>}
       </div>
 
       <div className="board-stats">

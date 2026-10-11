@@ -3,19 +3,19 @@ import { timeAgo } from "../../components/common";
 import type { Route } from "../../app/routes";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
-/** 卡片摘要：优先当前摘要，退回用户描述。 */
+/** 卡片概览：显示任务概览（用户描述），不显示任务摘要。 */
 export function cardSummaryLine(card: WorkstreamCardData): string {
-  return card.summary || card.description || "";
+  return card.description || "";
 }
 
 /** 检索字段必须与 placeholder 声明的一致：命中一个页面上看不见的字段，
  *  等于给用户一个无法解释的结果。 */
 export function cardSearchFields(card: WorkstreamCardData): (string | null | undefined)[] {
-  return [card.title, card.description, ...card.projects.map((p) => p.name), card.summary];
+  return [card.title, card.description, ...card.projects.map((p) => p.name)];
 }
 
 export function searchFieldHint(): string {
-  return "搜索任务…（标题、描述、项目、Context 摘要）";
+  return "搜索任务…（标题、描述、项目）";
 }
 
 /**
@@ -42,13 +42,26 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
       <header className="ws-card-head">
         {/* 单行截断（.ws-card-title）与两行 clamp（.ws-card-body）都靠 title
             把完整内容留给用户，否则长标题在窄窗口里就永久丢了。 */}
-        <h3 className="ws-card-title"><button className="card-title-link" title={card.title} onClick={e => { e.stopPropagation(); openDetail(); }}>{card.title}</button></h3>
+        <h3 className="ws-card-title">
+          <button className="card-title-link" title={card.title} onClick={e => { e.stopPropagation(); openDetail(); }}>
+            <Icon name="tasks" />
+            <span>{card.title}</span>
+          </button>
+        </h3>
         <div className="ws-card-side">
           {archived && <span className="badge">已归档</span>}
         </div>
       </header>
 
-      {card.projects.map((p) => <div key={p.id} className="task-project" title={p.name}><Icon name="project" /><span className="truncate">{p.name}</span></div>)}
+      {card.projects.length > 0 && (
+        <div
+          className="task-project"
+          title={card.projects.map((p) => p.name).join("、")}
+        >
+          <Icon name="project" />
+          <span>{card.projects.length} 个项目</span>
+        </div>
+      )}
       {body && <p className="ws-card-body" title={body}>{body}</p>}
 
       <footer className="ws-card-meta">

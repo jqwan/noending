@@ -74,8 +74,8 @@ it("shows and filters every related project in both board views", () => {
   screen.getByRole("button", { name: "跨项目任务" });
   expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
   const task = document.querySelector(".task-card")!;
-  expect(task.textContent).toContain("项目甲");
-  expect(task.textContent).toContain("项目乙");
+  expect(task.textContent).toContain("2 个项目");
+  expect(task.querySelector(".task-project")?.getAttribute("title")).toBe("项目甲、项目乙");
   fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
   const row = document.querySelector(".task-list-row")!;
   expect(row.textContent).toContain("项目甲");

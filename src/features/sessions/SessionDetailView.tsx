@@ -425,11 +425,7 @@ export default function SessionDetailView({
             </span>
           ) : <span className="muted">未知</span>}
         </Field>
-        <Field
-          label="会话统计"
-          copyValue={`用户消息 ${detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}  代理回复 ${detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}`}
-          copyTitle="复制会话统计"
-        >
+        <Field label="会话统计">
           <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
             <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
             <span>代理回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
@@ -442,9 +438,11 @@ export default function SessionDetailView({
                 <button
                   className="link"
                   title={`打开项目：${derivedProjectName}`}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
                   onClick={() => navigate({ view: "project", projectId: workspacePath.project_id, initialTitle: derivedProjectName })}
                 >
-                  {derivedProjectName}
+                  <Icon name="project" />
+                  <span>{derivedProjectName}</span>
                 </button>
 
               </span>
@@ -470,24 +468,24 @@ export default function SessionDetailView({
             <>
               <button
                 type="button"
-                className="link mono"
+                className="link mono path-text-with-icon"
                 title={workspacePath.canonical_path}
-                style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
                 onClick={() => void openPath(workspacePath.canonical_path)}
               >
-                {workspacePath.canonical_path}
+                <Icon name="folder" />
+                <span>{workspacePath.canonical_path}</span>
               </button>
               {cwd !== "" && cwd !== workspacePath.canonical_path && (
                 <div className="muted small" style={{ marginTop: 4 }}>
                   Agent 原始记录：
                   <button
                     type="button"
-                    className="link mono"
+                    className="link mono path-text-with-icon"
                     title={cwd}
-                    style={{ textAlign: "left", wordBreak: "break-all" }}
                     onClick={() => void openPath(cwd)}
                   >
-                    {cwd}
+                    <Icon name="folder" />
+                    <span>{cwd}</span>
                   </button>
                 </div>
               )}
@@ -506,12 +504,12 @@ export default function SessionDetailView({
             <>
               <button
                 type="button"
-                className="link mono"
+                className="link mono path-text-with-icon"
                 title={cwd}
-                style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
                 onClick={() => void openPath(cwd)}
               >
-                {cwd}
+                <Icon name="folder" />
+                <span>{cwd}</span>
               </button>
               <div className="muted small" style={{ marginTop: 4 }}>
                 未登记为工作路径

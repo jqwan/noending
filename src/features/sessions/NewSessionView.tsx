@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import RuntimeFields, { CatalogStatus, NATIVE_RUNTIME } from "../agents/RuntimeFields";
+import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import { useAgentRuntime } from "../agents/useAgentRuntime";
+import RuntimePopover from "./RuntimePopover";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import SidebarLogo from "../../components/SidebarLogo";
@@ -22,6 +23,7 @@ import {
   type WorkstreamCardData,
 } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
+import PageHeader from "../../layout/PageHeader";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
 export type NewSessionViewProps = {
@@ -63,11 +65,14 @@ export default function NewSessionView({
     }
     return "codex";
   });
-  const [runtimeOpen, setRuntimeOpen] = useState(false);
-  const [runtimeMode, setRuntimeMode] = useState<"inherit" | "native" | "custom">("inherit");
   const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntimeOverrides>(NATIVE_RUNTIME);
-  const runtime = useAgentRuntime(selectedAgent, runtimeOpen);
-  const launchRuntime = runtimeMode === "inherit" ? undefined : runtimeMode === "native" ? NATIVE_RUNTIME : runtimeOverride;
+  const runtime = useAgentRuntime(selectedAgent, true);
+  const launchRuntime = useMemo(() => {
+    if (runtimeOverride.model || runtimeOverride.effort) {
+      return runtimeOverride;
+    }
+    return undefined;
+  }, [runtimeOverride]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
@@ -179,15 +184,15 @@ export default function NewSessionView({
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
-        (a) => allowedAgents.includes(a) && agentStatus[a]?.terminal_cli && agentStatus[a]?.launch_enabled
+        (a) => allowedAgents.includes(a) && agentStatus[a]?.terminal_cli && agentStatus[a]?.detected && agentStatus[a]?.launch_enabled
       )
     : allowedAgents;
 
-  const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.launch_enabled));
+  const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.detected && agentStatus[selectedAgent]?.launch_enabled));
   useEffect(() => {
     if (agentStatus && !agentAvailable && cliAgents.length) {
       setSelectedAgent(cliAgents[0]);
-      setRuntimeMode("inherit");
+      setRuntimeOverride(NATIVE_RUNTIME);
     }
   }, [agentStatus, agentAvailable, cliAgents.join(",")]);
 
@@ -307,7 +312,6 @@ export default function NewSessionView({
     agentChanged.current = true;
     if (next === selectedAgent) return;
     releasePrepared();
-    setRuntimeMode("inherit");
     setRuntimeOverride(NATIVE_RUNTIME);
     setSelectedAgent(next);
   };
@@ -360,15 +364,11 @@ export default function NewSessionView({
     return ellipsisPathMiddle(currentDir, 42);
   }, [currentDir]);
 
-  const isGitDir = Boolean(
-    selectedProject?.kind === "git" ||
-    (currentDir && dirGitStates[currentDir])
-  );
-
   const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
+      <PageHeader title="新建会话" />
       <div className="new-session-content">
         <div className="new-session-heading">
           <div className="new-session-heading-title">
@@ -507,7 +507,7 @@ export default function NewSessionView({
               aria-label={`跟踪任务：${taskLabel}`}
               title={taskLabel}
             >
-              <Icon name={trackedWorkstreamId === STANDALONE ? "inbox" : "tasks"} />
+              <Icon name={trackedWorkstreamId === STANDALONE ? "minus" : "tasks"} />
               <span className="new-session-picker-label truncate">{taskLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
@@ -542,7 +542,7 @@ export default function NewSessionView({
                         setTaskMenuOpen(false);
                       }}
                     >
-                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-icon"><Icon name="minus" /></span>
                       <span className="menu-item-label">无任务</span>
                       {trackedWorkstreamId === STANDALONE && (
                         <span className="menu-item-check"><Icon name="check" /></span>
@@ -618,7 +618,7 @@ export default function NewSessionView({
                   aria-label={`项目目录：${currentDir || dirLabel}`}
                   title={currentDir || dirLabel}
                 >
-                  <Icon name={isGitDir ? "git" : "folder"} />
+                  <Icon name="folder" />
                   <span className="new-session-picker-label truncate" title={currentDir || dirLabel}>
                     {dirLabel}
                   </span>
@@ -642,9 +642,6 @@ export default function NewSessionView({
                     <div className="new-session-dropdown-menu" role="menu" aria-label="项目目录列表">
                       <div className="new-session-menu-list">
                         {projectDirs.map((dir) => {
-                          const isDirGit =
-                            selectedProject?.kind === "git" ||
-                            dirGitStates[dir] === true;
                           const isSelected = (selectedDirPath || projectDirs[0]) === dir;
                           return (
                             <button
@@ -658,7 +655,7 @@ export default function NewSessionView({
                               title={dir}
                             >
                               <span className="menu-item-icon">
-                                <Icon name={isDirGit ? "git" : "folder"} />
+                                <Icon name="folder" />
                               </span>
                               <span className="menu-item-label">{dir}</span>
                               {isSelected && (
@@ -676,24 +673,7 @@ export default function NewSessionView({
           </div>
           )}
 
-          <details className="new-session-runtime" open={runtimeOpen} onToggle={(e) => setRuntimeOpen(e.currentTarget.open)}>
-            <summary>模型与推理设置 · {runtimeMode === "native" ? "Agent 默认" : runtimeMode === "custom" ? runtimeOverride.model ?? "单次设置" : "使用代理页设置"}</summary>
-            <div className="row between">
-              <label>本次启动参数 <select aria-label="本次启动参数" value={runtimeMode} disabled={busy} onChange={(e) => {
-                releasePrepared();
-                const mode = e.target.value as typeof runtimeMode;
-                if (mode === "custom") setRuntimeOverride(runtime.settings?.overrides ?? NATIVE_RUNTIME);
-                setRuntimeMode(mode);
-              }}><option value="inherit">使用代理页设置</option><option value="native">使用 Agent 默认</option><option value="custom" disabled={!runtime.settings}>单次自定义</option></select></label>
-              <button type="button" className="btn small" disabled={runtime.loading || busy} onClick={() => void runtime.refresh(true)}>{runtime.loading ? "获取中…" : "刷新模型列表"}</button>
-            </div>
-            {runtimeMode === "custom" && runtime.options && <RuntimeFields value={runtimeOverride} options={runtime.options} onDiscover={() => void runtime.refresh()} disabled={busy} onChange={(v) => { releasePrepared(); setRuntimeOverride(v); }} />}
-            {runtime.options && <CatalogStatus options={runtime.options} />}
-            {runtime.error && <p className="muted small">{runtime.error} · 可使用默认参数继续启动。</p>}
-            <p className="muted small">仅影响这次新建会话，不修改代理页设置。</p>
-          </details>
-          {!agentAvailable && <p role="alert">没有启用的新建会话代理，请前往代理设置启用。</p>}
-
+          {!agentAvailable && <p role="alert">没有可用的新建会话代理，请确保本地已安装支持的 Agent CLI。</p>}
           <div className="new-session-composer" aria-busy={busy}>
             <textarea
               autoFocus
@@ -711,38 +691,51 @@ export default function NewSessionView({
               rows={4}
             />
             <div className="new-session-composer-footer">
-              <label className="new-session-picker new-session-agent">
-                <AgentIcon agent={selectedAgent} size={18} />
-                <span className="new-session-picker-label truncate">{agentLabel}</span>
-                <Icon name="chevronDown" />
-                <select
-                  aria-label="Agent"
-                  title={agentLabel}
-                  value={selectedAgent}
-                  onChange={(e) => handleAgentChange(e.target.value as Agent)}
+              <div className="new-session-composer-footer-left" />
+              <div className="new-session-composer-footer-right">
+                <label className="new-session-picker new-session-agent">
+                  <AgentIcon agent={selectedAgent} size={16} />
+                  <span className="new-session-picker-label">{agentLabel}</span>
+                  <Icon name="chevronDown" className="new-session-chevron" />
+                  <select
+                    aria-label="Agent"
+                    title={agentLabel}
+                    value={selectedAgent}
+                    onChange={(e) => handleAgentChange(e.target.value as Agent)}
+                    disabled={busy}
+                  >
+                    {cliAgents.map((a) => (
+                      <option key={a} value={a}>
+                        {AGENT_LABELS[a]}
+                        {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <RuntimePopover
+                  agent={selectedAgent}
+                  runtime={runtime}
+                  value={runtimeOverride}
                   disabled={busy}
+                  onChange={(v) => {
+                    releasePrepared();
+                    setRuntimeOverride(v);
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="new-session-send"
+                  aria-label={busy ? "启动中…" : "发送"}
+                  title={busy ? "启动中…" : preparing ? "准备中…" : "发送"}
+                  disabled={!canSend}
                 >
-                  {cliAgents.map((a) => (
-                    <option key={a} value={a}>
-                      {AGENT_LABELS[a]}
-                      {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                className="new-session-send"
-                aria-label={busy ? "启动中…" : "发送"}
-                title={busy ? "启动中…" : preparing ? "准备中…" : "发送"}
-                disabled={!canSend}
-              >
-                {busy ? <span className="new-session-spinner" aria-hidden="true" /> : (
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 19V5m-6 6 6-6 6 6" />
-                  </svg>
-                )}
-              </button>
+                  {busy ? <span className="new-session-spinner" aria-hidden="true" /> : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 19V5m-6 6 6-6 6 6" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 

@@ -221,11 +221,6 @@ export function activityLabel(iso: string | null | undefined): string {
   return `${relative} · ${formatDateTime(iso)}`;
 }
 
-/* 列宽预算：td 由全局 CSS 限定 max-width 320px + nowrap（components.css
- * .session-table），1 个宽度单位 ≈ 7px。宁可 JS 先省，也不让浏览器做尾部
- * 省略（会吃掉末段），更不让 7 列撑出 .main 的 1200px。 */
-const W_WORKSTREAM = 16;
-
 /**
  * Sessions 卡片：信息按卡片分组，随窗口宽度自适应，点击进入详情。
  * 显示会话跟踪的任务。
@@ -270,7 +265,7 @@ export default function SessionCards({
       const wsTitle=s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)?.trim() || UNNAMED_WORKSTREAM).join("、") || null;
       return {
         session: s,
-        workstream: wsTitle ? ellipsisTail(wsTitle, W_WORKSTREAM) : null,
+        workstream: wsTitle,
         workstreamFull: wsTitle,
         project: projectCellFor(s, projectNameById),
       };
@@ -290,13 +285,24 @@ export default function SessionCards({
               </span>
               <span className="session-list-meta">
                 <span>{agentDisplayLabel(s.agent)}</span>
-                <span title={workstreamFull ?? undefined}>{workstream ?? "未跟踪任务"}</span>
-                {!project.dim && <span title={project.hint}>{project.text}</span>}
+                {workstream && (
+                  <span title={workstreamFull ?? undefined} className="session-list-tag">
+                    <Icon name="tasks" />
+                    <span>{workstream}</span>
+                  </span>
+                )}
+                {!project.dim && (
+                  <span title={project.hint} className="session-list-tag">
+                    <Icon name="project" />
+                    <span>{project.text}</span>
+                  </span>
+                )}
                 <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
               </span>
               {s.cwd && (
                 <span className="session-list-path" title={s.cwd}>
-                  {cwdDisplayLabel(s.cwd, 90)}
+                  <Icon name="folder" />
+                  <span>{cwdDisplayLabel(s.cwd, 90)}</span>
                 </span>
               )}
             </button>
@@ -349,12 +355,14 @@ export default function SessionCards({
           </header>
 
           <div className="session-card-body">
-            <div className="session-card-prop" title={workstreamFull ?? undefined}>
-              <Icon name="tasks" />
-              <span className="truncate">
-                {workstream ?? "未跟踪任务"}
-              </span>
-            </div>
+            {workstream && (
+              <div className="session-card-prop" title={workstreamFull ?? undefined}>
+                <Icon name="tasks" />
+                <span className="truncate">
+                  {workstream}
+                </span>
+              </div>
+            )}
 
             {!project.dim && (
               <div className="session-card-prop" title={project.hint}>
@@ -365,6 +373,7 @@ export default function SessionCards({
 
             {s.cwd && (
               <div className="session-card-path" title={s.cwd}>
+                <Icon name="folder" />
                 <span className="mono">{cwdDisplayLabel(s.cwd, 40)}</span>
               </div>
             )}

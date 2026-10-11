@@ -32,3 +32,28 @@ it("archives without navigating, and offers unarchive/delete only on archived ca
   expect(remove).toHaveBeenCalledWith(archived);
   expect(navigate).not.toHaveBeenCalled();
 });
+
+it("displays task overview (description) instead of task summary (summary)", () => {
+  const cardWithBoth = {
+    ...card,
+    description: "这是任务概览内容",
+    summary: "这是任务摘要内容",
+  };
+  render(<WorkstreamCard card={cardWithBoth} mode="full" navigate={vi.fn()} defaultAgent="codex" />);
+  expect(screen.getByText("这是任务概览内容")).toBeTruthy();
+  expect(screen.queryByText("这是任务摘要内容")).toBeNull();
+});
+
+it("displays project count instead of individual project names", () => {
+  const cardWithProjects = {
+    ...card,
+    projects: [
+      { id: "p1", name: "前端项目" },
+      { id: "p2", name: "后端服务" },
+    ],
+  };
+  render(<WorkstreamCard card={cardWithProjects} mode="full" navigate={vi.fn()} defaultAgent="codex" />);
+  expect(screen.getByText("2 个项目")).toBeTruthy();
+  expect(screen.queryByText("前端项目")).toBeNull();
+  expect(screen.queryByText("后端服务")).toBeNull();
+});

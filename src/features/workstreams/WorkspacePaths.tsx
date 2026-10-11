@@ -1,5 +1,6 @@
 import { ellipsisPathMiddle } from "../sessions/SessionTable";
 import { openPath } from "../../components/common";
+import Icon from "../../components/Icon";
 import type {
   WorkspaceGitState,
 } from "../../types";
@@ -58,8 +59,9 @@ export function PathText({
   const text = ellipsisPathMiddle(path, max);
   if (!interactive) {
     return (
-      <span className="mono" title={path} style={{ overflowWrap: "anywhere" }}>
-        {text}
+      <span className="mono path-text-with-icon" title={path} style={{ overflowWrap: "anywhere" }}>
+        <Icon name="folder" />
+        <span>{text}</span>
       </span>
     );
   }
@@ -67,7 +69,7 @@ export function PathText({
     <span
       role="button"
       tabIndex={0}
-      className="mono path-link"
+      className="mono path-link path-text-with-icon"
       title={path}
       style={{ overflowWrap: "anywhere" }}
       onClick={(e) => {
@@ -82,7 +84,8 @@ export function PathText({
         }
       }}
     >
-      {text}
+      <Icon name="folder" />
+      <span>{text}</span>
     </span>
   );
 }

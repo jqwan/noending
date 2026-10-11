@@ -507,8 +507,8 @@ it("renders copy icon buttons next to field labels and copies values on click", 
   const copySourceBtn = screen.getByRole("button", { name: "复制源会话路径" });
   expect(copySourceBtn).toBeDefined();
   fireEvent.click(copySourceBtn);
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith("/path/to/source.jsonl"));
-
+  // 会话统计不再提供复制按钮
+  expect(screen.queryByRole("button", { name: "复制会话统计" })).toBeNull();
 });
 
 it("allows archived sessions to sync and generate summaries while blocking continue", async () => {
