@@ -51,7 +51,10 @@ function DraftRow({ raw }: { raw: string }) {
   return (
     <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <div className="path-draft-name">
-        <strong>{raw.split(/[\\/]/).filter(Boolean).pop() ?? raw}</strong>
+        <strong className="path-text-with-icon">
+          <Icon name="folder" />
+          <span>{raw.split(/[\\/]/).filter(Boolean).pop() ?? raw}</span>
+        </strong>
         <div
           role="button"
           tabIndex={0}

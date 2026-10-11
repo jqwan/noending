@@ -349,7 +349,12 @@ export default function WorkstreamDetailView({
   return (
     <div className="main task-detail">
       <PageHeader
-        title={<span style={{ overflowWrap: "anywhere" }}>{workstream.title}</span>}
+        title={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere" }}>
+            <Icon name="tasks" />
+            <span>{workstream.title}</span>
+          </span>
+        }
         actions={
           <>
             <button className="btn ghost icon-button" title="编辑任务" aria-label="编辑任务"
@@ -463,7 +468,10 @@ export default function WorkstreamDetailView({
               onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
               onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
               <div className="grow">
-                <div className="title" title={p.name ?? p.id}>{p.name ?? "未命名项目"}</div>
+                <div className="title" title={p.name ?? p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Icon name="project" />
+                  <span>{p.name ?? "未命名项目"}</span>
+                </div>
               </div>
             </div>
           ))}

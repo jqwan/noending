@@ -509,7 +509,7 @@ function SidebarGroupHeader({
   isCollapsed: boolean;
   isUnassignedGroup: boolean;
   isKnownAgent: boolean;
-  iconName: "tasks" | "tasksExpanded" | "project" | "projectOpen" | "bot" | "inbox";
+  iconName: "tasks" | "tasksExpanded" | "project" | "projectOpen" | "bot" | "minus" | "inbox" | "chevronRight" | "chevronDown";
   onToggle: () => void;
 }) {
   const titleRef = useRef<HTMLSpanElement>(null);
@@ -1019,7 +1019,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
               group.id === "__unassigned_project__";
             const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;
             const iconName = isUnassignedGroup
-              ? "inbox"
+              ? (isCollapsed ? "chevronRight" : "chevronDown")
               : groupBy === "workstream"
               ? (isCollapsed ? "tasks" : "tasksExpanded")
               : groupBy === "project"

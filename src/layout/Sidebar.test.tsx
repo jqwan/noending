@@ -559,9 +559,9 @@ describe("Sidebar 最近活动", () => {
     expect(taskUnassigned).toBeTruthy();
     const taskHeader = taskUnassigned.closest(".sidebar-recent-group-header");
     expect(taskHeader?.className).toContain("unassigned-group");
-    // Uses inbox icon
+    // Uses expand/collapse icon (chevronDown when expanded)
     expect(taskHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
-      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+      "M4.5 7l4.5 4.5 4.5-4.5",
     );
 
     // "无任务" should be sorted after "真正的任务" (sunk to bottom)
@@ -576,7 +576,7 @@ describe("Sidebar 最近活动", () => {
     const projectHeader = projectUnassigned.closest(".sidebar-recent-group-header");
     expect(projectHeader?.className).toContain("unassigned-group");
     expect(projectHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
-      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+      "M4.5 7l4.5 4.5 4.5-4.5",
     );
   });
 

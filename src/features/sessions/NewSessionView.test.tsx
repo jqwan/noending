@@ -531,7 +531,7 @@ describe("NewSessionView task and project selection", () => {
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
 });
 
-it("renders inbox icon for unassigned task and project pickers and their menu items", async () => {
+it("renders minus icon for unassigned task and project pickers and their menu items", async () => {
   vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
     id: "ws-1", title: "测试任务", description: "", visibility: "normal",
@@ -542,17 +542,17 @@ it("renders inbox icon for unassigned task and project pickers and their menu it
 
   const taskPicker = await screen.findByRole("button", { name: /所属任务：无任务/ });
   const taskPickerIconPath = taskPicker.querySelector("svg path")?.getAttribute("d");
-  expect(taskPickerIconPath).toBe("M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4");
+  expect(taskPickerIconPath).toBe("M4 9h10");
 
   const projectPicker = await screen.findByRole("button", { name: /所属项目：无项目/ });
   const projectPickerIconPath = projectPicker.querySelector("svg path")?.getAttribute("d");
-  expect(projectPickerIconPath).toBe("M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4");
+  expect(projectPickerIconPath).toBe("M4 9h10");
 
   // Open task menu
   fireEvent.click(taskPicker);
   const unassignedTaskOption = screen.getByRole("button", { name: "无任务" });
   expect(unassignedTaskOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
-    "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+    "M4 9h10",
   );
   const realTaskOption = screen.getByRole("button", { name: "测试任务" });
   expect(realTaskOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
@@ -569,7 +569,7 @@ it("renders inbox icon for unassigned task and project pickers and their menu it
   fireEvent.click(projectPicker);
   const unassignedProjectOption = screen.getByRole("button", { name: "无项目" });
   expect(unassignedProjectOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
-    "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+    "M4 9h10",
   );
   const realProjectOption = screen.getByRole("button", { name: "Project 1" });
   expect(realProjectOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
@@ -704,15 +704,34 @@ it("does not designate the first project of a multi-project task as its default"
 
 describe("NewSessionView runtime selection", () => {
   it("uses one-time runtime parameters for preview and launch without changing saved defaults", async () => {
+    vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
+      ...runtimeFixture(agent),
+      models: [{ id: "one-time-model", display_name: "One Time Model", provider: null, supported_efforts: ["low", "high"] }],
+    }));
     vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "new-runtime", launched_via: "embedded", command_line: "test", note: "" });
     render(<NewSessionView navigate={vi.fn()} />);
-    fireEvent.click(screen.getByText(/模型与推理设置/));
-    await waitFor(() => expect((screen.getByRole("option", { name: "单次自定义" }) as HTMLOptionElement).disabled).toBe(false));
-    fireEvent.change(screen.getByLabelText("本次启动参数"), { target: { value: "custom" } });
-    const model = await screen.findByLabelText("模型");
-    fireEvent.change(model, { target: { value: "one-time-model" } });
+    expect(screen.getByRole("heading", { name: "新建会话" })).toBeTruthy();
+
+    const runtimeBtn = screen.getByRole("button", { name: "模型与推理设置" });
+    await waitFor(() => expect(runtimeBtn.textContent).toContain("One Time Model"));
+    expect(runtimeBtn.textContent).toContain("low");
+
+    fireEvent.click(runtimeBtn);
+    expect(await screen.findByRole("dialog", { name: "模型与推理设置" })).toBeTruthy();
+
+    fireEvent.click(screen.getByText("模型"));
+    expect(screen.queryByRole("button", { name: "Agent 默认" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "One Time Model" }));
+
+    fireEvent.click(screen.getByText("推理等级"));
+    expect(screen.queryByRole("button", { name: "Agent 默认" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "high" }));
+
+    expect(runtimeBtn.textContent).toContain("high");
+
     const expected = { model: "one-time-model", provider: null, effort: "high" };
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, undefined, expected));
+
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始工作" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
@@ -720,24 +739,19 @@ describe("NewSessionView runtime selection", () => {
     expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
   });
 
-  it("can explicitly bypass saved overrides and launch when catalog discovery fails", async () => {
+  it("launches with agent native defaults when no overrides are selected", async () => {
     vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "native-runtime", launched_via: "embedded", command_line: "test", note: "" });
     render(<NewSessionView navigate={vi.fn()} />);
-    fireEvent.click(screen.getByText(/模型与推理设置/));
-    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
-    await screen.findByText(/catalog unavailable/);
-    fireEvent.change(screen.getByLabelText("本次启动参数"), { target: { value: "native" } });
-    const defaults = { model: null, provider: null, effort: null };
-    await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, undefined, defaults));
+
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "开始", defaults));
+    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "开始"));
     expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
   });
 
-  it("excludes disabled agents from new launches while keeping detected installation facts", async () => {
-    vi.mocked(api.getAgentStatus).mockResolvedValue({ ...mockAgentStatus, codex: { ...mockAgentStatus.codex, launch_enabled: false } });
+  it("excludes undetected agents from new launches while keeping supported installation facts", async () => {
+    vi.mocked(api.getAgentStatus).mockResolvedValue({ ...mockAgentStatus, codex: { ...mockAgentStatus.codex, detected: false } });
     render(<NewSessionView navigate={vi.fn()} />);
     await waitFor(() => expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code"));
     expect(screen.queryByRole("option", { name: "Codex" })).toBeNull();
@@ -745,21 +759,27 @@ describe("NewSessionView runtime selection", () => {
   });
 
   it("clears one-time parameters on an agent switch and prevents launching when all are disabled", async () => {
+    vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
+      ...runtimeFixture(agent),
+      models: [{ id: "codex-only", display_name: "Codex Only", provider: null, supported_efforts: ["low", "high"] }],
+    }));
     render(<NewSessionView navigate={vi.fn()} />);
-    fireEvent.click(screen.getByText(/模型与推理设置/));
-    await waitFor(() => expect((screen.getByRole("option", { name: "单次自定义" }) as HTMLOptionElement).disabled).toBe(false));
-    fireEvent.change(screen.getByLabelText("本次启动参数"), { target: { value: "custom" } });
-    fireEvent.change(await screen.findByLabelText("模型"), { target: { value: "codex-only" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "模型与推理设置" }));
+    fireEvent.click(screen.getByText("模型"));
+    fireEvent.click(await screen.findByRole("button", { name: "Codex Only" }));
+
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalledWith("codex", null, undefined, { model: "codex-only", provider: null, effort: null }));
+
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "pi" } });
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", null));
-    expect((screen.getByLabelText("本次启动参数") as HTMLSelectElement).value).toBe("inherit");
+
     cleanup();
-    vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, launch_enabled: false }])));
+    vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }])));
     render(<NewSessionView navigate={vi.fn()} />);
-    await screen.findByText("没有启用的新建会话代理，请前往代理设置启用。");
+    await screen.findByText("没有可用的新建会话代理，请确保本地已安装支持的 Agent CLI。");
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
     expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
     expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
   });
-
 });

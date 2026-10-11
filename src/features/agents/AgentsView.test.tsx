@@ -36,6 +36,7 @@ vi.mock("../../api", () => ({
     getIngestionStatus: vi.fn(),
     setResumeOpenMethod: vi.fn(),
     listWorkstreamCards: vi.fn(),
+    listSessions: vi.fn(),
     prepareNewSession: vi.fn(),
     cancelPrepared: vi.fn(),
   },
@@ -134,6 +135,7 @@ beforeEach(() => {
   vi.mocked(api.reconcileAll).mockReset().mockResolvedValue({ queued: true });
   vi.mocked(api.removeIngestSource).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
 });
 
 afterEach(cleanup);
@@ -148,7 +150,7 @@ describe("AgentsView", () => {
 
     expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
 
-    expect(screen.getByRole("button", { name: "配置 Antigravity" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看 Antigravity 代理详情" })).toBeTruthy();
     expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
   });
 
@@ -267,7 +269,7 @@ describe("AgentsView", () => {
   it("opens agent details from the overview and separates Antigravity source formats", async () => {
     const navigate = vi.fn();
     const view = render(<AgentsView navigate={navigate} />);
-    fireEvent.click(await screen.findByRole("button", { name: "配置 Antigravity" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看 Antigravity 代理详情" }));
     expect(navigate).toHaveBeenCalledWith({ view: "agents", agent: "antigravity" });
     view.unmount();
     render(<AgentsView navigate={navigate} initialAgent="antigravity" />);
@@ -279,27 +281,46 @@ describe("AgentsView", () => {
     expect(api.setAgentLaunchEnabled).not.toHaveBeenCalled();
   });
 
-  it("saves explicit runtime parameters and controls launching independently", async () => {
+  it("displays supported models and effort levels directly", async () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
-    const model = await screen.findByLabelText("模型");
-    expect((model as HTMLInputElement).value).toBe("saved-model");
-    expect((screen.getByRole("button", { name: "保存参数" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(await screen.findByText("模型与思考等级")).toBeTruthy();
     expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
-    await screen.findByText("来自 CLI · 1 个模型");
-    fireEvent.change(model, { target: { value: "listed-model" } });
-    expect((screen.getByLabelText("推理强度") as HTMLSelectElement).value).toBe("");
-    fireEvent.click(screen.getByRole("button", { name: "保存参数" }));
-    await waitFor(() => expect(api.setAgentRuntimeOverrides).toHaveBeenCalledWith("codex", { model: "listed-model", provider: null, effort: null }));
-    fireEvent.click(screen.getByLabelText("用于新建会话"));
-    await waitFor(() => expect(api.setAgentLaunchEnabled).toHaveBeenCalledWith("codex", false));
-    expect(api.setIngestSourceEnabled).not.toHaveBeenCalled();
+    await screen.findByText(/来自 CLI · 1 个模型/);
+    expect(await screen.findByText("Listed")).toBeTruthy();
+    expect(screen.getByText(/思考档位：low/)).toBeTruthy();
+  });
+
+  it("triggers incremental scan for a single agent from the card action", async () => {
+    render(<AgentsView navigate={vi.fn()} />);
+    await screen.findByText("Claude Code");
+    const syncBtn = screen.getByRole("button", { name: "增量同步 Claude Code" });
+    fireEvent.click(syncBtn);
+    await waitFor(() => expect(api.reconcileSource).toHaveBeenCalledWith("src-1"));
+  });
+
+  it("displays agent detail header with icon, models, and sessions section with new session action", async () => {
+    const navigate = vi.fn();
+    render(<AgentsView navigate={navigate} initialAgent="codex" />);
+    expect(await screen.findByText("模型与思考等级")).toBeTruthy();
+    expect(screen.getByText("会话 (0)")).toBeTruthy();
+    expect(screen.getByText("该代理下还没有会话。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", agent: "codex" });
+  });
+
+  it("displays normalized CLI status and does not include 仅同步历史 on cards", async () => {
+    render(<AgentsView navigate={vi.fn()} />);
+    await screen.findByText("Claude Code");
+    expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
+    expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
+    expect(screen.queryByText(/仅同步历史/)).toBeNull();
   });
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="dsh" />);
     await screen.findByText("该代理不支持新建终端会话，可同步历史会话。");
-    expect(screen.queryByLabelText("模型")).toBeNull();
+    expect(screen.queryByText("模型与思考等级")).toBeNull();
     expect(screen.queryByLabelText("用于新建会话")).toBeNull();
     expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();
   });
@@ -309,7 +330,16 @@ describe("AgentsView", () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
     fireEvent.click(await screen.findByRole("button", { name: "恢复 Agent 默认参数" }));
     await waitFor(() => expect(api.setAgentRuntimeOverrides).toHaveBeenCalledWith("codex", { model: null, provider: null, effort: null }));
-    expect(await screen.findByLabelText("模型")).toHaveProperty("value", "");
+    expect(await screen.findByText("模型与思考等级")).toBeTruthy();
   });
 
+  it("displays session count on agent cards", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      { id: "s1", agent: "codex" } as any,
+      { id: "s2", agent: "codex" } as any,
+    ]);
+    render(<AgentsView navigate={vi.fn()} />);
+    await screen.findByText("Codex");
+    expect(await screen.findByText("2 个会话")).toBeTruthy();
+  });
 });

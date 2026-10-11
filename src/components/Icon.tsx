@@ -7,6 +7,7 @@ const paths = {
   trash: "M3 5h12M7 5V3h4v2M5 5l1 10h6l1-10M8 8v4M10 8v4",
   edit: "M11 3l4 4M3 15l1-5 8-8 4 4-8 8Z",
   plus: "M9 3v12M3 9h12",
+  minus: "M4 9h10",
   chevronRight: "M7 4l5 5-5 5",
   chevronDown: "M4.5 7l4.5 4.5 4.5-4.5",
   arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",

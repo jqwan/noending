@@ -965,9 +965,6 @@ button.sidebar-pinned-header,
   user-select: none;
   transition: background 0.12s ease, color 0.12s ease;
 }
-.sidebar-recent-group-items.has-icons .sidebar-group-expand-btn {
-  padding-left: 26px;
-}
 .sidebar-group-expand-btn:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
