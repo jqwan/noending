@@ -821,7 +821,7 @@ it.each(["new-native-session", null])("uses the close result's verified identity
   renderView(navigate);
   fireEvent.click(await screen.findByRole("button", { name: "移除终端" }));
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(sessionId
-    ? { view: "session", sessionId, entry: "conversation" } : { view: "sessions" }));
+    ? { view: "session", sessionId } : { view: "sessions" }));
 });
 
 it("does not interrupt the new page when an old terminal close finishes after leaving", async () => {

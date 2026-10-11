@@ -500,6 +500,7 @@ export interface PreparedLaunch {
   cwd_resolution: CwdResolution;
   /** NoEnding 的 override 意图（null = Agent default），与 Launch 完全一致。 */
   runtime: AgentRuntimeOverrides;
+  runtime_override?: AgentRuntimeOverrides | null;
   /** 非 null：继续 = 打开 Agent 桌面应用（CLI 无法恢复该会话的源格式）。 */
   desktop_open?: { uri: string; note: string } | null;
   /** true：继续 = 在 NoEnding 内嵌终端里跑 CLI（与 desktop_open 互斥）。 */
@@ -613,6 +614,7 @@ export type AgentRuntimeDiscovery = Omit<AgentRuntimeSettings,
 
 /** get_agent_status 的一行：CLI 安装状态 + 两个启动面（终端 / 桌面应用）的能力与在场。 */
 export interface AgentStatusEntry {
+  launch_enabled: boolean;
   name: string;
   detected: boolean;
   executable: string | null;

@@ -1,5 +1,7 @@
+import { clearRuntimeCatalog } from "./useAgentRuntime";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runtimeFixture } from "./runtimeFixtures";
 import AgentsView from "./AgentsView";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -16,6 +18,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("../../api", () => ({
   api: {
     getAgentStatus: vi.fn(),
+    getAgentRuntimeSettings: vi.fn(),
+    setAgentRuntimeOverrides: vi.fn(),
+    refreshAgentRuntimeOptions: vi.fn(),
+    setAgentLaunchEnabled: vi.fn(),
+    redetectAgent: vi.fn(),
+    terminalList: vi.fn(),
     getDefaultAgent: vi.fn(),
     setDefaultAgent: vi.fn(),
     listIngestSources: vi.fn(),
@@ -40,6 +48,7 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     executable: "/usr/local/bin/codex",
     version: "codex 0.1.0",
     terminal_cli: true,
+    launch_enabled: true,
     desktop_app: "ChatGPT",
     desktop_app_present: true,
   },
@@ -49,6 +58,7 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     executable: "/opt/homebrew/bin/claude",
     version: "claude 1.0.0",
     terminal_cli: true,
+    launch_enabled: true,
     desktop_app: null,
     desktop_app_present: false,
   },
@@ -58,6 +68,7 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     executable: "/usr/local/bin/antigravity",
     version: "1.0",
     terminal_cli: true,
+    launch_enabled: true,
     desktop_app: "Antigravity",
     desktop_app_present: true,
   },
@@ -103,6 +114,13 @@ const mockIngestStatus: IngestTaskStatus = {
 };
 
 beforeEach(() => {
+  clearRuntimeCatalog();
+  vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
+  vi.mocked(api.setAgentRuntimeOverrides).mockReset().mockImplementation(async (agent, overrides) => ({ ...runtimeFixture(agent), overrides }));
+  vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
+  vi.mocked(api.setAgentLaunchEnabled).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.redetectAgent).mockReset().mockResolvedValue(runtimeFixture());
+  vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.addIngestSource).mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
@@ -130,14 +148,13 @@ describe("AgentsView", () => {
 
     expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
 
-    // Antigravity 来源聚合与格式展示
-    expect(screen.getByText("Desktop 格式")).toBeTruthy();
-    expect(screen.getByText("CLI 格式")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "配置 Antigravity" })).toBeTruthy();
+    expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
   });
 
 
   it("opens modal on re-ingest explaining safe rescan", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentsView navigate={vi.fn()} initialAgent="claude_code" />);
 
     const reingestButtons = await screen.findAllByRole("button", { name: "全量同步" });
     fireEvent.click(reingestButtons[0]);
@@ -165,7 +182,7 @@ describe("AgentsView", () => {
       created_at: "2026-10-05T15:00:00Z",
     });
 
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
 
     const addButtons = await screen.findAllByRole("button", { name: "+ 添加来源目录" });
     fireEvent.click(addButtons[0]);
@@ -211,7 +228,7 @@ describe("AgentsView", () => {
       },
     ]);
 
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentsView navigate={vi.fn()} initialAgent="claude_code" />);
 
     await screen.findByRole("button", { name: "增量同步" });
 
@@ -247,4 +264,52 @@ describe("AgentsView", () => {
     expect(container.querySelector(".agents-grid")).toBeTruthy();
     expect(container.querySelector(".agents-list")).toBeNull();
   });
+  it("opens agent details from the overview and separates Antigravity source formats", async () => {
+    const navigate = vi.fn();
+    const view = render(<AgentsView navigate={navigate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置 Antigravity" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "agents", agent: "antigravity" });
+    view.unmount();
+    render(<AgentsView navigate={navigate} initialAgent="antigravity" />);
+    expect(await screen.findByText("Desktop 格式")).toBeTruthy();
+    expect(screen.getByText("CLI 格式")).toBeTruthy();
+    expect(screen.queryByText("~/.claude/projects")).toBeNull();
+    fireEvent.click(screen.getByLabelText("自动同步 ~/.gemini/antigravity-cli"));
+    await waitFor(() => expect(api.setIngestSourceEnabled).toHaveBeenCalledWith("src-3", false));
+    expect(api.setAgentLaunchEnabled).not.toHaveBeenCalled();
+  });
+
+  it("saves explicit runtime parameters and controls launching independently", async () => {
+    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    const model = await screen.findByLabelText("模型");
+    expect((model as HTMLInputElement).value).toBe("saved-model");
+    expect((screen.getByRole("button", { name: "保存参数" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await screen.findByText("来自 CLI · 1 个模型");
+    fireEvent.change(model, { target: { value: "listed-model" } });
+    expect((screen.getByLabelText("推理强度") as HTMLSelectElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "保存参数" }));
+    await waitFor(() => expect(api.setAgentRuntimeOverrides).toHaveBeenCalledWith("codex", { model: "listed-model", provider: null, effort: null }));
+    fireEvent.click(screen.getByLabelText("用于新建会话"));
+    await waitFor(() => expect(api.setAgentLaunchEnabled).toHaveBeenCalledWith("codex", false));
+    expect(api.setIngestSourceEnabled).not.toHaveBeenCalled();
+  });
+
+  it("offers history controls without launch settings for ingestion-only agents", async () => {
+    render(<AgentsView navigate={vi.fn()} initialAgent="dsh" />);
+    await screen.findByText("该代理不支持新建终端会话，可同步历史会话。");
+    expect(screen.queryByLabelText("模型")).toBeNull();
+    expect(screen.queryByLabelText("用于新建会话")).toBeNull();
+    expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();
+  });
+
+  it("can repair unreadable defaults by restoring native parameters", async () => {
+    vi.mocked(api.getAgentRuntimeSettings).mockRejectedValue(new Error("配置损坏"));
+    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    fireEvent.click(await screen.findByRole("button", { name: "恢复 Agent 默认参数" }));
+    await waitFor(() => expect(api.setAgentRuntimeOverrides).toHaveBeenCalledWith("codex", { model: null, provider: null, effort: null }));
+    expect(await screen.findByLabelText("模型")).toHaveProperty("value", "");
+  });
+
 });

@@ -244,6 +244,8 @@ pub fn run() {
             commands::terminal_resize,
             commands::search,
             commands::get_agent_status,
+            commands::set_agent_launch_enabled,
+            commands::redetect_agent,
             commands::get_agent_runtime_settings,
             commands::set_agent_runtime_overrides,
             commands::refresh_agent_runtime_options,

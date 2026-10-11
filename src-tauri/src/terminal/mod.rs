@@ -829,22 +829,14 @@ pub fn spawn_embedded(
             let state = app.state::<crate::commands::AppState>();
             if let Some(current) = registry.report_native_identity(&state.db, &terminal_id, &event)
             {
-                if let Some(session_id) = current.session_id {
-                    crate::commands::ingestion::enqueue(
-                        &app,
-                        crate::commands::ingestion::IngestScope::RefreshSession(session_id),
-                    );
-                } else if let Ok(sources) = state.db.list_ingest_sources() {
-                    for source in sources
-                        .into_iter()
-                        .filter(|source| source.enabled && source.agent == current.agent)
-                    {
-                        crate::commands::ingestion::enqueue(
-                            &app,
-                            crate::commands::ingestion::IngestScope::ReconcileSource(source.id),
-                        );
-                    }
-                }
+                crate::commands::ingestion::enqueue(
+                    &app,
+                    crate::commands::ingestion::IngestScope::ReconcileNative {
+                        agent: current.agent,
+                        native_id: event.native_id.clone(),
+                        source_path: event.source_path.clone(),
+                    },
+                );
             }
         }));
     }
@@ -1164,6 +1156,93 @@ mod tests {
             .unwrap();
         assert_eq!(bound.session_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn native_sync_binds_task_with_history_disabled_without_importing_neighbors() {
+        let registry = registry();
+        let db = binding_db();
+        let task = selected_task(&db, "Disabled history");
+        let native = new_id();
+        let unrelated = new_id();
+        let terminal =
+            identity_terminal_with_owner(&registry, Agent::Codex, None, None, Some(&task));
+        let root = std::env::temp_dir().join(format!("noending-native-sync-{}", new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = db
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), false)
+            .unwrap();
+        let write_rollout = |id: &str, text: Option<&str>| {
+            let path = root.join(format!("rollout-2026-10-10T12-00-00-{id}.jsonl"));
+            let meta = serde_json::json!({"ordinal":0,"type":"session_meta","timestamp":now(),"payload":{"id":id,"timestamp":now(),"cwd":fixture_cwd()}});
+            let message = text.map(|text| serde_json::json!({"ordinal":1,"type":"response_item","timestamp":now(),"payload":{"type":"message","id":"first","role":"user","content":[{"type":"input_text","text":text}]}}).to_string()).unwrap_or_default();
+            std::fs::write(&path, format!("{meta}\n{message}\n")).unwrap();
+            path
+        };
+        let path = write_rollout(&native, None);
+        write_rollout(&unrelated, Some("unrelated history"));
+        assert!(
+            crate::ingestion::reconcile_all_report(&db, &|_| {})
+                .unwrap()
+                .discovered
+                == 0
+        );
+        let event = native_event(&native);
+        registry
+            .report_native_identity(&db, &terminal, &event)
+            .unwrap();
+        crate::ingestion::reconcile_native(
+            &db,
+            Agent::Codex,
+            &native,
+            Some(&path.to_string_lossy()),
+            &|_| {},
+        )
+        .unwrap();
+        registry.bind_discovered(&db);
+        assert!(
+            db.find_session_by_root_agent_id(Agent::Codex, &native)
+                .unwrap()
+                .is_none(),
+            "metadata alone must wait for a real message"
+        );
+        write_rollout(&native, Some("first real user message"));
+        assert_eq!(
+            crate::ingestion::reconcile_native(
+                &db,
+                Agent::Codex,
+                &native,
+                Some(&path.to_string_lossy()),
+                &|_| {}
+            )
+            .unwrap(),
+            (1, 1)
+        );
+        registry.bind_discovered(&db);
+        let session = db
+            .find_session_by_root_agent_id(Agent::Codex, &native)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+        assert!(db
+            .find_session_by_root_agent_id(Agent::Codex, &unrelated)
+            .unwrap()
+            .is_none());
+        assert!(!db.get_ingest_source(&source.id).unwrap().unwrap().enabled);
+        assert_eq!(
+            crate::ingestion::reconcile_native(&db, Agent::Codex, &native, None, &|_| {}).unwrap(),
+            (1, 0)
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

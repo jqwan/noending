@@ -174,9 +174,27 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                 <Icon name="archive" />
               </button>
             </div>
-            {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档任务" disabled={archivedTasks.length === 0 || bulkPurgeBusy || Boolean(taskActionId)} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建任务" title="新建任务" onClick={() => setCreatingWs(true)}>
-              <Icon name="plus" />
-            </button>}
+            <span className="session-action-divider" aria-hidden="true" />
+            {archivedMode ? (
+              <button
+                className="btn ghost icon-button danger"
+                aria-label="删除全部"
+                title="删除全部已归档任务"
+                disabled={archivedTasks.length === 0 || bulkPurgeBusy || Boolean(taskActionId)}
+                onClick={() => setBulkPurgeOpen(true)}
+              >
+                <Icon name="trash" />
+              </button>
+            ) : (
+              <button
+                className="btn ghost icon-button"
+                aria-label="新建任务"
+                title="新建任务"
+                onClick={() => setCreatingWs(true)}
+              >
+                <Icon name="plus" />
+              </button>
+            )}
           </>
         }
       />

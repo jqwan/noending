@@ -459,6 +459,75 @@ where
     })
 }
 
+/// Agent lifecycle notifications sync only the reported native root. This is
+/// independent of historical source enablement, so an owned terminal can bind
+/// even when the user has disabled automatic history import.
+pub fn reconcile_native<F>(
+    db: &Db,
+    agent: Agent,
+    native_id: &str,
+    source_path: Option<&str>,
+    on_session: &F,
+) -> Result<(usize, i64)>
+where
+    F: Fn(&Session),
+{
+    let existing = db.find_session_by_root_agent_id(agent, native_id)?;
+    let source_path = source_path.or_else(|| existing.as_ref().map(|s| s.source_path.as_str()));
+    let adapter = crate::adapters::adapter_for(agent);
+    let mut roots = Vec::new();
+    if let Some(path) = source_path {
+        let path = PathBuf::from(path);
+        if agent == Agent::Antigravity && path.extension().is_some_and(|e| e == "db") {
+            roots.push(path);
+        } else if agent == Agent::Antigravity {
+            // agy reports its exported transcript, but the adapter reads the
+            // native conversation DB beside brain/ (the CLI store only).
+            if let Some(brain) = path
+                .ancestors()
+                .find(|p| p.file_name().is_some_and(|n| n == "brain"))
+            {
+                if let Some(store) = brain.parent() {
+                    roots.push(store.join("conversations").join(format!("{native_id}.db")));
+                }
+            }
+        } else if let Some(parent) = path.parent() {
+            // JSONL adapters discover within directories; filtering below
+            // prevents neighboring histories from entering the database.
+            roots.push(parent.to_path_buf());
+        }
+    }
+    // A session switch can report an ID before it knows the new transcript.
+    // Discover metadata under configured roots, including disabled ones, but
+    // only the exact native root below is ever written to NoEnding.
+    if roots.is_empty() {
+        roots = db
+            .list_ingest_sources()?
+            .into_iter()
+            .filter(|s| s.agent == agent)
+            .map(|s| PathBuf::from(s.path))
+            .collect();
+    }
+    let discovered = adapter.discover_members_in(&roots, &|_| false)?;
+    let matching: Vec<_> = discovered
+        .into_iter()
+        .filter(|d| d.kind.is_logical_root() && d.source_member_id == native_id)
+        .collect();
+    if matching.is_empty() {
+        if let Some(session) = existing {
+            return refresh_session(db, &session.id).map(|n| (0, n));
+        }
+    }
+    let count = matching.len();
+    let resolved = resolve_batch(db, adapter, &matching)?;
+    let mut failures = Vec::new();
+    let (messages, _) = process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
+    if !failures.is_empty() {
+        return Err(other(failures.join("; ")));
+    }
+    Ok((count, messages))
+}
+
 /// Ingest one specific ingest source: discover members under that source's own
 /// path only, resolve + ingest them.
 pub fn reconcile_source<F>(

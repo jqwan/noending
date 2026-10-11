@@ -46,3 +46,23 @@ pub fn set_runtime_overrides(
         .map_err(|e| other(format!("运行时配置序列化失败: {}", e)))?;
     db.set_setting(&key(agent), &raw)
 }
+
+/// A launch preference, independent of executable detection and history sources.
+pub fn launch_enabled(db: &Db, agent: Agent) -> Result<bool> {
+    Ok(db
+        .get_setting(&format!("agent.launch.{}.enabled", agent.as_str()))?
+        .as_deref()
+        != Some("false"))
+}
+
+pub fn set_launch_enabled(db: &Db, agent: Agent, enabled: bool) -> Result<()> {
+    if !crate::adapters::adapter_for(agent).has_terminal_cli() {
+        return Err(other("该 Agent 不支持新建终端会话"));
+    }
+    let key = format!("agent.launch.{}.enabled", agent.as_str());
+    if enabled {
+        db.delete_setting(&key)
+    } else {
+        db.set_setting(&key, "false")
+    }
+}

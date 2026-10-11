@@ -505,9 +505,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 );
                 continue;
             }
-            let Ok(rd) = std::fs::read_dir(&dir) else {
-                continue;
-            };
             // The two source formats carry distinct kinds: the IDE store and
             // the `agy` CLI store are schema-identical, but Continue routes
             // them differently (terminal for the CLI store, desktop app for
@@ -518,11 +515,17 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             } else {
                 "antigravity_ide_conversation"
             };
-            let mut paths: Vec<PathBuf> = rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("db"))
-                .collect();
+            let mut paths: Vec<PathBuf> = if root.is_file() {
+                vec![root.clone()]
+            } else {
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("db"))
+                    .collect()
+            };
             paths.sort();
             for path in paths {
                 // `unchanged` is deliberately NOT consulted. It stats the main
@@ -1101,6 +1104,115 @@ mod tests {
         assert_eq!(root_m.first_agent_text.as_deref(), Some("已完成性能分析。"));
         assert_eq!(child.first_user_text, None);
         assert_eq!(child.first_agent_text, None);
+    }
+
+    #[test]
+    fn native_cli_notification_ingests_only_its_conversation_with_history_disabled() {
+        let base = temp_dir("native-notice");
+        let root = base.join("antigravity-cli");
+        let wanted = "11111111-2222-4333-8444-555555555555";
+        let neighbor = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let child = "12345678-1234-4234-8234-123456789012";
+        let steps = [(14, msg(19, &str(2, "真实首条消息")))];
+        for id in [wanted, neighbor, child] {
+            store(&root, id, &steps);
+        }
+        let conversation =
+            Connection::open(root.join("conversations").join(format!("{wanted}.db"))).unwrap();
+        conversation
+            .execute(
+                "UPDATE trajectory_metadata_blob SET data = ?1 WHERE id = 'main'",
+                rusqlite::params![msg(2, &int(1, 1_789_480_089))],
+            )
+            .unwrap();
+        summaries(
+            &root,
+            &[
+                (wanted, "目标会话", "", "[]"),
+                (neighbor, "历史会话", "", "[]"),
+                (child, "子会话", "", "[]"),
+            ],
+        );
+        Connection::open(root.join("conversation_summaries.db")).unwrap().execute(
+            "UPDATE conversation_summaries SET parent_conversation_id = ?1 WHERE conversation_id = ?2",
+            rusqlite::params![wanted, child],
+        ).unwrap();
+        let db = crate::storage::Db::open(&base.join("noending.db")).unwrap();
+        let source = db
+            .add_ingest_source(Agent::Antigravity, &root.to_string_lossy(), false)
+            .unwrap();
+        let transcript = root
+            .join("brain")
+            .join(wanted)
+            .join(".system_generated/logs/transcript_full.jsonl");
+        let result = crate::ingestion::reconcile_native(
+            &db,
+            Agent::Antigravity,
+            wanted,
+            Some(&transcript.to_string_lossy()),
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(result, (1, 1));
+        let session = db
+            .find_session_by_root_agent_id(Agent::Antigravity, wanted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.source_kind, "antigravity_cli_conversation");
+        assert_eq!(session.cwd, None);
+        // After initial binding, later native steps may supply the first cwd.
+        let workspace = base.join("late workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let uri = tauri::Url::from_file_path(&workspace).unwrap().to_string();
+        let payload = msg(19, &[str(2, "继续处理"), msg(12, &str(12, &uri))].concat());
+        conversation
+            .execute(
+                "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 14, ?1)",
+                rusqlite::params![payload],
+            )
+            .unwrap();
+        Connection::open(root.join("conversation_summaries.db"))
+            .unwrap()
+            .execute(
+                "UPDATE conversation_summaries SET title = '新标题' WHERE conversation_id = ?1",
+                rusqlite::params![wanted],
+            )
+            .unwrap();
+        assert_eq!(
+            crate::ingestion::reconcile_native(&db, Agent::Antigravity, wanted, None, &|_| {})
+                .unwrap(),
+            (1, 1)
+        );
+        let updated = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(updated.cwd.as_deref(), workspace.to_str());
+        assert_eq!(updated.title.as_deref(), Some("新标题"));
+        assert!(db
+            .find_session_by_root_agent_id(Agent::Antigravity, neighbor)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::ingestion::reconcile_native(&db, Agent::Antigravity, child, None, &|_| {})
+                .unwrap(),
+            (0, 0)
+        );
+        assert!(
+            db.find_session_by_root_agent_id(Agent::Antigravity, child)
+                .unwrap()
+                .is_none(),
+            "child notifications cannot create logical sessions"
+        );
+        assert!(!db.get_ingest_source(&source.id).unwrap().unwrap().enabled);
+        let one_file = AntigravityAdapter
+            .discover_members_in(
+                &[root.join("conversations").join(format!("{wanted}.db"))],
+                &|_| false,
+            )
+            .unwrap();
+        assert_eq!(one_file.len(), 1);
+        assert_eq!(one_file[0].source_member_id, wanted);
+        drop(conversation);
+        drop(db);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     fn reconcile_store(db: &crate::storage::Db, root: &Path) -> i64 {

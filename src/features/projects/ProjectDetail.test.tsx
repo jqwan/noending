@@ -36,6 +36,7 @@ beforeEach(() => {
       executable: "/bin/codex",
       version: "1.0.0",
       terminal_cli: true,
+      launch_enabled: true,
       desktop_app: "Codex",
       desktop_app_present: true,
     },

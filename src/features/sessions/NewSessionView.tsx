@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import RuntimeFields, { CatalogStatus, NATIVE_RUNTIME } from "../agents/RuntimeFields";
+import { useAgentRuntime } from "../agents/useAgentRuntime";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import SidebarLogo from "../../components/SidebarLogo";
@@ -13,6 +15,7 @@ import {
   AGENT_LABELS,
   type Agent,
   type AgentStatusEntry,
+  type AgentRuntimeOverrides,
   type PreparedLaunch,
   type ProjectCardData,
   type WorkstreamCardData,
@@ -58,6 +61,11 @@ export default function NewSessionView({
     }
     return "codex";
   });
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
+  const [runtimeMode, setRuntimeMode] = useState<"inherit" | "native" | "custom">("inherit");
+  const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntimeOverrides>(NATIVE_RUNTIME);
+  const runtime = useAgentRuntime(selectedAgent, runtimeOpen);
+  const launchRuntime = runtimeMode === "inherit" ? undefined : runtimeMode === "native" ? NATIVE_RUNTIME : runtimeOverride;
   const [defaultWorkspace, setDefaultWorkspace] = useState<string>("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -159,9 +167,17 @@ export default function NewSessionView({
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
-        (a) => agentStatus[a]?.terminal_cli
+        (a) => agentStatus[a]?.terminal_cli && agentStatus[a]?.launch_enabled
       )
     : CLI_AGENTS;
+
+  const agentAvailable = !agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.launch_enabled);
+  useEffect(() => {
+    if (agentStatus && !agentAvailable && cliAgents.length) {
+      setSelectedAgent(cliAgents[0]);
+      setRuntimeMode("inherit");
+    }
+  }, [agentStatus, agentAvailable, cliAgents.join(",")]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
   const isUnassignedProject = selectedProjectId === UNASSIGNED_PROJECT ||
@@ -218,13 +234,14 @@ export default function NewSessionView({
     : projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
-    if (!selectedAgent) return null;
+    if (!selectedAgent || !agentAvailable) return null;
     const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
+    if (launchRuntime) return api.prepareNewSession(selectedAgent, ownerId, launchCwd, launchRuntime);
     if (launchCwd) {
       return api.prepareNewSession(selectedAgent, ownerId, launchCwd);
     }
     return api.prepareNewSession(selectedAgent, ownerId);
-  }, [selectedAgent, ownerWorkstreamId, launchCwd]);
+  }, [selectedAgent, ownerWorkstreamId, launchCwd, launchRuntime, agentAvailable]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
@@ -287,10 +304,12 @@ export default function NewSessionView({
     agentChanged.current = true;
     if (next === selectedAgent) return;
     releasePrepared();
+    setRuntimeMode("inherit");
+    setRuntimeOverride(NATIVE_RUNTIME);
     setSelectedAgent(next);
   };
 
-  const canSend = Boolean(message.trim() && selectedAgent && prepared && !preparing && !busy);
+  const canSend = Boolean(message.trim() && selectedAgent && agentAvailable && prepared && !preparing && !busy);
 
   const start = async () => {
     if (!canSend || launching.current) return;
@@ -301,7 +320,7 @@ export default function NewSessionView({
     setError("");
     try {
       const ownerId = ownerWorkstreamId === STANDALONE ? null : ownerWorkstreamId;
-      const r = await api.launchEmbeddedNew(
+      const r = launchRuntime ? await api.launchEmbeddedNew(selectedAgent, ownerId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
         selectedAgent,
         ownerId,
         launchCwd,
@@ -326,10 +345,10 @@ export default function NewSessionView({
   const selectedWorkstream = workstreams.find((w) => w.id === ownerWorkstreamId);
   const taskLabel =
     ownerWorkstreamId === STANDALONE
-      ? "无所属任务"
-      : (selectedWorkstream?.title ?? "无所属任务");
+      ? "无任务"
+      : (selectedWorkstream?.title ?? "无任务");
 
-  const projectLabel = isUnassignedProject ? "未归属项目" : (selectedProject?.name ?? "未归属项目");
+  const projectLabel = isUnassignedProject ? "无项目" : (selectedProject?.name ?? "无项目");
 
   const currentDir = isUnassignedProject ? defaultWorkspace : launchCwd || "";
   const dirLabel = useMemo(() => {
@@ -385,7 +404,7 @@ export default function NewSessionView({
               aria-label={`所属任务：${taskLabel}`}
               title={taskLabel}
             >
-              <Icon name="tasks" />
+              <Icon name={ownerWorkstreamId === STANDALONE ? "inbox" : "tasks"} />
               <span className="new-session-picker-label truncate">{taskLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
@@ -402,7 +421,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={STANDALONE}>无所属任务</option>
+                <option value={STANDALONE}>无任务</option>
                 {workstreams.map((w) => (
                   <option key={w.id} value={w.id}>{w.title}</option>
                 ))}
@@ -420,8 +439,8 @@ export default function NewSessionView({
                         setTaskMenuOpen(false);
                       }}
                     >
-                      <span className="menu-item-icon"><Icon name="tasks" /></span>
-                      <span className="menu-item-label">无所属任务</span>
+                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-label">无任务</span>
                       {ownerWorkstreamId === STANDALONE && (
                         <span className="menu-item-check"><Icon name="check" /></span>
                       )}
@@ -492,7 +511,7 @@ export default function NewSessionView({
               aria-label={`所属项目：${projectLabel}`}
               title={projectLabel}
             >
-              <Icon name="project" />
+              <Icon name={isUnassignedProject ? "inbox" : "project"} />
               <span className="new-session-picker-label truncate">{projectLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
@@ -509,7 +528,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={UNASSIGNED_PROJECT}>未归属项目</option>
+                <option value={UNASSIGNED_PROJECT}>无项目</option>
                 {otherProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -526,10 +545,10 @@ export default function NewSessionView({
                         handleProjectChange(UNASSIGNED_PROJECT);
                         setProjectMenuOpen(false);
                       }}
-                      title="未归属项目"
+                      title="无项目"
                     >
-                      <span className="menu-item-icon"><Icon name="project" /></span>
-                      <span className="menu-item-label">未归属项目</span>
+                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-label">无项目</span>
                       {isUnassignedProject && (
                         <span className="menu-item-check"><Icon name="check" /></span>
                       )}
@@ -660,6 +679,23 @@ export default function NewSessionView({
             })()}
           </div>
 
+          <details className="new-session-runtime" open={runtimeOpen} onToggle={(e) => setRuntimeOpen(e.currentTarget.open)}>
+            <summary>模型与推理设置 · {runtimeMode === "native" ? "Agent 默认" : runtimeMode === "custom" ? runtimeOverride.model ?? "单次设置" : "使用代理页设置"}</summary>
+            <div className="row between">
+              <label>本次启动参数 <select aria-label="本次启动参数" value={runtimeMode} disabled={busy} onChange={(e) => {
+                releasePrepared();
+                const mode = e.target.value as typeof runtimeMode;
+                if (mode === "custom") setRuntimeOverride(runtime.settings?.overrides ?? NATIVE_RUNTIME);
+                setRuntimeMode(mode);
+              }}><option value="inherit">使用代理页设置</option><option value="native">使用 Agent 默认</option><option value="custom" disabled={!runtime.settings}>单次自定义</option></select></label>
+              <button type="button" className="btn small" disabled={runtime.loading || busy} onClick={() => void runtime.refresh(true)}>{runtime.loading ? "获取中…" : "刷新模型列表"}</button>
+            </div>
+            {runtimeMode === "custom" && runtime.options && <RuntimeFields value={runtimeOverride} options={runtime.options} onDiscover={() => void runtime.refresh()} disabled={busy} onChange={(v) => { releasePrepared(); setRuntimeOverride(v); }} />}
+            {runtime.options && <CatalogStatus options={runtime.options} />}
+            {runtime.error && <p className="muted small">{runtime.error} · 可使用默认参数继续启动。</p>}
+            <p className="muted small">仅影响这次新建会话，不修改代理页设置。</p>
+          </details>
+          {!agentAvailable && <p role="alert">没有启用的新建会话代理，请前往代理设置启用。</p>}
           <div className="new-session-composer" aria-busy={busy}>
             <textarea
               autoFocus

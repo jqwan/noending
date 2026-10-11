@@ -455,17 +455,19 @@ pub fn prepare_new_session(
     agent: String,
     owner_workstream_id: Option<String>,
     cwd: Option<String>,
+    runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::PreparedLaunch> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
-        launcher.prepare_new_in(
+        launcher.prepare_new_with_runtime_in(
             db,
             agent,
             owner_workstream_id.as_deref(),
             cwd.as_deref(),
             &workspace,
+            runtime.as_ref(),
         )
     })?;
     let mut map = state
@@ -599,17 +601,19 @@ pub fn launch_embedded_new(
     owner_workstream_id: Option<String>,
     cwd: Option<String>,
     initial_message: Option<String>,
+    runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = agent_of(&agent)?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let mut prepared = with_db(&state, |db| {
-        launcher.prepare_new_in(
+        launcher.prepare_new_with_runtime_in(
             db,
             agent,
             owner_workstream_id.as_deref(),
             cwd.as_deref(),
             &workspace,
+            runtime.as_ref(),
         )
     })?;
     prepared.embedded = true;
@@ -895,6 +899,7 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
                 "version": install.as_ref().and_then(|i| i.version.clone()),
                 "surface": surface,
                 "terminal_cli": adapter.has_terminal_cli(),
+                "launch_enabled": crate::agent_runtime::store::launch_enabled(&state.db, *agent)?,
                 "desktop_app": desktop_app,
                 "desktop_app_present": desktop_app
                     .map(crate::platform::paths::app_bundle_present)
@@ -903,6 +908,34 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
         );
     }
     Ok(serde_json::Value::Object(out))
+}
+
+#[tauri::command]
+pub fn set_agent_launch_enabled(
+    state: State<AppState>,
+    agent: String,
+    enabled: bool,
+) -> Result<()> {
+    let agent = agent_of(&agent)?;
+    crate::agent_runtime::store::set_launch_enabled(&state.db, agent, enabled)
+}
+
+#[tauri::command]
+pub async fn redetect_agent(
+    state: State<'_, AppState>,
+    agent: String,
+) -> Result<AgentRuntimeSettings> {
+    let agent = agent_of(&agent)?;
+    let db = state.db.clone();
+    run_on_blocking_worker(move || {
+        record_installation_probe(
+            &db,
+            agent,
+            crate::platform::exec_resolver::resolve(agent).ok(),
+        )?;
+        runtime_settings(&db, agent)
+    })
+    .await?
 }
 
 // ---------------- Agent Runtime Configuration ----------------

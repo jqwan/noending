@@ -39,7 +39,7 @@ pub struct AgentRuntimeCapabilities {
 }
 
 pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
-    use RuntimeFieldCapability::{Discoverable, FreeForm, Suggested, Unsupported};
+    use RuntimeFieldCapability::{Discoverable, Suggested, Unsupported};
     match agent {
         // codex exec -m <model> -c model_reasoning_effort=<effort>
         Agent::Codex => AgentRuntimeCapabilities {
@@ -86,10 +86,9 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
             effort: Unsupported,
         },
         // agy accepts `--model <name>` and `--effort low|medium|high|max`
-        // but has no provider switch; `agy models` exists, so the catalog
-        // could become Discoverable later.
+        // and lists available models with `agy models`.
         Agent::Antigravity => AgentRuntimeCapabilities {
-            model: FreeForm,
+            model: Discoverable,
             provider: Unsupported,
             effort: Suggested,
         },

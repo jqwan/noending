@@ -140,7 +140,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const peers = remaining.filter(t => t.terminal_id !== terminalId && t.session_id === closed.session_id && !!closed.session_id);
       const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
       navigate(next ? terminalDestination(next)
-        : closed.session_id ? { view: "session", sessionId: closed.session_id, entry: "conversation", ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
+        : closed.session_id ? { view: "session", sessionId: closed.session_id, ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
         : { view: "sessions" });
     } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }
     finally { closingRef.current = false; if (mountedRef.current) setClosing(false); }
@@ -484,9 +484,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           <>
             <SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
               agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived} navigate={navigate} />
+            <span className="session-action-divider" aria-hidden="true" />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
-            <span className="session-action-divider" aria-hidden="true" />
             <button
               className="btn ghost icon-button"
               aria-label={reconnecting ? "正在重新连接" : "重新连接"}

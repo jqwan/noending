@@ -299,9 +299,27 @@ export default function SessionsView({ navigate, scope }: {
                 <Icon name="archive" />
               </button>
             </div>
-            {archivedMode ? <button className="btn ghost danger" aria-label="删除全部" title="删除全部已归档会话" disabled={!sessions?.length || bulkPurgeBusy || unarchiveBusy || archiveBusy} onClick={() => setBulkPurgeOpen(true)}><Icon name="trash" /> 删除全部</button> : <button className="btn ghost icon-button" aria-label="新建会话" title="新建会话" onClick={() => navigate({ view: "new-session" })}>
-              <Icon name="plus" />
-            </button>}
+            <span className="session-action-divider" aria-hidden="true" />
+            {archivedMode ? (
+              <button
+                className="btn ghost icon-button danger"
+                aria-label="删除全部"
+                title="删除全部已归档会话"
+                disabled={!sessions?.length || bulkPurgeBusy || unarchiveBusy || archiveBusy}
+                onClick={() => setBulkPurgeOpen(true)}
+              >
+                <Icon name="trash" />
+              </button>
+            ) : (
+              <button
+                className="btn ghost icon-button"
+                aria-label="新建会话"
+                title="新建会话"
+                onClick={() => navigate({ view: "new-session" })}
+              >
+                <Icon name="plus" />
+              </button>
+            )}
           </>
         }
       />
