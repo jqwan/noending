@@ -28,6 +28,7 @@ beforeEach(() => {
   viewState.clear();
   sessionPages.clear();
   sessionTerminals.clear();
+  localStorage.clear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
@@ -126,6 +127,13 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
   };
 }
 
+function switchGroupBy(name: "按任务归类" | "按项目归类" | "按代理归类" | "不分组（全部会话）") {
+  const trigger = screen.getByRole("button", { name: /会话归类/ });
+  fireEvent.click(trigger);
+  const item = screen.getByRole("menuitemradio", { name });
+  fireEvent.click(item);
+}
+
 describe("Sidebar navigation", () => {
   it("opens the new-session page", async () => {
     const navigate = renderSidebar();
@@ -185,7 +193,7 @@ describe("Sidebar unified sessions", () => {
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
     await screen.findByText("另一会话");
     fireEvent.click(screen.getByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
   });
 
   it("sidebar prefers terminal capability and reuses the selected instance independently of aggregate status", async () => {
@@ -278,8 +286,9 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    // 1. Header shows "工作区"
-    expect(await screen.findByText("工作区")).toBeTruthy();
+    // 1. Header shows group trigger button replacing static title
+    expect(await screen.findByRole("button", { name: /会话归类/ })).toBeTruthy();
+    expect(screen.getByText("任务")).toBeTruthy();
 
     // 2. Default: shows all sessions (not restricted to 7 days)
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
@@ -288,7 +297,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("桌面代理会话")).toBeTruthy();
 
     // 3. Open filter menu
-    const filterBtn = screen.getByRole("button", { name: "筛选会话" });
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
     fireEvent.click(filterBtn);
     expect(screen.getByRole("menu")).toBeTruthy();
 
@@ -311,6 +320,49 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("桌面代理会话")).toBeNull();
   });
 
+  it("exempts sessions with started terminals from sidebar filters", async () => {
+    const oldSessionWithTerminal = session({
+      id: "s-term",
+      title: "有终端启动的会话",
+      agent: "codex",
+      last_conversation_at: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(),
+      archived_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const oldSessionWithoutTerminal = session({
+      id: "s-plain",
+      title: "普通较旧已归档会话",
+      agent: "codex",
+      last_conversation_at: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(),
+      archived_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    vi.mocked(api.listSessions).mockResolvedValue([oldSessionWithTerminal, oldSessionWithoutTerminal]);
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-1", session_id: "s-term", session_title: "有终端启动的会话", live: true }),
+    ]);
+
+    renderSidebar();
+
+    expect(await screen.findByText("有终端启动的会话")).toBeTruthy();
+    expect(screen.getByText("普通较旧已归档会话")).toBeTruthy();
+
+    // Open filter menu and enable both "最近5天" and "未归档"
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
+    fireEvent.click(filterBtn);
+
+    const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
+    fireEvent.click(filterRecentBtn);
+
+    const filterUnarchivedBtn = screen.getByRole("menuitemcheckbox", { name: "未归档" });
+    fireEvent.click(filterUnarchivedBtn);
+
+    // Plain session is filtered out because it is older than 5 days and archived
+    expect(screen.queryByText("普通较旧已归档会话")).toBeNull();
+
+    // Session with a started terminal bypasses filter restrictions and remains visible
+    expect(screen.getByText("有终端启动的会话")).toBeTruthy();
+  });
+
   it("groups by workstream by default and navigates to session detail on click", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
@@ -329,7 +381,7 @@ describe("Sidebar 最近活动", () => {
     const sessionItem = screen.getByText("修复侧栏问题");
 
     fireEvent.click(sessionItem);
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
   });
 
   it("navigates to session when clicking the row edge/container", async () => {
@@ -365,10 +417,36 @@ describe("Sidebar 最近活动", () => {
 
     fireEvent.mouseEnter(rowContainer);
     expect(titleContainer.className).toContain("scrolling");
-    expect(titleContainer.style.getPropertyValue("--overflow-width")).toBe("186px");
+    expect(titleContainer.style.getPropertyValue("--overflow-width")).toBe("208px");
 
     fireEvent.mouseLeave(rowContainer);
     expect(titleContainer.className).not.toContain("scrolling");
+  });
+
+  it("does not enable marquee scrolling when title fits completely", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-short",
+        title: "短标题",
+        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
+      }),
+    ]);
+    renderSidebar();
+    const rowTitle = await screen.findByText("短标题");
+    const titleContainer = rowTitle.closest(".sidebar-session-title") as HTMLElement;
+    const rowContainer = rowTitle.closest(".sidebar-recent-item")!;
+
+    // In a fitting title: text width is 50px, clientWidth is 150px
+    Object.defineProperty(rowTitle, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 50, height: 16, top: 0, left: 0, bottom: 16, right: 50 }),
+    });
+    Object.defineProperty(titleContainer, "clientWidth", { configurable: true, value: 150 });
+    Object.defineProperty(titleContainer, "scrollWidth", { configurable: true, value: 150 });
+
+    fireEvent.mouseEnter(rowContainer);
+    expect(titleContainer.className).not.toContain("scrolling");
+    expect(titleContainer.style.getPropertyValue("--overflow-width")).toBe("");
   });
 
   it("keeps an unbound terminal in its selected task and retains that group after ingestion", async () => {
@@ -377,7 +455,7 @@ describe("Sidebar 最近活动", () => {
     const navigate = renderSidebar();
     const group = await screen.findByRole("button", { name: /启动任务/ });
     expect(screen.getByTitle("新会话 · /repo/x")).toBeTruthy();
-    expect(screen.queryByText("未归属任务")).toBeNull();
+    expect(screen.queryByText("无任务")).toBeNull();
     fireEvent.click(group);
     expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull();
     fireEvent.click(group);
@@ -440,8 +518,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("按项目分组名")).toBeNull();
 
     // 切换至按项目归类
-    const projectToggle = screen.getByRole("radio", { name: "按项目归类" });
-    fireEvent.click(projectToggle);
+    switchGroupBy("按项目归类");
 
     const projectGroupHeader = await screen.findByRole("button", { name: /按项目分组名/ });
     expect(screen.queryByText("按任务分组名")).toBeNull();
@@ -451,12 +528,15 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("切换测试会话")).toBeNull();
 
     // 切回按任务归类
-    fireEvent.click(screen.getByRole("radio", { name: "按任务归类" }));
+    switchGroupBy("按任务归类");
 
     expect(await screen.findByText("按任务分组名")).toBeTruthy();
   });
 
   it("handles unassigned workstream and unassigned project groups", async () => {
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-real", title: "真正的任务", created_at: "2026-10-01T00:00:00.000Z" }),
+    ]);
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
         id: "s-orphan",
@@ -464,18 +544,40 @@ describe("Sidebar 最近活动", () => {
         owner_workstream_id: null,
         project_id: null,
       }),
+      session({
+        id: "s-owned",
+        title: "归属会话",
+        owner_workstream_id: "ws-real",
+        project_id: null,
+      }),
     ]);
 
     renderSidebar();
 
-    // 任务维度：未归属任务
-    expect(await screen.findByText("未归属任务")).toBeTruthy();
+    // 任务维度：无任务
+    const taskUnassigned = await screen.findByText("无任务");
+    expect(taskUnassigned).toBeTruthy();
+    const taskHeader = taskUnassigned.closest(".sidebar-recent-group-header");
+    expect(taskHeader?.className).toContain("unassigned-group");
+    // Uses inbox icon
+    expect(taskHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
+      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+    );
 
-    // 项目维度：未归属项目
-    const projectToggle = screen.getByRole("radio", { name: "按项目归类" });
-    fireEvent.click(projectToggle);
+    // "无任务" should be sorted after "真正的任务" (sunk to bottom)
+    const groupTitles = Array.from(document.querySelectorAll(".sidebar-recent-group-title")).map(el => el.textContent);
+    expect(groupTitles).toEqual(["真正的任务", "无任务"]);
 
-    expect(await screen.findByText("未归属项目")).toBeTruthy();
+    // 项目维度：无项目
+    switchGroupBy("按项目归类");
+
+    const projectUnassigned = await screen.findByText("无项目");
+    expect(projectUnassigned).toBeTruthy();
+    const projectHeader = projectUnassigned.closest(".sidebar-recent-group-header");
+    expect(projectHeader?.className).toContain("unassigned-group");
+    expect(projectHeader?.querySelector("svg path")?.getAttribute("d")).toBe(
+      "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+    );
   });
 
   it("refetches recent sessions on EVT_SYNCED event", async () => {
@@ -502,9 +604,7 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
-
-    fireEvent.click(agentToggle);
+    switchGroupBy("按代理归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Codex/ })).toBeTruthy();
@@ -546,13 +646,12 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    const filterBtn = screen.getByRole("button", { name: "筛选会话" });
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
     fireEvent.click(filterBtn);
     const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
     fireEvent.click(filterRecentBtn);
 
-    const agentToggle = screen.getByRole("radio", { name: "按代理归类" });
-    fireEvent.click(agentToggle);
+    switchGroupBy("按代理归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByText("近5天有新消息的会话")).toBeTruthy();
@@ -618,8 +717,7 @@ describe("Sidebar 最近活动", () => {
     ]);
 
     renderSidebar();
-    const agentRadio = screen.getByRole("radio", { name: "按代理归类" });
-    fireEvent.click(agentRadio);
+    switchGroupBy("按代理归类");
 
     await screen.findByRole("button", { name: /Claude Code/ });
     const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
@@ -661,5 +759,435 @@ describe("Sidebar 最近活动", () => {
     const exitedDot = exitedRow.querySelector(".sidebar-session-link .sidebar-session-dot");
     expect(exitedDot).toBeTruthy();
     expect(exitedDot?.className).toContain("exited");
+  });
+
+  it("does not render pinned section when no sessions are pinned", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", title: "测试会话" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("测试会话");
+    expect(screen.queryByRole("button", { name: /置顶 \(/ })).toBeNull();
+  });
+
+  it.each([
+    ["workstream", "关联任务"],
+    ["project", "关联项目"],
+    ["agent", "Codex"],
+    ["none", null],
+  ] as const)("moves pinned sessions out of the %s list and restores them on unpin", async (groupBy, groupTitle) => {
+    viewState.set("sidebar.recent.groupBy", groupBy);
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", title: "需要置顶的会话" }),
+      session({ id: "s-2", title: "普通会话" }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "关联任务" })]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "关联项目" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1" })]);
+
+    renderSidebar({ view: "session", sessionId: "s-1" });
+    await screen.findByText("需要置顶的会话");
+
+    // Initially no pinned section
+    expect(screen.queryByRole("button", { name: /置顶 \(/ })).toBeNull();
+
+    // Click pin button on s-1
+    const pinBtn = screen.getByRole("button", { name: "置顶会话：需要置顶的会话" });
+    fireEvent.click(pinBtn);
+
+    // Now pinned section appears with count 1
+    const pinnedHeader = await screen.findByTitle("置顶 (1)");
+    expect(pinnedHeader).toBeTruthy();
+
+    // Verify localStorage persistence
+    const stored = JSON.parse(localStorage.getItem("noending.sidebar.pinnedSessions") || "[]");
+    expect(stored).toContain("s-1");
+
+    // Current sessions and retained terminals must not duplicate the pinned row.
+    expect(screen.getAllByText("需要置顶的会话")).toHaveLength(1);
+    expect(screen.getAllByText("普通会话")).toHaveLength(1);
+    if (groupTitle) expect(screen.getByTitle(`${groupTitle} (1)`)).toBeTruthy();
+
+    // Unpin by clicking the pin button
+    fireEvent.click(screen.getByRole("button", { name: "取消置顶：需要置顶的会话" }));
+
+    // Pinned section disappears
+    await waitFor(() => {
+      expect(screen.queryByTitle(/置顶 \(/)).toBeNull();
+    });
+
+    const storedAfter = JSON.parse(localStorage.getItem("noending.sidebar.pinnedSessions") || "[]");
+    expect(storedAfter).not.toContain("s-1");
+    expect(screen.getAllByText("需要置顶的会话")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "置顶会话：需要置顶的会话" })).toBeTruthy();
+    if (groupTitle) expect(screen.getByTitle(`${groupTitle} (2)`)).toBeTruthy();
+  });
+
+  it.each(["workstream", "none"] as const)("keeps pinned sessions out of the %s list when the pinned section is collapsed", async (groupBy) => {
+    viewState.set("sidebar.recent.groupBy", groupBy);
+    localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["s-pinned"]));
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-pinned", title: "已置顶会话" }),
+    ]);
+
+    renderSidebar();
+    const pinnedHeader = await screen.findByTitle("置顶 (1)");
+    expect(pinnedHeader.getAttribute("aria-expanded")).toBe("true");
+
+    // Click to collapse
+    fireEvent.click(pinnedHeader);
+    expect(pinnedHeader.getAttribute("aria-expanded")).toBe("false");
+
+    // Collapsing the pinned section must not reveal a duplicate in the regular list.
+    expect(screen.queryByText("已置顶会话")).toBeNull();
+    expect(screen.queryByTitle("未知任务 (1)")).toBeNull();
+
+    // Click to expand again
+    fireEvent.click(pinnedHeader);
+    expect(pinnedHeader.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getAllByText("已置顶会话")).toHaveLength(1);
+  });
+
+  it("excludes pinned terminal-only rows from the regular list and restores terminal navigation on unpin", async () => {
+    localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["terminal:t-1"]));
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", owner_workstream_id: "ws-1" })]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([workstreamCard({ title: "启动任务" })]);
+    const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
+
+    await screen.findByTitle("置顶 (1)");
+    expect(screen.getAllByText("待同步会话")).toHaveLength(1);
+    expect(screen.queryByTitle("启动任务 (1)")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消置顶：待同步会话" }));
+    expect(screen.queryByTitle("置顶 (1)")).toBeNull();
+    expect(screen.getByTitle("启动任务 (1)")).toBeTruthy();
+    expect(screen.getAllByText("待同步会话")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /^待同步会话/ }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-1" }));
+  });
+
+  it("opens group dropdown menu, displays options and closes on selection or click outside", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", title: "测试会话" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("测试会话");
+
+    const groupTrigger = screen.getByRole("button", { name: "会话归类：按任务归类" });
+    expect(groupTrigger.getAttribute("aria-expanded")).toBe("false");
+
+    // Click trigger to open menu
+    fireEvent.click(groupTrigger);
+    expect(groupTrigger.getAttribute("aria-expanded")).toBe("true");
+
+    const taskOpt = screen.getByRole("menuitemradio", { name: "按任务归类" });
+    const projectOpt = screen.getByRole("menuitemradio", { name: "按项目归类" });
+    const agentOpt = screen.getByRole("menuitemradio", { name: "按代理归类" });
+    const noneOpt = screen.getByRole("menuitemradio", { name: "不分组（全部会话）" });
+    expect(taskOpt.getAttribute("aria-checked")).toBe("true");
+    expect(projectOpt.getAttribute("aria-checked")).toBe("false");
+    expect(agentOpt.getAttribute("aria-checked")).toBe("false");
+    expect(noneOpt.getAttribute("aria-checked")).toBe("false");
+
+    // Click outside closes the menu
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("menuitemradio", { name: "按项目归类" })).toBeNull();
+
+    // Reopen and select "按项目归类"
+    fireEvent.click(groupTrigger);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "按项目归类" }));
+
+    // Menu closes and trigger updates label
+    expect(screen.queryByRole("menuitemradio", { name: "按项目归类" })).toBeNull();
+    expect(screen.getByRole("button", { name: "会话归类：按项目归类" })).toBeTruthy();
+    expect(screen.getByText("项目")).toBeTruthy();
+  });
+
+  it("renders flat session list without group headers when ungrouped (会话) is selected", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", title: "会话一", owner_workstream_id: "ws-1" }),
+      session({ id: "s-2", title: "会话二", owner_workstream_id: "ws-2" }),
+    ]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "任务一" }),
+      workstreamCard({ id: "ws-2", title: "任务二" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("任务一");
+    expect(screen.getByText("会话一")).toBeTruthy();
+    expect(screen.getByText("会话二")).toBeTruthy();
+
+    // Switch to ungrouped "不分组（全部会话）"
+    switchGroupBy("不分组（全部会话）");
+
+    // Group headers should no longer exist
+    expect(screen.queryByText("任务一")).toBeNull();
+    expect(screen.queryByText("任务二")).toBeNull();
+    expect(screen.queryAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header")).length).toBe(0);
+
+    // Sessions should still be rendered in flat list
+    expect(screen.getByText("会话一")).toBeTruthy();
+    expect(screen.getByText("会话二")).toBeTruthy();
+    expect(document.querySelector(".sidebar-flat-session-items")).toBeTruthy();
+
+    // Group trigger now shows "会话"
+    expect(screen.getByRole("button", { name: "会话归类：不分组（全部会话）" })).toBeTruthy();
+    expect(screen.getByText("会话")).toBeTruthy();
+  });
+
+  it("switches sorting between 创建时间 and 最近更新 via combined menu", async () => {
+    const olderCreatedRecentUpdated = session({
+      id: "s-1",
+      title: "老创建新聊天",
+      started_at: "2026-10-01T10:00:00.000Z",
+      last_conversation_at: "2026-10-10T12:00:00.000Z",
+    });
+    const newerCreatedOldUpdated = session({
+      id: "s-2",
+      title: "新创建老聊天",
+      started_at: "2026-10-05T10:00:00.000Z",
+      last_conversation_at: "2026-10-06T12:00:00.000Z",
+    });
+
+    vi.mocked(api.listSessions).mockResolvedValue([olderCreatedRecentUpdated, newerCreatedOldUpdated]);
+
+    renderSidebar();
+    await screen.findByText("老创建新聊天");
+
+    // By default, sorted by createdAt desc: newerCreated first
+    let sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
+    expect(sessionLinks[0].textContent).toContain("新创建老聊天");
+    expect(sessionLinks[1].textContent).toContain("老创建新聊天");
+
+    // Open combined filter & sort menu
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
+    fireEvent.click(filterBtn);
+
+    const sortCreatedRadio = screen.getByRole("menuitemradio", { name: "创建时间" });
+    const sortUpdatedRadio = screen.getByRole("menuitemradio", { name: "最近更新" });
+    expect(sortCreatedRadio.getAttribute("aria-checked")).toBe("true");
+    expect(sortUpdatedRadio.getAttribute("aria-checked")).toBe("false");
+
+    // Switch to 最近更新
+    fireEvent.click(sortUpdatedRadio);
+    expect(sortUpdatedRadio.getAttribute("aria-checked")).toBe("true");
+
+    // Sessions now ordered by updatedAt desc: olderCreatedRecentUpdated first
+    sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
+    expect(sessionLinks[0].textContent).toContain("老创建新聊天");
+    expect(sessionLinks[1].textContent).toContain("新创建老聊天");
+
+    // Switch back to 创建时间
+    fireEvent.click(sortCreatedRadio);
+    sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
+    expect(sessionLinks[0].textContent).toContain("新创建老聊天");
+    expect(sessionLinks[1].textContent).toContain("老创建新聊天");
+  });
+
+  it("limits group to 5 sessions with 展开显示 button and resets on collapse", async () => {
+    const ws = workstreamCard({ id: "ws-test", title: "测试任务" });
+    const testSessions = Array.from({ length: 7 }, (_, i) =>
+      session({
+        id: `s-${i + 1}`,
+        title: `会话 ${i + 1}`,
+        owner_workstream_id: "ws-test",
+        started_at: new Date(Date.now() - (7 - i) * 60000).toISOString(),
+      }),
+    );
+
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listSessions).mockResolvedValue(testSessions);
+
+    renderSidebar();
+    await screen.findByText("会话 7");
+
+    // By default, only 5 sessions are visible
+    expect(screen.queryByText("会话 7")).toBeTruthy();
+    expect(screen.queryByText("会话 6")).toBeTruthy();
+    expect(screen.queryByText("会话 5")).toBeTruthy();
+    expect(screen.queryByText("会话 4")).toBeTruthy();
+    expect(screen.queryByText("会话 3")).toBeTruthy();
+    expect(screen.queryByText("会话 2")).toBeNull();
+    expect(screen.queryByText("会话 1")).toBeNull();
+
+    // 展开显示 button is shown
+    const expandBtn = screen.getByRole("button", { name: "展开显示" });
+    expect(expandBtn).toBeTruthy();
+
+    // Click 展开显示: reveals all 7 sessions and hides button
+    fireEvent.click(expandBtn);
+    expect(screen.getByText("会话 2")).toBeTruthy();
+    expect(screen.getByText("会话 1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开显示" })).toBeNull();
+
+    // Collapse the group
+    const groupHeader = screen.getByRole("button", { name: /测试任务/ });
+    fireEvent.click(groupHeader);
+
+    // Group is collapsed, sessions not rendered
+    expect(screen.queryByText("会话 7")).toBeNull();
+
+    // Re-expand the group: resets to showing at most 5 sessions with 展开显示 button
+    fireEvent.click(groupHeader);
+    expect(screen.queryByText("会话 7")).toBeTruthy();
+    expect(screen.queryByText("会话 3")).toBeTruthy();
+    expect(screen.queryByText("会话 2")).toBeNull();
+    expect(screen.queryByText("会话 1")).toBeNull();
+    expect(screen.getByRole("button", { name: "展开显示" })).toBeTruthy();
+  });
+
+  it("does not render 展开显示 button when group has 5 or fewer sessions", async () => {
+    const ws = workstreamCard({ id: "ws-small", title: "小型任务" });
+    const testSessions = Array.from({ length: 4 }, (_, i) =>
+      session({
+        id: `s-${i + 1}`,
+        title: `小型会话 ${i + 1}`,
+        owner_workstream_id: "ws-small",
+      }),
+    );
+
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listSessions).mockResolvedValue(testSessions);
+
+    renderSidebar();
+    await screen.findByText("小型会话 1");
+
+    expect(screen.queryByText("小型会话 1")).toBeTruthy();
+    expect(screen.queryByText("小型会话 4")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "展开显示" })).toBeNull();
+  });
+
+  it("enables marquee scrolling on group header hover when group title overflows", async () => {
+    const ws = workstreamCard({ id: "ws-long", title: "这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动" });
+    const s = session({ id: "s-1", owner_workstream_id: "ws-long", title: "普通会话" });
+
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listSessions).mockResolvedValue([s]);
+
+    renderSidebar();
+    const groupHeader = await screen.findByRole("button", { name: /这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动/ });
+    const groupTitle = groupHeader.querySelector(".sidebar-recent-group-title") as HTMLElement;
+
+    Object.defineProperty(groupTitle, "scrollWidth", { configurable: true, value: 350 });
+    Object.defineProperty(groupTitle, "clientWidth", { configurable: true, value: 160 });
+
+    fireEvent.mouseEnter(groupHeader);
+    expect(groupTitle.className).toContain("scrolling");
+    expect(groupTitle.style.getPropertyValue("--overflow-width")).toBe("190px");
+
+    fireEvent.mouseLeave(groupHeader);
+    expect(groupTitle.className).not.toContain("scrolling");
+  });
+
+  it("does not enable marquee scrolling on group header hover when group title fits", async () => {
+    const ws = workstreamCard({ id: "ws-short", title: "短任务" });
+    const s = session({ id: "s-1", owner_workstream_id: "ws-short", title: "普通会话" });
+
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([ws]);
+    vi.mocked(api.listSessions).mockResolvedValue([s]);
+
+    renderSidebar();
+    const groupHeader = await screen.findByRole("button", { name: /短任务/ });
+    const groupTitle = groupHeader.querySelector(".sidebar-recent-group-title") as HTMLElement;
+    const groupTitleText = groupHeader.querySelector(".sidebar-recent-group-title-text") as HTMLElement;
+
+    Object.defineProperty(groupTitleText, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 50, height: 16, top: 0, left: 0, bottom: 16, right: 50 }),
+    });
+    Object.defineProperty(groupTitle, "clientWidth", { configurable: true, value: 160 });
+    Object.defineProperty(groupTitle, "scrollWidth", { configurable: true, value: 160 });
+
+    fireEvent.mouseEnter(groupHeader);
+    expect(groupTitle.className).not.toContain("scrolling");
+  });
+
+  it("collapses all groups and expands all groups with the one-click button", async () => {
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "任务甲" }),
+      workstreamCard({ id: "ws-2", title: "任务乙" }),
+    ]);
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", owner_workstream_id: "ws-1", title: "会话甲" }),
+      session({ id: "s-2", owner_workstream_id: "ws-2", title: "会话乙" }),
+    ]);
+
+    renderSidebar();
+
+    expect(await screen.findByText("会话甲")).toBeTruthy();
+    expect(screen.getByText("会话乙")).toBeTruthy();
+
+    const collapseAllBtn = screen.getByRole("button", { name: "收起全部" });
+    expect(collapseAllBtn.querySelector("svg path")?.getAttribute("d")).toBe("M4 4.5l5 3.5 5-3.5M4 13.5l5-3.5 5 3.5");
+
+    // Click collapse all
+    fireEvent.click(collapseAllBtn);
+
+    expect(screen.queryByText("会话甲")).toBeNull();
+    expect(screen.queryByText("会话乙")).toBeNull();
+
+    // Button should now be "展开全部"
+    const expandAllBtn = screen.getByRole("button", { name: "展开全部" });
+    expect(expandAllBtn.querySelector("svg path")?.getAttribute("d")).toBe("M4 8l5-3.5 5 3.5M4 10l5 3.5 5-3.5");
+
+    // Click expand all
+    fireEvent.click(expandAllBtn);
+
+    expect(await screen.findByText("会话甲")).toBeTruthy();
+    expect(screen.getByText("会话乙")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起全部" })).toBeTruthy();
+  });
+
+  it("toggles session icons display via display settings in menu", async () => {
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([
+      workstreamCard({ id: "ws-1", title: "任务分组" }),
+    ]);
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", owner_workstream_id: "ws-1", title: "有图标的会话", agent: "codex" }),
+    ]);
+
+    renderSidebar();
+
+    await screen.findByText("有图标的会话");
+    const sessionRow = screen.getByText("有图标的会话").closest(".sidebar-recent-item");
+    expect(sessionRow?.querySelector(".agent-icon")).toBeTruthy();
+    expect(document.querySelector(".sidebar-recent-group-items")?.classList.contains("has-icons")).toBe(true);
+
+    // Open filter/sort menu
+    const filterBtn = screen.getByRole("button", { name: /筛选与排序/ });
+    fireEvent.click(filterBtn);
+
+    expect(screen.getByText("显示设置")).toBeTruthy();
+    const toggleIconBtn = screen.getByRole("menuitemcheckbox", { name: "显示会话图标" });
+    expect(toggleIconBtn.getAttribute("aria-checked")).toBe("true");
+
+    // Click to hide icons
+    fireEvent.click(toggleIconBtn);
+    expect(toggleIconBtn.getAttribute("aria-checked")).toBe("false");
+    expect(sessionRow?.querySelector(".agent-icon")).toBeNull();
+    expect(document.querySelector(".sidebar-recent-group-items")?.classList.contains("has-icons")).toBe(false);
+
+    // Click to show icons again
+    fireEvent.click(toggleIconBtn);
+    expect(toggleIconBtn.getAttribute("aria-checked")).toBe("true");
+    expect(sessionRow?.querySelector(".agent-icon")).toBeTruthy();
+    expect(document.querySelector(".sidebar-recent-group-items")?.classList.contains("has-icons")).toBe(true);
+  });
+
+  it("disables one-click collapse button in ungrouped mode", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-1", title: "平铺会话" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("平铺会话");
+
+    switchGroupBy("不分组（全部会话）");
+
+    const collapseBtn = screen.getByRole("button", { name: "收起全部" });
+    expect(collapseBtn.hasAttribute("disabled")).toBe(true);
   });
 });

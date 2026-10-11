@@ -12,11 +12,12 @@ const paths = {
   arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",
   home: "M3 8l6-5 6 5v7H11v-4H7v4H3Z",
   search: "M12 12l4 4M13 8A5 5 0 1 1 3 8a5 5 0 0 1 10 0",
-  tasks: "M3 5l1 1 2-2M8 5h7M3 10l1 1 2-2M8 10h7M8 15h7",
-  tasksCollapsed: "M3 5l1 1 2-2M8 5h7M4 10h11M6 14h7",
+  tasks: "M5 2.5h8M3.5 5h11M2.5 7.5h13v8h-13ZM5 10.5h5M5 13h8",
+  tasksExpanded: "M3 5l1 1 2-2M8 5h7M3 10l1 1 2-2M8 10h7M8 15h7",
   folder: "M2 5V3h5l2 2h7v10H2Z",
   folderOpen: "M2 5V3h5l2 2h7v2H2ZM1.5 7.5h13a1 1 0 0 1 .95 1.32l-1.8 5.5A1 1 0 0 1 12.7 15H2.3a1 1 0 0 1-.95-.68l-1.8-5.5A1 1 0 0 1 .5 7.5Z",
   project: "M9 2.5l6 3.5-6 3.5-6-3.5ZM3 6v6l6 3.5 6-3.5V6M9 9.5v6",
+  projectOpen: "M9 6l-6-3.5-2 3.5 6 3.5 2-3.5 2 3.5 6-3.5-2-3.5-6 3.5ZM3 8v4l6 3.5 6-3.5V8M9 6v9.5",
   git: "M5 3a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 6v6M5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM13 4.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 11a4.5 4.5 0 0 1 4.5-4.5h2",
   chat: "M3 3h12v9H8l-5 3Z",
   chatPlus: "M3 3h12v9H8l-5 3ZM9 5v5M6.5 7.5h5",
@@ -38,8 +39,14 @@ const paths = {
   grid: "M3.5 3.5h4.5v4.5h-4.5ZM10 3.5h4.5v4.5h-4.5ZM3.5 10h4.5v4.5h-4.5ZM10 10h4.5v4.5h-4.5Z",
   list: "M3.5 4.5h11M3.5 9h11M3.5 13.5h11",
   filter: "M2.5 3.5h13l-5 5.5v5.5l-3-2v-3.5Z",
+  sliders: "M2.5 6h13M6.5 3.5v5M2.5 12h13M11.5 9.5v5",
+  inbox: "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+  collapseAll: "M4 4.5l5 3.5 5-3.5M4 13.5l5-3.5 5 3.5",
+  expandAll: "M4 8l5-3.5 5 3.5M4 10l5 3.5 5-3.5",
 };
 
-export default function Icon({ name, className }: { name: keyof typeof paths; className?: string }) {
+export type IconName = keyof typeof paths;
+
+export default function Icon({ name, className }: { name: IconName; className?: string }) {
   return <svg className={`ui-icon${className ? ` ${className}` : ""}`} viewBox="0 0 18 18" aria-hidden="true"><path d={paths[name]} /></svg>;
 }
