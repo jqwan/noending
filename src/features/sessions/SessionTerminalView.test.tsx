@@ -534,9 +534,12 @@ it("keeps details disabled when an old title request resolves during pending", a
   expect((screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-it("paste keys intercept native event and deliver text as typed keystrokes", async () => {
+it.each([
+  { metaKey: true, ctrlKey: false, shiftKey: false },
+  { metaKey: false, ctrlKey: true, shiftKey: true },
+])("paste keys deliver clipboard text once: %j", async (modifiers) => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue({ text: "pasted text", image_path: null });
+  vi.mocked(api.readClipboardForTerminal).mockResolvedValue("pasted text");
 
   renderView();
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
@@ -544,33 +547,33 @@ it("paste keys intercept native event and deliver text as typed keystrokes", asy
   // 返回 false：拦截键盘事件，交给 readClipboardForTerminal；文本按打字语义
   // 经 terminalInput 交付（四家 TUI 渲染的最小公约数，term.paste 是 pi 双份
   // 的嫌疑残留层，已整体弃用）。
-  expect(term.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: () => {} })).toBe(false);
+  expect(term.keyHandler!({ type: "keydown", ...modifiers, key: "v", preventDefault: () => {} })).toBe(false);
   await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text"));
+  expect(api.terminalInput).toHaveBeenCalledTimes(1);
   expect(term.pasted).toEqual([]);
 });
 
-it("an image paste forwards ^V to claude code instead of a path", async () => {
-  // agent 取自快照（权威）：即使组件的 agent props 为空也能正确分流。
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ agent: "claude_code" }));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue({
-    text: null,
-    image_path: "/tmp/noending/paste/clipboard-1.png",
-  });
+it.each(["codex", "claude_code", "pi", "antigravity"] as const)(
+  "%s does not receive input when Cmd+V finds no clipboard text",
+  async (agent) => {
+    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ agent }));
+    vi.mocked(api.readClipboardForTerminal).mockResolvedValue(null);
 
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  FakeTerminal.last!.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: () => {} });
-  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "\x16"));
-  // claude 自己读剪贴板出单 chip；再交付路径文本会双显。
-  expect(api.terminalInput).not.toHaveBeenCalledWith(
-    "t-1",
-    "/tmp/noending/paste/clipboard-1.png",
-  );
-});
+    renderView();
+    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+    await act(async () => {
+      expect(FakeTerminal.last!.keyHandler!({
+        type: "keydown", metaKey: true, key: "v", preventDefault: () => {},
+      })).toBe(false);
+    });
+    expect(api.readClipboardForTerminal).toHaveBeenCalledTimes(1);
+    expect(api.terminalInput).not.toHaveBeenCalled();
+  },
+);
 
 it("the browser default paste is cancelled and event pastes die at capture", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue({ text: "x", image_path: null });
+  vi.mocked(api.readClipboardForTerminal).mockResolvedValue("x");
 
   renderView();
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
@@ -591,22 +594,20 @@ it("the browser default paste is cancelled and event pastes die at capture", asy
   expect(stopped).toHaveBeenCalledTimes(1);
 });
 
-it("an image-only paste path is delivered as typed text", async () => {
+it.each([
+  { ctrlKey: true, altKey: false },
+  { ctrlKey: false, altKey: true },
+])("passes native TUI paste shortcuts through to xterm: %j", async (modifiers) => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue({
-    text: null,
-    image_path: "/tmp/noending/paste/clipboard-1.png",
-  });
-
   renderView();
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const term = FakeTerminal.last!;
-
-  expect(term.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: () => {} })).toBe(false);
-  await waitFor(() =>
-    expect(api.terminalInput).toHaveBeenCalledWith("t-1", "/tmp/noending/paste/clipboard-1.png"),
-  );
-  expect(term.pasted).toEqual([]);
+  const prevented = vi.fn();
+  expect(FakeTerminal.last!.keyHandler!({
+    type: "keydown", metaKey: false, shiftKey: false, key: "v",
+    ...modifiers, preventDefault: prevented,
+  })).toBe(true);
+  expect(prevented).not.toHaveBeenCalled();
+  expect(api.readClipboardForTerminal).not.toHaveBeenCalled();
 });
 
 it("copy with a selection goes through the shared clipboard helper", async () => {

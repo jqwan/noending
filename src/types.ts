@@ -752,13 +752,6 @@ export interface TerminalSnapshot extends TerminalSummary {
   rows: number;
 }
 
-/** read_clipboard_for_terminal：系统剪贴板的原生读取结果——非空文本优先，
- *  否则图片落盘为 PNG 返回路径；两者都无 = 空对象。 */
-export interface ClipboardPaste {
-  text: string | null;
-  image_path: string | null;
-}
-
 export interface AssistantMessage {
   id: string;
   session_id: string;
