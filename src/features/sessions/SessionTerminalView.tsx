@@ -232,9 +232,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       // 复制：有选区时 Cmd/Ctrl+C 是复制，否则交给终端（SIGINT）。
       //
       // 粘贴在 keydown 层截获并压制原生路径，改为后端原生读系统剪贴板一次、
-      // 按内容路由：非空文本 → 打字语义交付；图片 → 落盘为 PNG、路径按打字
-      // 交付。不走 webview 的 paste 事件——WKWebView 对图片内容会把它派发
-      // 两次且 flavor 不一致，事件层怎么防重都会有半份从另一条路漏出去。
+      // 仅交付非空文本，不走 webview 的 paste 事件，避免重复投递。
+      // 图片由 Agent 自己处理，用户直接使用各 TUI 的原生粘贴快捷键。
       // 中文 IME 的 WKWebView 兼容层。xterm 6 的 input 通路（_inputEvent）在
       // _keyDownSeen 被 keyup 清零后会同步交付 ev.data，而 IME 直提交的事件
       // 顺序 WebKit 不保证：首键只有裸修饰键 keydown（字符键被吞、229 第二键
@@ -351,25 +350,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           // 独立于本路由的投递通道，键盘路由再正确也会多出一份。
           e.preventDefault();
           void api.readClipboardForTerminal()
-            .then((clip) => {
+            .then((text) => {
               // 文本也走打字语义（terminalInput）：term.paste 的 bracketed
               // 包裹在部分 TUI 下的重绘是双份渲染的残留层，打字语义是所有
               // TUI 行为的最小公约数；多行文本由 TUI 自己的输入处理消化。
-              if (clip.text) {
-                api.terminalInput(id, clip.text);
-                return;
-              }
-              if (clip.image_path) {
-                // 图片粘贴按 TUI 能力分流（均在真实 PTY 里实测）：
-                // claude code 有 ^V 读图绑定——转发控制字节，它自己读剪贴板，
-                // 恰好一个 [Image #N]；codex / pi / agy 对 ^V 无反应——交付落盘
-                // 路径（打字语义）。agent 取自快照：从 Resume 弹窗直接导航过来
-                // 时详情缓存与 props 都可能为空，快照里的 agent 才是权威事实。
-                if (snapshot.agent === "claude_code") {
-                  api.terminalInput(id, "\x16");
-                } else {
-                  api.terminalInput(id, clip.image_path);
-                }
+              if (text) {
+                api.terminalInput(id, text);
               }
             })
             .catch(() => {

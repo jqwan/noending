@@ -663,95 +663,13 @@ pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()
 
 // ---------------- Clipboard paste → terminal ----------------
 
-/// Encode raw RGBA bytes as a PNG. The clipboard hands back uncompressed
-/// pixels; a TUI can't take bitmap bytes, but a file path is just text.
-pub fn encode_paste_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut encoder = encoder
-        .write_header()
-        .map_err(|e| other(format!("PNG 编码失败: {e}")))?;
-    encoder
-        .write_image_data(rgba)
-        .map_err(|e| other(format!("PNG 写入失败: {e}")))?;
-    encoder
-        .finish()
-        .map_err(|e| other(format!("PNG 收尾失败: {e}")))?;
-    Ok(out)
-}
-
-/// Persist encoded PNG bytes under `<runtime>/paste/` and return the absolute
-/// path. Old paste files are pruned like the launcher scripts (diagnostics of
-/// one paste, not an archive).
-pub fn write_paste_image(runtime_dir: &std::path::Path, png_bytes: &[u8]) -> Result<String> {
-    let dir = runtime_dir.join("paste");
-    std::fs::create_dir_all(&dir)?;
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        for e in rd.filter_map(|e| e.ok()) {
-            if !e.file_name().to_string_lossy().starts_with("clipboard-") {
-                continue;
-            }
-            if let Ok(m) = e.metadata() {
-                if let Ok(modified) = m.modified() {
-                    if modified < cutoff {
-                        let _ = std::fs::remove_file(e.path());
-                    }
-                }
-            }
-        }
-    }
-    // Millisecond timestamps collide when two pastes land in the same tick —
-    // a uuid suffix keeps every paste its own file.
-    let path = dir.join(format!(
-        "clipboard-{}-{}.png",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"),
-        &uuid::Uuid::new_v4().simple().to_string()[..6]
-    ));
-    std::fs::write(&path, png_bytes)?;
-    Ok(path.to_string_lossy().to_string())
-}
-
-/// What a terminal paste of the SYSTEM clipboard resolves to, read natively
-/// (arboard) so the webview's paste-event quirks never reach the PTY:
-/// non-empty text wins; otherwise an image is saved and its path returned.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ClipboardPaste {
-    pub text: Option<String>,
-    pub image_path: Option<String>,
-}
-
-pub fn read_clipboard_paste(runtime_dir: &std::path::Path) -> Result<ClipboardPaste> {
+/// Read non-empty clipboard text natively to avoid duplicate WebView pastes.
+/// Image clipboard handling belongs to the Agent TUI.
+#[tauri::command]
+pub fn read_clipboard_for_terminal() -> Result<Option<String>> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| other(format!("读取剪贴板失败: {e}")))?;
-    if let Ok(text) = clipboard.get_text() {
-        if !text.is_empty() {
-            return Ok(ClipboardPaste {
-                text: Some(text),
-                image_path: None,
-            });
-        }
-    }
-    if let Ok(image) = clipboard.get_image() {
-        let png = encode_paste_png(image.width, image.height, &image.bytes.into_owned())?;
-        let path = write_paste_image(runtime_dir, &png)?;
-        return Ok(ClipboardPaste {
-            text: None,
-            image_path: Some(path),
-        });
-    }
-    Ok(ClipboardPaste {
-        text: None,
-        image_path: None,
-    })
-}
-
-#[tauri::command]
-pub fn read_clipboard_for_terminal(app: AppHandle) -> Result<crate::commands::ClipboardPaste> {
-    let runtime_dir = launcher_for(&app).runtime_dir;
-    read_clipboard_paste(&runtime_dir)
+    Ok(clipboard.get_text().ok().filter(|text| !text.is_empty()))
 }
 
 // ---------------- Embedded terminal (terminal subpage) ----------------
@@ -1225,43 +1143,5 @@ mod agent_runtime_refresh_seam_tests {
             let err = open_remote_url(bad.to_string()).unwrap_err();
             assert!(err.to_string().contains("http"), "{bad}: {err}");
         }
-    }
-}
-
-#[cfg(test)]
-mod paste_image_tests {
-    use super::*;
-
-    #[test]
-    fn encode_paste_png_produces_a_valid_png_from_raw_rgba() {
-        let rgba = vec![
-            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-        ];
-        let png = encode_paste_png(2, 2, &rgba).unwrap();
-        assert!(png.starts_with(&[0x89u8, 0x50, 0x4e, 0x47]));
-        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
-        let mut reader = decoder.read_info().unwrap();
-        let info = reader.info().clone();
-        assert_eq!((info.width, info.height), (2, 2));
-        let mut buf = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
-        reader.next_frame(&mut buf).unwrap();
-        assert_eq!(&buf[..4], &rgba[..4]);
-    }
-
-    #[test]
-    fn paste_image_round_trips_through_runtime_dir() {
-        let dir = std::env::temp_dir().join(format!("noending-paste-{}", uuid::Uuid::new_v4()));
-        let rgba = vec![1u8, 2, 3, 4];
-        let png = encode_paste_png(1, 1, &rgba).unwrap();
-
-        let path = write_paste_image(&dir, &png).unwrap();
-        assert!(path.starts_with(dir.join("paste").to_string_lossy().as_ref()));
-        assert!(path.ends_with(".png"));
-        assert_eq!(std::fs::read(&path).unwrap(), png);
-
-        // The stored file is fresh, so pruning right after must keep it.
-        write_paste_image(&dir, &png).unwrap();
-        let kept = std::fs::read_dir(dir.join("paste")).unwrap().count();
-        assert_eq!(kept, 2, "both paste files survive the 24h prune");
     }
 }

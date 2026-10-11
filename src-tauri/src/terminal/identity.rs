@@ -2,7 +2,7 @@
 //!
 //! Nothing is inferred from terminal output or message text. Each embedded
 //! launch gets its own authenticated loopback listener and temporary, explicit
-//! CLI resources. Antigravity uses a dedicated persistent plugin, gated by
+//! CLI resources. Antigravity uses a dedicated global plugin, gated by
 //! per-launch environment; existing user configuration is never replaced.
 
 mod antigravity;
@@ -652,8 +652,8 @@ mod tests {
     #[test]
     fn fragmented_identity_notification_waits_for_the_complete_payload() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        // Complete connection setup before testing the nonblocking read.
         let (mut server, _) = listener.accept().unwrap();
         // macOS and Windows can inherit the listener's nonblocking mode.
         // Force that mode so the same transport contract is tested everywhere.

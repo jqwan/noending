@@ -239,9 +239,9 @@ export const api = {
     invoke<void>("terminal_input", { terminalId, data }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
-  // 系统剪贴板的原生读取（arboard）：文本优先，图片落盘为 PNG 返回路径。
+  // 原生读取系统剪贴板的非空文本；图片由 Agent TUI 自己处理。
   readClipboardForTerminal: () =>
-    invoke<import("./types").ClipboardPaste>("read_clipboard_for_terminal"),
+    invoke<string | null>("read_clipboard_for_terminal"),
 
   listIngestSources: () =>
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),
