@@ -484,7 +484,6 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           <>
             <SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
               agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived} navigate={navigate} />
-            <span className="session-action-divider" aria-hidden="true" />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
             <button

@@ -86,6 +86,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
           aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(value => !value)}><Icon name="chevronDown" /></button>}
       </>}
     </div>
+    <span className="session-action-divider" aria-hidden="true" />
     <SessionTaskTracking key={sessionId} sessionId={sessionId} navigate={navigate}/>
     {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"

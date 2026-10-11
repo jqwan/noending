@@ -2343,7 +2343,7 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 /* 会话看板的运行中伪行/伪卡：可点击、与真实会话行视觉同族但有一道 accent 边。 */
 
 /* Unified session titlebar: icon navigation, instance menu and contextual actions. */
-.session-navigation { position: relative; display: flex; flex: none; align-items: center; }
+.session-navigation { position: relative; display: flex; flex: none; align-items: center; gap: 8px; }
 .session-action-divider,
 .action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
 button.btn.ghost.terminal-running,
@@ -2722,16 +2722,26 @@ button.btn.ghost.terminal-exited,
 
 .session-tracking-panel {
   position: fixed;
-  top: 104px;
-  bottom: 0;
-  right: 0;
-  width: min(360px, 85vw);
+  top: calc(var(--titlebar-height, 48px) + 8px);
+  right: max(16px, var(--main-gutter, 24px));
+  width: min(320px, calc(100vw - 32px));
+  max-height: calc(100vh - var(--titlebar-height, 48px) - 24px);
   z-index: 35;
-  padding: 20px;
+  padding: 12px;
   overflow: auto;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-default);
-  box-shadow: -8px 0 24px #0000000c;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px #00000018;
 }
-.session-tracking-panel .rail-row { gap: 6px; }
-.session-tracking-panel .grow { flex: 1; min-width: 0; white-space: normal; text-align: left; }
+.session-tracking-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.session-tracking-head h3 { margin: 0; font-size: 13px; }
+.session-tracking-list { max-height: 240px; overflow: auto; }
+.session-tracking-row { display: flex; align-items: center; gap: 6px; border-radius: var(--radius-sm); }
+.session-tracking-row:hover { background: var(--bg-hover); }
+.session-tracking-link { flex: 1; min-width: 0; padding: 8px 6px; text-align: left; background: transparent; border: 0; color: var(--text-primary); font-family: inherit; font-size: 13px; cursor: pointer; overflow-wrap: anywhere; }
+.session-tracking-link:hover { color: var(--accent); }
+.session-tracking-add { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
+.session-tracking-add .section-label { margin: 0 0 4px; }
+.session-tracking-add .existing-path-option { padding: 8px 6px; font-size: 13px; }
+.session-tracking-add > .btn { margin-top: 10px; }
