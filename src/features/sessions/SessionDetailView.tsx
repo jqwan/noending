@@ -396,7 +396,7 @@ export default function SessionDetailView({
         </div>
       )}
       {sessionCtx?.fields ? (
-        <div className="md-body" style={{ marginTop: 10, maxWidth: "72ch", overflowWrap: "anywhere" }}>
+        <div className="md-body" style={{ marginTop: 10, overflowWrap: "anywhere" }}>
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
             {sessionCtx.fields.summary}
           </ReactMarkdown>

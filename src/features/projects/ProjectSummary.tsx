@@ -73,7 +73,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
       </div>
     </div>
     {view?.pending && <p className="muted">有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
-    {view?.summary ? <div className="md-body" style={{ maxWidth: "72ch", overflowWrap: "anywhere" }}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{view.summary}</ReactMarkdown></div> : <p className="muted">{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
+    {view?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{view.summary}</ReactMarkdown></div> : <p className="muted">{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
     {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
     {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
     {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}

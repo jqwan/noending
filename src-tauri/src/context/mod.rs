@@ -70,6 +70,7 @@ struct SessionSnapshot {
     latest: i64,
     from: i64,
     messages: Vec<SessionMessage>,
+    summary_through_at: Option<String>,
 }
 impl SessionSnapshot {
     fn read(db: &Db, session: Session, regenerate: bool) -> Result<Self> {
@@ -81,6 +82,14 @@ impl SessionSnapshot {
             .map(|c| c.processed_through_seq)
             .unwrap_or(0);
         let messages = db.get_messages_after(&session.id, from, latest.saturating_sub(from))?;
+        let summary_through_at = if from > 0 {
+            db.get_messages_after(&session.id, from - 1, 1)?
+                .into_iter()
+                .next()
+                .and_then(|m| m.ts)
+        } else {
+            None
+        };
         Ok(Self {
             session,
             existing,
@@ -88,7 +97,14 @@ impl SessionSnapshot {
             latest,
             from,
             messages,
+            summary_through_at,
         })
+    }
+    fn last_message_at(&self) -> Option<&str> {
+        match self.messages.last() {
+            Some(message) => message.ts.as_deref(),
+            None => self.summary_through_at.as_deref(),
+        }
     }
     fn revision(&self) -> i64 {
         self.existing.as_ref().map(|c| c.revision).unwrap_or(0)
@@ -359,6 +375,7 @@ fn extract_session(
             },
             snapshot.from,
             &snapshot.messages,
+            snapshot.summary_through_at.as_deref(),
         )?;
         let mut cli = require_cli(launch, operation)?;
         cli.timeout_secs = 300;
@@ -605,11 +622,26 @@ fn run_batch(
     files.write_preferences(&preference_snapshot)?;
     let mut records = vec![header];
     let mut targets = HashSet::new();
-    for s in snapshots {
+    let mut ordered: Vec<_> = snapshots.iter().collect();
+    ordered.sort_by_cached_key(|s| {
+        (
+            s.last_message_at()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.timestamp_millis()),
+            s.session.id.clone(),
+        )
+    });
+    for s in ordered {
         let need_update = !s.messages.is_empty();
         if need_update {
             targets.insert(s.session.id.clone());
-            files.write_session(&s.session, s.current_summary(), s.from, &s.messages)?;
+            files.write_session(
+                &s.session,
+                s.current_summary(),
+                s.from,
+                &s.messages,
+                s.summary_through_at.as_deref(),
+            )?;
         }
         let preference_input_file = if regenerate {
             let messages = db.get_messages_after(&s.session.id, 0, s.latest)?;
@@ -620,6 +652,7 @@ fn run_batch(
         };
         records.push(
             serde_json::json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
+                "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at,
                 "need_update":need_update,"current_summary":s.current_summary(),
                 "preference_input_file":preference_input_file,
                 "input_file":need_update.then(||files.session_input(&s.session.id)),

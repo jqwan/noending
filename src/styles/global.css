@@ -61,6 +61,8 @@ button.btn.danger:hover { opacity: 0.9; }
 button.btn.small { padding: 3px 10px; font-size: 12px; }
 button.btn.ghost { border-color: transparent; background: transparent; color: var(--text-secondary); }
 button.btn.ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+button.btn.ghost.danger { color: var(--danger); }
+button.btn.ghost.danger:hover:not(:disabled) { background: var(--bg-hover); color: var(--danger); }
 button.btn:disabled { opacity: 0.4; cursor: default; transform: none; }
 button.link {
   background: none; border: none; color: var(--accent);

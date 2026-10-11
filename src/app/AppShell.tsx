@@ -260,6 +260,7 @@ export default function AppShell() {
             </svg>
           </button>
         </div>
+        <div className="titlebar-divider" aria-hidden="true" />
       </header>
       <NavigationRail route={route} navigate={navigate} />
       <Sidebar

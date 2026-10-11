@@ -186,8 +186,15 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     f.db()
         .write()
         .execute(
-            "UPDATE sessions SET cwd=?1 WHERE id=?2",
+            "UPDATE sessions SET cwd=?1, started_at='2026-09-01T00:00:00Z' WHERE id=?2",
             rusqlite::params!["/workspace/项目 with spaces", id],
+        )
+        .unwrap();
+    f.db()
+        .write()
+        .execute(
+            "UPDATE session_messages SET ts='2026-10-01T00:00:00Z' WHERE session_id=?1 AND sequence=50",
+            [&id],
         )
         .unwrap();
     let root = diagnostics::prepare_runtime_dir(&home).unwrap();
@@ -208,6 +215,9 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
         assert_eq!(input[0]["message_count"], 50);
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert_eq!(input[0]["working_directory"], "/workspace/项目 with spaces");
+        assert_eq!(input[0]["started_at"], "2026-09-01T00:00:00Z");
+        assert_eq!(input[0]["last_message_at"], "2026-10-01T00:00:00Z");
+        assert_eq!(input[0]["summary_through_at"], Value::Null);
         for seq in 1..=50 {
             let reconstructed: String = input
                 .iter()
@@ -217,7 +227,8 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
             assert_eq!(reconstructed, "x".repeat(6000));
         }
         assert_eq!(input.last().unwrap()["marker"], "END_OF_SESSION_INPUT");
-        assert!(prompt.len() < 10_000);
+        assert!(prompt.contains(&format!("session-{id}.jsonl")));
+        assert!(!prompt.contains(&"x".repeat(6000)));
         result(dir, "session", &id, &long);
         empty_preferences(dir);
         Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
@@ -231,6 +242,8 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
         assert_eq!(input[0]["current_summary"], long);
         assert_eq!(input[0]["from_sequence"], 51);
         assert_eq!(input[0]["message_count"], 1);
+        assert_eq!(input[0]["summary_through_at"], "2026-10-01T00:00:00Z");
+        assert_eq!(input[0]["last_message_at"], Value::Null);
         result(dir, "session", &id, "**结果**：验证完成");
         empty_preferences(dir);
         Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
@@ -241,6 +254,7 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert_eq!(input[0]["message_count"], 51);
+        assert_eq!(input[0]["summary_through_at"], Value::Null);
         result(dir, "session", &id, "重新整理");
         empty_preferences(dir);
         Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
@@ -761,6 +775,13 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
     let ws = task(&f, &[&a, &outside]);
     seed(&f, &b, "已有 B 摘要");
     append(&f, &b, "新内容", false);
+    f.db()
+        .write()
+        .execute(
+            "UPDATE session_messages SET ts=CASE WHEN sequence=1 THEN '2026-09-01T00:00:00Z' ELSE '2026-10-01T00:00:00Z' END WHERE session_id IN (?1,?2)",
+            rusqlite::params![a, b],
+        )
+        .unwrap();
     let (p, path) = project_fixture(&f, "scope", &[&a, &b]);
     let (_, other_path) = project_fixture(&f, "outside", &[&outside]);
     f.db()
@@ -782,11 +803,22 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         assert_eq!(input[0]["related_tasks"][0]["task_id"], ws.id);
         assert_eq!(input[0]["related_tasks"][0]["title"], ws.title);
         assert_eq!(input.iter().filter(|r| r["type"] == "session").count(), 2);
+        assert_eq!(
+            input
+                .iter()
+                .filter(|r| r["type"] == "session")
+                .map(|r| r["session_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![a.as_str(), b.as_str()]
+        );
         assert!(!input.iter().any(|r| r["session_id"] == outside));
         assert!(!dir.join(format!("session-{outside}.jsonl")).exists());
         assert!(input
             .iter()
             .any(|r| r["session_id"] == b && r["current_summary"] == "已有 B 摘要"));
+        let b_record = input.iter().find(|r| r["session_id"] == b).unwrap();
+        assert_eq!(b_record["summary_through_at"], "2026-09-01T00:00:00Z");
+        assert_eq!(b_record["last_message_at"], "2026-10-01T00:00:00Z");
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert!(!dir.join(format!("task-{}.jsonl", ws.id)).exists());
         result(dir, "session", &a, "A 已完成");
@@ -820,6 +852,9 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         assert!(input
             .iter()
             .any(|r| r["session_id"] == a && r["need_update"] == false));
+        let a_record = input.iter().find(|r| r["session_id"] == a).unwrap();
+        assert_eq!(a_record["summary_through_at"], "2026-09-01T00:00:00Z");
+        assert_eq!(a_record["last_message_at"], "2026-09-01T00:00:00Z");
         assert!(!dir.join(format!("session-{a}.jsonl")).exists());
         result(dir, "session", &b, "B 已更新");
         result(dir, "project", &p.id, "project searchable conclusion");
@@ -1182,7 +1217,18 @@ fn configured_templates_reach_actual_session_task_project_calls_and_previews() {
         assert!(preview.contains("{{输入文件路径}}"));
         assert!(preview.contains("{{结果文件路径}}"));
         assert!(preview.contains(r#"{"summary":"完整 Markdown 摘要"}"#));
-        assert!(preview.contains(r#""status":"completed""#));
+        let single = r#"{"status":"completed","preferences":{"status":"completed"}}"#;
+        let batch = r#"{"status":"completed","skipped_session_ids":[],"preferences":{"status":"completed"}}"#;
+        match kind {
+            PromptKind::Task | PromptKind::Project => {
+                assert!(preview.contains(batch));
+                assert!(!preview.contains(single));
+            }
+            PromptKind::Session | PromptKind::Preferences => {
+                assert!(preview.contains(single));
+                assert!(!preview.contains(batch));
+            }
+        }
     }
     let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
         assert!(prompt.contains("SESSION CUSTOM"));

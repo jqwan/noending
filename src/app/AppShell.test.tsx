@@ -52,6 +52,7 @@ afterEach(cleanup);
 it("starts on the new-session page", () => {
   render(<AppShell />);
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  expect(document.querySelector(".app-titlebar .titlebar-divider")).toBeTruthy();
 });
 
 it("keeps icon navigation fixed and allows toggling the session sidebar in any section", () => {
@@ -78,7 +79,9 @@ it("keeps icon navigation fixed and allows toggling the session sidebar in any s
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
 
-  // Clicking 会话 in rail navigates to sessions board
+  // Clicking 会话 restores the previous session page (new-session); clicking again navigates to sessions board
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
@@ -127,6 +130,8 @@ it("remembers a background launch result without changing the current section", 
   fireEvent.click(screen.getByRole("button", { name: "代理" }));
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
 });

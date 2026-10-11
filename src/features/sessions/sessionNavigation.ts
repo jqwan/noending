@@ -26,5 +26,5 @@ export function sessionDestination(sessionId: string, terminals: TerminalSummary
   if (remembered?.view === "terminal" && bound.some(t => t.terminal_id === remembered.terminalId)) return { ...remembered, initialTitle: seed?.title ?? remembered.initialTitle, initialAgent: seed?.agent ?? remembered.initialAgent, initialSessionId: sessionId };
   const terminal = preferredTerminal(sessionId, bound.filter(t => t.live));
   return terminal ? { ...terminalDestination(terminal), initialTitle: seed?.title ?? terminal.session_title ?? undefined }
-    : { view: "session", sessionId, entry: "conversation", initialTitle: seed?.title, initialAgent: seed?.agent };
+    : { view: "session", sessionId, initialTitle: seed?.title, initialAgent: seed?.agent };
 }

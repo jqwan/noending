@@ -345,10 +345,10 @@ export default function NewSessionView({
   const selectedWorkstream = workstreams.find((w) => w.id === ownerWorkstreamId);
   const taskLabel =
     ownerWorkstreamId === STANDALONE
-      ? "无所属任务"
-      : (selectedWorkstream?.title ?? "无所属任务");
+      ? "无任务"
+      : (selectedWorkstream?.title ?? "无任务");
 
-  const projectLabel = isUnassignedProject ? "未归属项目" : (selectedProject?.name ?? "未归属项目");
+  const projectLabel = isUnassignedProject ? "无项目" : (selectedProject?.name ?? "无项目");
 
   const currentDir = isUnassignedProject ? defaultWorkspace : launchCwd || "";
   const dirLabel = useMemo(() => {
@@ -404,7 +404,7 @@ export default function NewSessionView({
               aria-label={`所属任务：${taskLabel}`}
               title={taskLabel}
             >
-              <Icon name="tasks" />
+              <Icon name={ownerWorkstreamId === STANDALONE ? "inbox" : "tasks"} />
               <span className="new-session-picker-label truncate">{taskLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
@@ -421,7 +421,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={STANDALONE}>无所属任务</option>
+                <option value={STANDALONE}>无任务</option>
                 {workstreams.map((w) => (
                   <option key={w.id} value={w.id}>{w.title}</option>
                 ))}
@@ -439,8 +439,8 @@ export default function NewSessionView({
                         setTaskMenuOpen(false);
                       }}
                     >
-                      <span className="menu-item-icon"><Icon name="tasks" /></span>
-                      <span className="menu-item-label">无所属任务</span>
+                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-label">无任务</span>
                       {ownerWorkstreamId === STANDALONE && (
                         <span className="menu-item-check"><Icon name="check" /></span>
                       )}
@@ -511,7 +511,7 @@ export default function NewSessionView({
               aria-label={`所属项目：${projectLabel}`}
               title={projectLabel}
             >
-              <Icon name="project" />
+              <Icon name={isUnassignedProject ? "inbox" : "project"} />
               <span className="new-session-picker-label truncate">{projectLabel}</span>
               <Icon name="chevronDown" className="new-session-chevron" />
               <select
@@ -528,7 +528,7 @@ export default function NewSessionView({
                 disabled={busy}
                 tabIndex={-1}
               >
-                <option value={UNASSIGNED_PROJECT}>未归属项目</option>
+                <option value={UNASSIGNED_PROJECT}>无项目</option>
                 {otherProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -545,10 +545,10 @@ export default function NewSessionView({
                         handleProjectChange(UNASSIGNED_PROJECT);
                         setProjectMenuOpen(false);
                       }}
-                      title="未归属项目"
+                      title="无项目"
                     >
-                      <span className="menu-item-icon"><Icon name="project" /></span>
-                      <span className="menu-item-label">未归属项目</span>
+                      <span className="menu-item-icon"><Icon name="inbox" /></span>
+                      <span className="menu-item-label">无项目</span>
                       {isUnassignedProject && (
                         <span className="menu-item-check"><Icon name="check" /></span>
                       )}

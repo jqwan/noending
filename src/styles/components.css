@@ -2217,7 +2217,8 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 
 /* Unified session titlebar: icon navigation, instance menu and contextual actions. */
 .session-navigation { position: relative; display: flex; flex: none; align-items: center; }
-.session-action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
+.session-action-divider,
+.action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
 button.btn.ghost.terminal-running,
 .btn.terminal-running,
 .page-head .session-navigation .terminal-running,

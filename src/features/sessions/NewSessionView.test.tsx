@@ -356,7 +356,7 @@ describe("NewSessionView task and project selection", () => {
     });
 
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toContain("未归属项目");
+    expect(options).toContain("无项目");
     expect(options).toContain("Project 1");
     expect(options).toContain("+ 新项目");
 
@@ -529,6 +529,58 @@ describe("NewSessionView task and project selection", () => {
     expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", null, undefined, "请检查这段代码\n并修复问题"),
   );
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-new-1" });
+});
+
+it("renders inbox icon for unassigned task and project pickers and their menu items", async () => {
+  vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
+  vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
+    id: "ws-1", title: "测试任务", description: "", visibility: "normal",
+    projects: [], created_at: "", updated_at: "", summary: null,
+    last_activity_at: null, session_count: 0, latest_session: null, path_count: 0,
+  }]);
+  render(<NewSessionView navigate={vi.fn()} />);
+
+  const taskPicker = await screen.findByRole("button", { name: /所属任务：无任务/ });
+  const taskPickerIconPath = taskPicker.querySelector("svg path")?.getAttribute("d");
+  expect(taskPickerIconPath).toBe("M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4");
+
+  const projectPicker = await screen.findByRole("button", { name: /所属项目：无项目/ });
+  const projectPickerIconPath = projectPicker.querySelector("svg path")?.getAttribute("d");
+  expect(projectPickerIconPath).toBe("M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4");
+
+  // Open task menu
+  fireEvent.click(taskPicker);
+  const unassignedTaskOption = screen.getByRole("button", { name: "无任务" });
+  expect(unassignedTaskOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
+    "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+  );
+  const realTaskOption = screen.getByRole("button", { name: "测试任务" });
+  expect(realTaskOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
+    "M5 2.5h8M3.5 5h11M2.5 7.5h13v8h-13ZM5 10.5h5M5 13h8",
+  );
+
+  // Select real task
+  fireEvent.click(realTaskOption);
+  expect(taskPicker.querySelector("svg path")?.getAttribute("d")).toBe(
+    "M5 2.5h8M3.5 5h11M2.5 7.5h13v8h-13ZM5 10.5h5M5 13h8",
+  );
+
+  // Open project menu
+  fireEvent.click(projectPicker);
+  const unassignedProjectOption = screen.getByRole("button", { name: "无项目" });
+  expect(unassignedProjectOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
+    "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
+  );
+  const realProjectOption = screen.getByRole("button", { name: "Project 1" });
+  expect(realProjectOption.querySelector(".menu-item-icon svg path")?.getAttribute("d")).toBe(
+    "M9 2.5l6 3.5-6 3.5-6-3.5ZM3 6v6l6 3.5 6-3.5V6M9 9.5v6",
+  );
+
+  // Select real project
+  fireEvent.click(realProjectOption);
+  expect(projectPicker.querySelector("svg path")?.getAttribute("d")).toBe(
+    "M9 2.5l6 3.5-6 3.5-6-3.5ZM3 6v6l6 3.5 6-3.5V6M9 9.5v6",
+  );
 });
 
 });

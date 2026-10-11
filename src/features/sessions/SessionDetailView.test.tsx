@@ -607,3 +607,13 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
   expect(screen.getByRole("heading").textContent).toBe("稳定标题");
 });
+
+it("renders divider between subpage tabs and action buttons in header", async () => {
+  await renderDetail(detail(session("me")));
+  const divider = document.querySelector(".page-head .actions .session-action-divider");
+  expect(divider).toBeTruthy();
+  const tabs = screen.getByRole("group", { name: "会话子页" });
+  const desktopBtn = screen.getByRole("button", { name: "在桌面应用中继续" });
+  expect(tabs.compareDocumentPosition(divider!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(divider!.compareDocumentPosition(desktopBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

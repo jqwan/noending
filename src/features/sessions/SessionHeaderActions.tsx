@@ -47,8 +47,8 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     finally { setArchiveBusy(false); }
   };
   return <>
-    <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} />
     <span className="session-action-divider" aria-hidden="true" />
+    <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} />
     <button className="btn ghost icon-button" aria-label="增量同步" title="同步最新对话" disabled={syncing}
       onClick={() => void handleSync()}><Icon name="refresh" /></button>
     <button className="btn ghost icon-button" aria-label="归档" title={archived ? "该会话已归档" : "归档"}
