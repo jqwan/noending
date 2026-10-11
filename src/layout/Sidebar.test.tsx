@@ -1049,7 +1049,11 @@ describe("Sidebar 最近活动", () => {
   });
 });
 
-it("scopes the assistant sidebar to its project and its unbound terminals", async () => {
+it("shows assistant and ordinary project sessions together with their terminals", async () => {
+  vi.mocked(api.listProjectCards).mockResolvedValue([
+    projectCard({ id: "assistant-project", name: "我的助手", purpose: "assistant", search_paths: ["/home/app/assistant"] }),
+    projectCard(),
+  ]);
   vi.mocked(api.listSessions).mockResolvedValue([
     session({ id: "assistant-session", title: "助手原生会话", project_id: "assistant-project" }),
     session({ id: "regular-session", title: "普通会话" }),
@@ -1058,20 +1062,12 @@ it("scopes the assistant sidebar to its project and its unbound terminals", asyn
     terminal({ terminal_id: "assistant-bound", session_id: "assistant-session", session_title: "助手原生会话" }),
     terminal({ terminal_id: "assistant-pending", cwd: "/home/app/assistant", session_title: "待绑定助手" }),
     terminal({ terminal_id: "regular-bound", session_id: "regular-session", session_title: "普通会话" }),
-    terminal({ terminal_id: "lookalike", cwd: "/home/app/assistant-other", session_title: "其他终端" }),
-    terminal({ terminal_id: "child", cwd: "/home/app/assistant/tmp", session_title: "子目录终端" }),
   ]);
-  const workspace: import("../types").AssistantWorkspace = { project: { id: "assistant-project", name: "助手", git_id: null, name_customized: false, visibility: "normal", created_at: "", updated_at: "" }, directory: "/home/app/assistant" };
-  const navigate = vi.fn();
-  const { rerender } = render(<Sidebar route={{ view: "assistant" }} navigate={navigate} assistantMode assistantWorkspace={workspace} />);
+  const navigate = renderSidebar({ view: "sessions" });
   await screen.findByText("助手原生会话");
+  expect(screen.getByText("我的助手")).toBeTruthy();
   expect(screen.getByText("待绑定助手")).toBeTruthy();
-  expect(screen.queryByText("普通会话")).toBeNull();
-  expect(screen.queryByText("其他终端")).toBeNull();
-  expect(screen.queryByText("子目录终端")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "新建" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "assistant" });
-  rerender(<Sidebar route={{ view: "sessions" }} navigate={navigate} />);
-  await screen.findByText("普通会话");
-  expect(screen.getByText("助手原生会话")).toBeTruthy();
+  expect(screen.getByText("普通会话")).toBeTruthy();
+  fireEvent.click(screen.getByText("助手原生会话"));
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "assistant-bound", initialSessionId: "assistant-session" }));
 });

@@ -129,7 +129,7 @@ describe("ProjectDetail", () => {
     expect(newSessionBtn).toBeTruthy();
 
     fireEvent.click(newSessionBtn);
-    expect(navigate).toHaveBeenCalledWith({ view: "assistant" });
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
     expect(screen.getByText(kind === "git" ? "Git 项目" : "单目录项目")).toBeTruthy();
     expect(screen.getByText("助手")).toBeTruthy();
   });

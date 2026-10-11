@@ -7,7 +7,7 @@ afterEach(cleanup);
 
 it.each([
   ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-  ["代理", "agents"], ["助手", "assistant"], ["设置", "settings"],
+  ["代理", "agents"], ["设置", "settings"],
 ] as const)("opens the existing %s page", (label, view) => {
   const navigate = vi.fn();
   render(<NavigationRail route={{ view: "new-session" }} navigate={navigate} />);
@@ -89,19 +89,13 @@ it("sanitizes modal actions when remembering last route", () => {
   expect(navigate).toHaveBeenCalledWith({ view: "workstreams" });
 });
 
-it("remembers assistant and ordinary session pages independently", () => {
+it("restores an assistant terminal through the unified session section", () => {
   const navigate = vi.fn();
-  const ordinary: Route = { view: "session", sessionId: "regular" };
-  const assistant: Route = { view: "terminal", terminalId: "assistant-terminal", assistant: true };
-  const { rerender } = render(<NavigationRail route={ordinary} navigate={navigate} />);
-  rerender(<NavigationRail route={assistant} navigate={navigate} />);
-  expect(screen.getByRole("button", { name: "助手" }).getAttribute("aria-current")).toBe("page");
-  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(navigate).toHaveBeenLastCalledWith(ordinary);
-  fireEvent.click(screen.getByRole("button", { name: "助手" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "sessions", assistant: true });
+  const assistant: Route = { view: "terminal", terminalId: "assistant-terminal" };
+  const { rerender } = render(<NavigationRail route={assistant} navigate={navigate} />);
+  expect(screen.queryByRole("button", { name: "助手" })).toBeNull();
+  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
   rerender(<NavigationRail route={{ view: "projects" }} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: "助手" }));
+  fireEvent.click(screen.getByRole("button", { name: "会话" }));
   expect(navigate).toHaveBeenLastCalledWith(assistant);
 });

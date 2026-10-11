@@ -523,11 +523,6 @@ export interface TerminalSnapshot extends TerminalSummary {
   rows: number;
 }
 
-export interface AssistantWorkspace {
-  project: Project;
-  directory: string;
-}
-
 export const AGENT_LABELS: Record<Agent, string> = {
   codex: "Codex",
   claude_code: "Claude Code",

@@ -228,7 +228,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               className="btn ghost icon-button"
               title="新建会话"
               aria-label="新建会话"
-              onClick={() => navigate(detail.purpose === "assistant" ? { view: "assistant" } : { view: "new-session", projectId: project.id })}
+              onClick={() => navigate({ view: "new-session", projectId: project.id })}
             >
               <Icon name="plus" />
             </button>

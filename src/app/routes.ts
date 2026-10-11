@@ -22,7 +22,7 @@ export type WorkstreamScope = "unarchived" | "archived";
 /** 会话页的历史消息入口。终端实例由 terminal_id 路由标识，与详情、历史消息共用顶部导航。 */
 export type SessionEntry = "conversation";
 
-export type Route = (
+export type Route =
   | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; initialTitle?: string }
@@ -42,11 +42,10 @@ export type Route = (
    *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
   | { view: "agents"; agent?: Agent }
-  | { view: "assistant" }
   | { view: "projects"; scope?: "unarchived" | "archived" }
   | { view: "project"; projectId: string; initialTitle?: string }
   | { view: "settings"; section?: SettingsSection | LegacySettingsSection }
-  | { view: "search"; query: string }) & { assistant?: boolean };
+  | { view: "search"; query: string };
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";

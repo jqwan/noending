@@ -256,8 +256,6 @@ export const api = {
     invoke<AgentRuntimeSettings>("set_agent_runtime_overrides", { agent, overrides }),
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
-
-  assistantWorkspace: () => invoke<import("./types").AssistantWorkspace>("assistant_workspace"),
 };
 
 export type { Agent };

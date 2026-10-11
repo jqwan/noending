@@ -23,12 +23,12 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
-vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn(), assistantWorkspace: vi.fn().mockResolvedValue({ project: { id: "assistant-project" }, directory: "/home/assistant", agents: ["codex"] }) } }));
+vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn() } }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
   const [draft, setDraft] = useState("");
-  if (["new-session", "sessions", "session", "terminal", "assistant"].includes(route.view)) sessionNavigation.navigate = navigate;
+  if (["new-session", "sessions", "session", "terminal"].includes(route.view)) sessionNavigation.navigate = navigate;
   return <>
     <output aria-label="当前页面">{route.view}</output>
     <output aria-label="页面参数">{JSON.stringify(route)}</output>
@@ -215,25 +215,13 @@ it("resolves an ID-only destination before changing pages, and cancels a late re
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });
 
-it("keeps assistant header navigation in the assistant section and normal sessions separate", async () => {
+it("keeps assistant project launches and terminals in the session section", async () => {
   render(<AppShell />);
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "助手" })); });
+  await act(async () => { sessionNavigation.navigate!({ view: "new-session", projectId: "assistant-project" }); });
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "new-session", projectId: "assistant-project" });
   await act(async () => { sessionNavigation.navigate!({ view: "terminal", terminalId: "assistant-terminal" }); });
-  expect(screen.getByRole("status", { name: "页面参数" }).textContent).toContain('"assistant":true');
-  expect(screen.getByRole("button", { name: "助手" }).getAttribute("aria-current")).toBe("page");
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
-  fireEvent.click(screen.getByRole("button", { name: "助手" }));
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("terminal");
-});
-
-it("an assistant launch finishing after opening ordinary sessions does not pull the user back", async () => {
-  render(<AppShell />);
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "助手" })); });
-  const finishAssistantLaunch = sessionNavigation.navigate!;
+  fireEvent.click(screen.getByRole("button", { name: "项目" }));
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  await act(async () => { finishAssistantLaunch({ view: "terminal", terminalId: "late-assistant", assistant: true }); });
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "assistant-terminal" });
 });

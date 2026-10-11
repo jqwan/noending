@@ -5,27 +5,21 @@ import SessionsView from "../features/sessions/SessionsView";
 import SessionDetailView, { sessionDetailCache } from "../features/sessions/SessionDetailView";
 import SessionConversationView from "../features/sessions/SessionConversationView";
 import SessionTerminalView from "../features/sessions/SessionTerminalView";
-import AssistantView from "../features/assistant/AssistantView";
 import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail, { projectDetailCache } from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
 import AgentsView from "../features/agents/AgentsView";
 import SearchView from "../features/search/SearchView";
-import type { AssistantWorkspace } from "../types";
 import type { Route } from "./routes";
 
-export default function Router({ route, navigate, goBack, actionSeq, assistantWorkspace = null, assistantError = "", retryAssistant = () => {} }: {
+export default function Router({ route, navigate, goBack, actionSeq }: {
   route: Route;
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
   actionSeq: number;
-  assistantWorkspace?: AssistantWorkspace | null;
-  assistantError?: string;
-  retryAssistant?: () => void;
 }) {
   switch (route.view) {
     case "new-session":
-      if (route.assistant) return <AssistantView workspace={assistantWorkspace} error={assistantError} retry={retryAssistant} navigate={navigate} />;
       return (
         <NewSessionView
           key={`${route.workstreamId ?? ""}:${route.agent ?? ""}:${route.projectId ?? ""}`}
@@ -57,9 +51,6 @@ export default function Router({ route, navigate, goBack, actionSeq, assistantWo
     case "sessions":
       return (
         <SessionsView
-          key={route.assistant ? "assistant" : "sessions"}
-          assistantMode={route.assistant}
-          assistantProjectId={assistantWorkspace?.project.id}
           navigate={navigate}
           scope={route.scope}
         />
@@ -95,8 +86,6 @@ export default function Router({ route, navigate, goBack, actionSeq, assistantWo
           navigate={navigate}
         />
       );
-    case "assistant":
-      return <AssistantView navigate={navigate} workspace={assistantWorkspace} error={assistantError} retry={retryAssistant} />;
     case "projects":
       return <ProjectsView navigate={navigate} scope={route.scope} />;
     case "project":

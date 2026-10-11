@@ -1,10 +1,9 @@
-import { useAssistantWorkspace } from "../features/assistant/useAssistantWorkspace";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
-import NavigationRail, { getRouteSection, isSessionRoute } from "../layout/NavigationRail";
+import NavigationRail, { isSessionRoute } from "../layout/NavigationRail";
 import Router from "./Router";
 import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
@@ -25,7 +24,7 @@ function withoutAction(route: Route): Route {
 
 export function normalizeRoute(route: Route): Route {
   if (route.view === "sessions" && route.action === "new") {
-    return { view: "new-session", ...(route.assistant ? { assistant: true } : {}) };
+    return { view: "new-session" };
   }
   if (route.view === "settings") {
     if (route.section === "agents" || route.section === "sources") {
@@ -36,7 +35,6 @@ export function normalizeRoute(route: Route): Route {
 }
 
 function sameRoute(a: Route, b: Route): boolean {
-  if (Boolean(a.assistant) !== Boolean(b.assistant)) return false;
   const left = withoutAction(a);
   const right = withoutAction(b);
   if (left.view === "sessions" && right.view === "sessions") {
@@ -82,8 +80,6 @@ export default function AppShell() {
   const navigationRequest = useRef(0);
   useEffect(() => () => { ++navigationRequest.current; }, []);
   const route = navigation.entries[navigation.index];
-  const assistantMode = route.view === "assistant" || Boolean(route.assistant);
-  const assistant = useAssistantWorkspace(assistantMode);
   const sessionSection = isSessionRoute(route);
   const lastSessionRoute = useRef<Route>(route);
   const currentRoute = useRef(route);
@@ -146,10 +142,9 @@ export default function AppShell() {
   // An async launch can finish after switching sections. Remember its result
   // for the session section without pulling the user away from another page.
   const navigateSession = useCallback((target: Route) => {
-    if (target.assistant === undefined && isSessionRoute(target) && (sessionRoute.view === "assistant" || sessionRoute.assistant)) target = { ...target, assistant: true };
-    if (isSessionRoute(currentRoute.current) && getRouteSection(currentRoute.current) === getRouteSection(sessionRoute)) navigate(target);
+    if (isSessionRoute(currentRoute.current)) navigate(target);
     else if (isSessionRoute(target)) lastSessionRoute.current = withoutAction(normalizeRoute(target));
-  }, [navigate, sessionRoute]);
+  }, [navigate]);
 
   const goBack = useCallback((fallback?: Route) => {
     ++navigationRequest.current;
@@ -271,11 +266,8 @@ export default function AppShell() {
       </header>
       <NavigationRail route={route} navigate={navigate} />
       <Sidebar
-        key={assistantMode ? "assistant" : "sessions"}
-        assistantWorkspace={assistantMode ? assistant.workspace : undefined}
-        assistantMode={assistantMode}
         route={route}
-        navigate={target => navigate(target.assistant === undefined && assistantMode && isSessionRoute(target) ? { ...target, assistant: true } : target)}
+        navigate={navigate}
         collapsed={sidebarCollapsed}
       />
       {!sidebarCollapsed && <div
@@ -304,7 +296,7 @@ export default function AppShell() {
             用户能直接切走；resetKey 让路由一换就复位。 */}
         <div className="session-content" hidden={!sessionSection}>
           <ErrorBoundary resetKey={JSON.stringify(withoutAction(sessionRoute))}>
-            <Router route={sessionRoute} navigate={navigateSession} goBack={goBack} actionSeq={actionSeq} assistantWorkspace={assistant.workspace} assistantError={assistant.error} retryAssistant={assistant.reload} />
+            <Router route={sessionRoute} navigate={navigateSession} goBack={goBack} actionSeq={actionSeq} />
           </ErrorBoundary>
         </div>
         {!sessionSection && <ErrorBoundary resetKey={JSON.stringify(withoutAction(route))}>

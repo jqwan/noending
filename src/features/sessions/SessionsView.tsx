@@ -33,15 +33,13 @@ export function clearSessionsCache() {
   cachedWorkstreamTitleById = new Map();
 }
 
-export default function SessionsView({ navigate, scope, assistantMode = false, assistantProjectId }: {
+export default function SessionsView({ navigate, scope }: {
   navigate: (r: Route) => void;
   scope?: SessionScope;
-  assistantMode?: boolean;
-  assistantProjectId?: string;
 }) {
-  const statePrefix = assistantMode ? "assistant.sessions" : "sessions";
+  const statePrefix = "sessions";
   const [archivedMode, setArchivedMode] = useState(scope === "archived");
-  const [allSessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
+  const [sessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
   const [projects, setProjects] = useState<Project[]>(cachedProjects);
   /** Workstream id → 标题：跟踪任务 ID 的标题在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
@@ -116,8 +114,6 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
     setSessions(isArchived ? cachedArchivedSessions : cachedNormalSessions);
   }, [scope]);
 
-  const sessions = useMemo(() => allSessions === null ? null : assistantMode ? allSessions.filter(s => assistantProjectId && s.project_id === assistantProjectId) : allSessions, [allSessions, assistantMode, assistantProjectId]);
-
   const projectNameById = useMemo(
     () => new Map(projects.map((p) => [p.id, p.name])),
     [projects],
@@ -135,7 +131,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
   }, [sessions, workstreamTitleById]);
 
   const filtersActive =
-    query.trim() !== "" || agent !== "all" || (!assistantMode && projectId !== "all")
+    query.trim() !== "" || agent !== "all" || projectId !== "all"
     || wsFilter !== "all";
 
   const shown = useMemo(() => {
@@ -147,7 +143,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
       // 徽章说"历史标签，已不决定任何事"的行不能一边显示成无归属、一边又被筛进来
       // （M34 / M29：一个视图不能两个真相）。
       .filter((s) =>
-        assistantMode || projectId === "all" ? true : projectId === "none"
+        projectId === "all" ? true : projectId === "none"
           ? !s.workspace_path_id || !s.project_id
           : !!s.workspace_path_id && s.project_id === projectId
       )
@@ -180,7 +176,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById, assistantMode]);
+  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById]);
 
   /** 行内「继续」：直接在会话格式对应的桌面应用里打开（无预览）；格式没有
    *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
@@ -264,8 +260,8 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
    *  来源读不到时退回中性说法，不宣称没被证实的事。 */
   const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
   const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
-  const emptyTitle = assistantMode ? "还没有助手会话" : noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
-  const emptyHint = assistantMode ? "新建助手会话，查询或管理工作区资料。" : noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
+  const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
+  const emptyHint = noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
     ? `来源目录不存在：${missingSourcePath}` : "新建会话，或检查会话来源。";
 
   const loadFailedState = (
@@ -280,7 +276,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
   return (
     <div className="main board-page" ref={scrollRef}>
       <PageHeader
-        title={assistantMode ? "助手会话" : "会话"}
+        title="会话"
         actions={
           <>
             {/* 两个归档范围共用同一套卡片和列表。 */}
@@ -320,7 +316,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
                 className="btn ghost icon-button"
                 aria-label="新建会话"
                 title="新建会话"
-                onClick={() => navigate(assistantMode ? { view: "assistant" } : { view: "new-session" })}
+                onClick={() => navigate({ view: "new-session" })}
               >
                 <Icon name="plus" />
               </button>
@@ -356,7 +352,7 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
                 <option value="unassigned">未跟踪任务</option>
               </select>
             </label>
-            {!assistantMode && (<label className="ws-control">
+            <label className="ws-control">
               <span className="muted small">项目</span>
               <select
                 value={projectId}
@@ -367,7 +363,6 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
                 {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </label>
-            )}
             {filtersActive && (
               <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
             )}
@@ -430,10 +425,10 @@ export default function SessionsView({ navigate, scope, assistantMode = false, a
               hint={archivedMode ? "归档的会话会显示在这里，可以取消归档或永久删除。" : emptyHint}
               actions={!archivedMode ? (
                 <>
-                  {!assistantMode && <button className="btn small" onClick={() => navigate({ view: "agents" })}>
+                  <button className="btn small" onClick={() => navigate({ view: "agents" })}>
                     配置会话来源
-                  </button>}
-                  <button className="btn small" onClick={() => navigate(assistantMode ? { view: "assistant" } : { view: "new-session" })}>新建会话</button>
+                  </button>
+                  <button className="btn small" onClick={() => navigate({ view: "new-session" })}>新建会话</button>
                 </>
               ) : undefined}
             />
