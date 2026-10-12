@@ -202,7 +202,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("NewSessionView explicit agent resolution", () => {
-  it("uses explicitly specified agent over default agent and does not mutate global default setting", async () => {
+  it("resolves explicitly specified agent over default agent and falls back without mutating global setting", async () => {
     vi.mocked(api.prepareNewSession).mockResolvedValueOnce({
       id: "prep-claude",
       mode: "new",
@@ -213,7 +213,6 @@ describe("NewSessionView explicit agent resolution", () => {
         source: "default_workspace",
         cwd: "/tmp/workspace",
         fallback: false,
-
         note: "使用默认工作路径",
       },
       runtime: { model: null, provider: null, effort: null },
@@ -221,26 +220,20 @@ describe("NewSessionView explicit agent resolution", () => {
       prepared_at: "2026-10-05T15:00:00Z",
     });
 
-    render(<NewSessionView navigate={vi.fn()} agent="claude_code" />);
-
+    const { unmount } = render(<NewSessionView navigate={vi.fn()} agent="claude_code" />);
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("claude_code", [], "/tmp/workspace", NATIVE_RUNTIME);
     });
-
     expect(api.setDefaultAgent).not.toHaveBeenCalled();
-    const select = screen.getByLabelText("Agent") as HTMLSelectElement;
-    expect(select.value).toBe("claude_code");
-  });
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
+    unmount();
 
-  it("falls back to default agent when no agent is specified", async () => {
+    // Fallback when no agent specified
     render(<NewSessionView navigate={vi.fn()} />);
-
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
     });
-
-    const select = screen.getByLabelText("Agent") as HTMLSelectElement;
-    expect(select.value).toBe("codex");
+    expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("codex");
   });
 
   it("keeps a manual Agent selection when the default Agent arrives late", async () => {
@@ -349,34 +342,39 @@ describe("NewSessionView task and project selection", () => {
     expect(screen.queryByRole("checkbox", {name:"独立任务"})).toBeNull();
   });
 
-  it.each(["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"])("includes chat-directory project %s from selection", async (name) => {
+  it("includes chat-directory projects in selection options", async () => {
+    const chatNames = ["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"];
+    const extraProjects = chatNames.map((name, idx) => ({
+      id: `p-chat-${idx}`,
+      name,
+      name_customized: false, visibility: "normal" as const,
+      kind: "directory_group" as const,
+      path_count: 1,
+      missing_path_count: 0,
+      workstream_count: 0,
+      session_count: 0,
+      representative_paths: [`/Documents/Chat-${idx}`],
+      search_paths: [`/Documents/Chat-${idx}`],
+      last_activity_at: null,
+      updated_at: "2026-10-01T00:00:00Z",
+    }));
+
     vi.mocked(api.listProjectCards).mockResolvedValue([
       ...mockProjects,
-      {
-        id: "p-codex",
-        name,
-        name_customized: false, visibility: "normal" as const,
-        kind: "directory_group" as const,
-        path_count: 1,
-        missing_path_count: 0,
-        workstream_count: 0,
-        session_count: 0,
-        representative_paths: ["/Documents/Codex"],
-        search_paths: ["/Documents/Codex"],
-        last_activity_at: null,
-        updated_at: "2026-10-01T00:00:00Z",
-      },
+      ...extraProjects,
     ]);
     render(<NewSessionView navigate={vi.fn()} />);
 
     const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
     const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
     expect(options).toContain("Project 1");
-    expect(options).toContain(name);
+    for (const name of chatNames) {
+      expect(options).toContain(name);
+    }
   });
 
-  it.each(["directory_group", "git"] as const)("defaults by workspace identity even for a renamed %s project", async (kind) => {
-    const renamed = { ...chatProject, name: "我的聊天空间", name_customized: true, kind,
+  it("defaults by workspace identity even for a renamed project", async () => {
+    const renamed = { ...chatProject, name: "我的聊天空间", name_customized: true, kind: "directory_group" as const,
       search_paths: ["/tmp/workspace/another", "/tmp/workspace"] };
     vi.mocked(api.listProjectCards).mockResolvedValue([mockProjects[0], renamed]);
     render(<NewSessionView navigate={vi.fn()} />);
@@ -399,20 +397,7 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME));
   });
 
-  it("when choosing a project, sets working directory to project's first workspace path and calls prepareNewSession with it", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    const projectSelect = await screen.findByLabelText("所属项目");
-    fireEvent.change(projectSelect, { target: { value: "p-1" } });
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/repo/project-1", NATIVE_RUNTIME);
-    });
-    expect(api.probeWorkspacePath).not.toHaveBeenCalledWith("/repo/project-1");
-  });
-
-  it("allows switching directory under a project with multiple paths", async () => {
+  it("when choosing a project, sets working directory to first path and allows switching", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       chatProject,
       {
@@ -433,13 +418,15 @@ describe("NewSessionView task and project selection", () => {
     render(<NewSessionView navigate={vi.fn()} />);
 
     const projectSelect = await screen.findByLabelText("所属项目");
-    await screen.findByRole("option", {name:"Multi Project"});
+    await screen.findByRole("option", { name: "Multi Project" });
     fireEvent.change(projectSelect, { target: { value: "p-multi" } });
 
     const dirSelect = (await screen.findByLabelText("项目目录")) as HTMLSelectElement;
     await waitFor(() => {
       expect(dirSelect.value).toBe("/repo/main");
+      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/repo/main", NATIVE_RUNTIME);
     });
+    expect(api.probeWorkspacePath).not.toHaveBeenCalledWith("/repo/main");
 
     fireEvent.change(dirSelect, { target: { value: "/repo/worktree-1" } });
 
@@ -524,7 +511,7 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", "继续这个任务", NATIVE_RUNTIME));
   });
 
-  it("allows a Git project named NoEnding Chat to be selected normally", async () => {
+  it("when created with projectId, defaults to that project even if named NoEnding Chat", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       { ...mockProjects[0], name: "NoEnding Chat", search_paths: ["/tmp/workspace"] },
     ]);
@@ -532,18 +519,6 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(() => {
       expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1");
       expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
-    });
-  });
-
-  it("when created with projectId, defaults to that project", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue(mockProjects);
-
-    render(<NewSessionView projectId="p-1" navigate={vi.fn()} />);
-
-    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
-
-    await waitFor(() => {
-      expect(projectSelect.value).toBe("p-1");
     });
   });
 
@@ -707,12 +682,17 @@ describe("NewSessionView runtime selection", () => {
     expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
   });
 
-  it.each(["detected", "launch_enabled"] as const)("excludes agents when %s is false", async (field) => {
-    vi.mocked(api.getAgentStatus).mockResolvedValue({ ...mockAgentStatus, codex: { ...mockAgentStatus.codex, [field]: false } });
+  it("excludes agents when detected or launch_enabled is false", async () => {
+    vi.mocked(api.getAgentStatus).mockResolvedValue({
+      ...mockAgentStatus,
+      codex: { ...mockAgentStatus.codex, detected: false },
+      pi: { ...mockAgentStatus.pi, launch_enabled: false },
+    });
     render(<NewSessionView navigate={vi.fn()} />);
     await waitFor(() => expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code"));
     expect(screen.queryByRole("option", { name: "Codex" })).toBeNull();
-    expect(screen.getByRole("option", { name: "Pi" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Pi" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Claude Code" })).toBeTruthy();
   });
 
   it("clears one-time parameters on an agent switch and prevents launching when all are disabled", async () => {

@@ -41,33 +41,20 @@ it("limits initial rows and reveals more without losing sessions", async () => {
   fireEvent.click(screen.getByText("显示更多（剩余 1）"));
   expect(screen.getByText("会话100")).toBeTruthy();
 });
-it("shows the single owner workstream and omits unowned workstream row", async () => {
+it("shows the single owner workstream in full without 16-char JS truncation and omits unowned row", async () => {
+  const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";
   await renderCards(<SessionCards
     sessions={[
       { ...session, id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] },
       { ...session, id: "free", title: "没归属", tracked_workstream_ids: [] },
     ]}
-    workstreamTitleById={new Map([["w1", "会话重构"]])}
+    workstreamTitleById={new Map([["w1", longTitle]])}
     projectNameById={new Map()}
     onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
 
-  // 有归属会话显示任务标题，没归属会话不显示未归属任务
-  screen.getByText("会话重构");
+  screen.getByText(longTitle);
   expect(screen.queryByText("未归属任务")).toBeNull();
   expect(screen.queryByText(/\+\d/)).toBeNull();
-});
-
-it("displays full workstream title without truncating to 16 characters in JS", async () => {
-  const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";
-  await renderCards(<SessionCards
-    sessions={[
-      { ...session, id: "s-long-ws", title: "长任务会话", tracked_workstream_ids: ["w-long"] },
-    ]}
-    workstreamTitleById={new Map([["w-long", longTitle]])}
-    projectNameById={new Map()}
-    onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
-
-  expect(screen.getByText(longTitle)).toBeTruthy();
 });
 
 

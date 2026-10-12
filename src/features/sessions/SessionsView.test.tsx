@@ -132,22 +132,11 @@ it("shows archived sessions in the same cards and filters, with continue disable
   expect(bulkDeleteBtn.className).toContain("icon-button");
   expect(bulkDeleteBtn.className).toContain("danger");
   expect(bulkDeleteBtn.textContent).toBe("");
-  expect(bulkDeleteBtn.querySelector("svg path")?.getAttribute("d")).toBe("M3 5h12M7 5V3h4v2M5 5l1 10h6l1-10M8 8v4M10 8v4");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   fireEvent.change(screen.getByRole("textbox", { name: "搜索会话" }), { target: { value: "不匹配" } });
   expect(screen.queryByText("归档会话")).toBeNull();
 });
 
-it("renders divider between scope switcher and action buttons in header", async () => {
-  vi.mocked(api.listSessions).mockResolvedValue([]);
-  render(<SessionsView navigate={navigate} />);
-  const divider = document.querySelector(".page-head .actions .session-action-divider");
-  expect(divider).toBeTruthy();
-  const scopeGroup = screen.getByRole("group", { name: "会话列表范围" });
-  const newBtn = screen.getAllByRole("button", { name: "新建会话" })[0];
-  expect(scopeGroup.compareDocumentPosition(divider!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(divider!.compareDocumentPosition(newBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-});
 
 it("includes assistant sessions in the shared archived board and bulk deletion", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([

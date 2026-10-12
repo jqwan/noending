@@ -69,29 +69,7 @@ describe("Projects Board", () => {
     expect(api.getProjectDetail).not.toHaveBeenCalled();
   });
 
-  it("projects_search_matches_name", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue([
-      card({ id: "p-1", name: "NoEnding" }),
-      card({
-        id: "p-2",
-        name: "My App",
-        kind: "single_directory",
-        representative_paths: ["/Users/me/dev/my-app"],
-        search_paths: ["/Users/me/dev/my-app"],
-      }),
-    ]);
-    render(<ProjectsView navigate={navigate} />);
-    await screen.findByText("My App");
-
-    fireEvent.change(screen.getByPlaceholderText(/搜索项目/), {
-      target: { value: "noending" },
-    });
-
-    expect(screen.getByText("NoEnding")).toBeTruthy();
-    expect(screen.queryByText("My App")).toBeNull();
-  });
-
-  it("projects_search_matches_workspace_path", async () => {
+  it("projects_search_matches_name_and_workspace_path", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       card({
         id: "p-1",
@@ -108,11 +86,15 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("My App");
 
-    // 第三个 worktree 不在展示用的 representative_paths 里，但路径搜索覆盖全部 search_paths。
-    fireEvent.change(screen.getByPlaceholderText(/搜索项目/), {
-      target: { value: "worktrees/noending-ui" },
-    });
+    const searchInput = screen.getByPlaceholderText(/搜索项目/);
 
+    // Matches by name
+    fireEvent.change(searchInput, { target: { value: "noending" } });
+    expect(screen.getByText("NoEnding")).toBeTruthy();
+    expect(screen.queryByText("My App")).toBeNull();
+
+    // Matches by hidden search path
+    fireEvent.change(searchInput, { target: { value: "worktrees/noending-ui" } });
     expect(screen.getByText("NoEnding")).toBeTruthy();
     expect(screen.queryByText("My App")).toBeNull();
   });
@@ -226,28 +208,20 @@ describe("Projects Board", () => {
     });
   });
 
-  it("navigates to new-session with projectId when clicking plus button on card", async () => {
+  it("navigates to new-session with projectId in card and list view", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([card({ id: "p-123" })]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("NoEnding");
 
-    const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
-    fireEvent.click(newSessionBtn);
-
+    // Card view click
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p-123" });
     expect(navigate).not.toHaveBeenCalledWith({ view: "project", projectId: "p-123" });
-  });
 
-  it("navigates to new-session with projectId when clicking plus button in list view", async () => {
-    vi.mocked(api.listProjectCards).mockResolvedValue([card({ id: "p-456" })]);
-    render(<ProjectsView navigate={navigate} />);
-    await screen.findByText("NoEnding");
-
+    // Switch to list view
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-    const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
-    fireEvent.click(newSessionBtn);
-
-    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p-456" });
+    fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p-123" });
   });
 
   it("does not render new-session actions for any chat-directory project in card and list view", async () => {
@@ -263,6 +237,7 @@ describe("Projects Board", () => {
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
+
   it("archive moves the project to the archive scope and restoration brings it back", async () => {
     const active = card({ id: "p-active", name: "Active" });
     const archived = card({ id: "p-archived", name: "Archived", visibility: "archived" });
@@ -287,8 +262,7 @@ describe("Projects Board", () => {
     await vi.waitFor(() => expect(screen.queryByText("Archived")).toBeNull());
   });
 
-  it.each(["cards", "list"] as const)("archive %s view restricts delete and bulk deletion to eligible projects", async (mode) => {
-    viewState.set("projects.viewMode", mode);
+  it("archive view restricts delete and bulk deletion to eligible projects", async () => {
     const projects = [
       card({ id: "normal", name: "Normal", visibility: "normal", session_count: 0 }),
       card({ id: "empty", name: "Empty", visibility: "archived", session_count: 0 }),

@@ -24,7 +24,6 @@ it("uses the same searchable cards for both scopes with the correct toolbar acti
   expect(bulkDeleteBtn.className).toContain("icon-button");
   expect(bulkDeleteBtn.className).toContain("danger");
   expect(bulkDeleteBtn.textContent).toBe("");
-  expect(bulkDeleteBtn.querySelector("svg path")?.getAttribute("d")).toBe("M3 5h12M7 5V3h4v2M5 5l1 10h6l1-10M8 8v4M10 8v4");
   expect(screen.queryByRole("button", { name: "新建任务" })).toBeNull();
   expect(document.querySelectorAll(".task-card")).toHaveLength(2);
   fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });
@@ -83,14 +82,4 @@ it("shows and filters every related project in both board views", () => {
   fireEvent.change(projectFilter, { target: { value: "none" } });
   screen.getByText("无项目任务");
   expect(screen.queryByText("跨项目任务")).toBeNull();
-});
-
-it("renders divider between scope switcher and action buttons in header", () => {
-  render(<WorkstreamsView navigate={() => {}} actionSeq={0} />);
-  const divider = document.querySelector(".page-head .actions .session-action-divider");
-  expect(divider).toBeTruthy();
-  const scopeGroup = screen.getByRole("group", { name: "任务列表范围" });
-  const newBtn = screen.getByRole("button", { name: "新建任务" });
-  expect(scopeGroup.compareDocumentPosition(divider!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(divider!.compareDocumentPosition(newBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

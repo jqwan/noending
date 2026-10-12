@@ -5,44 +5,52 @@ import type { Route } from "../app/routes";
 
 afterEach(cleanup);
 
-it.each([
-  ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-  ["代理", "agents"], ["设置", "settings"],
-] as const)("opens the existing %s page", (label, view) => {
-  const navigate = vi.fn();
-  render(<NavigationRail route={{ view: "new-session" }} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: label }));
-  expect(navigate).toHaveBeenCalledWith({ view });
+it("opens the existing primary pages", () => {
+  const sections = [
+    ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
+    ["代理", "agents"], ["设置", "settings"],
+  ] as const;
+
+  for (const [label, view] of sections) {
+    const navigate = vi.fn();
+    const { unmount } = render(<NavigationRail route={{ view: "new-session" }} navigate={navigate} />);
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(navigate).toHaveBeenCalledWith({ view });
+    unmount();
+  }
 });
 
-it.each([
-  [{ view: "terminal", terminalId: "t1" }, "会话"],
-  [{ view: "session", sessionId: "s1" }, "会话"],
-  [{ view: "sessions" }, "会话"],
-  [{ view: "workstream", workstreamId: "w1" }, "任务"],
-  [{ view: "project", projectId: "p1" }, "项目"],
-] as [Route, string][])("highlights the owning section for %j", (route, label) => {
-  render(<NavigationRail route={route} navigate={vi.fn()} />);
-  expect(screen.getByRole("button", { name: label }).getAttribute("aria-current")).toBe("page");
+it("highlights the owning section for routes", () => {
+  const cases: [Route, string][] = [
+    [{ view: "terminal", terminalId: "t1" }, "会话"],
+    [{ view: "session", sessionId: "s1" }, "会话"],
+    [{ view: "sessions" }, "会话"],
+    [{ view: "workstream", workstreamId: "w1" }, "任务"],
+    [{ view: "project", projectId: "p1" }, "项目"],
+  ];
+
+  for (const [route, label] of cases) {
+    const { unmount } = render(<NavigationRail route={route} navigate={vi.fn()} />);
+    expect(screen.getByRole("button", { name: label }).getAttribute("aria-current")).toBe("page");
+    unmount();
+  }
 });
 
-it("navigates to sessions board on sessions click", () => {
-  const navigate = vi.fn();
-  render(<NavigationRail route={{ view: "projects" }} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "sessions" });
-});
+it("jumps to its root board interface when clicking the active section icon", () => {
+  const cases: [Route, string, Route][] = [
+    [{ view: "session", sessionId: "s1" }, "会话", { view: "sessions" }],
+    [{ view: "workstream", workstreamId: "w1" }, "任务", { view: "workstreams" }],
+    [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
+    [{ view: "settings", section: "appearance" }, "设置", { view: "settings" }],
+  ];
 
-it.each([
-  [{ view: "session", sessionId: "s1" }, "会话", { view: "sessions" }],
-  [{ view: "workstream", workstreamId: "w1" }, "任务", { view: "workstreams" }],
-  [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
-  [{ view: "settings", section: "appearance" }, "设置", { view: "settings" }],
-] as [Route, string, Route][])("clicking the active section icon %s jumps to its root board interface %j", (route, label, expected) => {
-  const navigate = vi.fn();
-  render(<NavigationRail route={route} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: label }));
-  expect(navigate).toHaveBeenCalledWith(expected);
+  for (const [route, label, expected] of cases) {
+    const navigate = vi.fn();
+    const { unmount } = render(<NavigationRail route={route} navigate={navigate} />);
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(navigate).toHaveBeenCalledWith(expected);
+    unmount();
+  }
 });
 
 it("restores the last visited sub-interface when clicking other section icons", () => {

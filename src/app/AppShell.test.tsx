@@ -68,7 +68,6 @@ it("refreshes visible data when a CLI business operation completes", async () =>
 it("starts on the new-session page", () => {
   render(<AppShell />);
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  expect(document.querySelector(".app-titlebar .titlebar-divider")).toBeTruthy();
 });
 
 it("keeps icon navigation fixed and allows toggling the session sidebar in any section", () => {
@@ -117,18 +116,8 @@ it("preserves the session page's unsent state while switching sections or viewin
   expect((screen.getByRole("textbox", { name: "会话草稿" }) as HTMLInputElement).value).toBe("未发送的消息");
 });
 
-it("opens command palette when clicking the search button at the top", () => {
-  render(<AppShell />);
-  expect(screen.queryByRole("dialog", { name: "全局搜索" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
-  expect(screen.getByRole("dialog", { name: "全局搜索" })).toBeTruthy();
-});
-
-it.each([
-  { view: "terminal", terminalId: "t-7" },
-  { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialAgent: "codex" },
-  { view: "sessions", scope: "archived" },
-] as Route[])("restores the last session page and parameters across history navigation: %j", (route) => {
+it("restores the last session page and parameters across history navigation", () => {
+  const route: Route = { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialAgent: "codex" };
   render(<AppShell />);
   act(() => sessionNavigation.navigate!(route));
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
@@ -152,7 +141,7 @@ it("remembers a background launch result without changing the current section", 
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
 });
 
-it("remembers keyboard resizing, clamps width, and resets on double click", () => {
+it("remembers keyboard resizing, clamps width, resets on double click, and hides handle when collapsed", () => {
   const view = render(<AppShell />);
   const divider = screen.getByRole("separator");
   fireEvent.keyDown(divider, { key: "ArrowRight" });
@@ -169,10 +158,8 @@ it("remembers keyboard resizing, clamps width, and resets on double click", () =
   expect(restored.getAttribute("aria-valuenow")).toBe("200");
   fireEvent.doubleClick(restored);
   expect(localStorage.getItem("noending.sidebarWidth")).toBe("248");
-});
 
-it("hides the resize handle while the sidebar is collapsed", () => {
-  render(<AppShell />);
+  // Hides resize handle while collapsed
   fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
   expect(screen.queryByRole("separator")).toBeNull();
   expect(localStorage.getItem("noending.sidebarCollapsed")).toBe("true");

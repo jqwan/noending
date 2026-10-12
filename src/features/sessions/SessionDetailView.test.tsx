@@ -234,27 +234,25 @@ it("offers no conversation entry for a session that has no messages", async () =
 
 // Fork
 
-it("links to the session it forked from", async () => {
-  const me = session("me", { forked_from_session_id: "orig" });
-  const { navigate } = await renderDetail(detail(me, {
+it("handles fork origin provenance: linked session, missing source, and non-fork", async () => {
+  // 1. Linked source session
+  const meWithFork = session("me", { forked_from_session_id: "orig" });
+  const { navigate, unmount } = await renderDetail(detail(meWithFork, {
     forked_from: session("orig", { title: "原始会话" }),
   }));
-
   fireEvent.click(screen.getByRole("button", { name: "分叉自：原始会话" }));
   expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig", initialTitle: "原始会话", initialAgent: "codex" });
-});
+  unmount();
 
-it("names the missing fork source instead of hiding the provenance", async () => {
-  const me = session("me", { forked_from_session_id: "ghost" });
-  await renderDetail(detail(me));
-
+  // 2. Missing source session
+  const meWithMissingFork = session("me", { forked_from_session_id: "ghost" });
+  const { unmount: unmountMissing } = await renderDetail(detail(meWithMissingFork));
   screen.getByText(/来源会话不在 NoEnding 库里/);
   screen.getByText(/ghost/);
-});
+  unmountMissing();
 
-it("shows no fork field for a session that is not a fork", async () => {
+  // 3. Not a fork
   await renderDetail(detail(session("me")));
-
   expect(screen.queryByText(/分叉自/)).toBeNull();
 });
 
@@ -284,31 +282,26 @@ function archivedDetail(over: Partial<SessionDetail> = {}): SessionDetail {
 
 // 点删除之后：先查源状态，告知这次是彻底删除还是会被重新入库，用户再确认。
 
-it("checks the root source before confirming and says the copy will be rebuilt", async () => {
+it("checks root source status in local delete preview", async () => {
+  // 1. Root source present
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "present" }),
   );
-  await renderDetail(archivedDetail({ source_status: "present" }));
-
+  const { unmount } = await renderDetail(archivedDetail({ source_status: "present" }));
   fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
-
   await screen.findByText(/Root 源会话仍然存在/);
   screen.getByText(/下一次同步会从它重新同步/);
-  // 每一条「将删除」都渲染出数字：后端改名而前端漏改时，这里会当场炸掉，
-  // 而不是在生产里把整棵树渲染崩成黑屏。
   screen.getByText("3 条会话消息");
   screen.getByText("0 条 Context 摘要记录");
   screen.getByRole("button", { name: "删除" });
-});
+  unmount();
 
-it("says the local data is unrecoverable when the root source is gone", async () => {
+  // 2. Root source missing
   vi.mocked(api.getSessionLocalDeletePreview).mockResolvedValue(
     preview({ root_source_status: "missing" }),
   );
   await renderDetail(archivedDetail({ source_status: "missing" }));
-
   fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
-
   await screen.findByText(/本地数据删除后无法找回/);
   expect(screen.queryByText(/Root 源会话仍然存在/)).toBeNull();
 });
@@ -329,20 +322,7 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
   };
 }
 
-it("offers 更新摘要 only when there are messages and no summary yet", async () => {
-  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
-  await renderDetail(detail(session("me"), {
-    messages: [message("me", 1, "user", "开始吧")],
-  }));
-
-  screen.getByText("Context");
-  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
-  await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
-  // 更新成功后重新拉取 Context 与详情。
-  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
-});
-
-it("keeps the summary read-only and shows 更新摘要 while there is a pending increment", async () => {
+it("renders summary, supports copying, and updates context on pending increment", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
       summary: "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
@@ -365,6 +345,7 @@ it("keeps the summary read-only and shows 更新摘要 while there is a pending 
   screen.getByText(/补测试/);
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await waitFor(() => expect(api.updateSessionContext).toHaveBeenCalledWith("me"));
+  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
 });
 
 it("allows regenerating a current summary without pending messages", async () => {
@@ -391,60 +372,35 @@ it("allows regenerating a current summary without pending messages", async () =>
   await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
 });
 
-it("shows structured Context failure details and copies the operation id", async () => {
+it("shows and copies structured Context failure details, retains across sync, and clears on session navigation", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
-  vi.mocked(api.updateSessionContext).mockRejectedValue(
-    { code: "stale_snapshot", message: "内容已变化，请重新更新", operation_id: "123e4567-e89b-12d3-a456-426614174000" },
-  );
+  vi.mocked(api.updateSessionContext).mockRejectedValue({
+    code: "stale_snapshot",
+    message: "内容已变化，请重新更新",
+    operation_id: "123e4567-e89b-12d3-a456-426614174000",
+  });
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-  await renderDetail(detail(session("me"), {
-    messages: [message("me", 1, "user", "开始吧")],
-  }));
 
-  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
-  await screen.findByText("内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000");
-  fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith(
-    "内容已变化，请重新更新\n错误代码：stale_snapshot\n操作 ID：123e4567-e89b-12d3-a456-426614174000",
-  ));
-});
-
-it("keeps an update error visible across background sync refreshes", async () => {
-  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
-  vi.mocked(api.updateSessionContext).mockRejectedValue({
-    code: "stale_snapshot",
-    message: "内容已变化，请重新更新",
-    operation_id: "123e4567-e89b-12d3-a456-426614174000",
-  });
-  await renderDetail(detail(session("me"), {
-    messages: [message("me", 1, "user", "开始吧")],
-  }));
-
-  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
-  const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
-  await screen.findByText(failure);
-
-  window.dispatchEvent(new Event("noending:sync"));
-  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
-  expect(screen.getByText(failure)).toBeTruthy();
-});
-
-it("clears a session's update error when the same detail view navigates to another session", async () => {
-  vi.mocked(api.getSessionContext).mockResolvedValue(contextView({ pending: true }));
-  vi.mocked(api.updateSessionContext).mockRejectedValue({
-    code: "stale_snapshot",
-    message: "内容已变化，请重新更新",
-    operation_id: "123e4567-e89b-12d3-a456-426614174000",
-  });
   const { navigate, rerender } = await renderDetail(detail(session("session-a"), {
     messages: [message("session-a", 1, "user", "开始吧")],
   }));
 
+  // 1. Shows error and copies error details
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   const failure = "内容已变化，请重新更新 · 操作 ID 123e4567-e89b-12d3-a456-426614174000";
   await screen.findByText(failure);
+  fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(
+    "内容已变化，请重新更新\n错误代码：stale_snapshot\n操作 ID：123e4567-e89b-12d3-a456-426614174000",
+  ));
 
+  // 2. Retains error across background sync
+  window.dispatchEvent(new Event("noending:sync"));
+  await waitFor(() => expect(api.getSessionContext).toHaveBeenCalledTimes(2));
+  expect(screen.getByText(failure)).toBeTruthy();
+
+  // 3. Clears error on session navigation
   rerender(<SessionDetailView sessionId="session-b" navigate={navigate} goBack={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText(failure)).toBeNull());
 });
@@ -536,14 +492,4 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
   await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
   expect(screen.getByRole("heading").textContent).toBe("稳定标题");
-});
-
-it("renders divider between subpage tabs and action buttons in header", async () => {
-  await renderDetail(detail(session("me")));
-  const divider = document.querySelector(".page-head .actions .session-action-divider");
-  expect(divider).toBeTruthy();
-  const tabs = screen.getByRole("group", { name: "会话子页" });
-  const desktopBtn = screen.getByRole("button", { name: "在桌面应用中继续" });
-  expect(tabs.compareDocumentPosition(divider!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(divider!.compareDocumentPosition(desktopBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });

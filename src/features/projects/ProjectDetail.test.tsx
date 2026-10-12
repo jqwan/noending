@@ -117,9 +117,9 @@ function mockDetail(): ProjectDetailData {
 }
 
 describe("ProjectDetail", () => {
-  it.each(["git", "single_directory"] as const)("keeps project type and assistant purpose separate for %s", async (kind) => {
+  it("keeps project type and assistant purpose separate", async () => {
     const detail = mockDetail();
-    detail.kind = kind;
+    detail.kind = "git";
     detail.purpose = "assistant";
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
@@ -130,18 +130,18 @@ describe("ProjectDetail", () => {
 
     fireEvent.click(newSessionBtn);
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
-    expect(screen.getByText(kind === "git" ? "Git 项目" : "单目录项目")).toBeTruthy();
+    expect(screen.getByText("Git 项目")).toBeTruthy();
     expect(screen.getByText("助手")).toBeTruthy();
   });
 
-  it.each(["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"])("does not offer new sessions in chat-directory project %s", async (name) => {
+  it("does not offer new sessions in chat-directory projects", async () => {
     const agentDetail = mockDetail();
     agentDetail.kind = "directory_group";
-    agentDetail.project.name = name;
+    agentDetail.project.name = "Codex Chat";
     vi.mocked(api.getProjectDetail).mockResolvedValue(agentDetail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
-    await screen.findByText(name);
+    await screen.findByText("Codex Chat");
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
 

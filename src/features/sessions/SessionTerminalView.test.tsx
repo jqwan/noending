@@ -180,8 +180,9 @@ function detail(title: string): Awaited<ReturnType<typeof api.getSessionDetail>>
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function pushIdentity(sessionId: string | null, revision: number, terminalId = "t-1") {
@@ -314,35 +315,32 @@ it("retains an exited terminal across page changes until manual removal disposes
   expect(eventHandlers.has("terminal-exit://t-1")).toBe(false);
 });
 
-it("allows reconnecting a live but unresponsive TUI and prevents double clicks", async () => {
+it("handles reconnect lifecycle: prevents double clicks, recovers on failure, and navigates on success", async () => {
   const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.terminalReconnect).mockReturnValue(pending.promise);
+  vi.mocked(api.terminalReconnect).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(reconnected);
   const navigate = vi.fn();
   renderView(navigate);
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  const old = FakeTerminal.last!;
+
+  // 1. Initial click enters busy state and prevents double clicks
   fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
   const busy = screen.getByRole("button", { name: "正在重新连接" }) as HTMLButtonElement;
   expect(busy.disabled).toBe(true);
   fireEvent.click(busy);
   expect(api.terminalReconnect).toHaveBeenCalledTimes(1);
-  await act(async () => pending.resolve(reconnected));
-  expect(navigate).toHaveBeenCalledTimes(1);
-});
 
-it("keeps a failed reconnect retryable and retains the terminal output", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.terminalReconnect).mockRejectedValueOnce(new Error("spawn failed"));
-  const navigate = vi.fn();
-  renderView(navigate);
-  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  const old = FakeTerminal.last!;
-  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  // 2. Failure retains terminal output and keeps button retryable
+  await act(async () => pending.reject(new Error("spawn failed")));
   await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.stringContaining("spawn failed")));
   expect(navigate).not.toHaveBeenCalled();
   expect(old.disposed).toBe(false);
-  expect((screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement).disabled).toBe(false);
-  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+
+  // 3. Retry succeeds and navigates
+  const retryBtn = screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement;
+  expect(retryBtn.disabled).toBe(false);
+  fireEvent.click(retryBtn);
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
 });
 
@@ -533,43 +531,42 @@ it("keeps details disabled when an old title request resolves during pending", a
   expect(screen.getByRole("heading", { name: "新会话" })).toBeTruthy();
   expect((screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement).disabled).toBe(true);
 });
+it("delivers clipboard text once on supported paste shortcuts", async () => {
+  const pasteModifiers = [
+    { metaKey: true, ctrlKey: false, shiftKey: false },
+    { metaKey: false, ctrlKey: true, shiftKey: true },
+  ];
 
-it.each([
-  { metaKey: true, ctrlKey: false, shiftKey: false },
-  { metaKey: false, ctrlKey: true, shiftKey: true },
-])("paste keys deliver clipboard text once: %j", async (modifiers) => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue("pasted text");
+  for (const modifiers of pasteModifiers) {
+    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+    vi.mocked(api.readClipboardForTerminal).mockResolvedValue("pasted text");
+    vi.mocked(api.terminalInput).mockClear();
+
+    const view = renderView();
+    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+    const term = FakeTerminal.last!;
+    expect(term.keyHandler!({ type: "keydown", ...modifiers, key: "v", preventDefault: () => {} })).toBe(false);
+    await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text"));
+    expect(api.terminalInput).toHaveBeenCalledTimes(1);
+    expect(term.pasted).toEqual([]);
+    view.unmount();
+  }
+});
+
+it("does not receive input when Cmd+V finds no clipboard text", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ agent: "codex" }));
+  vi.mocked(api.readClipboardForTerminal).mockResolvedValue(null);
 
   renderView();
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const term = FakeTerminal.last!;
-  // 返回 false：拦截键盘事件，交给 readClipboardForTerminal；文本按打字语义
-  // 经 terminalInput 交付（四家 TUI 渲染的最小公约数，term.paste 是 pi 双份
-  // 的嫌疑残留层，已整体弃用）。
-  expect(term.keyHandler!({ type: "keydown", ...modifiers, key: "v", preventDefault: () => {} })).toBe(false);
-  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text"));
-  expect(api.terminalInput).toHaveBeenCalledTimes(1);
-  expect(term.pasted).toEqual([]);
+  await act(async () => {
+    expect(FakeTerminal.last!.keyHandler!({
+      type: "keydown", metaKey: true, key: "v", preventDefault: () => {},
+    })).toBe(false);
+  });
+  expect(api.readClipboardForTerminal).toHaveBeenCalledTimes(1);
+  expect(api.terminalInput).not.toHaveBeenCalled();
 });
-
-it.each(["codex", "claude_code", "pi", "antigravity"] as const)(
-  "%s does not receive input when Cmd+V finds no clipboard text",
-  async (agent) => {
-    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ agent }));
-    vi.mocked(api.readClipboardForTerminal).mockResolvedValue(null);
-
-    renderView();
-    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-    await act(async () => {
-      expect(FakeTerminal.last!.keyHandler!({
-        type: "keydown", metaKey: true, key: "v", preventDefault: () => {},
-      })).toBe(false);
-    });
-    expect(api.readClipboardForTerminal).toHaveBeenCalledTimes(1);
-    expect(api.terminalInput).not.toHaveBeenCalled();
-  },
-);
 
 it("the browser default paste is cancelled and event pastes die at capture", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
@@ -594,20 +591,27 @@ it("the browser default paste is cancelled and event pastes die at capture", asy
   expect(stopped).toHaveBeenCalledTimes(1);
 });
 
-it.each([
-  { ctrlKey: true, altKey: false },
-  { ctrlKey: false, altKey: true },
-])("passes native TUI paste shortcuts through to xterm: %j", async (modifiers) => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const prevented = vi.fn();
-  expect(FakeTerminal.last!.keyHandler!({
-    type: "keydown", metaKey: false, shiftKey: false, key: "v",
-    ...modifiers, preventDefault: prevented,
-  })).toBe(true);
-  expect(prevented).not.toHaveBeenCalled();
-  expect(api.readClipboardForTerminal).not.toHaveBeenCalled();
+it("passes native TUI paste shortcuts through to xterm", async () => {
+  const shortcutModifiers = [
+    { ctrlKey: true, altKey: false },
+    { ctrlKey: false, altKey: true },
+  ];
+
+  for (const modifiers of shortcutModifiers) {
+    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+    vi.mocked(api.readClipboardForTerminal).mockClear();
+
+    const view = renderView();
+    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+    const prevented = vi.fn();
+    expect(FakeTerminal.last!.keyHandler!({
+      type: "keydown", metaKey: false, shiftKey: false, key: "v",
+      ...modifiers, preventDefault: prevented,
+    })).toBe(true);
+    expect(prevented).not.toHaveBeenCalled();
+    expect(api.readClipboardForTerminal).not.toHaveBeenCalled();
+    view.unmount();
+  }
 });
 
 it("copy with a selection goes through the shared clipboard helper", async () => {
@@ -814,14 +818,21 @@ it("closes only the selected terminal and switches to another live instance", as
   expect(current.disposed).toBe(true);
 });
 
-it.each(["new-native-session", null])("uses the close result's verified identity for the final destination: %s", async (sessionId) => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
-  vi.mocked(api.terminalClose).mockResolvedValue(snapshot({ session_id: sessionId }));
-  const navigate = vi.fn();
-  renderView(navigate);
-  fireEvent.click(await screen.findByRole("button", { name: "移除终端" }));
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith(sessionId
-    ? { view: "session", sessionId } : { view: "sessions" }));
+it("uses the close result's verified identity for the final destination", async () => {
+  const cases = [
+    { sessionId: "new-native-session", expected: { view: "session", sessionId: "new-native-session" } },
+    { sessionId: null, expected: { view: "sessions" } },
+  ];
+
+  for (const { sessionId, expected } of cases) {
+    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
+    vi.mocked(api.terminalClose).mockResolvedValue(snapshot({ session_id: sessionId }));
+    const navigate = vi.fn();
+    const view = renderView(navigate);
+    fireEvent.click(await screen.findByRole("button", { name: "移除终端" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(expected));
+    view.unmount();
+  }
 });
 
 it("does not interrupt the new page when an old terminal close finishes after leaving", async () => {
