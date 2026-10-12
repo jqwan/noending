@@ -444,7 +444,7 @@ pub fn prepare_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    initial_workstream_id: Option<String>,
+    initial_workstream_ids: Vec<String>,
     cwd: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::PreparedLaunch> {
@@ -455,7 +455,7 @@ pub fn prepare_new_session(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            initial_workstream_id.as_deref(),
+            &initial_workstream_ids,
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),
@@ -589,7 +589,7 @@ pub fn launch_embedded_new(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     agent: String,
-    initial_workstream_id: Option<String>,
+    initial_workstream_ids: Vec<String>,
     cwd: Option<String>,
     initial_message: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
@@ -601,7 +601,7 @@ pub fn launch_embedded_new(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            initial_workstream_id.as_deref(),
+            &initial_workstream_ids,
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),
@@ -1032,6 +1032,24 @@ pub async fn refresh_agent_runtime_options(
 ) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
     let agent = agent_of(&agent)?;
     discover_runtime_options_async(agent).await
+}
+
+#[tauri::command]
+pub fn get_extraction_settings(
+    state: State<AppState>,
+) -> Result<crate::sync::extractor::ExtractionSettings> {
+    with_db(
+        &state,
+        crate::sync::extractor::ExtractionSettings::from_settings,
+    )
+}
+
+#[tauri::command]
+pub fn set_extraction_settings(
+    state: State<AppState>,
+    settings: crate::sync::extractor::ExtractionSettings,
+) -> Result<crate::sync::extractor::ExtractionSettings> {
+    with_db(&state, |db| settings.save(db))
 }
 
 // ---------------- Assistant ----------------

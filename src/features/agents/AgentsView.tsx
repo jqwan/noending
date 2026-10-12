@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useViewState } from "../../hooks/useViewState";
+import { useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
@@ -196,9 +196,9 @@ export default function AgentsView({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [reingestTarget, setReingestTarget] = useState<IngestSource | null>(null);
-  const [filterTab, setFilterTab] = useState<FilterTab>("all");
+  const [filterTab, setFilterTab] = useViewPreference<FilterTab>("agents.filterTab", "all", preferenceValues("all", "tui", "desktop"));
   const [searchQuery, setSearchQuery] = useState("");
-  const [viewMode, setViewMode] = useViewState<"cards" | "list">("agents.viewMode", "cards");
+  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("agents.viewMode", "cards", preferenceValues("cards", "list"));
   const [sessionCounts, setSessionCounts] = useState<Record<string, number>>({});
 
   const clearMessages = () => setError("");

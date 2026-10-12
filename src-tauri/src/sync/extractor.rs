@@ -5,36 +5,60 @@ use crate::domain::Agent;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-/// Assistant configuration, persisted in settings.
-///
-/// ONLY the agent choice: which CLI the explicit Context update runs on. Model /
-/// provider / effort are owned by Settings → Agents like every other runtime.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AssistantConfig {
-    pub agent: String, // codex | claude_code | pi | none
+/// Dedicated runtime for all summary and accompanying preference extraction.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExtractionSettings {
+    pub agent: String,
+    pub runtime: crate::agent_runtime::AgentRuntimeOverrides,
 }
 
-impl Default for AssistantConfig {
+impl Default for ExtractionSettings {
     fn default() -> Self {
         Self {
             agent: "codex".into(),
+            runtime: Default::default(),
         }
     }
 }
 
-impl AssistantConfig {
-    pub fn from_settings(db: &Db) -> AssistantConfig {
-        AssistantConfig {
-            agent: db
-                .get_setting("assistant.agent")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| AssistantConfig::default().agent),
+impl ExtractionSettings {
+    pub fn from_settings(db: &Db) -> Result<Self> {
+        match db.get_setting("context.extraction")? {
+            Some(raw) => {
+                serde_json::from_str(&raw).map_err(|e| other(format!("摘要提取配置已损坏：{e}")))
+            }
+            None => Ok(Self::default()),
         }
     }
 
-    pub fn save(&self, db: &Db) -> Result<()> {
-        db.set_setting("assistant.agent", &self.agent)
+    pub fn exec_options(&self) -> Result<Option<(Agent, ExecOptions)>> {
+        if self.agent == "none" {
+            return Ok(None);
+        }
+        let agent = Agent::parse(&self.agent)
+            .ok_or_else(|| other(format!("未知的 Agent: {}", self.agent)))?;
+        if !matches!(agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi) {
+            return Err(other("摘要提取仅支持 Codex、Claude Code 和 Pi"));
+        }
+        crate::agent_runtime::validate_runtime_overrides(agent, &self.runtime)?;
+        Ok(Some((agent, self.runtime.exec_options())))
+    }
+
+    pub fn save(&self, db: &Db) -> Result<Self> {
+        self.exec_options()?;
+        let value = Self {
+            agent: self.agent.clone(),
+            runtime: if self.agent == "none" {
+                Default::default()
+            } else {
+                self.runtime.normalized()
+            },
+        };
+        db.set_setting(
+            "context.extraction",
+            &serde_json::to_string(&value).map_err(|e| other(e.to_string()))?,
+        )?;
+        Ok(value)
     }
 }
 
@@ -65,22 +89,11 @@ pub struct ContextCallFailure {
 }
 
 impl CliExtractor {
-    /// Strict lookup for the interactive path: `Ok(None)` means the user set
-    /// Assistant to `none`; anything else that cannot be honoured is an `Err`.
-    /// A missing or invalid CLI is surfaced, never degraded to a heuristic.
+    /// A missing CLI or invalid dedicated configuration remains a failure.
     pub fn try_from_settings(db: &Db) -> Result<Option<CliExtractor>> {
-        Self::try_for_agent(db, &AssistantConfig::from_settings(db).agent)
-    }
-
-    pub fn try_for_agent(db: &Db, agent: &str) -> Result<Option<CliExtractor>> {
-        if agent == "none" {
-            return Ok(None);
-        }
-        let agent = Agent::parse(agent).ok_or_else(|| other(format!("未知的 Agent: {agent}")))?;
-        Ok(Some(CliExtractor::new(
-            agent,
-            crate::agent_runtime::runtime_exec_options(db, agent)?,
-        )))
+        Ok(ExtractionSettings::from_settings(db)?
+            .exec_options()?
+            .map(|(agent, opts)| Self::new(agent, opts)))
     }
 
     pub fn new(agent: Agent, opts: ExecOptions) -> CliExtractor {

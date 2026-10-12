@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import { useAgentRuntime } from "../agents/useAgentRuntime";
 import RuntimePopover from "./RuntimePopover";
+import { readNewSessionPreferences, updateNewSessionPreferences, lastNewSessionRuntime, rememberNewSessionRuntime } from "./newSessionPreferences";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import SidebarLogo from "../../components/SidebarLogo";
@@ -30,7 +30,7 @@ export type NewSessionViewProps = {
   workstreamId?: string | null;
   /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
-  /** 预置选中的项目 ID；省略时选择默认工作目录所属的 NoEnding Chat 项目。 */
+  /** 预置选中的项目 ID；省略时恢复手动选择，首次使用选择默认工作目录所属项目。 */
   projectId?: string | null;
   navigate: (r: Route) => void;
 };
@@ -47,10 +47,12 @@ export default function NewSessionView({
   navigate,
 }: NewSessionViewProps) {
   const allowedAgents = CLI_AGENTS;
+  const [savedPreferences] = useState(readNewSessionPreferences);
+  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [trackedWorkstreamId, setTrackedWorkstreamId] = useState(
-    workstreamId && workstreamId !== STANDALONE ? workstreamId : STANDALONE
+  const [trackedWorkstreamIds, setTrackedWorkstreamIds] = useState<string[]>(
+    workstreamId && workstreamId !== STANDALONE ? [workstreamId] : []
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
@@ -60,29 +62,25 @@ export default function NewSessionView({
     if (initialAgent && allowedAgents.includes(initialAgent)) {
       return initialAgent;
     }
-    return "codex";
+    return savedPreferences.agent && allowedAgents.includes(savedPreferences.agent) ? savedPreferences.agent : "codex";
   });
-  const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntimeOverrides>(NATIVE_RUNTIME);
+  const [runtimeChoice, setRuntimeChoice] = useState(() => ({ agent: selectedAgent, value: lastNewSessionRuntime(selectedAgent) }));
+  const runtimeOverride = useMemo(() => runtimeChoice.agent === selectedAgent ? runtimeChoice.value
+    : lastNewSessionRuntime(selectedAgent), [runtimeChoice, selectedAgent]);
+  const setRuntimeOverride = (value: AgentRuntimeOverrides) => setRuntimeChoice({ agent: selectedAgent, value });
   const runtime = useAgentRuntime(selectedAgent, true);
-  const launchRuntime = useMemo(() => {
-    if (runtimeOverride.model || runtimeOverride.effort) {
-      return runtimeOverride;
-    }
-    return undefined;
-  }, [runtimeOverride]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
-  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
-  const taskRef = useRef<HTMLDivElement>(null);
   const projectRef = useRef<HTMLDivElement>(null);
   const dirRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
   const projectChanged = useRef(false);
+  const messageChanged = useRef(false);
   const [projectError, setProjectError] = useState("");
   const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
 
@@ -92,11 +90,8 @@ export default function NewSessionView({
   }, []);
 
   useEffect(() => {
-    if (!taskMenuOpen && !projectMenuOpen && !dirMenuOpen) return;
+    if (!projectMenuOpen && !dirMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (taskMenuOpen && !taskRef.current?.contains(e.target as Node)) {
-        setTaskMenuOpen(false);
-      }
       if (projectMenuOpen && !projectRef.current?.contains(e.target as Node)) {
         setProjectMenuOpen(false);
       }
@@ -106,7 +101,6 @@ export default function NewSessionView({
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setTaskMenuOpen(false);
         setProjectMenuOpen(false);
         setDirMenuOpen(false);
       }
@@ -117,7 +111,7 @@ export default function NewSessionView({
       window.removeEventListener("mousedown", handleClickOutside);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [taskMenuOpen, projectMenuOpen, dirMenuOpen]);
+  }, [projectMenuOpen, dirMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,12 +119,18 @@ export default function NewSessionView({
     Promise.all([api.listWorkstreamCards(), api.listProjectCards(), api.getWorkspaceSettings()])
       .then(async ([ws, cards, settings]) => {
         if (cancelled) return;
+        cards = cards.filter(p => p.visibility !== "archived");
+        const preferences = readNewSessionPreferences();
         const normal = ws.filter((w) => w.visibility === "normal");
         const targetWs = normal.find((w) => w.id === workstreamId);
         let projectId = initialProjectId && initialProjectId !== "none" ? initialProjectId : "";
         let defaultDir = "";
         if (!projectId && targetWs?.projects.length === 1) {
           projectId = targetWs.projects[0].id;
+        }
+        if (projectId && !cards.some(p => p.id === projectId)) projectId = "";
+        if (!projectId && !initialProjectId && (!workstreamId || workstreamId === STANDALONE) && cards.some(p => p.id === preferences.projectId)) {
+          projectId = preferences.projectId;
         }
         if (!projectId) {
           defaultDir = settings.default_workspace;
@@ -142,7 +142,7 @@ export default function NewSessionView({
             if (cancelled) return;
             projectId = result.project_id;
             defaultDir = result.path.canonical_path;
-            cards = await api.listProjectCards();
+            cards = (await api.listProjectCards()).filter(p => p.visibility !== "archived");
           }
         }
         if (cancelled) return;
@@ -150,8 +150,22 @@ export default function NewSessionView({
         setWorkstreams(normal);
         if (!projectChanged.current) {
           setSelectedProjectId(projectId);
-          if (defaultDir) setSelectedDirPath(defaultDir);
-          if (workstreamId && workstreamId !== STANDALONE && !targetWs) setTrackedWorkstreamId(STANDALONE);
+          const project = cards.find(p => p.id === projectId);
+          const directories = project?.search_paths.length ? project.search_paths : (project?.representative_paths ?? []);
+          const rememberedDir = preferences.directories[projectId];
+          setSelectedDirPath(directories.includes(rememberedDir) ? rememberedDir
+            : directories.includes(defaultDir) ? defaultDir : (directories[0] ?? ""));
+          if (!messageChanged.current) setMessage(preferences.drafts[projectId] ?? preferences.drafts[""] ?? "");
+          // Text typed before the project query completed belongs to the resolved project.
+          if (preferences.drafts[""] !== undefined) {
+            updateNewSessionPreferences(current => {
+              const drafts = { ...current.drafts };
+              drafts[projectId] = messageChanged.current ? drafts[""] : (drafts[projectId] ?? drafts[""]);
+              delete drafts[""];
+              return { ...current, drafts };
+            });
+          }
+          if (workstreamId && workstreamId !== STANDALONE && !targetWs) setTrackedWorkstreamIds([]);
         }
       })
       .catch((reason) => {
@@ -167,8 +181,11 @@ export default function NewSessionView({
       api
         .getDefaultAgent()
         .then((def) => {
-          if (!cancelled && !agentChanged.current && def && allowedAgents.includes(def)) {
-            setSelectedAgent(def);
+          if (!cancelled && def && allowedAgents.includes(def)) {
+            setDefaultAgent(def);
+            if (!agentChanged.current && (!savedPreferences.agent || !allowedAgents.includes(savedPreferences.agent))) {
+              setSelectedAgent(def);
+            }
           }
         })
         .catch(console.error);
@@ -184,11 +201,14 @@ export default function NewSessionView({
 
   const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.detected && agentStatus[selectedAgent]?.launch_enabled));
   useEffect(() => {
-    if (agentStatus && !agentAvailable && cliAgents.length) {
-      setSelectedAgent(cliAgents[0]);
-      setRuntimeOverride(NATIVE_RUNTIME);
+    if (!agentStatus || !cliAgents.length || (agentChanged.current && agentAvailable)) return;
+    const preferred = [initialAgent, savedPreferences.agent, defaultAgent, cliAgents[0]]
+      .find((candidate): candidate is Agent => Boolean(candidate && cliAgents.includes(candidate)));
+    if (preferred && preferred !== selectedAgent) {
+      setSelectedAgent(preferred);
+      setRuntimeChoice({ agent: preferred, value: lastNewSessionRuntime(preferred) });
     }
-  }, [agentStatus, agentAvailable, cliAgents.join(",")]);
+  }, [agentStatus, agentAvailable, selectedAgent, initialAgent, savedPreferences.agent, defaultAgent, cliAgents.join(",")]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
 
@@ -238,27 +258,20 @@ export default function NewSessionView({
   const launchCwd = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
 
   const availableTasks = workstreams.filter(w => w.visibility === "normal" && w.projects.some(p => p.id === selectedProjectId));
-  const eligibleTask = trackedWorkstreamId === STANDALONE || availableTasks.some(w => w.id === trackedWorkstreamId);
+  const eligibleTask = trackedWorkstreamIds.every(id => availableTasks.some(w => w.id === id));
   const hasDirectory = Boolean(launchCwd);
 
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
     if (!selectedAgent || !agentAvailable || !eligibleTask || !hasDirectory) return null;
-    const initialTaskId = trackedWorkstreamId === STANDALONE ? null : trackedWorkstreamId;
-    if (launchRuntime) return api.prepareNewSession(selectedAgent, initialTaskId, launchCwd, launchRuntime);
-    if (launchCwd) {
-      return api.prepareNewSession(selectedAgent, initialTaskId, launchCwd);
-    }
-    return api.prepareNewSession(selectedAgent, initialTaskId);
-  }, [selectedAgent, trackedWorkstreamId, launchCwd, launchRuntime, agentAvailable, eligibleTask, hasDirectory]);
+    return api.prepareNewSession(selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride);
+  }, [selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride, agentAvailable, eligibleTask, hasDirectory]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
 
-  const handleWsChange = (next: string) => {
-    if (next === trackedWorkstreamId) return;
+  const toggleTask = (id: string) => {
     releasePrepared();
-    setTrackedWorkstreamId(next);
-
+    setTrackedWorkstreamIds(current => current.includes(id) ? current.filter(task => task !== id) : [...current, id]);
   };
 
   const handleProjectChange = (next: string) => {
@@ -267,13 +280,19 @@ export default function NewSessionView({
     setProjectError("");
     releasePrepared();
     setSelectedProjectId(next);
-    if (!workstreams.find(w=>w.id===trackedWorkstreamId)?.projects.some(p=>p.id===next)) setTrackedWorkstreamId(STANDALONE);
+    const preferences = readNewSessionPreferences();
+    setSelectedDirPath(preferences.directories[next] ?? "");
+    setMessage(preferences.drafts[next] ?? "");
+    messageChanged.current = false;
+    updateNewSessionPreferences(current => ({ ...current, projectId: next }));
+    setTrackedWorkstreamIds(current => current.filter(id => workstreams.find(w=>w.id===id)?.projects.some(p=>p.id===next)));
   };
 
   const handleDirChange = (next: string) => {
     if (next === selectedDirPath) return;
     releasePrepared();
     setSelectedDirPath(next);
+    updateNewSessionPreferences(current => ({ ...current, directories: { ...current.directories, [selectedProjectId]: next } }));
   };
 
   const handleAddNewProject = async () => {
@@ -289,10 +308,12 @@ export default function NewSessionView({
 
       const res = await api.addProjectPath(pickedPath);
       const fresh = await api.listProjectCards();
-      setProjects(fresh);
+      setProjects(fresh.filter(p => p.visibility !== "archived"));
       if (res.project_id) {
         handleProjectChange(res.project_id);
-        setSelectedDirPath(res.path.canonical_path || pickedPath);
+        const directory = res.path.canonical_path || pickedPath;
+        setSelectedDirPath(directory);
+        updateNewSessionPreferences(current => ({ ...current, directories: { ...current.directories, [res.project_id!]: directory } }));
       }
       showToast(`已添加到项目「${res.project_name}」`);
     } catch (e) {
@@ -304,10 +325,22 @@ export default function NewSessionView({
 
   const handleAgentChange = (next: Agent) => {
     agentChanged.current = true;
+    updateNewSessionPreferences(current => ({ ...current, agent: next }));
     if (next === selectedAgent) return;
     releasePrepared();
-    setRuntimeOverride(NATIVE_RUNTIME);
+    setRuntimeChoice({ agent: next, value: lastNewSessionRuntime(next) });
     setSelectedAgent(next);
+  };
+
+  const handleMessageChange = (next: string) => {
+    messageChanged.current = true;
+    setMessage(next);
+    updateNewSessionPreferences(current => {
+      const drafts = { ...current.drafts };
+      if (next) drafts[selectedProjectId] = next;
+      else delete drafts[selectedProjectId];
+      return { ...current, drafts };
+    });
   };
 
   const canSend = Boolean(message.trim() && selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
@@ -320,15 +353,17 @@ export default function NewSessionView({
     setBusy(true);
     setError("");
     try {
-      const initialTaskId = trackedWorkstreamId === STANDALONE ? null : trackedWorkstreamId;
-      const r = launchRuntime ? await api.launchEmbeddedNew(selectedAgent, initialTaskId, launchCwd, message, launchRuntime) : await api.launchEmbeddedNew(
-        selectedAgent,
-        initialTaskId,
-        launchCwd,
-        message,
-      );
+      const r = await api.launchEmbeddedNew(selectedAgent, trackedWorkstreamIds, launchCwd, message, runtimeOverride);
       announceLaunch("启动", r);
       if (r.terminal_id) {
+        rememberNewSessionRuntime(selectedAgent, runtimeOverride);
+        updateNewSessionPreferences(current => {
+          const drafts = { ...current.drafts };
+          // Do not erase a newer draft written while this launch was in flight.
+          if (drafts[selectedProjectId] === message) delete drafts[selectedProjectId];
+          return { ...current, drafts };
+        });
+        if (mounted.current) setMessage("");
         navigate({ view: "terminal", terminalId: r.terminal_id });
       } else {
         throw new Error("未返回新会话终端");
@@ -343,12 +378,6 @@ export default function NewSessionView({
     }
   };
 
-
-  const selectedWorkstream = workstreams.find((w) => w.id === trackedWorkstreamId);
-  const taskLabel =
-    trackedWorkstreamId === STANDALONE
-      ? "无任务"
-      : (selectedWorkstream?.title ?? "无任务");
 
   const projectLabel = selectedProject?.name ?? "选择项目";
 
@@ -365,14 +394,25 @@ export default function NewSessionView({
       <PageHeader title="新建会话" />
       <div className="new-session-content">
         <div className="new-session-heading">
-          <div className="new-session-heading-title">
-            <SidebarLogo size={36} />
-            <h1 id="new-session-title">开启新会话</h1>
-          </div>
-          <p className="new-session-subtitle">选择项目与跟踪任务，立即启动 Agent 展开工作</p>
+          <SidebarLogo size={64} />
+          <h1 id="new-session-title">你想在 {selectedProject?.name ?? "这里"} 中构建什么？</h1>
+          <section className="new-session-tasks" aria-label="跟踪任务（可选）">
+            <div className="new-session-tasks-head">
+              <span>跟踪任务 <span className="muted">· 可多选</span></span>
+              <button type="button" className="btn ghost icon-button small" aria-label="新建跟踪任务" title="新建任务"
+                disabled={busy || !selectedProject} onClick={() => setShowNewWorkstreamModal(true)}><Icon name="plus" /></button>
+            </div>
+            <div className="new-session-task-list">
+              {availableTasks.map(task => <label key={task.id} className={`new-session-task-option${trackedWorkstreamIds.includes(task.id) ? " selected" : ""}`}>
+                <input type="checkbox" checked={trackedWorkstreamIds.includes(task.id)} disabled={busy} onChange={() => toggleTask(task.id)} />
+                <span className="truncate" title={task.title}>{task.title}</span>
+              </label>)}
+              {availableTasks.length === 0 && <p className="muted small">当前项目暂无可跟踪任务</p>}
+            </div>
+          </section>
         </div>
 
-        <form onSubmit={(e) => { e.preventDefault(); void start(); }}>
+        <form className="new-session-form" onSubmit={(e) => { e.preventDefault(); void start(); }}>
           <div className="new-session-context">
             <div
               className={`new-session-picker new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
@@ -381,7 +421,6 @@ export default function NewSessionView({
                 if (busy) return;
                 if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
                 setProjectMenuOpen((v) => !v);
-                setTaskMenuOpen(false);
                 setDirMenuOpen(false);
               }}
               onKeyDown={(e) => {
@@ -390,7 +429,6 @@ export default function NewSessionView({
                   if (!projectMenuOpen) {
                     e.preventDefault();
                     setProjectMenuOpen(true);
-                    setTaskMenuOpen(false);
                     setDirMenuOpen(false);
                   }
                 }
@@ -467,114 +505,6 @@ export default function NewSessionView({
               )}
             </div>
 
-            <div
-              className={`new-session-picker new-session-task has-custom-menu${taskMenuOpen ? " open" : ""}`}
-              ref={taskRef}
-              onClick={(e) => {
-                if (busy) return;
-                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
-                setTaskMenuOpen((v) => !v);
-                setProjectMenuOpen(false);
-                setDirMenuOpen(false);
-              }}
-              onKeyDown={(e) => {
-                if (busy) return;
-                if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
-                  if (!taskMenuOpen) {
-                    e.preventDefault();
-                    setTaskMenuOpen(true);
-                    setProjectMenuOpen(false);
-                    setDirMenuOpen(false);
-                  }
-                }
-              }}
-              tabIndex={busy ? -1 : 0}
-              role="button"
-              aria-haspopup="menu"
-              aria-expanded={taskMenuOpen}
-              aria-label={`跟踪任务：${taskLabel}`}
-              title={taskLabel}
-            >
-              <Icon name={trackedWorkstreamId === STANDALONE ? "minus" : "tasks"} />
-              <span className="new-session-picker-label truncate">{taskLabel}</span>
-              <Icon name="chevronDown" className="new-session-chevron" />
-              <select
-                aria-label="跟踪任务（可选）"
-                title={taskLabel}
-                value={eligibleTask ? trackedWorkstreamId : STANDALONE}
-                onChange={(e) => {
-                  if (e.target.value === "__new_workstream__") {
-                    if (Boolean(selectedProject)) setShowNewWorkstreamModal(true);
-                    return;
-                  }
-                  handleWsChange(e.target.value);
-                }}
-                disabled={busy}
-                tabIndex={-1}
-              >
-                <option value={STANDALONE}>无任务</option>
-                {availableTasks.map((w) => (
-                  <option key={w.id} value={w.id}>{w.title}</option>
-                ))}
-                {Boolean(selectedProject) && <option value="__new_workstream__">+ 新任务</option>}
-              </select>
-
-              {taskMenuOpen && (
-                <div className="new-session-dropdown-menu" role="menu" aria-label="跟踪任务列表">
-                  <div className="new-session-menu-list">
-                    <button
-                      type="button"
-                      className={`new-session-menu-item${trackedWorkstreamId === STANDALONE ? " selected" : ""}`}
-                      onClick={() => {
-                        handleWsChange(STANDALONE);
-                        setTaskMenuOpen(false);
-                      }}
-                    >
-                      <span className="menu-item-icon"><Icon name="minus" /></span>
-                      <span className="menu-item-label">无任务</span>
-                      {trackedWorkstreamId === STANDALONE && (
-                        <span className="menu-item-check"><Icon name="check" /></span>
-                      )}
-                    </button>
-                    {availableTasks.map((w) => {
-                      const isSelected = trackedWorkstreamId === w.id;
-                      return (
-                        <button
-                          key={w.id}
-                          type="button"
-                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
-                          onClick={() => {
-                            handleWsChange(w.id);
-                            setTaskMenuOpen(false);
-                          }}
-                          title={w.title}
-                        >
-                          <span className="menu-item-icon"><Icon name="tasks" /></span>
-                          <span className="menu-item-label">{w.title}</span>
-                          {isSelected && (
-                            <span className="menu-item-check"><Icon name="check" /></span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="new-session-menu-divider" />
-                  <button
-                    type="button"
-                    className="new-session-menu-action"
-                    disabled={!selectedProject}
-                    onClick={() => {
-                      setShowNewWorkstreamModal(true);
-                      setTaskMenuOpen(false);
-                    }}
-                  >
-                    <span className="action-icon"><Icon name="plus" /></span>
-                    <span>添加任务...</span>
-                  </button>
-                </div>
-              )}
-            </div>
-
             {(() => {
               const canSwitchDir = projectDirs.length > 1;
               return (
@@ -585,7 +515,6 @@ export default function NewSessionView({
                     if (busy || !canSwitchDir) return;
                     if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
                     setDirMenuOpen((v) => !v);
-                    setTaskMenuOpen(false);
                     setProjectMenuOpen(false);
                   }}
                   onKeyDown={(e) => {
@@ -594,7 +523,6 @@ export default function NewSessionView({
                       if (!dirMenuOpen) {
                         e.preventDefault();
                         setDirMenuOpen(true);
-                        setTaskMenuOpen(false);
                         setProjectMenuOpen(false);
                       }
                     }
@@ -667,7 +595,7 @@ export default function NewSessionView({
               aria-label="首条消息"
               placeholder="描述你想完成的任务…"
               value={message}
-              onChange={(e) => setMessage(e.target.value)}
+              onChange={(e) => handleMessageChange(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                   e.preventDefault();
@@ -678,8 +606,7 @@ export default function NewSessionView({
               rows={4}
             />
             <div className="new-session-composer-footer">
-              <div className="new-session-composer-footer-left" />
-              <div className="new-session-composer-footer-right">
+              <div className="new-session-composer-footer-left">
                 <label className="new-session-picker new-session-agent">
                   <AgentIcon agent={selectedAgent} size={16} />
                   <span className="new-session-picker-label">{agentLabel}</span>
@@ -699,6 +626,8 @@ export default function NewSessionView({
                     ))}
                   </select>
                 </label>
+              </div>
+              <div className="new-session-composer-footer-right">
                 <RuntimePopover
                   agent={selectedAgent}
                   runtime={runtime}
@@ -753,7 +682,7 @@ export default function NewSessionView({
               setWorkstreams(cards);
               const created=cards.find(w=>w.id===newWs.id);
               if(created?.visibility==="normal" && created.projects.some(p=>p.id===selectedProjectId)) {
-                releasePrepared();setTrackedWorkstreamId(created.id);
+                releasePrepared();setTrackedWorkstreamIds(current => [...new Set([...current, created.id])]);
               }
             } catch(e) { showToast(`读取任务失败：${String(e)}`); }
             setShowNewWorkstreamModal(false);

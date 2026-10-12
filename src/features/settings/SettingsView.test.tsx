@@ -1,5 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
+import { runtimeFixture } from "../agents/runtimeFixtures";
+import { viewState } from "../../hooks/useViewState";
 import SettingsView from "./SettingsView";
 import { api } from "../../api";
 import type { Preference } from "../../types";
@@ -30,6 +33,10 @@ vi.mock("../../api", () => ({
       home_source: "bootstrap",
     }),
     openPath: vi.fn().mockResolvedValue(true),
+    getExtractionSettings: vi.fn(),
+    setExtractionSettings: vi.fn(),
+    getAgentRuntimeSettings: vi.fn(),
+    refreshAgentRuntimeOptions: vi.fn(),
     getSummaryPromptSettings: vi.fn(),
     setSummaryPromptTemplate: vi.fn(),
     previewSummaryPrompt: vi.fn(),
@@ -74,6 +81,11 @@ it("opens modal to change data storage directory and can submit new path", async
 
 const templates = {session: "默认会话要求", task: "默认任务要求", project: "默认项目要求", preferences: "默认偏好要求"};
 beforeEach(() => {
+  viewState.clear(); localStorage.clear(); clearRuntimeCatalog();
+  vi.mocked(api.getExtractionSettings).mockReset().mockResolvedValue({ agent: "codex", runtime: { model: null, provider: null, effort: null } });
+  vi.mocked(api.setExtractionSettings).mockReset();
+  vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async agent => runtimeFixture(agent));
+  vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
   vi.mocked(api.listPreferences).mockReset().mockResolvedValue([]);
   vi.mocked(api.savePreference).mockReset();
   vi.mocked(api.deletePreference).mockReset();
@@ -165,4 +177,34 @@ it("edits the shared preference extraction template without changing summary tem
   fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
   await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
   expect(api.setSummaryPromptTemplate).toHaveBeenCalledWith("preferences", "只提取明确的长期约定");
+});
+
+
+it("saves extraction runtime independently, retains failed drafts and restores saved settings", async () => {
+  render(<SettingsView navigate={vi.fn()} />);
+  const agent = await screen.findByLabelText("提取 Agent");
+  fireEvent.change(agent, { target: { value: "pi" } });
+  fireEvent.change(await screen.findByLabelText("提供商"), { target: { value: "my-provider" } });
+  fireEvent.change(screen.getByLabelText("模型"), { target: { value: "summary-model" } });
+  fireEvent.change(screen.getByLabelText("推理强度"), { target: { value: "high" } });
+  const expected = { agent: "pi" as const, runtime: { provider: "my-provider", model: "summary-model", effort: "high" } };
+  expect(api.setExtractionSettings).not.toHaveBeenCalled();
+  vi.mocked(api.setExtractionSettings).mockRejectedValueOnce(new Error("save failed"));
+  fireEvent.click(screen.getByRole("button", { name: "保存提取设置" }));
+  await screen.findByText(/save failed/);
+  expect(screen.getByLabelText("模型")).toHaveProperty("value", "summary-model");
+  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(expected);
+  fireEvent.click(screen.getByRole("button", { name: "保存提取设置" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存提取设置" })).toHaveProperty("disabled", true));
+  expect(api.setExtractionSettings).toHaveBeenLastCalledWith(expected);
+  expect(api.setSummaryPromptTemplate).not.toHaveBeenCalled();
+  cleanup(); viewState.clear();
+  vi.mocked(api.getExtractionSettings).mockResolvedValue(expected);
+  render(<SettingsView navigate={vi.fn()} />);
+  expect(await screen.findByLabelText("模型")).toHaveProperty("value", "summary-model");
+  expect(screen.getByLabelText("推理强度")).toHaveProperty("value", "high");
+  fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });
+  expect(screen.queryByLabelText("模型")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "撤销提取设置修改" }));
+  expect(await screen.findByLabelText("模型")).toHaveProperty("value", "summary-model");
 });

@@ -73,7 +73,7 @@ function taskFilter(): HTMLSelectElement {
 beforeEach(() => {
   navigate.mockClear();
   clearSessionsCache();
-  viewState.clear();
+  viewState.clear(); localStorage.clear();
   vi.mocked(api.listSessions).mockReset();
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
   vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([

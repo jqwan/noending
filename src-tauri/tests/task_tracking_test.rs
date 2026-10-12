@@ -171,10 +171,14 @@ fn launch_tracking_adds_without_replacing_existing_and_missing_selection_does_no
     let f = Fixture::new();
     let a = f.task("Chosen", &["a"]);
     let b = f.task("Existing", &["a"]);
+    let c = f.task("Also chosen", &["a"]);
     f.db().set_session_tracking(&f.sid, &b, true).unwrap();
     let session = f.db().get_session(&f.sid).unwrap().unwrap();
     f.db()
-        .inherit_terminal_tracking(&session, Some(&a))
+        .inherit_terminal_tracking(
+            &session,
+            &[a.clone(), c.clone(), a.clone(), "deleted".into()],
+        )
         .unwrap();
     assert_eq!(
         f.db()
@@ -182,15 +186,21 @@ fn launch_tracking_adds_without_replacing_existing_and_missing_selection_does_no
             .unwrap()
             .unwrap()
             .tracked_workstream_ids
-            .len(),
-        2
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [a.clone(), b, c]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     f.db()
-        .inherit_terminal_tracking(&session, Some("deleted"))
+        .inherit_terminal_tracking(&session, &["deleted".into()])
         .unwrap();
     let mut wrong = session;
     wrong.root_agent_session_id = "other".into();
-    assert!(f.db().inherit_terminal_tracking(&wrong, Some(&a)).is_err());
+    assert!(f
+        .db()
+        .inherit_terminal_tracking(&wrong, &[a.clone()])
+        .is_err());
 }
 #[test]
 fn preference_promotion_moves_scope_preserves_lock_and_coalesces_existing_user_item() {

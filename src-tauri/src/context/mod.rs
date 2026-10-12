@@ -16,7 +16,7 @@ use crate::storage::context_repo::{
     get_workstream_context_state_conn, set_workstream_frontier_conn,
 };
 use crate::storage::Db;
-use crate::sync::extractor::{self, AssistantConfig, CliExtractor};
+use crate::sync::extractor::{self, CliExtractor, ExtractionSettings};
 pub use project::{
     project_context_view, regenerate_project, update_project, ProjectContextView,
     ProjectUpdateOutcome,
@@ -733,10 +733,10 @@ struct ContextLaunchConfig {
 
 impl ContextLaunchConfig {
     fn from_db(db: &Db) -> Result<Self> {
-        let raw_agent = AssistantConfig::from_settings(db).agent;
-        let agent = crate::domain::Agent::parse(&raw_agent);
-        let opts =
-            agent.and_then(|agent| crate::agent_runtime::runtime_exec_options(db, agent).ok());
+        let settings = ExtractionSettings::from_settings(db)?;
+        let agent = crate::domain::Agent::parse(&settings.agent);
+        let opts = settings.exec_options().ok().flatten().map(|(_, opts)| opts);
+        let raw_agent = settings.agent;
         Ok(Self {
             templates: prompts::templates(db)?,
             raw_agent,
@@ -754,7 +754,7 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "agent_not_configured",
-            "未选择 Context Agent，请在助手设置中选择 Codex、Claude Code 或 Pi。",
+            "未选择提取 Agent，请在设置 → 摘要与偏好提取中选择 Codex、Claude Code 或 Pi。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
             "未选择 Context Agent".into(),
@@ -774,7 +774,7 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "runtime_configuration_invalid",
-            "Agent Runtime 配置无效，请检查 Settings → Agent。",
+            "提取运行参数无效，请检查设置 → 摘要与偏好提取。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
             "Agent Runtime 配置不可用".into(),

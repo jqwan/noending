@@ -46,35 +46,27 @@ export default function RuntimePopover({
 
   // When agent switches or catalog loads, discover options if needed
   useEffect(() => {
-    if (open && runtime.options?.model_source === "not_loaded") {
+    if (open && runtime.settings) {
       void runtime.refresh();
     }
-  }, [open, runtime]);
+  }, [open, runtime.settings?.agent, runtime.refresh]);
 
   const models = runtime.options?.models ?? [];
-  const effectiveModelId = value.model || (models.length > 0 ? models[0].id : null);
-  const selectedModelObj = models.find((m) => m.id === effectiveModelId);
+  const effectiveModelId = value.model;
+  const matchingModels = models.filter((m) => m.id === effectiveModelId && (!value.provider || m.provider === value.provider));
+  const selectedModelObj = matchingModels.length === 1 ? matchingModels[0] : undefined;
   const activeModelLabel = selectedModelObj
     ? (selectedModelObj.display_name ?? selectedModelObj.id)
-    : value.model
-    ? value.model
-    : models.length > 0
-    ? (models[0].display_name ?? models[0].id)
-    : "暂无模型";
+    : value.model ?? "Agent 默认";
 
   const hasPerModelEfforts = models.some((m) => m.supported_efforts.length > 0);
-  const availableEfforts = hasPerModelEfforts
-    ? (selectedModelObj ? selectedModelObj.supported_efforts : [])
+  const availableEfforts = selectedModelObj && hasPerModelEfforts
+    ? selectedModelObj.supported_efforts
     : (runtime.options?.effort_levels ?? []);
 
   const supportsEffort = availableEfforts.length > 0;
 
-  const effectiveEffort = supportsEffort
-    ? (value.effort && availableEfforts.includes(value.effort)
-        ? value.effort
-        : (availableEfforts.includes("medium") ? "medium" : availableEfforts[0]))
-    : null;
-
+  const effectiveEffort = value.effort;
   const activeEffortLabel = effectiveEffort ?? "";
 
   return (
@@ -141,7 +133,7 @@ export default function RuntimePopover({
               >
                 <span className="popover-row-label">推理等级</span>
                 <span className="popover-row-val">
-                  <span className="truncate">{supportsEffort ? (effectiveEffort || "暂无") : "不支持"}</span>
+                  <span className="truncate">{effectiveEffort || (supportsEffort ? "Agent 默认" : "不支持")}</span>
                   {supportsEffort && <Icon name="chevronRight" />}
                 </span>
               </div>
@@ -173,11 +165,12 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
+                <button type="button" className="popover-option-item" onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>Agent 默认</button>
                 {models.map((m) => {
-                  const isSelected = effectiveModelId === m.id;
+                  const isSelected = selectedModelObj === m;
                   return (
                     <button
-                      key={m.id}
+                      key={`${m.provider ?? ""}/${m.id}`}
                       type="button"
                       className={`popover-option-item ${isSelected ? "selected" : ""}`}
                       onClick={() => {
@@ -187,7 +180,7 @@ export default function RuntimePopover({
                         const nextEffort = (value.effort && nextEfforts.includes(value.effort))
                           ? value.effort
                           : null;
-                        onChange({ ...value, model: m.id, effort: nextEffort });
+                        onChange({ ...value, model: m.id, provider: m.provider, effort: nextEffort });
                         setSubpage("main");
                       }}
                       title={m.display_name ?? m.id}
@@ -198,6 +191,7 @@ export default function RuntimePopover({
                   );
                 })}
 
+                {runtime.error && <p role="alert" className="muted small">{runtime.error}</p>}
                 {models.length === 0 && (
                   <div className="muted small" style={{ padding: "8px 12px" }}>
                     暂未发现模型，可点击右上角刷新
@@ -223,6 +217,7 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
+                <button type="button" className="popover-option-item" onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>Agent 默认</button>
                 {availableEfforts.map((lvl) => {
                   const isSelected = effectiveEffort === lvl;
                   return (

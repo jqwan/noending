@@ -1076,11 +1076,11 @@ impl Db {
     }
     /// A launch selection is applied once to its exact native session. A deleted,
     /// archived or detached task cannot prevent terminal identity binding.
-    pub fn inherit_terminal_tracking(&self, session: &Session, task: Option<&str>) -> Result<()> {
+    pub fn inherit_terminal_tracking(&self, session: &Session, tasks: &[String]) -> Result<()> {
         self.tx(|tx| {
             let current=get_session_conn(tx,&session.id)?.ok_or_else(||other("会话不存在"))?;
             if current.agent!=session.agent || current.root_agent_session_id!=session.root_agent_session_id { return Err(other("终端会话身份已变化")); }
-            if let Some(tid)=task {
+            for tid in tasks {
                 let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM workstreams w JOIN workstream_projects p ON p.workstream_id=w.id WHERE w.id=?1 AND w.visibility='normal' AND p.project_id=?2)",params![tid,current.project_id],|r|r.get(0))?;
                 if eligible { workstream_projects::set_tracking_conn(tx,&current.id,tid,true)?; }
             }

@@ -64,8 +64,8 @@ pub struct TerminalBound {
 pub struct TerminalSummary {
     pub terminal_id: String,
     pub session_id: Option<String>,
-    /// Selected task before first binding; cleared after the initial tracking is consumed.
-    pub initial_workstream_id: Option<String>,
+    /// Selected tasks before first binding; cleared after the initial tracking is consumed.
+    pub initial_workstream_ids: Vec<String>,
     pub identity_revision: u64,
     pub agent: Agent,
     pub cwd: Option<String>,
@@ -150,7 +150,7 @@ struct TerminalRecord {
 }
 
 struct PendingTracking {
-    workstream_id: String,
+    workstream_ids: Vec<String>,
     native_id: Option<String>,
 }
 
@@ -384,7 +384,7 @@ impl TerminalRegistry {
                         .is_some_and(|id| id != &event.native_id)
                     {
                         // The TUI switched before initial ingestion completed.
-                        // The launch task never follows an unrelated conversation.
+                        // The launch tasks never follow an unrelated conversation.
                         record.pending_tracking = None;
                     } else {
                         pending.native_id = Some(event.native_id.clone());
@@ -393,10 +393,11 @@ impl TerminalRegistry {
                 record.root_agent_session_id = Some(event.native_id.clone());
                 record.summary.session_id = None;
                 record.summary.session_title = None;
-                record.summary.initial_workstream_id = record
+                record.summary.initial_workstream_ids = record
                     .pending_tracking
                     .as_ref()
-                    .map(|pending| pending.workstream_id.clone());
+                    .map(|pending| pending.workstream_ids.clone())
+                    .unwrap_or_default();
             }
             if let Some(cwd) = &event.cwd {
                 record.summary.cwd = Some(cwd.clone());
@@ -462,9 +463,10 @@ impl TerminalRegistry {
                 .pending_tracking
                 .as_ref()
                 .filter(|pending| pending.native_id.as_deref() == Some(native_id))
-                .map(|pending| pending.workstream_id.clone())
+                .map(|pending| pending.workstream_ids.clone())
+                .unwrap_or_default()
         };
-        if let Err(error) = db.inherit_terminal_tracking(session, owner.as_deref()) {
+        if let Err(error) = db.inherit_terminal_tracking(session, &owner) {
             eprintln!("[terminal] native binding failed: {error}");
             return;
         }
@@ -479,7 +481,7 @@ impl TerminalRegistry {
                 return;
             };
             record.summary.session_id = Some(session.id.clone());
-            record.summary.initial_workstream_id = None;
+            record.summary.initial_workstream_ids.clear();
             record.pending_tracking = None;
             record.summary.session_title = session.title.clone();
             record.summary.identity_revision += 1;
@@ -653,15 +655,12 @@ impl TerminalRegistry {
     ) -> TerminalSummary {
         let terminal_id = summary.terminal_id.clone();
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
-            pending_tracking: summary
-                .session_id
-                .is_none()
-                .then(|| summary.initial_workstream_id.clone())
-                .flatten()
-                .map(|workstream_id| PendingTracking {
-                    workstream_id,
-                    native_id: root_agent_session_id.clone(),
-                }),
+            pending_tracking: (summary.session_id.is_none()
+                && !summary.initial_workstream_ids.is_empty())
+            .then(|| PendingTracking {
+                workstream_ids: summary.initial_workstream_ids.clone(),
+                native_id: root_agent_session_id.clone(),
+            }),
             summary: summary.clone(),
             root_agent_session_id,
             identity_bridge,
@@ -749,8 +748,8 @@ pub struct EmbeddedTarget<'a> {
     /// registry entry starts unbound and binds when its native identity is
     /// available in the ingested Session store.
     pub session_id: Option<&'a str>,
-    /// New launches assign this task once; Resume reads its current owner.
-    pub initial_workstream_id: Option<&'a str>,
+    /// New launches assign these tasks once; Resume preserves current tracking.
+    pub initial_workstream_ids: &'a [String],
     /// Prespecified ID for NEW, or the known native ID for Resume. Future
     /// Agent events replace this identity when its TUI switches conversations.
     pub root_agent_session_id: Option<&'a str>,
@@ -796,7 +795,7 @@ pub fn spawn_embedded(
     let summary = TerminalSummary {
         terminal_id: terminal_id.clone(),
         session_id: target.session_id.map(str::to_string),
-        initial_workstream_id: target.initial_workstream_id.map(str::to_string),
+        initial_workstream_ids: target.initial_workstream_ids.to_vec(),
         identity_revision: 0,
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
@@ -883,7 +882,7 @@ mod tests {
         EmbeddedTarget {
             registry,
             session_id: Some(session),
-            initial_workstream_id: None,
+            initial_workstream_ids: &[],
             root_agent_session_id: None,
             agent: Agent::Codex,
         }
@@ -949,7 +948,7 @@ mod tests {
             summary: TerminalSummary {
                 terminal_id: terminal_id.clone(),
                 session_id: session_id.map(str::to_string),
-                initial_workstream_id: owner.map(str::to_string),
+                initial_workstream_ids: owner.into_iter().map(str::to_string).collect(),
                 identity_revision: 0,
                 agent,
                 cwd: Some(fixture_cwd()),
@@ -960,7 +959,7 @@ mod tests {
             },
             root_agent_session_id: native_id.map(str::to_string),
             pending_tracking: owner.map(|owner| PendingTracking {
-                workstream_id: owner.into(),
+                workstream_ids: vec![owner.into()],
                 native_id: native_id.map(str::to_string),
             }),
             identity_bridge: None,
@@ -1109,9 +1108,8 @@ mod tests {
                     .attach(&terminal)
                     .unwrap()
                     .summary
-                    .initial_workstream_id
-                    .as_deref(),
-                None
+                    .initial_workstream_ids,
+                Vec::<String>::new()
             );
             assert!(crate::search::search(&db, "Initialtask", 50)
                 .unwrap()
@@ -1127,7 +1125,7 @@ mod tests {
             let current = registry
                 .report_native_identity(&db, &terminal, &native_event("native-b"))
                 .unwrap();
-            assert_eq!(current.initial_workstream_id.as_deref(), None);
+            assert_eq!(current.initial_workstream_ids, Vec::<String>::new());
             let c = ingested_native(&db, agent, "native-c");
             registry.report_native_identity(&db, &terminal, &native_event("native-c"));
             assert_eq!(owner(&db, &c), None);
@@ -1305,9 +1303,8 @@ mod tests {
                 .attach(&terminal)
                 .unwrap()
                 .summary
-                .initial_workstream_id
-                .as_deref(),
-            None
+                .initial_workstream_ids,
+            Vec::<String>::new()
         );
         let terminal = identity_terminal_with_owner(
             &registry,
@@ -1322,7 +1319,7 @@ mod tests {
         registry.bind_discovered(&db);
         let current = registry.attach(&terminal).unwrap().summary;
         assert_eq!(current.session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(current.initial_workstream_id, None);
+        assert_eq!(current.initial_workstream_ids, Vec::<String>::new());
         assert_eq!(owner(&db, &session), None);
     }
 
@@ -1410,12 +1407,13 @@ mod tests {
         let registry = registry();
         let db = binding_db();
         let task = selected_task(&db, "Actualspawn");
+        let second_task = selected_task(&db, "Secondtask");
         let outcome = spawn_embedded(
             &sh("exit 0"),
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
-                initial_workstream_id: Some(&task),
+                initial_workstream_ids: &[task.clone(), second_task.clone()],
                 root_agent_session_id: Some("spawned-native"),
                 agent: Agent::Pi,
             },
@@ -1424,8 +1422,8 @@ mod tests {
         let id = outcome.terminal_id.unwrap();
         let initial = registry.attach(&id).unwrap().summary;
         assert_eq!(
-            initial.initial_workstream_id.as_deref(),
-            Some(task.as_str())
+            initial.initial_workstream_ids,
+            vec![task.clone(), second_task.clone()]
         );
         assert!(initial.session_id.is_none());
         until("spawned terminal to exit", || {
@@ -1437,7 +1435,17 @@ mod tests {
         let session = ingested_native(&db, Agent::Pi, "spawned-native");
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
-        assert_eq!(owner(&db, &session).as_deref(), Some(task.as_str()));
+        assert_eq!(
+            db.get_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .tracked_workstream_ids
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [task, second_task]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
         assert_eq!(
             registry.attach(&id).unwrap().summary.session_id.as_deref(),
             Some(session.id.as_str())
@@ -2063,7 +2071,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: None,
-                initial_workstream_id: None,
+                initial_workstream_ids: &[],
                 root_agent_session_id: Some("root-born-identity"),
                 agent: Agent::Pi,
             },
@@ -2114,7 +2122,7 @@ mod tests {
             &EmbeddedTarget {
                 registry: &registry,
                 session_id: Some("s-live"),
-                initial_workstream_id: None,
+                initial_workstream_ids: &[],
                 root_agent_session_id: None,
                 agent: Agent::Codex,
             },

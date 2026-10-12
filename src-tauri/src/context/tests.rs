@@ -179,6 +179,26 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     let f = ServiceFixture::new();
     let home = f.home();
     let id = f.add_session(50, 6000);
+    extractor::ExtractionSettings {
+        agent: "codex".into(),
+        runtime: crate::agent_runtime::AgentRuntimeOverrides {
+            model: Some("extraction-model".into()),
+            effort: Some("high".into()),
+            provider: None,
+        },
+    }
+    .save(f.db())
+    .unwrap();
+    crate::agent_runtime::set_runtime_overrides(
+        f.db(),
+        Agent::Codex,
+        &crate::agent_runtime::AgentRuntimeOverrides {
+            model: Some("unrelated-global-model".into()),
+            effort: Some("low".into()),
+            provider: None,
+        },
+    )
+    .unwrap();
     f.db()
         .write()
         .execute(
@@ -203,7 +223,10 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     .unwrap();
     let long = "**结论**：".repeat(500);
     let mut calls = 0;
-    let mut runner = |_: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |cli: &CliExtractor, prompt: &str, dir: &Path| {
+        assert_eq!(cli.agent, Agent::Codex);
+        assert_eq!(cli.opts.model.as_deref(), Some("extraction-model"));
+        assert_eq!(cli.opts.effort.as_deref(), Some("high"));
         calls += 1;
         assert_eq!(dir, fixed);
         assert!(!dir.join(format!("session-{id}.result.json")).exists());
@@ -714,7 +737,12 @@ fn unconfigured_agent_never_invokes_cli_and_logs_only_operation_metadata() {
             [&id],
         )
         .unwrap();
-    f.db().set_setting("assistant.agent", "none").unwrap();
+    f.db()
+        .set_setting(
+            "context.extraction",
+            r#"{"agent":"none","runtime":{"model":null,"provider":null,"effort":null}}"#,
+        )
+        .unwrap();
     let mut never = |_: &CliExtractor, _: &str, _: &Path| panic!("no configured Agent");
     assert_eq!(
         code(extract_session(f.db(), &id, Some(&home), false, &mut never)),

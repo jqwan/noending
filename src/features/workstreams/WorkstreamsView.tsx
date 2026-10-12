@@ -1,4 +1,4 @@
-import { useViewState, useViewScroll } from "../../hooks/useViewState";
+import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -30,9 +30,9 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
 }) {
   const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
   const [query, setQuery] = useViewState("workstreams.query", "");
-  const [sort, setSort] = useViewState<SortKey>("workstreams.sort", "recent");
+  const [sort, setSort] = useViewPreference<SortKey>("workstreams.sort", "recent", preferenceValues("recent", "created", "name"));
   const [projectId, setProjectId] = useViewState("workstreams.projectId", "all");
-  const [viewMode, setViewMode] = useViewState<"cards" | "list">("workstreams.viewMode", "cards");
+  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("workstreams.viewMode", "cards", preferenceValues("cards", "list"));
   const [creatingWs, setCreatingWs] = useState(false);
   const archivedMode = scope === "archived";
   const [bulkPurgeOpen, setBulkPurgeOpen] = useState(false);

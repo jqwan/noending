@@ -174,12 +174,12 @@ export const api = {
   previewSummaryPrompt: (kind: SummaryPromptKind, templates: SummaryPromptTemplates) =>
     invoke<string>("preview_summary_prompt", { kind, templates }),
 
-  /** 新建 Session 可预选一个跟踪任务（`null` = standalone）。 */
-  prepareNewSession: (agent: Agent, initialWorkstreamId: string | null, cwd?: string, runtime?: AgentRuntimeOverrides) =>
+  /** 新建 Session 可预选多个跟踪任务（空数组 = 不跟踪）。 */
+  prepareNewSession: (agent: Agent, initialWorkstreamIds: string[], cwd?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", {
       agent,
       runtime: runtime ?? null,
-      initialWorkstreamId,
+      initialWorkstreamIds,
       cwd: cwd ?? null,
     }),
   launchPrepared: (preparedId: string) =>
@@ -194,11 +194,11 @@ export const api = {
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
    *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, initialWorkstreamId: string | null, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
+  launchEmbeddedNew: (agent: Agent, initialWorkstreamIds: string[], cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
       runtime: runtime ?? null,
-      initialWorkstreamId,
+      initialWorkstreamIds,
       cwd: cwd ?? null,
       initialMessage: initialMessage ?? null,
     }),
@@ -249,6 +249,10 @@ export const api = {
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
   setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
+
+  getExtractionSettings: () => invoke<import("./types").ExtractionSettings>("get_extraction_settings"),
+  setExtractionSettings: (settings: import("./types").ExtractionSettings) =>
+    invoke<import("./types").ExtractionSettings>("set_extraction_settings", { settings }),
 
   getAgentRuntimeSettings: (agent: Agent) =>
     invoke<AgentRuntimeSettings>("get_agent_runtime_settings", { agent }),

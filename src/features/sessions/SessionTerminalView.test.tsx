@@ -159,7 +159,7 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
   return {
     terminal_id: "t-1",
     session_id: "s1",
-    initial_workstream_id: null,
+    initial_workstream_ids: [],
     identity_revision: 1,
     agent: "codex",
     cwd: "/tmp/work",

@@ -99,7 +99,7 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
         .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
-    assert!(prepared.initial_workstream_id.is_none());
+    assert!(prepared.initial_workstream_ids.is_empty());
     assert!(prepared.cwd.is_none());
     assert!(prepared.runtime.is_default());
 
@@ -170,7 +170,13 @@ fn capture_embedded_new_message(
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
-    assert_eq!(target.initial_workstream_id, Some("first-message-task"));
+    assert_eq!(
+        target.initial_workstream_ids,
+        &[
+            "first-message-task".to_string(),
+            "second-message-task".to_string()
+        ]
+    );
     assert_eq!(
         target.root_agent_session_id.is_some(),
         matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
@@ -216,13 +222,29 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
             &[PROJECT.into()],
         )
         .unwrap();
+        db.upsert_workstream(&support::workstream(
+            "second-message-task".into(),
+            "Second task",
+        ))
+        .unwrap();
+        noending::workspace::workstream::set_workstream_projects(
+            &db,
+            "second-message-task",
+            &[PROJECT.into()],
+        )
+        .unwrap();
         let mut prepared = launcher
-            .prepare_new_in(
+            .prepare_new_with_runtime_in(
                 &db,
                 agent,
-                Some("first-message-task"),
+                &[
+                    "second-message-task".into(),
+                    "first-message-task".into(),
+                    "first-message-task".into(),
+                ],
                 Some(&cwd),
                 &workspace,
+                None,
             )
             .unwrap();
         assert!(prepared.initial_message.is_none());
@@ -834,7 +856,7 @@ fn reconnect_fixture(
         &noending::terminal::EmbeddedTarget {
             registry,
             session_id: Some(sid),
-            initial_workstream_id: None,
+            initial_workstream_ids: &[],
             root_agent_session_id: Some(&session.root_agent_session_id),
             agent: session.agent,
         },

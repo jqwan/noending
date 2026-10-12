@@ -464,7 +464,7 @@ export interface PreparedLaunch {
   agent: Agent;
   session_id?: string | null;
   /** 新建时预选的跟踪任务；首次原生绑定后消费。 */
-  initial_workstream_id: string | null;
+  initial_workstream_ids: string[];
   cwd?: string | null;
   /** `cwd` 由哪一层决定，以及发生 fallback 时的说明。 */
   cwd_resolution: CwdResolution;
@@ -495,7 +495,7 @@ export interface TerminalSummary {
   /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
   /** 首次绑定前的跟踪意图，绑定后清空。只在内存中保存。 */
-  initial_workstream_id: string | null;
+  initial_workstream_ids: string[];
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   agent: Agent;
@@ -543,6 +543,11 @@ export interface AgentRuntimeOverrides {
   model: string | null;
   provider: string | null;
   effort: string | null;
+}
+
+export interface ExtractionSettings {
+  agent: "codex" | "claude_code" | "pi" | "none";
+  runtime: AgentRuntimeOverrides;
 }
 
 /** dynamic = 来自 Agent CLI；suggested = NoEnding 建议值；unavailable = 获取失败。 */

@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.mocked(api.restoreProject).mockReset();
   vi.mocked(api.deleteProjectPermanently).mockReset();
   clearProjectCardsCache();
-  viewState.clear();
+  viewState.clear(); localStorage.clear();
   vi.mocked(api.listProjectCards).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
 });
@@ -165,7 +165,7 @@ describe("Projects Board", () => {
     expect(screen.queryByText("Normal Directory")).toBeNull();
   });
 
-  it("toggles between card and list view", async () => {
+  it("toggles between card and list view and restores the choice after a restart", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([card()]);
     const { container } = render(<ProjectsView navigate={navigate} />);
     await screen.findByText("NoEnding");
@@ -177,9 +177,16 @@ describe("Projects Board", () => {
     expect(container.querySelector(".project-list")).toBeTruthy();
     expect(container.querySelector(".board-grid")).toBeNull();
 
+    cleanup();
+    viewState.clear();
+    const reopened = render(<ProjectsView navigate={navigate} />);
+    await screen.findByText("NoEnding");
+    expect(reopened.container.querySelector(".project-list")).toBeTruthy();
+    expect(reopened.container.querySelector(".board-grid")).toBeNull();
+
     fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
-    expect(container.querySelector(".board-grid")).toBeTruthy();
-    expect(container.querySelector(".project-list")).toBeNull();
+    expect(reopened.container.querySelector(".board-grid")).toBeTruthy();
+    expect(reopened.container.querySelector(".project-list")).toBeNull();
   });
 
   it("add_project_button_opens_picker_and_calls_add_project_path", async () => {

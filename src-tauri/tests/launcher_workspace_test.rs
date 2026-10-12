@@ -531,7 +531,10 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         assert_eq!(prepared.cwd_resolution.source, source);
         assert_eq!(prepared.cwd_resolution.fallback, fallback);
         assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
-        assert_eq!(prepared.initial_workstream_id, owner);
+        assert_eq!(
+            prepared.initial_workstream_ids,
+            owner.into_iter().collect::<Vec<_>>()
+        );
         let result = launcher
             .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open, None)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));
@@ -566,7 +569,7 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
         provider: None,
     };
     let prepared = l
-        .prepare_new_with_runtime_in(&db, Agent::Codex, None, None, &ws, Some(&custom))
+        .prepare_new_with_runtime_in(&db, Agent::Codex, &[], None, &ws, Some(&custom))
         .unwrap();
     assert_eq!(
         get_runtime_overrides(&db, Agent::Codex)
@@ -599,7 +602,7 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
         .prepare_new_with_runtime_in(
             &db,
             Agent::Codex,
-            None,
+            &[],
             None,
             &ws,
             Some(&AgentRuntimeOverrides::default()),
@@ -650,4 +653,71 @@ fn disabling_new_launches_rejects_new_and_prepared_new_but_allows_resume() {
     set_launch_enabled(&db, Agent::Codex, true).unwrap();
     assert!(l.prepare_new_in(&db, Agent::Codex, None, None, &ws).is_ok());
     assert!(set_launch_enabled(&db, Agent::Dsh, true).is_err());
+}
+
+#[test]
+fn every_selected_task_is_validated_and_part_of_the_frozen_launch() {
+    let db = open_db("multiple-launch-tasks");
+    seed_installation(&db, Agent::Codex);
+    let cwd = real_dir("multiple-launch-tasks", "project");
+    let a = ws_with_paths(&db, "First task", &[cwd.clone()]);
+    let b = ws_with_paths(&db, "Second task", &[cwd.clone()]);
+    let launcher = launcher_in("multiple-launch-tasks");
+    let workspace = LaunchWorkspace::default();
+    let prepared = launcher
+        .prepare_new_with_runtime_in(
+            &db,
+            Agent::Codex,
+            &[a.clone(), b.clone()],
+            Some(&cwd),
+            &workspace,
+            None,
+        )
+        .unwrap();
+    // Changing any selected task invalidates the frozen preview.
+    db.write()
+        .execute(
+            "UPDATE workstreams SET description='changed' WHERE id=?1",
+            [&b],
+        )
+        .unwrap();
+    let err = launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+        .unwrap_err();
+    assert!(is_stale(&err.to_string()));
+    let prepared = launcher
+        .prepare_new_with_runtime_in(
+            &db,
+            Agent::Codex,
+            &[a.clone(), b.clone()],
+            Some(&cwd),
+            &workspace,
+            None,
+        )
+        .unwrap();
+    // Removing one task from the project refuses launch even if another remains eligible.
+    noending::workspace::workstream::set_workstream_projects(&db, &b, &[]).unwrap();
+    assert!(launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+        .is_err());
+    assert!(launcher
+        .prepare_new_with_runtime_in(
+            &db,
+            Agent::Codex,
+            &[a.clone(), b.clone()],
+            Some(&cwd),
+            &workspace,
+            None
+        )
+        .is_err());
+    noending::workspace::workstream::set_workstream_projects(&db, &b, &[PROJECT.into()]).unwrap();
+    db.write()
+        .execute(
+            "UPDATE workstreams SET visibility='archived' WHERE id=?1",
+            [&b],
+        )
+        .unwrap();
+    assert!(launcher
+        .prepare_new_with_runtime_in(&db, Agent::Codex, &[a, b], Some(&cwd), &workspace, None)
+        .is_err());
 }

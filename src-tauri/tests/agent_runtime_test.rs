@@ -10,7 +10,7 @@ use noending::agent_runtime::{
 };
 use noending::domain::Agent;
 use noending::storage::{new_id, Db};
-use noending::sync::extractor::CliExtractor;
+use noending::sync::extractor::{CliExtractor, ExtractionSettings};
 
 fn temp_db() -> Db {
     let dir = std::env::temp_dir().join(format!("noending-runtime-test-{}", new_id()));
@@ -229,65 +229,88 @@ fn serialized_vocabulary_is_the_ui_contract() {
 }
 
 #[test]
-fn extractor_names_what_was_actually_passed() {
-    let db = temp_db();
-    assert_eq!(
-        CliExtractor::try_for_agent(&db, "codex")
-            .unwrap()
-            .unwrap()
-            .name(),
-        "cli:codex:agent-default",
-        "no override must read as Agent default, never as a model NoEnding chose"
-    );
-
+fn extraction_settings_persist_independently_and_name_the_actual_runtime() {
+    let path = std::env::temp_dir()
+        .join(format!("noending-extraction-{}", new_id()))
+        .join("test.db");
+    let db = Db::open(&path).unwrap();
     set_runtime_overrides(
         &db,
         Agent::Codex,
-        &overrides(Some("gpt-5.6-luna"), None, Some("low")),
+        &overrides(Some("session-only"), None, Some("low")),
     )
     .unwrap();
-    let name = CliExtractor::try_for_agent(&db, "codex")
-        .unwrap()
-        .unwrap()
-        .name();
-    assert_eq!(name, "cli:codex:override:model=gpt-5.6-luna,effort=low");
-    // The Preview badge and the launch audit both render this one string.
     assert_eq!(
-        get_runtime_overrides(&db, Agent::Codex)
+        CliExtractor::try_from_settings(&db)
             .unwrap()
-            .intent_summary(),
-        "model=gpt-5.6-luna,effort=low"
+            .unwrap()
+            .name(),
+        "cli:codex:agent-default"
     );
-    assert!(
-        CliExtractor::try_for_agent(&db, "none").unwrap().is_none(),
-        "Assistant without an Agent stays retrieval-only"
+    let settings = ExtractionSettings {
+        agent: "codex".into(),
+        runtime: overrides(Some("summary-model"), None, Some("high")),
+    };
+    settings.save(&db).unwrap();
+    assert_eq!(
+        CliExtractor::try_from_settings(&db)
+            .unwrap()
+            .unwrap()
+            .name(),
+        "cli:codex:override:model=summary-model,effort=high"
     );
+    drop(db);
+    // Reopening the same database restores the dedicated configuration.
+    let reopened = Db::open(&path).unwrap();
+    let saved = ExtractionSettings::from_settings(&reopened).unwrap();
+    assert_eq!(saved.agent, "codex");
+    assert_eq!(saved.runtime.model.as_deref(), Some("summary-model"));
+    assert_eq!(saved.runtime.effort.as_deref(), Some("high"));
+    assert_eq!(
+        get_runtime_overrides(&reopened, Agent::Codex).unwrap(),
+        overrides(Some("session-only"), None, Some("low"))
+    );
+    ExtractionSettings {
+        agent: "none".into(),
+        runtime: Default::default(),
+    }
+    .save(&reopened)
+    .unwrap();
+    assert!(CliExtractor::try_from_settings(&reopened)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
-fn an_invalid_override_errors_for_the_assistant_instead_of_downgrading() {
+fn invalid_extraction_settings_are_rejected_without_overwriting_saved_settings() {
     let db = temp_db();
-    db.set_setting("agent.runtime.claude_code", r#"{"provider":"openai"}"#)
-        .unwrap();
-    // an invalid override must surface, not downgrade
-    assert!(CliExtractor::try_for_agent(&db, "claude_code").is_err());
-}
-
-#[test]
-fn a_corrupt_assistant_agent_is_not_mistaken_for_retrieval_only() {
-    let db = temp_db();
-    db.set_setting("assistant.agent", "no_such_agent").unwrap();
-    // `none` is the ONLY value that means "no model on purpose".
-    assert!(CliExtractor::try_for_agent(&db, "none").unwrap().is_none());
-    let err = CliExtractor::try_for_agent(&db, "no_such_agent")
-        .err()
-        .expect("an unresolvable Agent must not become retrieval-only");
-    assert!(
-        err.to_string().contains("no_such_agent"),
-        "names the value: {err}"
-    );
-    assert!(
-        CliExtractor::try_from_settings(&db).is_err(),
-        "Assistant reports an unresolvable Agent instead of quietly answering from retrieval"
-    );
+    ExtractionSettings::default().save(&db).unwrap();
+    for settings in [
+        ExtractionSettings {
+            agent: "claude_code".into(),
+            runtime: overrides(None, Some("openai"), None),
+        },
+        ExtractionSettings {
+            agent: "antigravity".into(),
+            runtime: Default::default(),
+        },
+        ExtractionSettings {
+            agent: "unknown".into(),
+            runtime: Default::default(),
+        },
+    ] {
+        assert!(settings.save(&db).is_err());
+        assert_eq!(
+            ExtractionSettings::from_settings(&db).unwrap().agent,
+            "codex"
+        );
+    }
+    db.set_setting(
+        "context.extraction",
+        r#"{"agent":"no_such_agent","runtime":{"model":null,"provider":null,"effort":null}}"#,
+    )
+    .unwrap();
+    assert!(CliExtractor::try_from_settings(&db).is_err());
+    db.set_setting("context.extraction", "not json").unwrap();
+    assert!(CliExtractor::try_from_settings(&db).is_err());
 }

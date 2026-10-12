@@ -8,7 +8,7 @@ import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { capsOf, FORMAT_CAPS } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
 import { openSessionTerminal, useAgentStatus } from "../features/sessions/continueDesktop";
-import { useViewState } from "../hooks/useViewState";
+import { useViewPreference, preferenceValues, booleanPreference, booleanRecordPreference } from "../hooks/useViewState";
 import { preferredTerminal, sessionDestination, terminalDestination } from "../features/sessions/sessionNavigation";
 
 export type SidebarFilterKey = "recent5Days" | "unarchived" | "canContinue";
@@ -18,6 +18,10 @@ export const SIDEBAR_FILTER_OPTIONS: Array<{ key: SidebarFilterKey; label: strin
   { key: "unarchived", label: "未归档" },
   { key: "canContinue", label: "可终端继续" },
 ];
+
+function isSidebarFilters(value: unknown): value is SidebarFilterKey[] {
+  return Array.isArray(value) && value.every(item => SIDEBAR_FILTER_OPTIONS.some(option => option.key === item));
+}
 
 export type SidebarGroupBy = "project" | "agent" | "none";
 
@@ -553,8 +557,8 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [groupBy, setGroupBy] = useViewState<SidebarGroupBy>(`${statePrefix}.recent.groupBy.v2`, "project");
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [groupBy, setGroupBy] = useViewPreference<SidebarGroupBy>(`${statePrefix}.recent.groupBy.v2`, "project", preferenceValues("project", "agent", "none"));
+  const [collapsedGroups, setCollapsedGroups] = useViewPreference<Record<string, boolean>>(`${statePrefix}.recent.collapsedGroups`, {}, booleanRecordPreference);
   const [expandedGroupSessions, setExpandedGroupSessions] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
@@ -594,10 +598,11 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   useEffect(() => onEvent(EVT_TERMINALS, refreshSessions), [refreshSessions]);
   useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
 
-  const [filters, setFilters] = useViewState<SidebarFilterKey[]>(`${statePrefix}.recent.filters`, []);
-  const [showSessionIcons, setShowSessionIcons] = useViewState<boolean>(
+  const [filters, setFilters] = useViewPreference<SidebarFilterKey[]>(`${statePrefix}.recent.filters`, [], isSidebarFilters);
+  const [showSessionIcons, setShowSessionIcons] = useViewPreference<boolean>(
     `${statePrefix}.recent.showSessionIcons`,
     true,
+    booleanPreference,
   );
   const [filterOpen, setFilterOpen] = useState(false);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -639,7 +644,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   }, [projects]);
 
   const [pinnedSessionIds, setPinnedSessionIds] = useState<string[]>(getStoredPinnedSessions);
-  const [pinnedCollapsed, setPinnedCollapsed] = useViewState<boolean>(`${statePrefix}.pinned.collapsed`, false);
+  const [pinnedCollapsed, setPinnedCollapsed] = useViewPreference<boolean>(`${statePrefix}.pinned.collapsed`, false, booleanPreference);
 
   const isSessionPinned = useCallback(
     (s: { id: string; sessionId: string | null }) => {
@@ -666,7 +671,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     });
   }, []);
 
-  const [sortBy, setSortBy] = useViewState<SidebarSortKey>(`${statePrefix}.recent.sortBy`, "createdAt");
+  const [sortBy, setSortBy] = useViewPreference<SidebarSortKey>(`${statePrefix}.recent.sortBy`, "createdAt", preferenceValues("createdAt", "updatedAt"));
 
   const currentSortOpt = useMemo(() => {
     return SIDEBAR_SORT_OPTIONS.find((opt) => opt.key === sortBy) ?? SIDEBAR_SORT_OPTIONS[0];
@@ -704,9 +709,11 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     ).filter((group) => group.sessions.length > 0);
   }, [sessions, terminals, route, filters, groupBy, sortBy, projectMap, isSessionPinned]);
 
+  const collapseKey = (groupId: string) => `${groupBy}:${groupId}`;
   const toggleGroup = (groupId: string) => {
+    const key = collapseKey(groupId);
     setCollapsedGroups((prev) => {
-      const nextCollapsed = !prev[groupId];
+      const nextCollapsed = !prev[key];
       if (nextCollapsed) {
         setExpandedGroupSessions((exp) => {
           if (!exp[groupId]) return exp;
@@ -717,27 +724,26 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       }
       return {
         ...prev,
-        [groupId]: nextCollapsed,
+        [key]: nextCollapsed,
       };
     });
   };
 
   const allGroupsCollapsed =
     sessionGroups.length > 0 &&
-    sessionGroups.every((g) => Boolean(collapsedGroups[g.id]));
+    sessionGroups.every((g) => Boolean(collapsedGroups[collapseKey(g.id)]));
 
   const toggleAllGroups = () => {
-    if (allGroupsCollapsed) {
-      setCollapsedGroups({});
-      setExpandedGroupSessions({});
-    } else {
-      const next: Record<string, boolean> = {};
-      for (const g of sessionGroups) {
-        next[g.id] = true;
+    setCollapsedGroups(prev => {
+      const next = { ...prev };
+      for (const group of sessionGroups) {
+        const key = collapseKey(group.id);
+        if (allGroupsCollapsed) delete next[key];
+        else next[key] = true;
       }
-      setCollapsedGroups(next);
-      setExpandedGroupSessions({});
-    }
+      return next;
+    });
+    setExpandedGroupSessions({});
   };
 
   return (
@@ -967,7 +973,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           </div>
         ) : (
           sessionGroups.map((group) => {
-            const isCollapsed = Boolean(collapsedGroups[group.id]);
+            const isCollapsed = Boolean(collapsedGroups[collapseKey(group.id)]);
             const isUnassignedGroup =
               group.id === "__unassigned_project__";
             const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;

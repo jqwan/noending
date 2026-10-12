@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import PreferenceList from "../preferences/PreferenceList";
 import SummaryPromptSettings from "./SummaryPromptSettings";
+import ExtractionRuntimeSettings from "./ExtractionRuntimeSettings";
 import PageHeader from "../../layout/PageHeader";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
@@ -24,6 +25,7 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
       />
       <div className="settings-pane" style={{ marginTop: 18 }}>
         <AppearanceSettings />
+        <ExtractionRuntimeSettings />
         <SummaryPromptSettings />
         <PreferenceList projectId={null} />
         <ContextDiagnosticsSettings />

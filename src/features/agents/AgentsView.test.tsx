@@ -1,3 +1,4 @@
+import { viewState } from "../../hooks/useViewState";
 import { clearRuntimeCatalog } from "./useAgentRuntime";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +116,8 @@ const mockIngestStatus: IngestTaskStatus = {
 };
 
 beforeEach(() => {
+  viewState.clear();
+  localStorage.clear();
   clearRuntimeCatalog();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
   vi.mocked(api.setAgentRuntimeOverrides).mockReset().mockImplementation(async (agent, overrides) => ({ ...runtimeFixture(agent), overrides }));
@@ -281,7 +284,7 @@ describe("AgentsView", () => {
     expect(api.setAgentLaunchEnabled).not.toHaveBeenCalled();
   });
 
-  it("displays supported models and effort levels directly", async () => {
+  it("restores the catalog after restart, replaces successful results and keeps them on failure", async () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
     expect(await screen.findByText("模型与思考等级")).toBeTruthy();
     expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
@@ -289,6 +292,26 @@ describe("AgentsView", () => {
     await screen.findByText(/来自 CLI · 1 个模型/);
     expect(await screen.findByText("Listed")).toBeTruthy();
     expect(screen.getByText(/思考档位：low/)).toBeTruthy();
+    cleanup();
+    viewState.clear(); // Restart memory, retain persistent preferences.
+    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    expect(await screen.findByText("Listed")).toBeTruthy();
+    expect(api.refreshAgentRuntimeOptions).toHaveBeenCalledTimes(1);
+
+    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "replacement", display_name: "Replacement", provider: null, supported_efforts: ["high"] }] });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await screen.findByText("Replacement");
+    expect(screen.queryByText("Listed")).toBeNull();
+    expect(screen.getByText(/思考档位：high/)).toBeTruthy();
+
+    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "unavailable", models: [], warnings: ["CLI offline"] });
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Error: CLI offline");
+    expect(screen.getByText("Replacement")).toBeTruthy();
+    cleanup();
+    viewState.clear();
+    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    expect(await screen.findByText("Replacement")).toBeTruthy();
   });
 
   it("triggers incremental scan for a single agent from the card action", async () => {

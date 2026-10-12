@@ -1,5 +1,5 @@
 import Icon from "../../components/Icon";
-import { useViewState, useViewScroll } from "../../hooks/useViewState";
+import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -61,11 +61,11 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
   const [cards, setCards] = useState<ProjectCardData[] | null>(cachedProjectCards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState("projects.query", "");
-  const [filter, setFilter] = useViewState<FilterKey>("projects.filter", "all");
-  const [kindFilter, setKindFilter] = useViewState<ProjectKindFilter>("projects.kindFilter", "all");
+  const [filter, setFilter] = useViewPreference<FilterKey>("projects.filter", "all", preferenceValues("all", "ok", "missing"));
+  const [kindFilter, setKindFilter] = useViewPreference<ProjectKindFilter>("projects.kindFilter", "all", preferenceValues("all", "git", "single_directory", "directory_group"));
   const effectiveKindFilter = kindFilter === "all" || kindFilter in projectKindLabels ? kindFilter : "all";
-  const [sort, setSort] = useViewState<SortKey>("projects.sort", "recent");
-  const [viewMode, setViewMode] = useViewState<"cards" | "list">("projects.viewMode", "cards");
+  const [sort, setSort] = useViewPreference<SortKey>("projects.sort", "recent", preferenceValues("recent", "name", "paths"));
+  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("projects.viewMode", "cards", preferenceValues("cards", "list"));
 
   const refresh = useCallback(() => {
     api

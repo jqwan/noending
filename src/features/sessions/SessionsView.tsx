@@ -1,4 +1,4 @@
-import { useViewState, useViewScroll } from "../../hooks/useViewState";
+import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -48,10 +48,12 @@ export default function SessionsView({ navigate, scope }: {
   const [sources, setSources] = useState<IngestSource[] | null>(cachedSources);
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useViewState(`${statePrefix}.query`, "");
-  const [agent, setAgent] = useViewState<"all" | Agent>(`${statePrefix}.agent`, "all");
+  const [agent, setAgent] = useViewPreference<"all" | Agent>(
+    `${statePrefix}.agent`, "all", preferenceValues("all", ...Object.keys(AGENT_LABELS) as Agent[]),
+  );
   const [projectId, setProjectId] = useViewState(`${statePrefix}.projectId`, "all");
   const [wsFilter, setWsFilter] = useViewState(`${statePrefix}.wsFilter`, "all");
-  const [viewMode, setViewMode] = useViewState<"cards" | "list">(`${statePrefix}.viewMode`, "cards");
+  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">(`${statePrefix}.viewMode`, "cards", preferenceValues("cards", "list"));
   const [archiveSessionId, setArchiveSessionId] = useState<string | null>(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [unarchiveBusy, setUnarchiveBusy] = useState(false);

@@ -46,7 +46,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   return {
     terminal_id: "t-1",
     session_id: null,
-    initial_workstream_id: null, identity_revision: 0,
+    initial_workstream_ids: [], identity_revision: 0,
     agent: "codex",
     cwd: "/repo/x",
     created_at: new Date().toISOString(),
@@ -450,8 +450,14 @@ describe("Sidebar 最近活动", () => {
     fireEvent.click(groupHeader);
     expect(screen.queryByText("可折叠会话")).toBeNull();
 
-    // 再次点击展开
-    fireEvent.click(groupHeader);
+    cleanup();
+    viewState.clear();
+    renderSidebar();
+    const restoredHeader = await screen.findByRole("button", { name: /折叠测试任务/ });
+    expect(restoredHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("可折叠会话")).toBeNull();
+
+    fireEvent.click(restoredHeader);
     expect(screen.getByText("可折叠会话")).toBeTruthy();
   });
 
@@ -702,15 +708,21 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("已置顶会话")).toBeNull();
     expect(screen.queryByTitle("未知任务 (1)")).toBeNull();
 
-    // Click to expand again
-    fireEvent.click(pinnedHeader);
-    expect(pinnedHeader.getAttribute("aria-expanded")).toBe("true");
+    cleanup();
+    viewState.clear();
+    renderSidebar();
+    const restoredPinnedHeader = await screen.findByTitle("置顶 (1)");
+    expect(restoredPinnedHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("已置顶会话")).toBeNull();
+
+    fireEvent.click(restoredPinnedHeader);
+    expect(restoredPinnedHeader.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getAllByText("已置顶会话")).toHaveLength(1);
   });
 
   it("excludes pinned terminal-only rows from the regular list and restores terminal navigation on unpin", async () => {
     localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["terminal:t-1"]));
-    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", initial_workstream_id: "ws-1" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", initial_workstream_ids: ["ws-1"] })]);
     vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "启动任务" })]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
 
@@ -1070,4 +1082,31 @@ it("shows assistant and ordinary project sessions together with their terminals"
   expect(screen.getByText("普通会话")).toBeTruthy();
   fireEvent.click(screen.getByText("助手原生会话"));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "assistant-bound", initialSessionId: "assistant-session" }));
+});
+
+
+it("restores sidebar grouping, filters, sorting and display preferences after a restart", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([
+    session({ id: "active", title: "未归档内容" }),
+    session({ id: "archived", title: "归档内容", archived_at: new Date().toISOString() }),
+  ]);
+  renderSidebar();
+  await screen.findByText("归档内容");
+  switchGroupBy("按代理归类");
+  fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "未归档" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "显示会话图标" }));
+  cleanup();
+  viewState.clear();
+
+  renderSidebar();
+  await screen.findByText("未归档内容");
+  expect(screen.queryByText("归档内容")).toBeNull();
+  screen.getByRole("button", { name: "会话归类：按代理归类" });
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
+  expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("menuitemradio", { name: "最近更新" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("menuitemcheckbox", { name: "显示会话图标" }).getAttribute("aria-checked")).toBe("false");
 });

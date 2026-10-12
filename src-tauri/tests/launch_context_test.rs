@@ -261,7 +261,7 @@ fn prepare_new_does_not_create_session_or_file() {
     // 1. PreparedLaunch captures the launch facts & fingerprint
     assert_eq!(prepared.mode, "new");
     assert_eq!(
-        prepared.initial_workstream_id.as_deref(),
+        prepared.initial_workstream_ids.first().map(String::as_str),
         Some(ws.id.as_str())
     );
     assert!(!prepared.state_fingerprint.is_empty());
@@ -297,10 +297,13 @@ fn prepare_resume_uses_current_owner_without_writing() {
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
-    assert_eq!(prepared.initial_workstream_id.as_deref(), None);
+    assert_eq!(
+        prepared.initial_workstream_ids.first().map(String::as_str),
+        None
+    );
     // ws2 is a different Workstream and is never adopted as the Owner.
     assert_ne!(
-        prepared.initial_workstream_id.as_deref(),
+        prepared.initial_workstream_ids.first().map(String::as_str),
         Some(ws2.id.as_str())
     );
 
@@ -374,7 +377,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             db,
             "new",
             None,
-            prepared.initial_workstream_id.as_deref(),
+            prepared.initial_workstream_ids.first().map(String::as_str),
             Agent::Codex,
             &LaunchWorkspace::default(),
             &prepared.cwd_resolution,

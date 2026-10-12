@@ -15,7 +15,8 @@ export default function RuntimeFields({ value, options, onChange, onDiscover, on
   const models = options.models.filter((m) => !value.provider || m.provider === value.provider);
   const matching = models.filter((m) => m.id === value.model);
   const selected = matching.length === 1 ? matching[0] : undefined;
-  const efforts = selected?.supported_efforts.length ? selected.supported_efforts : options.effort_levels;
+  const hasPerModelEfforts = options.models.some(model => model.supported_efforts.length > 0);
+  const efforts = selected && hasPerModelEfforts ? selected.supported_efforts : options.effort_levels;
   const change = (field: "model" | "provider" | "effort", raw: string) => {
     const next = { ...value, [field]: raw.trim() || null };
     if (field === "provider" && next.provider !== value.provider) {
@@ -25,7 +26,7 @@ export default function RuntimeFields({ value, options, onChange, onDiscover, on
     if (field === "model") {
       const matches = models.filter((m) => m.id === next.model);
       const model = matches.length === 1 ? matches[0] : undefined;
-      if (model?.supported_efforts.length && next.effort && !model.supported_efforts.includes(next.effort)) next.effort = null;
+      if (model && hasPerModelEfforts && next.effort && !model.supported_efforts.includes(next.effort)) next.effort = null;
     }
     onChange(next);
   };

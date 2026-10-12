@@ -143,8 +143,8 @@ it("displays running terminal state on the continue button when session has a li
   const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
   const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
   const terminals: TerminalSummary[] = [
-    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_id: null, identity_revision: 0 },
-    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", initial_workstream_id: null, identity_revision: 0 },
+    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_ids: [], identity_revision: 0 },
+    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", initial_workstream_ids: [], identity_revision: 0 },
   ];
   await renderCards(
     <SessionCards

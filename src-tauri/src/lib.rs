@@ -258,6 +258,8 @@ pub fn run() {
             commands::get_agent_runtime_settings,
             commands::set_agent_runtime_overrides,
             commands::refresh_agent_runtime_options,
+            commands::get_extraction_settings,
+            commands::set_extraction_settings,
             commands::assistant_workspace,
         ])
         .build(tauri::generate_context!())

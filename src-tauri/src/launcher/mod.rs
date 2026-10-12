@@ -146,8 +146,8 @@ pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    /// Optional initial tracking task for New; Resume does not carry a task.
-    pub initial_workstream_id: Option<String>,
+    /// Initial tracking tasks for New; Resume does not carry a task.
+    pub initial_workstream_ids: Vec<String>,
     /// The directory the Agent WILL start in — authoritative. Since
     /// the spawn step uses this value and nothing else: `launch_prepared` no
     /// longer re-reads `sessions.cwd`, because re-reading let background
@@ -239,14 +239,24 @@ impl SessionLauncher {
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
-        self.prepare_new_with_runtime_in(db, agent, initial_workstream_id, cwd, workspace, None)
+        self.prepare_new_with_runtime_in(
+            db,
+            agent,
+            &initial_workstream_id
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            cwd,
+            workspace,
+            None,
+        )
     }
 
     pub fn prepare_new_with_runtime_in(
         &self,
         db: &Db,
         agent: Agent,
-        initial_workstream_id: Option<&str>,
+        initial_workstream_ids: &[String],
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
         runtime_override: Option<&AgentRuntimeOverrides>,
@@ -254,24 +264,20 @@ impl SessionLauncher {
         if !crate::agent_runtime::store::launch_enabled(db, agent)? {
             return Err(other("该 Agent 已关闭用于新建会话，请在代理设置中启用"));
         }
-        // Validate the optional initial task before preparing the launch.
-        if let Some(ws_id) = initial_workstream_id {
-            require_unarchived_task(db, ws_id)?;
-        }
-
+        let mut initial_workstream_ids = initial_workstream_ids.to_vec();
+        initial_workstream_ids.sort();
+        initial_workstream_ids.dedup();
         let resolution = resolve_new_cwd(cwd, workspace)?;
-        validate_initial_task(
-            db,
-            initial_workstream_id,
-            resolution.cwd.as_deref(),
-            workspace,
-        )?;
+        for ws_id in &initial_workstream_ids {
+            require_unarchived_task(db, ws_id)?;
+            validate_initial_task(db, Some(ws_id), resolution.cwd.as_deref(), workspace)?;
+        }
         let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
         let fingerprint = compute_state_fingerprint_with_runtime(
             db,
             "new",
             None,
-            initial_workstream_id,
+            &initial_workstream_ids,
             agent,
             workspace,
             &resolution,
@@ -283,7 +289,7 @@ impl SessionLauncher {
             mode: "new".into(),
             agent,
             session_id: None,
-            initial_workstream_id: initial_workstream_id.map(str::to_string),
+            initial_workstream_ids,
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -392,7 +398,7 @@ impl SessionLauncher {
             mode: "resume".into(),
             agent: session.agent,
             session_id: Some(session_id.to_string()),
-            initial_workstream_id: None,
+            initial_workstream_ids: Vec::new(),
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -472,7 +478,7 @@ impl SessionLauncher {
             db,
             &prepared.mode,
             prepared.session_id.as_deref(),
-            prepared.initial_workstream_id.as_deref(),
+            &prepared.initial_workstream_ids,
             prepared.agent,
             workspace,
             &resolution,
@@ -491,15 +497,10 @@ impl SessionLauncher {
             crate::assistant::cli_writable_directories(&self.runtime_dir, prepared.cwd.as_deref());
 
         if prepared.mode == "new" {
-            if let Some(owner) = prepared.initial_workstream_id.as_deref() {
-                require_unarchived_task(db, owner)?;
+            for task in &prepared.initial_workstream_ids {
+                require_unarchived_task(db, task)?;
+                validate_initial_task(db, Some(task), prepared.cwd.as_deref(), workspace)?;
             }
-            validate_initial_task(
-                db,
-                prepared.initial_workstream_id.as_deref(),
-                prepared.cwd.as_deref(),
-                workspace,
-            )?;
             let install = resolve_install(db, prepared.agent)?;
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
@@ -540,7 +541,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
-                        initial_workstream_id: prepared.initial_workstream_id.as_deref(),
+                        initial_workstream_ids: &prepared.initial_workstream_ids,
                         root_agent_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
@@ -552,9 +553,9 @@ impl SessionLauncher {
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: public_command_line.unwrap_or(outcome.command_line),
-                note: if prepared.initial_workstream_id.is_some() && prepared.embedded {
+                note: if !prepared.initial_workstream_ids.is_empty() && prepared.embedded {
                     "会话摄入并绑定终端后，将跟踪所选任务。".into()
-                } else if prepared.initial_workstream_id.is_some() {
+                } else if !prepared.initial_workstream_ids.is_empty() {
                     "已在外部终端启动；摄入后请手动添加跟踪任务。".into()
                 } else {
                     "已直接启动；本次未选择跟踪任务。".into()
@@ -632,7 +633,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
-                        initial_workstream_id: None,
+                        initial_workstream_ids: &[],
                         root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
@@ -751,7 +752,10 @@ pub fn compute_state_fingerprint_in(
         db,
         mode,
         session_id,
-        initial_workstream_id,
+        &initial_workstream_id
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
         agent,
         workspace,
         resolution,
@@ -778,7 +782,7 @@ fn compute_state_fingerprint_with_runtime(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    initial_workstream_id: Option<&str>,
+    initial_workstream_ids: &[String],
     agent: Agent,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
@@ -816,7 +820,7 @@ fn compute_state_fingerprint_with_runtime(
     // The directory the Agent will actually start in, and why.
     hasher.update(resolution.fingerprint_input());
 
-    if let Some(ws_id) = initial_workstream_id {
+    for ws_id in initial_workstream_ids {
         hasher.update(b"initial_task:");
         hasher.update(ws_id.as_bytes());
         hasher.update(b":");

@@ -547,7 +547,12 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
 fn cli_extraction_jobs_report_backend_failure_without_claiming_summary_was_saved() {
     let f = Fixture::new();
     let sid = f.session();
-    f.db().set_setting("assistant.agent", "none").unwrap();
+    f.db()
+        .set_setting(
+            "context.extraction",
+            r#"{"agent":"none","runtime":{"model":null,"provider":null,"effort":null}}"#,
+        )
+        .unwrap();
     let started = f.call(&["summary", "update", "session", &sid]).unwrap();
     let job = started["job_id"].as_str().unwrap();
     let start = std::time::Instant::now();
