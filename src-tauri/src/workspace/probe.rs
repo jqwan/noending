@@ -134,7 +134,7 @@ pub fn probe_workspace_path(
                 };
                 let family_project = match &observation.git {
                     GitDetection::Detected { common_dir, .. } => {
-                        let common = resolve_common_dir(&observation.canonical_path, common_dir);
+                        let common = resolve_common_dir(common_dir);
                         if common.is_empty() {
                             None
                         } else {

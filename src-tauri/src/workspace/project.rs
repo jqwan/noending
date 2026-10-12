@@ -63,8 +63,7 @@ use crate::storage::workspace::{
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
-    auto_project_name, is_within, normalize_path, normalize_path_with, path_identity,
-    same_location, NormalizeOpts,
+    auto_project_name, is_within, normalize_path, path_identity, same_location,
 };
 use crate::workspace::resolver::WorkspaceObserving;
 use crate::workspace::WorkspaceAttaching;
@@ -317,7 +316,7 @@ pub fn ensure_workspace_path_conn(
         )));
     }
 
-    let family = git_family(conn, &canonical, &observation.git)?;
+    let family = git_family(conn, &observation.git)?;
     let known = get_workspace_path_conn(conn, &id)?;
     let (mut state, kind) = next_git_observation(known.as_ref(), &observation.git, &family);
     let mut effect = ProjectionEffect::default();
@@ -722,11 +721,7 @@ struct GitFamily {
     worktrees: Vec<String>,
 }
 
-fn git_family(
-    conn: &Connection,
-    observed_canonical: &str,
-    detection: &GitDetection,
-) -> Result<Option<GitFamily>> {
+fn git_family(conn: &Connection, detection: &GitDetection) -> Result<Option<GitFamily>> {
     let GitDetection::Detected {
         common_dir,
         kind,
@@ -740,7 +735,7 @@ fn git_family(
         // `next_git_observation`, never ownership.
         return Ok(None);
     };
-    let common_dir = resolve_common_dir(observed_canonical, common_dir);
+    let common_dir = resolve_common_dir(common_dir);
     if common_dir.is_empty() {
         // "Detected" with no common directory is not evidence of a family; a row
         // keyed on an empty string would silently adopt every other broken report.
@@ -758,31 +753,14 @@ fn git_family(
     }))
 }
 
-/// `git rev-parse --git-common-dir` answers `.git` — relative to the directory it
-/// was asked about — for a main worktree. Keying identities on that literal would
-/// give one repository as many families as it has worktrees, i.e. exactly the
-/// split the family key exists to prevent, so a relative answer is resolved
-/// against the path we asked about. An already-absolute common dir is untouched
-/// (the resolver is responsible for resolving git output).
-pub(crate) fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> String {
-    let trimmed = common_dir.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    normalize_path(trimmed).unwrap_or_else(|| {
-        normalize_path_with(
-            trimmed,
-            NormalizeOpts {
-                style: None,
-                base: Some(observed_canonical),
-                home: None,
-            },
-        )
-        // A common dir we cannot make absolute is keyed verbatim: it still
-        // converges with any other report of the same string, and inventing a
-        // base would be a guess about the filesystem.
-        .unwrap_or_else(|| trimmed.to_string())
-    })
+/// Keying identities on the common dir is what keeps one repository from
+/// splitting into one family per worktree. `classify_git` canonicalizes git's
+/// answer (a main worktree's `--git-common-dir` is a relative `.git`) before a
+/// `GitDetection` is ever built, so this only normalizes; an answer it cannot
+/// turn into a clean absolute path is no family evidence (callers treat empty
+/// that way).
+pub(crate) fn resolve_common_dir(common_dir: &str) -> String {
+    normalize_path(common_dir.trim()).unwrap_or_default()
 }
 
 /// The `git_state` / `git_kind` this observation implies.
@@ -1387,16 +1365,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_relative_git_common_dir_cannot_split_a_family() {
-        // `git rev-parse --git-common-dir` answers `.git` for a main worktree,
-        // and classify_git canonicalizes it against the observed directory
-        // before a GitDetection is ever built — so production only ever hands
-        // this function absolute answers.
+    fn an_absolute_git_common_dir_keys_one_family_per_repository() {
+        // classify_git canonicalizes the common dir against the observed
+        // directory before a GitDetection is ever built — production only ever
+        // hands this function absolute answers.
         assert_eq!(
-            resolve_common_dir("/repo", "/repo/.git/worktrees/y"),
+            resolve_common_dir("/repo/.git/worktrees/y"),
             normalize_path("/repo/.git/worktrees/y").unwrap()
         );
-        assert_eq!(resolve_common_dir("/repo", "   "), "");
+        assert_eq!(resolve_common_dir("   "), "");
+        assert_eq!(resolve_common_dir("relative/.git"), "");
     }
 
     #[test]
