@@ -2,6 +2,25 @@
 
 * { box-sizing: border-box; }
 
+/* Windows: show the thumb only while scrolling, keeping the native drag
+   target and a constant gutter. macOS and high-contrast mode stay native. */
+@media (forced-colors: none) {
+  html[data-auto-hide-scrollbars] * { --scrollbar-thumb: transparent; }
+  html[data-auto-hide-scrollbars] [data-scrollbar-active] { --scrollbar-thumb: var(--border-default); }
+  html[data-auto-hide-scrollbars] ::-webkit-scrollbar { width: 10px; height: 10px; }
+  html[data-auto-hide-scrollbars] ::-webkit-scrollbar-track,
+  html[data-auto-hide-scrollbars] ::-webkit-scrollbar-corner { background: transparent; }
+  html[data-auto-hide-scrollbars] ::-webkit-scrollbar-button { display: none; }
+  html[data-auto-hide-scrollbars] ::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 999px;
+  }
+  html[data-auto-hide-scrollbars] [data-scrollbar-active]::-webkit-scrollbar-thumb:hover { background-color: var(--text-muted); }
+  html[data-auto-hide-scrollbars] [data-scrollbar-active]::-webkit-scrollbar-thumb:active { background-color: var(--text-secondary); }
+}
+
 html, body, #root {
   height: 100%;
   overflow: hidden;

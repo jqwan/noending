@@ -9,6 +9,7 @@ import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
 import { prepareNavigationTitle } from "./navigationTitle";
+import { useAutoHideScrollbars } from "../hooks/useAutoHideScrollbars";
 import ToastHost, { showToast } from "../components/Toast";
 import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
@@ -57,6 +58,7 @@ function sameRoute(a: Route, b: Route): boolean {
  * CommandPalette、全局事件与 Toast。ID-only 导航先准备标题，业务数据仍由页面加载。
  */
 export default function AppShell() {
+  useAutoHideScrollbars();
   const [navigation, setNavigation] = useState<NavigationState>({
     entries: [{ view: "new-session" }],
     index: 0,
