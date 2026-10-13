@@ -73,7 +73,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     <div className="settings-seg icon-seg" role="group" aria-label="会话子页">
       <button className={!terminalId && entry === "conversation" ? "on" : ""} aria-pressed={!terminalId && entry === "conversation"}
         aria-label="历史消息" title="历史消息" disabled={!sessionId}
-        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation", initialTitle: title, initialAgent: agent })}><Icon name="chat" /></button>
+        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation", initialTitle: title, initialAgent: agent })}><Icon name="chatLines" /></button>
       <button className={!terminalId && entry === undefined ? "on" : ""} aria-pressed={!terminalId && entry === undefined}
         aria-label="会话详情" title="会话详情" disabled={!sessionId}
         onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>

@@ -150,7 +150,7 @@ describe("ProjectDetail", () => {
     const { container } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Test Project");
-    const pathRows = container.querySelectorAll("aside .list-row");
+    const pathRows = container.querySelectorAll(".project-workspace-paths .list-row");
     expect(pathRows.length).toBe(2);
     // Even though /a/linked/worktree is alphabetically earlier, /z/main/worktree is git_kind: "main" and comes first
     expect(pathRows[0].textContent).toContain("/z/main/worktree");

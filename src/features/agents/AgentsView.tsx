@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useViewPreference, preferenceValues } from "../../hooks/useViewState";
+import { useViewPreference, preferenceValues, useViewScroll } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
@@ -60,7 +60,7 @@ export function formatCliStatus(agent: Agent, entry?: AgentStatusEntry): string 
     return "无终端 CLI";
   }
   if (!entry?.detected) {
-    return "未检测到 TUI CLI";
+    return "未检测到CLI";
   }
   const ver = extractVersion(entry.version);
   if (!ver) return `${AGENT_LABELS[agent]} CLI 已就绪`;
@@ -90,7 +90,6 @@ function SourceRow({
   onReingest,
   onRemove,
   onCopy,
-  onToggle,
 }: {
   src: IngestSource;
   running: boolean;
@@ -98,7 +97,6 @@ function SourceRow({
   onReingest: (src: IngestSource) => void;
   onRemove: (src: IngestSource) => void;
   onCopy: (path: string) => void;
-  onToggle: (src: IngestSource, enabled: boolean) => void;
 }) {
   return (
     <div className="agent-source-row">
@@ -169,7 +167,6 @@ function SourceRow({
         )}
       </div>
 
-      <label className="agent-toggle"><input type="checkbox" aria-label={`自动同步 ${src.path}`} checked={src.enabled} disabled={running} onChange={(e) => onToggle(src, e.target.checked)} />自动同步历史</label>
       <button
         type="button"
         className="btn small ghost agent-reingest-btn"
@@ -200,6 +197,7 @@ export default function AgentsView({
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("agents.viewMode", "cards", preferenceValues("cards", "list"));
   const [sessionCounts, setSessionCounts] = useState<Record<string, number>>({});
+  const scrollRef = useViewScroll("agents.scroll", agentStatus !== null);
 
   const clearMessages = () => setError("");
 
@@ -443,9 +441,6 @@ export default function AgentsView({
                   <Icon name="folder" />
                   <span>历史会话来源</span>
                 </h2>
-                <p className="muted small" style={{ marginTop: 0 }}>
-                  自动同步仅控制此目录的历史扫描。NoEnding 启动的终端仍会按 Agent 通知同步当前会话并绑定；手动同步不受此开关影响。
-                </p>
                 {agentFormats.map((fmt, fIdx) => {
                   const formatSources = agentSources.filter((s) => formatOf(s) === fmt.id);
                   const isMultiFormat = agentFormats.length > 1;
@@ -495,16 +490,6 @@ export default function AgentsView({
                               onReingest={setReingestTarget}
                               onRemove={handleRemoveSource}
                               onCopy={copyPath}
-                              onToggle={(source, enabled) => {
-                                void (async () => {
-                                  try {
-                                    await api.setIngestSourceEnabled(source.id, enabled);
-                                    await reloadSources();
-                                  } catch (e) {
-                                    setError(String(e));
-                                  }
-                                })();
-                              }}
                             />
                           ))
                         )}
@@ -551,7 +536,7 @@ export default function AgentsView({
   }
 
   return (
-    <div className="main agents-page">
+    <div className="main board-page agents-page" ref={scrollRef}>
       <PageHeader
         title="代理"
         actions={
@@ -567,71 +552,47 @@ export default function AgentsView({
         }
       />
 
-      <div className="agents-content">
-        {error && (
-          <div className="badge warn" style={{ marginBottom: 14, overflowWrap: "anywhere", display: "block", padding: "8px 12px" }}>
-            {error}
-          </div>
-        )}
+      {/* 顶部工具栏与筛选，使用 board-toolbar 固定吸顶 */}
+      <div className="board-toolbar agents-board-toolbar">
+        <input
+          type="text"
+          className="ws-search"
+          aria-label="搜索 Agent"
+          placeholder="搜索 Agent…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
 
-        {/* 顶部工具栏与筛选 */}
-        <div className="toolbar agents-toolbar">
-          <div className="agents-filter-pills" role="tablist" aria-label="代理分类筛选">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filterTab === "all"}
-              className={`agents-filter-pill ${filterTab === "all" ? "active" : ""}`}
-              onClick={() => setFilterTab("all")}
-            >
-              全部 ({ALL_AGENTS.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filterTab === "tui"}
-              className={`agents-filter-pill ${filterTab === "tui" ? "active" : ""}`}
-              onClick={() => setFilterTab("tui")}
-            >
-              TUI ({tuiCount})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={filterTab === "desktop"}
-              className={`agents-filter-pill ${filterTab === "desktop" ? "active" : ""}`}
-              onClick={() => setFilterTab("desktop")}
-            >
-              桌面端 ({desktopCount})
-            </button>
-          </div>
-
-          <div className="row" style={{ gap: 10, alignItems: "center" }}>
-            <div style={{ position: "relative", minWidth: 160 }}>
-              <input
-                type="text"
-                placeholder="搜索 Agent…"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                style={{
-                  fontSize: 12.5,
-                  padding: "5px 24px 5px 10px",
-                  borderRadius: "var(--radius-sm)",
-                  background: "var(--bg-panel)",
-                  border: "1px solid var(--border-subtle)",
-                }}
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  className="btn small ghost icon-button"
-                  style={{ position: "absolute", right: 2, top: "50%", transform: "translateY(-50%)", padding: 2 }}
-                  onClick={() => setSearchQuery("")}
-                  title="清除搜索"
-                >
-                  <Icon name="close" />
-                </button>
-              )}
+        <div className="toolbar ws-controls">
+          <div className="ws-controls-group">
+            <div className="agents-filter-pills" role="tablist" aria-label="代理分类筛选">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterTab === "all"}
+                className={`agents-filter-pill ${filterTab === "all" ? "active" : ""}`}
+                onClick={() => setFilterTab("all")}
+              >
+                全部 ({ALL_AGENTS.length})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterTab === "tui"}
+                className={`agents-filter-pill ${filterTab === "tui" ? "active" : ""}`}
+                onClick={() => setFilterTab("tui")}
+              >
+                TUI ({tuiCount})
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterTab === "desktop"}
+                className={`agents-filter-pill ${filterTab === "desktop" ? "active" : ""}`}
+                onClick={() => setFilterTab("desktop")}
+              >
+                桌面端 ({desktopCount})
+              </button>
             </div>
 
             <div className="agents-stat-badges">
@@ -651,6 +612,25 @@ export default function AgentsView({
               )}
             </div>
 
+            {(searchQuery.trim() || filterTab !== "all") && (
+              <button
+                className="btn small ghost"
+                onClick={() => {
+                  setSearchQuery("");
+                  setFilterTab("all");
+                }}
+              >
+                清除筛选
+              </button>
+            )}
+          </div>
+
+          <div className="ws-controls-meta">
+            <span className="muted small">
+              {(searchQuery.trim() || filterTab !== "all")
+                ? `显示 ${visibleAgents.length} / 共 ${ALL_AGENTS.length} 项`
+                : `共 ${ALL_AGENTS.length} 项`}
+            </span>
             <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
               <button
                 className={viewMode === "cards" ? "on" : ""}
@@ -679,6 +659,14 @@ export default function AgentsView({
             最近一次同步：{scopeLabel(status.scope, sources)} · 同步发现 {status.discovered} 条记录 · 写入 {status.messages} 条新消息
             {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
             {status.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+          </div>
+        )}
+      </div>
+
+      <div className="agents-content">
+        {error && (
+          <div className="badge warn" style={{ marginBottom: 14, overflowWrap: "anywhere", display: "block", padding: "8px 12px" }}>
+            {error}
           </div>
         )}
 
@@ -759,10 +747,6 @@ export default function AgentsView({
                         {sessionCounts[agent] ?? 0}<span>会话</span>
                         <span className="sr-only">{sessionCounts[agent] ?? 0} 个会话</span>
                       </span>
-                      <span title="来源目录">
-                        <Icon name="folder" />
-                        {agentSources.length}<span>目录</span>
-                      </span>
                     </div>
                   </div>
                 ) : (
@@ -776,8 +760,6 @@ export default function AgentsView({
                     </span>
                     <span>·</span>
                     <span>{sessionCounts[agent] ?? 0} 个会话</span>
-                    <span>·</span>
-                    <span>{agentSources.length === 0 ? "未配置目录" : `${agentSources.length} 个目录`}</span>
                   </div>
                 )}
 
@@ -785,7 +767,7 @@ export default function AgentsView({
                   <span className="muted small">
                     {agentSources.length === 0
                       ? "未配置来源目录"
-                      : `${agentSources.filter((s) => s.enabled).length} / ${agentSources.length} 个来源目录`}
+                      : `${agentSources.length} 个来源目录`}
                   </span>
                   <div className="agent-card-actions ws-card-actions" onClick={(e) => e.stopPropagation()}>
                     <button

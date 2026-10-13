@@ -7,6 +7,10 @@
   flex-direction: column;
   padding-bottom: 20px;
 }
+.main.new-session-page > .page-head {
+  flex: none;
+  min-height: var(--titlebar-height);
+}
 .new-session-content {
   width: min(960px, 100%);
   flex: 1;
@@ -369,7 +373,7 @@
 }
 .new-session-composer textarea {
   display: block;
-  min-height: 112px;
+  min-height: 60px;
   max-height: 40vh;
   padding: 2px 4px;
   resize: vertical;
@@ -509,6 +513,128 @@
 .workstream-project-chip-remove .ui-icon {
   width: 10px;
   height: 10px;
+}
+
+/* ---------- Workstream project multi-select popover ---------- */
+.workstream-project-picker-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.workstream-project-popover {
+  position: static;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  user-select: none;
+  margin-top: 6px;
+}
+.workstream-project-search-input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  box-sizing: border-box;
+}
+.workstream-project-search-input:focus-visible {
+  outline: none;
+  border-color: var(--border-default);
+}
+.workstream-project-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+.workstream-project-empty {
+  padding: 10px 6px;
+  text-align: center;
+}
+.workstream-project-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  transition: background 0.1s ease;
+  box-sizing: border-box;
+}
+.workstream-project-item:hover {
+  background: var(--bg-hover);
+}
+.workstream-project-item.checked {
+  background: var(--bg-hover);
+}
+.workstream-project-item input[type="checkbox"] {
+  cursor: pointer;
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+.workstream-project-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.workstream-project-item-icon .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+.workstream-project-item.checked .workstream-project-item-icon {
+  color: var(--accent);
+}
+.workstream-project-item-name {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.workstream-project-popover-divider {
+  border-top: 1px solid var(--border-subtle);
+  margin: 4px 0;
+}
+.workstream-project-popover-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease, color 0.1s ease;
+  box-sizing: border-box;
+}
+.workstream-project-popover-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.workstream-project-popover-action .ui-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* ---------- Workstream cards (shared compact / full) ---------- */
@@ -1243,17 +1369,6 @@ button.btn.conversation-jump:active {
 }
 
 /* ---------- Session archive / permanent delete ---------- */
-.session-archive-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  border: 1px solid var(--warning);
-  background: var(--warning-wash);
-  border-radius: var(--radius-md);
-  padding: 12px 16px;
-  margin-top: 20px;
-}
 /* 删除预览里的「将删除」清单（会话与任务共用）。 */
 .purge-list { margin: 6px 0 0; padding-left: 18px; }
 .purge-list li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
@@ -2043,6 +2158,8 @@ button.icon-button.small .ui-icon {
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout aside .list-row { flex-wrap: wrap; }
 .project-detail-layout aside .grow { flex-basis: 100%; }
+.project-detail-layout aside .project-sessions-section .list-row { flex-wrap: nowrap; }
+.project-detail-layout aside .project-sessions-section .grow { flex: 1 1 auto; min-width: 0; flex-basis: auto; }
 @media (max-width: 1100px) {
   .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
@@ -2088,6 +2205,21 @@ button.icon-button.small .ui-icon {
   align-items: center;
   flex-wrap: wrap;
   min-height: 28px;
+  display: flex;
+  justify-content: space-between;
+}
+.board-toolbar .ws-controls-group {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+.board-toolbar .ws-controls-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
 }
 .board-toolbar .ws-control {
   gap: 6px;
@@ -2113,10 +2245,12 @@ button.icon-button.small .ui-icon {
   background: var(--bg-hover);
   border-color: var(--border-default);
 }
-.board-toolbar .ws-controls > span {
+.board-toolbar .ws-controls > span,
+.board-toolbar .ws-controls-meta > span {
   height: 28px;
   display: inline-flex;
   align-items: center;
+  white-space: nowrap;
 }
 .board-toolbar .ws-controls .btn.small {
   height: 28px;
@@ -2463,6 +2597,10 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
   margin-bottom: 4px;
 }
 
+.board-toolbar .agents-toolbar {
+  margin-bottom: 0;
+}
+
 .agents-filter-pills {
   display: flex;
   align-items: center;
@@ -2503,17 +2641,19 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
   margin-bottom: 14px;
 }
 
-.agents-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
-  gap: 16px;
-  align-items: stretch;
+.board-toolbar .agents-sync-status-strip {
+  padding: 10px 2px 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: none;
+  margin-top: 12px;
+  margin-bottom: 0;
 }
 
-@media (max-width: 980px) {
-  .agents-grid {
-    grid-template-columns: 1fr;
-  }
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: 16px;
+  align-items: stretch;
 }
 
 .agent-card {
@@ -3182,11 +3322,40 @@ button.btn.ghost.terminal-exited,
   border-bottom: none;
   padding-bottom: 0;
 }
+.session-tracked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.session-tracked-task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  min-height: 32px;
+  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.session-tracked-task-row:first-of-type {
+  border-top: none;
+}
+.session-tracked-task-row:hover {
+  background: var(--bg-hover);
+}
+.session-tracked-task-row .mini-title {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .session-tracking-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 6px;
+  padding: 5px 8px;
+  min-height: 32px;
   border-radius: var(--radius-sm);
   transition: background 0.1s ease;
 }
@@ -3207,9 +3376,13 @@ button.btn.ghost.terminal-exited,
   background: var(--bg-hover);
 }
 .session-tracking-link {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   flex: 1;
   min-width: 0;
-  padding: 2px 0;
+  padding: 0;
+  line-height: 1.4;
   text-align: left;
   background: transparent;
   border: 0;
@@ -3218,60 +3391,69 @@ button.btn.ghost.terminal-exited,
   font-size: 13px;
   cursor: pointer;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.session-tracking-link .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
 }
 .session-tracking-link:hover {
+  color: var(--accent);
+}
+.session-tracking-link:hover .ui-icon {
   color: var(--accent);
 }
 .session-tracking-remove:hover {
   color: var(--danger) !important;
 }
-.session-tracking-add {
-  margin-top: 4px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
+
+/* 跟踪任务多选弹窗 */
+.session-tracking-modal-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.session-tracking-add .section-label {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 550;
-  color: var(--text-secondary);
-}
-.session-tracking-options {
-  max-height: 180px;
+  gap: 2px;
+  max-height: 360px;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  margin: 12px 0 6px;
 }
-.session-tracking-option {
+.session-tracking-modal-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  font-size: 12.5px;
+  gap: 10px;
+  padding: 6px 10px;
+  min-height: 34px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.1s ease;
+  user-select: none;
 }
-.session-tracking-option:hover {
+.session-tracking-modal-row:hover {
   background: var(--bg-hover);
 }
-.session-tracking-option.selected {
-  background: var(--accent-wash);
-  color: var(--accent);
+.session-tracking-modal-row.tracked {
+  background: var(--bg-panel);
 }
-.session-tracking-add-buttons {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
+.session-tracking-modal-row input[type="checkbox"] {
+  cursor: pointer;
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
 }
+.session-tracking-modal-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
 .session-tracking-error {
   margin: 4px 0 0;
   font-size: 12px;

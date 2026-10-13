@@ -224,27 +224,6 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               );
             })}
           </section>
-
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <h2 className="detail-section-title">
-                <Icon name="chat" />
-                <span>会话 ({detail.sessions.length})</span>
-              </h2>
-              {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
-                <button
-                  className="btn ghost icon-button small"
-                  title="新建会话"
-                  aria-label="新建会话"
-                  onClick={() => navigate({ view: "new-session", projectId: project.id })}
-                >
-                  <Icon name="plus" />
-                </button>
-              )}
-            </div>
-
-            <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
-          </section>
         </div>
 
         <aside className="detail-aside project-detail-aside">
@@ -290,7 +269,28 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
             </div>
           </section>
 
-          <section className="card detail-section">
+          <section className="card detail-section project-sessions-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="chat" />
+                <span>会话 ({detail.sessions.length})</span>
+              </h2>
+              {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
+                <button
+                  className="btn ghost icon-button small"
+                  title="新建会话"
+                  aria-label="新建会话"
+                  onClick={() => navigate({ view: "new-session", projectId: project.id })}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
+            </div>
+
+            <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
+          </section>
+
+          <section className="card detail-section project-workspace-paths">
             <h2 className="detail-section-title">
               <Icon name="folder" />
               <span>工作目录 ({sortedWorkspacePaths.length})</span>

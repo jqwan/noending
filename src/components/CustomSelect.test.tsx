@@ -42,14 +42,14 @@ describe("CustomSelect", () => {
           onChange={vi.fn()}
           ariaLabel="排序"
           options={[
-            { value: "recent", label: "最近活动 ↓" },
+            { value: "recent", label: "最近活动" },
             { value: "name", label: "名称" },
           ]}
         />
       </div>
     );
 
-    const trigger = screen.getByRole("button", { name: "排序：最近活动 ↓" });
+    const trigger = screen.getByRole("button", { name: "排序：最近活动" });
     fireEvent.click(trigger);
     expect(screen.getByRole("listbox")).toBeTruthy();
 

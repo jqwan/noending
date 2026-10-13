@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
-import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, submitsOnEnter, timeAgo } from "../../components/common";
+import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamFormModal from "./WorkstreamFormModal";
@@ -53,32 +53,11 @@ export default function WorkstreamDetailView({
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [busy, setBusy] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [actionError, setActionError] = useState("");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
-  const [purgeConfirmText, setPurgeConfirmText] = useState("");
   const busyRef = useRef(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  // ••• 菜单：点击外部与 Escape 都要收起。mousedown 阶段监听先于 click，
-  // 所以菜单项自己的 click 仍然正常触发。
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [menuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,7 +74,6 @@ export default function WorkstreamDetailView({
     setPreferenceError(null);
     setFailedSessions([]);
     setCtxUpdating(false);
-    setMenuOpen(false);
     setEditing(false);
     setConfirmArchive(false);
     setConfirmPurge(false);
@@ -228,7 +206,6 @@ export default function WorkstreamDetailView({
    * 失败留在原地说明原因，成功才跳走。
    */
   const archiveTask = async () => {
-    setMenuOpen(false);
     setConfirmArchive(false);
     if (busyRef.current) return;
     busyRef.current = true;
@@ -248,7 +225,6 @@ export default function WorkstreamDetailView({
   };
 
   const restore = async () => {
-    setMenuOpen(false);
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
@@ -280,7 +256,6 @@ export default function WorkstreamDetailView({
     } catch (e) {
       console.error(e);
       setActionError(`永久删除失败：${String(e)}`);
-      setPurgeConfirmText("");
       refresh();
     } finally {
       busyRef.current = false;
@@ -289,7 +264,6 @@ export default function WorkstreamDetailView({
   };
 
   const openEditor = () => {
-    setMenuOpen(false);
     setEditing(true);
   };
 
@@ -312,32 +286,33 @@ export default function WorkstreamDetailView({
               onClick={openEditor}>
               <Icon name="edit" />
             </button>
-            {!archived && (
+            {!archived ? (
               <button className="btn ghost icon-button" aria-label="归档"
                 title="归档：保留项目关联、会话跟踪与摘要，归档后不能新建会话。"
                 onClick={() => setConfirmArchive(true)}>
                 <Icon name="archive" />
               </button>
-            )}
-            {archived && (
-              <div style={{ position: "relative" }} ref={menuRef}>
-                <button className="btn ghost icon-button" onClick={() => setMenuOpen((v) => !v)} title="更多操作"
-                  aria-label="更多操作" aria-haspopup="true" aria-expanded={menuOpen}>
-                  <Icon name="more" />
+            ) : (
+              <>
+                <button
+                  className="btn ghost icon-button"
+                  title="取消归档"
+                  aria-label="取消归档"
+                  disabled={busy}
+                  onClick={restore}
+                >
+                  <Icon name="unarchive" />
                 </button>
-                {menuOpen && (
-                  <div className="menu-pop">
-                    <button className="menu-item" onClick={restore}>
-                      取消归档
-                    </button>
-                    <button className="menu-item"
-                      title="永久删除（不可撤销）"
-                      onClick={() => { setMenuOpen(false); setPurgeConfirmText(""); setConfirmPurge(true); }}>
-                      永久删除…
-                    </button>
-                  </div>
-                )}
-              </div>
+                <button
+                  className="btn ghost icon-button danger"
+                  title="永久删除"
+                  aria-label="永久删除"
+                  disabled={busy}
+                  onClick={() => setConfirmPurge(true)}
+                >
+                  <Icon name="trash" />
+                </button>
+              </>
             )}
           </>
         }
@@ -462,32 +437,15 @@ export default function WorkstreamDetailView({
       )}
 
       {confirmPurge && (
-        <Modal title="永久删除这项任务？" onClose={() => setConfirmPurge(false)}>
-          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-            不可撤销
-          </div>
-          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            将<b>删除</b>：<span className="mono">{workstream.title}</span> 本身、它的有序工作目录列表、
-            它的当前摘要与摘要处理进度。
+        <Modal title="永久删除这项任务？" onClose={() => { if (!busy) setConfirmPurge(false); }}>
+          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>不可撤销</div>
+          <p style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
+            确定要永久删除 <b>{workstream.title}</b> 吗？任务本身、工作路径列表、Context 和审阅数据会被删除，关联会话及其事件历史会保留。
           </p>
-          <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            将<b>保留</b>：它引用过的 Sessions 与这些 Session 的完整事件历史、原始 Agent
-            会话文件、启动记录、以及工作目录本身（WorkspacePath）与由它派生的 Project。
-            换句话说：Project 与 Session 都不会因为删掉一项任务而受影响。
-          </p>
-          <p className="small muted" style={{ marginBottom: 12 }}>
-            只有已经在已归档的任务才能被永久删除 —— 这是刻意留的缓冲。
-          </p>
-          <label className="field"><span>输入这项任务的标题以确认</span>
-            <input type="text" value={purgeConfirmText} autoFocus
-              placeholder={workstream.title}
-              onChange={(e) => setPurgeConfirmText(e.target.value)}
-              onKeyDown={(e) => submitsOnEnter(e) && purgeConfirmText === workstream.title && purge()} /></label>
           <div className="row" style={{ justifyContent: "flex-end" }}>
             <button className="btn" onClick={() => setConfirmPurge(false)} disabled={busy}>取消</button>
-            <button className="btn primary" onClick={purge}
-              disabled={busy || purgeConfirmText !== workstream.title}>
-              {busy ? "删除中…" : "确认永久删除"}
+            <button className="btn danger" onClick={purge} disabled={busy}>
+              {busy ? "删除中…" : "永久删除"}
             </button>
           </div>
         </Modal>

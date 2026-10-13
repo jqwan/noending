@@ -212,61 +212,66 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           />
 
           <div className="toolbar ws-controls">
-            <div className="ws-control">
-              <span className="muted small">项目</span>
-              <CustomSelect
-                value={projectId}
-                onChange={(val) => setProjectId(val)}
-                ariaLabel="全部项目"
-                options={[
-                  { value: "all", label: "全部项目" },
-                  ...projectOptions.map(([id, name]) => ({
-                    value: id,
-                    label: name,
-                    icon: "project",
-                  })),
-                  { value: "none", label: "无项目" },
-                ]}
-              />
+            <div className="ws-controls-group">
+              <div className="ws-control">
+                <span className="muted small">项目</span>
+                <CustomSelect
+                  value={projectId}
+                  onChange={(val) => setProjectId(val)}
+                  ariaLabel="全部项目"
+                  options={[
+                    { value: "all", label: "全部项目" },
+                    ...projectOptions.map(([id, name]) => ({
+                      value: id,
+                      label: name,
+                      icon: "project",
+                    })),
+                    { value: "none", label: "无项目" },
+                  ]}
+                />
+              </div>
+              <div className="ws-control">
+                <span className="muted small">排序</span>
+                <CustomSelect
+                  value={sort}
+                  onChange={(val) => setSort(val as SortKey)}
+                  ariaLabel="排序"
+                  options={[
+                    { value: "recent", label: "最近活动" },
+                    { value: "created", label: "创建时间" },
+                    { value: "name", label: "名称" },
+                  ]}
+                />
+              </div>
+              {filtersActive && <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>}
             </div>
-            <div className="ws-control">
-              <span className="muted small">排序</span>
-              <CustomSelect
-                value={sort}
-                onChange={(val) => setSort(val as SortKey)}
-                ariaLabel="排序"
-                options={[
-                  { value: "recent", label: "最近活动 ↓" },
-                  { value: "created", label: "创建时间" },
-                  { value: "name", label: "名称" },
-                ]}
-              />
-            </div>
-            {filtersActive && <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>}
-            {list && (
-              <span className="muted small">
-                {filtersActive ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 个` : `共 ${list.length} 个任务`}
-              </span>
-            )}
-            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-              <button
-                className={viewMode === "cards" ? "on" : ""}
-                aria-pressed={viewMode === "cards"}
-                aria-label="卡片视图"
-                title="卡片视图"
-                onClick={() => setViewMode("cards")}
-              >
-                <Icon name="grid" />
-              </button>
-              <button
-                className={viewMode === "list" ? "on" : ""}
-                aria-pressed={viewMode === "list"}
-                aria-label="列表视图"
-                title="列表视图"
-                onClick={() => setViewMode("list")}
-              >
-                <Icon name="list" />
-              </button>
+
+            <div className="ws-controls-meta">
+              {list && (
+                <span className="muted small">
+                  {filtersActive ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 项` : `共 ${list.length} 项`}
+                </span>
+              )}
+              <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+                <button
+                  className={viewMode === "cards" ? "on" : ""}
+                  aria-pressed={viewMode === "cards"}
+                  aria-label="卡片视图"
+                  title="卡片视图"
+                  onClick={() => setViewMode("cards")}
+                >
+                  <Icon name="grid" />
+                </button>
+                <button
+                  className={viewMode === "list" ? "on" : ""}
+                  aria-pressed={viewMode === "list"}
+                  aria-label="列表视图"
+                  title="列表视图"
+                  onClick={() => setViewMode("list")}
+                >
+                  <Icon name="list" />
+                </button>
+              </div>
             </div>
           </div>
 

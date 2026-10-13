@@ -340,82 +340,87 @@ export default function SessionsView({ navigate, scope }: {
           />
 
           <div className="toolbar ws-controls">
-            <div className="ws-control">
-              <span className="muted small">Agent</span>
-              <CustomSelect
-                value={agent}
-                onChange={(val) => setAgent(val as "all" | Agent)}
-                ariaLabel="全部 Agent"
-                options={[
-                  { value: "all", label: "全部 Agent" },
-                  ...Object.entries(AGENT_LABELS).map(([k, v]) => ({
-                    value: k,
-                    label: v,
-                  })),
-                ]}
-              />
+            <div className="ws-controls-group">
+              <div className="ws-control">
+                <span className="muted small">Agent</span>
+                <CustomSelect
+                  value={agent}
+                  onChange={(val) => setAgent(val as "all" | Agent)}
+                  ariaLabel="全部 Agent"
+                  options={[
+                    { value: "all", label: "全部 Agent" },
+                    ...Object.entries(AGENT_LABELS).map(([k, v]) => ({
+                      value: k,
+                      label: v,
+                    })),
+                  ]}
+                />
+              </div>
+              <div className="ws-control">
+                <span className="muted small">任务</span>
+                <CustomSelect
+                  value={wsFilter}
+                  onChange={(val) => setWsFilter(val)}
+                  ariaLabel="全部任务"
+                  options={[
+                    { value: "all", label: "全部任务" },
+                    ...wsOptions.map(([id, title]) => ({
+                      value: id,
+                      label: title,
+                      icon: "tasks" as const,
+                    })),
+                    { value: "unassigned", label: "未跟踪任务" },
+                  ]}
+                />
+              </div>
+              <div className="ws-control">
+                <span className="muted small">项目</span>
+                <CustomSelect
+                  value={projectId}
+                  onChange={(val) => setProjectId(val)}
+                  ariaLabel="全部项目"
+                  title="按工作目录所属项目筛选"
+                  options={[
+                    { value: "all", label: "全部项目" },
+                    ...projects.map((p) => ({
+                      value: p.id,
+                      label: p.name,
+                      icon: "project",
+                    })),
+                  ]}
+                />
+              </div>
+              {filtersActive && (
+                <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
+              )}
             </div>
-            <div className="ws-control">
-              <span className="muted small">任务</span>
-              <CustomSelect
-                value={wsFilter}
-                onChange={(val) => setWsFilter(val)}
-                ariaLabel="全部任务"
-                options={[
-                  { value: "all", label: "全部任务" },
-                  ...wsOptions.map(([id, title]) => ({
-                    value: id,
-                    label: title,
-                    icon: "tasks" as const,
-                  })),
-                  { value: "unassigned", label: "未跟踪任务" },
-                ]}
-              />
-            </div>
-            <div className="ws-control">
-              <span className="muted small">项目</span>
-              <CustomSelect
-                value={projectId}
-                onChange={(val) => setProjectId(val)}
-                ariaLabel="全部项目"
-                title="按工作目录所属项目筛选"
-                options={[
-                  { value: "all", label: "全部项目" },
-                  ...projects.map((p) => ({
-                    value: p.id,
-                    label: p.name,
-                    icon: "project",
-                  })),
-                ]}
-              />
-            </div>
-            {filtersActive && (
-              <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
-            )}
-            {shown && (
-              <span className="muted small">
-                {filtersActive ? `显示 ${shown.length} / 共 ${sessions?.length ?? 0} 条` : `共 ${shown.length} 条`}
-              </span>
-            )}
-            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-              <button
-                className={viewMode === "cards" ? "on" : ""}
-                aria-pressed={viewMode === "cards"}
-                aria-label="卡片视图"
-                title="卡片视图"
-                onClick={() => setViewMode("cards")}
-              >
-                <Icon name="grid" />
-              </button>
-              <button
-                className={viewMode === "list" ? "on" : ""}
-                aria-pressed={viewMode === "list"}
-                aria-label="列表视图"
-                title="列表视图"
-                onClick={() => setViewMode("list")}
-              >
-                <Icon name="list" />
-              </button>
+
+            <div className="ws-controls-meta">
+              {shown && (
+                <span className="muted small">
+                  {filtersActive ? `显示 ${shown.length} / 共 ${sessions?.length ?? 0} 项` : `共 ${shown.length} 项`}
+                </span>
+              )}
+              <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+                <button
+                  className={viewMode === "cards" ? "on" : ""}
+                  aria-pressed={viewMode === "cards"}
+                  aria-label="卡片视图"
+                  title="卡片视图"
+                  onClick={() => setViewMode("cards")}
+                >
+                  <Icon name="grid" />
+                </button>
+                <button
+                  className={viewMode === "list" ? "on" : ""}
+                  aria-pressed={viewMode === "list"}
+                  aria-label="列表视图"
+                  title="列表视图"
+                  onClick={() => setViewMode("list")}
+                >
+                  <Icon name="list" />
+                </button>
+              </div>
             </div>
           </div>
 

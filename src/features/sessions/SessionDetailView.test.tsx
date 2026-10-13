@@ -150,15 +150,34 @@ async function renderDetail(d: SessionDetail) {
 }
 
 
-it("renders session message stats in session info aside", async () => {
+it("renders session message stats and tracked tasks in aside", async () => {
+  const task1 = {
+    id: "w1",
+    title: "测试任务",
+    description: "任务描述",
+    visibility: "normal" as const,
+    created_at: "2026-10-13T00:00:00Z",
+    updated_at: "2026-10-13T00:00:00Z",
+  };
   const d = detail(session("s1", { title: "测试统计会话" }), {
     message_stats: { user_messages: 5, assistant_messages: 8 },
+    tracked_workstreams: [task1],
   });
-  await renderDetail(d);
+  const { navigate } = await renderDetail(d);
 
   expect(screen.getByText("会话统计")).toBeTruthy();
   expect(screen.getByText("用户消息 5")).toBeTruthy();
   expect(screen.getByText("代理回复 8")).toBeTruthy();
+  expect(screen.getByText("跟踪任务 (1)")).toBeTruthy();
+  expect(screen.getByText("测试任务")).toBeTruthy();
+  expect(screen.queryByText("任务描述")).toBeNull();
+
+  fireEvent.click(screen.getByText("测试任务"));
+  expect(navigate).toHaveBeenCalledWith({
+    view: "workstream",
+    workstreamId: "w1",
+    initialTitle: "测试任务",
+  });
 });
 
 // 执行信息
@@ -212,8 +231,9 @@ it("previews the newest messages and links to the whole conversation", async () 
     ingested_message_sequence: 420,
   }));
 
+  screen.getByText("最近消息");
   screen.getByText("最近的一句话");
-  screen.getByText("以上是最近 1 条。");
+  expect(screen.queryByText(/以上是最近/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "查看全部历史消息（共 420 条）" }));
   expect(navigate).toHaveBeenCalledWith({
     view: "session",
@@ -288,7 +308,10 @@ it("checks root source status in local delete preview", async () => {
     preview({ root_source_status: "present" }),
   );
   const { unmount } = await renderDetail(archivedDetail({ source_status: "present" }));
-  fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
+  expect(screen.queryByText("该会话已归档")).toBeNull();
+  expect(screen.getByText("归档时间")).toBeDefined();
+  screen.getByRole("button", { name: "取消归档" });
+  fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
   await screen.findByText(/Root 源会话仍然存在/);
   screen.getByText(/下一次同步会从它重新同步/);
   screen.getByText("3 条会话消息");
@@ -301,7 +324,7 @@ it("checks root source status in local delete preview", async () => {
     preview({ root_source_status: "missing" }),
   );
   await renderDetail(archivedDetail({ source_status: "missing" }));
-  fireEvent.click(screen.getByRole("button", { name: "永久删除…" }));
+  fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
   await screen.findByText(/本地数据删除后无法找回/);
   expect(screen.queryByText(/Root 源会话仍然存在/)).toBeNull();
 });

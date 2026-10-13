@@ -23,6 +23,7 @@ const paths = {
   git: "M5 3a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 6v6M5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM13 4.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM5 11a4.5 4.5 0 0 1 4.5-4.5h2",
   chat: "M3 3h12v9H8l-5 3Z",
   chatPlus: "M3 3h12v9H8l-5 3ZM9 5v5M6.5 7.5h5",
+  chatLines: "M3 3h12v9H8l-5 3ZM6 6.5h6M6 9.5h3.5",
   spark: "M9 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2Z",
   chart: "M3.5 15V9M9 15V4M14.5 15V8",
   settings: "M3 5h12M3 13h12M6 3v4M12 11v4",

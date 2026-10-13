@@ -26,9 +26,10 @@ export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, 
 }
 
 /** Record/detail actions. Terminal navigation lives in the shared titlebar switcher. */
-export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, onChanged }: {
+export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, onChanged, onPurge, onRestore }: {
   sessionId: string; agent: Agent; sourceKind: string | undefined; title: string;
   archived: boolean; onChanged: () => void;
+  onPurge?: () => void; onRestore?: () => void;
 }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
@@ -46,12 +47,40 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     catch (e) { showToast(`归档失败：${String(e)}`); }
     finally { setArchiveBusy(false); }
   };
+  const handleRestore = async () => {
+    if (archiveBusy) return;
+    if (onRestore) {
+      onRestore();
+      return;
+    }
+    setArchiveBusy(true);
+    try {
+      await api.restoreSession(sessionId);
+      showToast("已恢复");
+      onChanged();
+    } catch (e) {
+      showToast(`恢复失败：${String(e)}`);
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
   return <>
     <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} />
     <button className="btn ghost icon-button" aria-label="增量同步" title="同步最新对话" disabled={syncing}
       onClick={() => void handleSync()}><Icon name="refresh" /></button>
-    <button className="btn ghost icon-button" aria-label="归档" title={archived ? "该会话已归档" : "归档"}
-      disabled={archived || archiveBusy} onClick={() => setConfirmArchive(true)}><Icon name="archive" /></button>
+    {!archived ? (
+      <button className="btn ghost icon-button" aria-label="归档" title="归档"
+        disabled={archiveBusy} onClick={() => setConfirmArchive(true)}><Icon name="archive" /></button>
+    ) : (
+      <>
+        <button className="btn ghost icon-button" aria-label="取消归档" title="取消归档"
+          disabled={archiveBusy} onClick={() => void handleRestore()}><Icon name="unarchive" /></button>
+        {onPurge && (
+          <button className="btn ghost icon-button danger" aria-label="永久删除" title="永久删除"
+            disabled={archiveBusy} onClick={onPurge}><Icon name="trash" /></button>
+        )}
+      </>
+    )}
       {confirmArchive && (
         <Modal title="归档" onClose={() => { if (!archiveBusy) setConfirmArchive(false); }}>
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>

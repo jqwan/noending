@@ -178,68 +178,90 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       />
 
       <div className="toolbar ws-controls">
-        <div className="ws-control">
-          <span className="muted small">筛选</span>
-          <CustomSelect
-            value={filter}
-            onChange={(val) => setFilter(val as FilterKey)}
-            ariaLabel="筛选"
-            options={[
-              { value: "all", label: "全部" },
-              { value: "ok", label: "正常" },
-              { value: "missing", label: "有目录缺失" },
-            ]}
-          />
+        <div className="ws-controls-group">
+          <div className="ws-control">
+            <span className="muted small">筛选</span>
+            <CustomSelect
+              value={filter}
+              onChange={(val) => setFilter(val as FilterKey)}
+              ariaLabel="筛选"
+              options={[
+                { value: "all", label: "全部" },
+                { value: "ok", label: "正常" },
+                { value: "missing", label: "有目录缺失" },
+              ]}
+            />
+          </div>
+          <div className="ws-control">
+            <span className="muted small">项目类型</span>
+            <CustomSelect
+              value={effectiveKindFilter}
+              onChange={(val) => setKindFilter(val as ProjectKindFilter)}
+              ariaLabel="项目类型"
+              options={[
+                { value: "all", label: "全部类型" },
+                ...Object.entries(projectKindLabels).map(([kind, label]) => ({
+                  value: kind,
+                  label,
+                })),
+              ]}
+            />
+          </div>
+          <div className="ws-control">
+            <span className="muted small">排序</span>
+            <CustomSelect
+              value={sort}
+              onChange={(val) => setSort(val as SortKey)}
+              ariaLabel="排序"
+              options={[
+                { value: "recent", label: "最近活动" },
+                { value: "name", label: "名称" },
+                { value: "paths", label: "目录数" },
+              ]}
+            />
+          </div>
+          {(query || filter !== "all" || effectiveKindFilter !== "all") && (
+            <button
+              className="btn small ghost"
+              onClick={() => {
+                setQuery("");
+                setFilter("all");
+                setKindFilter("all");
+              }}
+            >
+              清除筛选
+            </button>
+          )}
         </div>
-        <div className="ws-control">
-          <span className="muted small">项目类型</span>
-          <CustomSelect
-            value={effectiveKindFilter}
-            onChange={(val) => setKindFilter(val as ProjectKindFilter)}
-            ariaLabel="项目类型"
-            options={[
-              { value: "all", label: "全部类型" },
-              ...Object.entries(projectKindLabels).map(([kind, label]) => ({
-                value: kind,
-                label,
-              })),
-            ]}
-          />
-        </div>
-        <div className="ws-control">
-          <span className="muted small">排序</span>
-          <CustomSelect
-            value={sort}
-            onChange={(val) => setSort(val as SortKey)}
-            ariaLabel="排序"
-            options={[
-              { value: "recent", label: "最近活动 ↓" },
-              { value: "name", label: "名称" },
-              { value: "paths", label: "目录数" },
-            ]}
-          />
-        </div>
-        {(query || filter !== "all" || effectiveKindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
-        {list && <span className="muted small">{list.length} 个项目</span>}
-        <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-          <button
-            className={viewMode === "cards" ? "on" : ""}
-            aria-pressed={viewMode === "cards"}
-            aria-label="卡片视图"
-            title="卡片视图"
-            onClick={() => setViewMode("cards")}
-          >
-            <Icon name="grid" />
-          </button>
-          <button
-            className={viewMode === "list" ? "on" : ""}
-            aria-pressed={viewMode === "list"}
-            aria-label="列表视图"
-            title="列表视图"
-            onClick={() => setViewMode("list")}
-          >
-            <Icon name="list" />
-          </button>
+
+        <div className="ws-controls-meta">
+          {list !== null && (
+            <span className="muted small">
+              {(query || filter !== "all" || effectiveKindFilter !== "all")
+                ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 项`
+                : `共 ${list.length} 项`}
+            </span>
+          )}
+          <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+            <button
+              className={viewMode === "cards" ? "on" : ""}
+              aria-pressed={viewMode === "cards"}
+              aria-label="卡片视图"
+              title="卡片视图"
+              onClick={() => setViewMode("cards")}
+            >
+              <Icon name="grid" />
+            </button>
+            <button
+              className={viewMode === "list" ? "on" : ""}
+              aria-pressed={viewMode === "list"}
+              aria-label="列表视图"
+              title="列表视图"
+              onClick={() => setViewMode("list")}
+            >
+              <Icon name="list" />
+            </button>
+          </div>
         </div>
       </div>
 

@@ -26,7 +26,8 @@ vi.mock("../../api", () => ({
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
-
+    restoreWorkstream: vi.fn().mockResolvedValue({ id: "w1", visibility: "normal" }),
+    deleteWorkstreamPermanently: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -134,7 +135,7 @@ it("opens the 新建任务 form, prefilled with the current task", async () => {
   screen.getByDisplayValue("整理 API 设计");
   within(dialog).getByText("Main");
   screen.getByRole("button", { name: "保存" });
-  screen.getByRole("button", { name: "新增目录…" });
+  screen.getByRole("button", { name: "添加关联项目" });
 });
 
 it("shows 更新摘要 with the pending-session count and calls the explicit update", async () => {
@@ -208,4 +209,32 @@ it("keeps the task summary visible and reports failed sessions after a partial u
   await screen.findByText("s-failed：无法完整读取消息");
   expect(screen.getByText("当前进展")).toBeTruthy();
   expect((screen.getByRole("button", { name: "更新摘要" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("renders separate unarchive and permanent delete buttons when workstream is archived", async () => {
+  const ctx = context();
+  ctx.workstream.visibility = "archived";
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByText("任务概览");
+
+  expect(screen.queryByRole("button", { name: "更多操作" })).toBeNull();
+  const unarchiveBtn = screen.getByRole("button", { name: "取消归档" });
+  const deleteBtn = screen.getByRole("button", { name: "永久删除" });
+  expect(unarchiveBtn).toBeDefined();
+  expect(deleteBtn).toBeDefined();
+
+  // Clicking delete opens permanent delete modal without text confirmation input
+  fireEvent.click(deleteBtn);
+  const dialog = screen.getByRole("dialog", { name: "永久删除这项任务？" });
+  expect(dialog).toBeDefined();
+  expect(within(dialog).queryByRole("textbox")).toBeNull();
+  within(dialog).getByText(/确定要永久删除/);
+
+  // Directly clickable without typing title
+  const confirmBtn = within(dialog).getByRole("button", { name: "永久删除" });
+  expect((confirmBtn as HTMLButtonElement).disabled).toBe(false);
+  fireEvent.click(confirmBtn);
+  await waitFor(() => expect(api.deleteWorkstreamPermanently).toHaveBeenCalledWith("w1"));
 });

@@ -86,7 +86,7 @@ export function contextUpdateErrorCopyText(error: ContextUpdateErrorDetails): st
  * 弹窗可以叠：两个 Modal 的 keydown 监听都在 document 上，一次按键会同时命中，
  * 所以只让最上面那一个响应（自己不是最后一个 `.modal-backdrop` 时忽略）。
  */
-export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+export function Modal({ title, onClose, children, wide, actions }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean; actions?: ReactNode }) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -128,7 +128,10 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
       <div className={`modal${wide ? " wide" : ""}`} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           <h2>{title}</h2>
-          <button type="button" className="btn ghost icon-only" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
+          <div className="modal-header-actions" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {actions}
+            <button type="button" className="btn ghost icon-only" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
+          </div>
         </div>
         {children}
       </div>

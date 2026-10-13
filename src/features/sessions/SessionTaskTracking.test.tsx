@@ -18,7 +18,6 @@ it("hides with the session page and remembers open and closed state across navig
   fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   fireEvent.click(await screen.findByRole("button", { name: "existing" }));
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "existing", initialTitle: "existing" });
-  expect(screen.getAllByRole("checkbox").length).toBe(3);
   fireEvent.mouseDown(document.body);
   expect(screen.getByRole("complementary")).toBeTruthy();
   // AppShell keeps the session page mounted but hidden in other sections.
@@ -36,44 +35,38 @@ it("hides with the session page and remembers open and closed state across navig
   expect(screen.queryByRole("complementary")).toBeNull();
 });
 
-it("directly toggles multi-select checkboxes, supports collapse/expand and hide untracked filter", async () => {
+it("opens task selection modal, supports multi-select checkboxes and quick untracking", async () => {
   render(<SessionTaskTracking sessionId="s" navigate={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   await screen.findByRole("button", { name: "existing" });
 
-  // Filter: toggle hide untracked
-  expect(screen.getByRole("checkbox", { name: "first" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "隐藏未跟踪任务" }));
-  expect(screen.queryByRole("checkbox", { name: "first" })).toBeNull();
-  expect(screen.getByRole("checkbox", { name: "existing" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "显示未跟踪任务" }));
-  expect(screen.getByRole("checkbox", { name: "first" })).toBeTruthy();
+  // Open modal via plus button
+  fireEvent.click(screen.getByRole("button", { name: "添加跟踪任务" }));
+  expect(await screen.findByRole("dialog", { name: "选择跟踪任务" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "新建任务" })).toBeTruthy();
+  expect(screen.getAllByRole("checkbox").length).toBe(3);
 
-  // Directly check untracked task
+  // Directly check untracked task in modal
   fireEvent.click(screen.getByRole("checkbox", { name: "second" }));
   await waitFor(() => expect(api.setSessionTaskTracking).toHaveBeenCalledWith("s", "second", true));
 
-  // Directly uncheck tracked task or use remove button
+  // Directly uncheck tracked task or use remove button in panel
   fireEvent.click(screen.getByRole("button", { name: "取消跟踪：existing" }));
   await waitFor(() => expect(api.setSessionTaskTracking).toHaveBeenCalledWith("s", "existing", false));
-
-  // Collapse and expand panel
-  fireEvent.click(screen.getByRole("button", { name: "收起跟踪任务面板" }));
-  expect(screen.queryByRole("checkbox")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "展开跟踪任务面板" }));
-  expect(screen.getAllByRole("checkbox").length).toBe(3);
 });
 
-it("refreshes external changes and preserves a failed mutation's error after reloading", async () => {
+it("refreshes external changes and preserves a failed mutation's error in modal", async () => {
   render(<SessionTaskTracking sessionId="s" navigate={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   await screen.findByRole("button", { name: "existing" });
   vi.mocked(api.getSessionTracking).mockResolvedValue({ ...data(), tracked_workstreams: [task("changed")] });
   act(() => { window.dispatchEvent(new Event(EVT_SYNCED)); });
   await screen.findByRole("button", { name: "changed" });
+
+  // Open modal and toggle with error
+  fireEvent.click(screen.getByRole("button", { name: "添加跟踪任务" }));
+  await screen.findByRole("dialog", { name: "选择跟踪任务" });
   vi.mocked(api.setSessionTaskTracking).mockRejectedValue(new Error("任务已归档"));
   fireEvent.click(screen.getByRole("checkbox", { name: "first" }));
   expect((await screen.findByRole("alert")).textContent).toContain("任务已归档");
-  await waitFor(() => expect(api.getSessionTracking).toHaveBeenCalledTimes(3));
-  expect(screen.getByRole("alert").textContent).toContain("任务已归档");
 });

@@ -37,3 +37,22 @@ it("keeps failed saves open with actionable error",async()=>{
   expect((await screen.findByRole("alert")).textContent).toContain("项目已删除");
   expect(screen.getByRole("dialog")).toBeTruthy();
 });
+it("opens project multi-select list and allows toggling projects", async () => {
+  const secondProject = { id: "p2", name: "后端服务", kind: "directory_group", purpose: "code", search_paths: ["/three"] } as unknown as ProjectCardData;
+  const missingProject = { id: "p3", name: "缺失项目", path_count: 1, missing_path_count: 1, search_paths: ["/missing"] } as unknown as ProjectCardData;
+  const noEndingChat = { id: "nec", name: "NoEnding Chat", kind: "directory_group", purpose: "chat", search_paths: ["/chat"] } as unknown as ProjectCardData;
+  vi.mocked(api.listProjectCards).mockResolvedValue([project, secondProject, missingProject, noEndingChat]);
+  render(<WorkstreamFormModal onClose={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加关联项目" }));
+  expect(await screen.findByRole("checkbox", { name: "NoEnding Chat" })).toBeTruthy();
+  expect(screen.queryByRole("checkbox", { name: "聊天项目" })).toBeNull();
+  expect(screen.queryByRole("checkbox", { name: "缺失项目" })).toBeNull();
+  const checkbox2 = screen.getByRole("checkbox", { name: "后端服务" });
+  expect(checkbox2).toHaveProperty("checked", false);
+  fireEvent.click(checkbox2);
+  expect(checkbox2).toHaveProperty("checked", true);
+  expect(screen.getByRole("button", { name: "移除项目 后端服务" })).toBeTruthy();
+  fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "多项目任务" } });
+  fireEvent.submit(screen.getByRole("textbox", { name: "标题" }).closest("form")!);
+  await waitFor(() => expect(api.createWorkstream).toHaveBeenCalledWith("多项目任务", "", ["p2"]));
+});

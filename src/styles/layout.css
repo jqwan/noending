@@ -295,6 +295,8 @@
   margin: 0 calc(-1 * var(--main-gutter)) var(--head-gap);
   padding: 0 var(--main-gutter);
   height: var(--titlebar-height);
+  min-height: var(--titlebar-height);
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;

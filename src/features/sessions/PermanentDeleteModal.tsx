@@ -19,23 +19,22 @@ function outcome(status: SourceAvailability): { warning: string | null; detail: 
   switch (status) {
     case "present":
       return {
-        warning: "Root 源会话仍然存在：删掉的是 NoEnding 这份副本。",
+        warning: "Root 源会话仍然存在：仅删除 NoEnding 本地副本。",
         detail:
-          "源文件不会被删除。下一次同步会从它重新同步——新的会话 id、没有跟踪任务、没有摘要，"
-          + "启动记录也不会恢复。想让它彻底消失，需要删除源会话文件。",
-        toast: "；源会话仍在，下次同步会作为新会话重新同步",
+          "原始 Agent 会话文件不会被删除。下一次同步会从它重新同步；若需彻底删除请清理源会话文件。",
+        toast: "；源会话仍在，下次同步将重新摄入",
       };
     case "missing":
       return {
         warning: null,
-        detail: "Root 源会话已不存在——本地数据删除后无法找回。",
-        toast: "；源会话已不存在，无法找回",
+        detail: "Root 源会话已不存在，本地数据删除后无法找回。",
+        toast: "；源会话已不存在",
       };
     default:
       return {
         warning: "无法确认 Root 源会话的状态。",
         detail:
-          "源文件不会被删除；如果它其实还在，下一次同步会把这个会话作为新会话重新同步。",
+          "原始文件不会被删除；若源文件仍存在，下次同步将重新录入。",
         toast: "",
       };
   }
@@ -92,7 +91,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
   };
 
   return (
-    <Modal title="删除" onClose={requestClose}>
+    <Modal title="永久删除这项会话？" onClose={requestClose}>
       {loading && (
         <div className="muted" style={{ padding: "12px 0" }}>
           正在读取删除预览…
@@ -113,17 +112,14 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
 
       {!loading && errorText === null && preview && (
         <>
+          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>不可撤销</div>
+
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
-            将删除 <b>{sessionDisplayTitle(preview.session_title)}</b>
-            <span className="muted">（{agentDisplayLabel(preview.agent)}）</span> 在 NoEnding 中的本地数据：
+            确定要永久删除会话 <b>{sessionDisplayTitle(preview.session_title)}</b>
+            <span className="muted">（{agentDisplayLabel(preview.agent)}）</span> 的本地记录吗？
           </p>
 
-          <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-            只删除 NoEnding 本地数据，不会删除 Agent 数据。
-          </div>
-
-          <div className="section-label" style={{ margin: "14px 0 2px" }}>将删除</div>
-          <ul className="purge-list">
+          <ul className="purge-list" style={{ margin: "0 0 12px" }}>
             <li>{fmtCount(preview.message_count)} 条会话消息</li>
             <li>{fmtCount(preview.session_context_count)} 条 Context 摘要记录</li>
           </ul>
@@ -134,7 +130,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           </div>
 
           <p className="muted small" style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
-            任务及其 Context 内容不受影响；受影响 Context 的「来源」将显示为「来源会话已删除」。
+            关联任务及其 Context 内容不受影响。
           </p>
 
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>

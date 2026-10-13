@@ -14,3 +14,43 @@ export const projectPurposeLabels: Record<ProjectPurpose, string> = {
 export function isDirectoryGroupProject(project: { kind?: ProjectKind }): boolean {
   return project.kind === "directory_group";
 }
+
+export function isProjectAllPathsMissing(project: {
+  path_count?: number;
+  missing_path_count?: number;
+  search_paths?: string[];
+  representative_paths?: string[];
+}): boolean {
+  const total = project.path_count ?? (project.search_paths?.length || project.representative_paths?.length || 0);
+  const missing = project.missing_path_count ?? 0;
+  if (total === 0) return true;
+  return missing >= total;
+}
+
+export function isNoEndingChatProject(project: {
+  id?: string;
+  name?: string;
+  purpose?: ProjectPurpose | null;
+}): boolean {
+  if (project.purpose !== "chat") return false;
+  const normalized = project.name?.trim().toLowerCase();
+  return normalized === "noending chat" || normalized === "noendingchat" || project.id === "noending-chat";
+}
+
+export function isSelectableProject(project: {
+  id?: string;
+  name?: string;
+  visibility?: string;
+  kind?: ProjectKind;
+  purpose?: ProjectPurpose | null;
+  path_count?: number;
+  missing_path_count?: number;
+  search_paths?: string[];
+  representative_paths?: string[];
+}): boolean {
+  if (project.visibility === "archived") return false;
+  if (project.kind !== "git" && project.purpose === "chat" && !isNoEndingChatProject(project)) {
+    return false;
+  }
+  return !isProjectAllPathsMissing(project);
+}

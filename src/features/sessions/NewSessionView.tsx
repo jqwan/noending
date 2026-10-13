@@ -22,6 +22,7 @@ import {
   type WorkstreamCardData,
 } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
+import { isSelectableProject } from "../projects/projectKind";
 import PageHeader from "../../layout/PageHeader";
 
 /** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
@@ -212,17 +213,50 @@ export default function NewSessionView({
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
 
-  const otherProjects = useMemo(
-    () => projects,
-    [projects],
+  const selectableProjects = useMemo(
+    () => projects.filter((p) => p.id === selectedProjectId || isSelectableProject(p)),
+    [projects, selectedProjectId],
   );
+
+  const [projectDetailPaths, setProjectDetailPaths] = useState<Record<string, { canonical_path: string; exists: boolean }[]>>({});
+
+  useEffect(() => {
+    if (!selectedProjectId || !api.getProjectDetail) return;
+    let cancelled = false;
+    api
+      .getProjectDetail(selectedProjectId)
+      .then((detail) => {
+        if (!cancelled && detail?.workspace_paths) {
+          setProjectDetailPaths((prev) => ({
+            ...prev,
+            [selectedProjectId]: detail.workspace_paths.map((wp) => ({
+              canonical_path: wp.canonical_path,
+              exists: wp.exists,
+            })),
+          }));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectId]);
 
   const projectDirs: string[] = useMemo(() => {
     if (!selectedProject) return [];
-    return selectedProject.search_paths?.length
+    const rawDirs = selectedProject.search_paths?.length
       ? selectedProject.search_paths
       : selectedProject.representative_paths;
-  }, [selectedProject]);
+    const detailPaths = projectDetailPaths[selectedProject.id];
+    if (detailPaths && detailPaths.length > 0) {
+      const nonMissing = new Set(
+        detailPaths.filter((wp) => wp.exists).map((wp) => wp.canonical_path)
+      );
+      const filtered = rawDirs.filter((d) => nonMissing.has(d));
+      if (filtered.length > 0) return filtered;
+    }
+    return rawDirs;
+  }, [selectedProject, projectDetailPaths]);
 
   const [selectedDirPath, setSelectedDirPath] = useState<string>("");
   const [dirGitStates, setDirGitStates] = useState<Record<string, boolean>>({});
@@ -464,7 +498,7 @@ export default function NewSessionView({
                 tabIndex={-1}
               >
                 {!selectedProject && <option value="" disabled>选择项目</option>}
-                {otherProjects.map((p) => (
+                {selectableProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
                 <option value="__new_project__">+ 新项目</option>
@@ -473,7 +507,7 @@ export default function NewSessionView({
               {projectMenuOpen && (
                 <div className="new-session-dropdown-menu" role="menu" aria-label="所属项目列表">
                   <div className="new-session-menu-list">
-                    {otherProjects.map((p) => {
+                    {selectableProjects.map((p) => {
                       const isSelected = selectedProjectId === p.id;
                       return (
                         <button
@@ -609,7 +643,7 @@ export default function NewSessionView({
                 }
               }}
               disabled={busy}
-              rows={4}
+              rows={2}
             />
             <div className="new-session-composer-footer">
               <div className="new-session-composer-footer-left">
@@ -693,7 +727,7 @@ export default function NewSessionView({
             } catch(e) { showToast(`读取任务失败：${String(e)}`); }
             setShowNewWorkstreamModal(false);
           }}
-          initialProjectId={selectedProjectId || undefined}
+          initialProjectId={selectedProject && isSelectableProject(selectedProject) ? selectedProjectId : undefined}
         />
       )}
     </main>

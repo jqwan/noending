@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
 import { useViewState } from "../../hooks/useViewState";
 import { EVT_SYNCED, type Route } from "../../app/routes";
-import type { SessionTracking, Workstream } from "../../types";
-import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
+import type { SessionTracking } from "../../types";
+import SessionTaskTrackingModal from "./SessionTaskTrackingModal";
 
 /** State survives navigation; the window stays inside the session content so hiding it hides the window too. */
 export default function SessionTaskTracking({ sessionId, navigate }: {
@@ -12,9 +12,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
   navigate: (route: Route) => void;
 }) {
   const [open, setOpen] = useViewState(`session.${sessionId}.tracking.open`, false);
-  const [collapsed, setCollapsed] = useViewState(`session.${sessionId}.tracking.collapsed`, false);
-  const [hideUntracked, setHideUntracked] = useState(false);
-  const [newTaskOpen, setNewTaskOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
   const [data, setData] = useState<SessionTracking | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -75,31 +73,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
     }
   };
 
-  const allTasks = useMemo(() => {
-    if (!data) return [];
-    const map = new Map<string, Workstream>();
-    for (const t of data.tracked_workstreams) map.set(t.id, t);
-    for (const t of data.available_workstreams) {
-      if (!map.has(t.id)) map.set(t.id, t);
-    }
-    return Array.from(map.values());
-  }, [data]);
-
-  const trackedIds = useMemo(() => {
-    if (!data) return new Set<string>();
-    const set = new Set<string>(data.session.tracked_workstream_ids);
-    for (const t of data.tracked_workstreams) set.add(t.id);
-    return set;
-  }, [data]);
-
-  const displayedTasks = useMemo(() => {
-    if (hideUntracked) {
-      return allTasks.filter(t => trackedIds.has(t.id));
-    }
-    return allTasks;
-  }, [allTasks, trackedIds, hideUntracked]);
-
-  const trackedCount = trackedIds.size;
+  const trackedCount = data?.tracked_workstreams.length ?? 0;
 
   return <>
     <button
@@ -113,7 +87,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
       <Icon name="tasks" />
     </button>
     {open && sessionId && (
-      <aside className={`session-tracking-panel${collapsed ? " collapsed" : ""}`} aria-label="跟踪任务面板">
+      <aside className="session-tracking-panel" aria-label="跟踪任务面板">
         <div className="session-tracking-head">
           <div className="session-tracking-head-title">
             <Icon name="tasks" />
@@ -124,94 +98,60 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
           </div>
           <div className="session-tracking-actions">
             <button
-              className={`btn ghost icon-button small${hideUntracked ? " on" : ""}`}
-              title={hideUntracked ? "显示未跟踪任务" : "隐藏未跟踪任务"}
-              aria-label={hideUntracked ? "显示未跟踪任务" : "隐藏未跟踪任务"}
-              aria-pressed={hideUntracked}
-              disabled={busy || !data}
-              onClick={() => setHideUntracked(v => !v)}
-            >
-              <Icon name="filter" />
-            </button>
-            <button
               className="btn ghost icon-button small"
-              title="新建任务"
-              aria-label="新建任务"
+              title="添加跟踪任务"
+              aria-label="添加跟踪任务"
               disabled={busy || !data}
-              onClick={() => setNewTaskOpen(true)}
+              onClick={() => setModalOpen(true)}
             >
               <Icon name="plus" />
             </button>
             <button
               className="btn ghost icon-button small"
-              title={collapsed ? "展开跟踪任务面板" : "收起跟踪任务面板"}
-              aria-label={collapsed ? "展开跟踪任务面板" : "收起跟踪任务面板"}
-              aria-expanded={!collapsed}
-              onClick={() => setCollapsed(v => !v)}
+              title="关闭面板"
+              aria-label="关闭面板"
+              onClick={() => setOpen(false)}
             >
-              <Icon name={collapsed ? "expandAll" : "collapseAll"} />
+              <Icon name="close" />
             </button>
           </div>
         </div>
 
-        {!collapsed && (
-          <div className="session-tracking-list">
-            {displayedTasks.map(task => {
-              const isTracked = trackedIds.has(task.id);
-              return (
-                <div className={`session-tracking-row${isTracked ? " tracked" : ""}`} key={task.id}>
-                  <label className="session-tracking-check-label" title={isTracked ? "取消跟踪" : "添加跟踪"}>
-                    <input
-                      type="checkbox"
-                      disabled={busy}
-                      checked={isTracked}
-                      aria-label={task.title}
-                      onChange={() => void change([task.id], !isTracked)}
-                    />
-                  </label>
-                  <button
-                    className="session-tracking-link"
-                    title={task.title}
-                    onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
-                  >
-                    {task.title}
-                  </button>
-                  {task.visibility === "archived" && <span className="badge">已归档</span>}
-                  {isTracked && (
-                    <button
-                      className="btn ghost icon-button small session-tracking-remove"
-                      disabled={busy}
-                      title="取消跟踪"
-                      aria-label={`取消跟踪：${task.title}`}
-                      onClick={() => void change([task.id], false)}
-                    >
-                      <Icon name="close" />
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-            {data && displayedTasks.length === 0 && (
-              <p className="muted small">
-                {hideUntracked
-                  ? "暂无跟踪任务。"
-                  : (data.session.project_id ? "该项目暂无可用任务，可点击上方「+」新建。" : "请先为会话关联工作目录及项目。")}
-              </p>
-            )}
-            {!data && !error && <p className="muted small">正在读取任务…</p>}
-          </div>
-        )}
+        <div className="session-tracking-list">
+          {data?.tracked_workstreams.map(task => (
+            <div className="session-tracking-row" key={task.id}>
+              <button
+                className="session-tracking-link"
+                title={task.title}
+                onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
+              >
+                <Icon name="tasks" />
+                <span className="truncate">{task.title}</span>
+              </button>
+              {task.visibility === "archived" && <span className="badge">已归档</span>}
+              <button
+                className="btn ghost icon-button small session-tracking-remove"
+                disabled={busy}
+                title="取消跟踪"
+                aria-label={`取消跟踪：${task.title}`}
+                onClick={() => void change([task.id], false)}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          ))}
+          {data && data.tracked_workstreams.length === 0 && (
+            <p className="muted small">未跟踪任何任务，点击右上角「+」添加。</p>
+          )}
+          {!data && !error && <p className="muted small">正在读取任务…</p>}
+        </div>
 
         {error && <p role="alert" className="warning session-tracking-error">{error}</p>}
 
-        {newTaskOpen && (
-          <WorkstreamFormModal
-            initialProjectId={data?.session.project_id ?? undefined}
-            onClose={() => setNewTaskOpen(false)}
-            onCreated={async (created) => {
-              setNewTaskOpen(false);
-              await change([created.id], true);
-            }}
+        {modalOpen && (
+          <SessionTaskTrackingModal
+            sessionId={sessionId}
+            onClose={() => setModalOpen(false)}
           />
         )}
       </aside>
