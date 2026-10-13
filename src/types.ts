@@ -519,8 +519,16 @@ export interface TerminalBound {
 export interface TerminalSnapshot extends TerminalSummary {
   /** base64 的 PTY 原始字节，attach 时一次性全量重放。 */
   scrollback: string;
+  /** 快照覆盖到的 PTY 字节位置，包括已从 scrollback 淘汰的字节。 */
+  output_offset: number;
   cols: number;
   rows: number;
+}
+
+/** terminal-output://{id}：带字节位置的原始输出，供快照交界处去重。 */
+export interface TerminalOutput {
+  offset: number;
+  data: string;
 }
 
 export const AGENT_LABELS: Record<Agent, string> = {

@@ -19,6 +19,7 @@ import { EVT_TERMINALS, type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
+import { subscribeTerminalStream, type TerminalStream } from "./terminalStream";
 
 /**
  * 会话页的内嵌终端面板。路由保留 terminal_id 以访问尚未绑定的实例；PTY 与 scrollback 都归后端（terminal
@@ -33,21 +34,13 @@ import { connectTerminalInput } from "./terminalInput";
  * 统一收割）。
  */
 
-/** base64 → PTY 原始字节。xterm.write 直接吃 Uint8Array，不经过字符串化。 */
-function decodeBase64(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
 /** 裸修饰键（e.key）：IME 首键直提交时唯一能先到的 keydown，武装差分窗口用。 */
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 
 type TerminalState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; snapshot: TerminalSnapshot; exited: boolean };
+  | { kind: "ready"; snapshot: TerminalSnapshot; exited: boolean; stream: TerminalStream | null };
 
 /** 注册表的身份广播：绑定、切换与 pending 清空都走同一个版本化通道。 */
 const EVENT_BOUND = "terminal-bound";
@@ -150,28 +143,36 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
    *  启动时就已存在，本视图从不负责 spawn。 */
   const bootstrap = () => setConnectionAttempt((attempt) => attempt + 1);
 
-  // 先完成订阅再读取快照：订阅窗口里的切换事件靠 revision 赢过旧快照。
+  // 身份、输出与退出都先完成订阅，再读快照。输出按字节位置去掉快照重叠。
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
     setState({ kind: "loading" });
-    void listen<TerminalBound>(EVENT_BOUND, (e) => {
+    const identityReady = listen<TerminalBound>(EVENT_BOUND, (e) => {
       if (active && e.payload.terminal_id === terminalId) applyIdentity(e.payload);
-    })
-      .then(async (stop) => {
-        if (!active) { stop(); return; }
-        unlisten = stop;
+    }).then(stop => {
+      if (!active) stop();
+      else unlisten = stop;
+    });
+    // 缓存实例已经持有常驻输出订阅，重挂时不能再订阅或重放。
+    const cached = liveTerminals.get(terminalId);
+    const stream = cached ? null : subscribeTerminalStream(terminalId);
+    void Promise.all([identityReady, stream?.ready])
+      .then(async () => {
+        if (!active) return;
         const snapshot = await api.terminalAttach(terminalId);
         if (!active) return;
         applyIdentity(snapshot, true);
-        setState({ kind: "ready", snapshot, exited: !snapshot.live });
+        setState({ kind: "ready", snapshot, stream, exited: !snapshot.live || !!cached?.exited || !!stream?.exited });
       })
       .catch((error) => {
+        stream?.dispose();
         if (active) setState({ kind: "error", message: String(error) });
       });
     return () => {
       active = false;
       unlisten?.();
+      if (!stream?.retained) stream?.dispose();
     };
   }, [terminalId, connectionAttempt, applyIdentity]);
 
@@ -201,6 +202,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   // DOM 节点搬回新容器）。unmount 只断开 ResizeObserver 和横幅联动，不销毁
   // 实例；PTY 输出在 detach 期间继续写入同一实例。
   const snapshot = state.kind === "ready" ? state.snapshot : null;
+  const stream = state.kind === "ready" ? state.stream : null;
   const exited = state.kind === "ready" && state.exited;
   useEffect(() => {
     if (snapshot === null || containerRef.current === null) return;
@@ -209,6 +211,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
 
     let entry = liveTerminals.get(id);
     if (!entry) {
+      if (!stream) return;
       const term = new Terminal({
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 12.5,
@@ -377,8 +380,6 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         true,
       );
 
-      term.write(decodeBase64(snapshot.scrollback));
-
       // 输入通道随实例常驻：detach 期间没有 UI 焦点自然无输入，无需重建。
       const stopInput = connectTerminalInput(term, (data) => {
         const liveNow = liveTerminals.get(id);
@@ -388,28 +389,21 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         });
       });
 
-      const unlisteners = [
-        listen<string>(`terminal-output://${id}`, (e) => {
-          term.write(decodeBase64(e.payload));
-        }),
-        listen<{ exit_code: number | null }>(`terminal-exit://${id}`, () => {
-          const live = liveTerminals.get(id);
-          if (live) {
-            live.exited = true;
-            live.onExit?.();
-          }
-        }),
-      ];
       entry = {
         term,
         fit,
-        unlisteners: [stopTheme, stopInput, ...unlisteners.map((p) => () => {
-          void p.then((u) => u()).catch(() => {});
-        })],
-        exited: !snapshot.live,
+        unlisteners: [stopTheme, stopInput, () => stream.dispose()],
+        exited: !snapshot.live || stream.exited,
         onExit: null,
       };
       liveTerminals.set(id, entry);
+      stream.replay(snapshot, data => term.write(data), () => {
+        const live = liveTerminals.get(id);
+        if (live) {
+          live.exited = true;
+          live.onExit?.();
+        }
+      });
     } else {
       // 重挂：搬回节点，不回放、不新建。状态（含 detach 期间的输出与退出
       // 事实）都在实例里。
@@ -459,7 +453,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       live.onExit = null;
       observer.disconnect();
     };
-  }, [snapshot]);
+  }, [snapshot, stream]);
 
   // 未绑定的终端以「新会话」为名；绑定后标题换成会话本名。agent 在
   // attach 回来前用路由种子，避免首帧丢失图标。

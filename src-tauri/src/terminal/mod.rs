@@ -78,16 +78,27 @@ pub struct TerminalSummary {
     pub session_title: Option<String>,
 }
 
-/// attach 的回答：元数据 + 当前 scrollback 快照 + 几何。一次性全量重放
-/// （cap 256 KiB），换来零 seq 协商——子页切换的频率下这是正确的取舍。
+/// Attach snapshot and its output byte boundary. Events subscribed before
+/// attach may overlap this snapshot; the boundary lets clients replay once.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalSnapshot {
     #[serde(flatten)]
     pub summary: TerminalSummary,
     /// base64 of the buffered raw PTY bytes.
     pub scrollback: String,
+    /// Total PTY bytes observed, including bytes evicted from scrollback.
+    pub output_offset: u64,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// The output payload of `terminal-output://{id}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalOutput {
+    /// Offset of the first byte in `data` in this terminal's output stream.
+    pub offset: u64,
+    /// Base64-encoded raw PTY bytes.
+    pub data: String,
 }
 
 /// The exit payload of `terminal-exit://{id}`.
@@ -101,10 +112,12 @@ pub struct TerminalExit {
 #[derive(Default)]
 struct Scrollback {
     data: VecDeque<u8>,
+    output_offset: u64,
 }
 
 impl Scrollback {
     fn push(&mut self, bytes: &[u8]) {
+        self.output_offset += bytes.len() as u64;
         if bytes.len() >= SCROLLBACK_CAP {
             self.data.clear();
             let keep = &bytes[bytes.len() - SCROLLBACK_CAP..];
@@ -565,6 +578,7 @@ impl TerminalRegistry {
         Ok(TerminalSnapshot {
             summary: record.summary.clone(),
             scrollback: base64::engine::general_purpose::STANDARD.encode(record.scrollback.bytes()),
+            output_offset: record.scrollback.output_offset,
             cols: record.cols,
             rows: record.rows,
         })
@@ -696,8 +710,12 @@ impl TerminalRegistry {
                             let Ok(mut record) = reader_record.lock() else {
                                 break;
                             };
+                            let offset = record.scrollback.output_offset;
                             record.scrollback.push(&chunk[..n]);
-                            base64::engine::general_purpose::STANDARD.encode(&chunk[..n])
+                            TerminalOutput {
+                                offset,
+                                data: base64::engine::general_purpose::STANDARD.encode(&chunk[..n]),
+                            }
                         };
                         if let Some(app) = &reader_app {
                             let _ = app.emit(&format!("{EVENT_OUTPUT_PREFIX}{reader_id}"), encoded);
@@ -1914,11 +1932,64 @@ mod tests {
         let mut sb = Scrollback::default();
         sb.push(&[1, 2, 3]);
         assert_eq!(sb.bytes(), vec![1, 2, 3]);
+        assert_eq!(sb.output_offset, 3);
         // A single chunk larger than the cap keeps only its tail.
         let big: Vec<u8> = (0..SCROLLBACK_CAP + 10).map(|i| i as u8).collect();
         sb.push(&big);
         assert_eq!(sb.len(), SCROLLBACK_CAP);
         assert_eq!(sb.bytes()[0], 10_u8);
+        assert_eq!(sb.output_offset, (SCROLLBACK_CAP + 13) as u64);
+        // Eviction across multiple chunks must not reset the stream boundary.
+        sb.push(&[42, 43]);
+        assert_eq!(sb.output_offset, (SCROLLBACK_CAP + 15) as u64);
+        assert_eq!(sb.len(), SCROLLBACK_CAP);
+        assert_eq!(sb.bytes()[SCROLLBACK_CAP - 2..], [42, 43]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_conpty_startup_query_survives_attach_and_unblocks_on_reply() {
+        let registry = registry();
+        let cmd = AgentCommand {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo NOENDING_CONPTY_READY".into()],
+            cwd: None,
+        };
+        let outcome = spawn_embedded(&cmd, &target(&registry, "s-conpty")).unwrap();
+        let id = outcome.terminal_id.unwrap();
+        struct Cleanup<'a>(&'a TerminalRegistry, &'a str);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.write(self.1, "\x1b[1;1R");
+                self.0.kill_all();
+            }
+        }
+        let _cleanup = Cleanup(&registry, &id);
+        let snapshot = until("ConPTY startup cursor query", || {
+            let snapshot = registry.attach(&id).ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&snapshot.scrollback)
+                .ok()?;
+            bytes
+                .windows(4)
+                .any(|part| part == b"\x1b[6n")
+                .then_some(snapshot)
+        });
+        let initial = base64::engine::general_purpose::STANDARD
+            .decode(&snapshot.scrollback)
+            .unwrap();
+        assert_eq!(snapshot.output_offset, initial.len() as u64);
+        assert!(!String::from_utf8_lossy(&initial).contains("NOENDING_CONPTY_READY"));
+        registry.write(&id, "\x1b[1;1R").unwrap();
+        until("command output after cursor reply", || {
+            let current = registry.attach(&id).ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&current.scrollback)
+                .ok()?;
+            String::from_utf8_lossy(&bytes)
+                .contains("NOENDING_CONPTY_READY")
+                .then_some(())
+        });
     }
 
     #[cfg(unix)]

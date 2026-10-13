@@ -4,7 +4,7 @@ import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTermin
 import { disposeTerminal, liveTerminals } from "./terminalCache";
 import { api } from "../../api";
 import { sessionPages, sessionTerminals } from "./sessionNavigation";
-import type { TerminalBound, TerminalSnapshot } from "../../types";
+import type { TerminalBound, TerminalOutput, TerminalSnapshot } from "../../types";
 import { listen } from "@tauri-apps/api/event";
 
 // 终端子页的交互面全部在后端；这里覆盖进入即用的状态机：
@@ -140,6 +140,12 @@ vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
   sessionPages.clear(); sessionTerminals.clear();
+  vi.mocked(listen).mockReset().mockImplementation((event, handler) => {
+    eventHandlers.set(event, handler as (e: unknown) => void);
+    return Promise.resolve(() => {
+      if (eventHandlers.get(event) === handler) eventHandlers.delete(event);
+    });
+  });
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.terminalClose).mockReset();
   vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue(reconnected);
@@ -171,6 +177,7 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
     cols: 80,
     rows: 24,
     ...over,
+    output_offset: over.output_offset ?? atob(over.scrollback ?? "").length,
   };
 }
 
@@ -244,6 +251,24 @@ it("attaches by terminal ID, replays scrollback and forwards input", async () =>
 
   FakeTerminal.last!.handlers.forEach((h) => h("q"));
   await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q"));
+});
+
+it("retains output and exit events emitted while the attach snapshot is in flight", async () => {
+  const attach = deferred<TerminalSnapshot>();
+  vi.mocked(api.terminalAttach).mockReturnValueOnce(attach.promise);
+  renderView();
+  await waitFor(() => expect(api.terminalAttach).toHaveBeenCalledWith("t-1"));
+  await act(async () => {
+    const output: TerminalOutput = { offset: 9, data: btoa("ready") };
+    eventHandlers.get("terminal-output://t-1")!({ payload: output });
+    eventHandlers.get("terminal-exit://t-1")!({ payload: { exit_code: 1 } });
+    attach.resolve(snapshot({ scrollback: btoa("startup: "), live: true }));
+  });
+  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  expect(FakeTerminal.last!.written.map(data =>
+    typeof data === "string" ? data : new TextDecoder().decode(data),
+  ).join("")).toBe("startup: ready");
+  expect(screen.getByText(/Agent 已退出/)).toBeTruthy();
 });
 
 it("an attach failure shows the message with a retry", async () => {
@@ -412,15 +437,21 @@ it("a bound snapshot shows the session-detail entry enabled from the start", asy
   await waitFor(() => expect(screen.getByText("已有身份")).toBeTruthy());
 });
 
-it("waits for identity subscription before attaching", async () => {
-  const subscription = deferred<() => void>();
-  vi.mocked(listen).mockReturnValueOnce(subscription.promise);
+it("waits for identity, output and exit subscriptions before attaching", async () => {
+  const events = ["terminal-bound", "terminal-output://t-1", "terminal-exit://t-1"];
+  const subscriptions = new Map(events.map(event => [event, deferred<void>()]));
+  const register = vi.mocked(listen).getMockImplementation()!;
+  vi.mocked(listen).mockImplementation((event, handler) =>
+    subscriptions.get(event)!.promise.then(() => register(event, handler)),
+  );
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_title: "当前会话" }));
   renderView();
-  expect(listen).toHaveBeenCalledWith("terminal-bound", expect.any(Function));
   expect(api.terminalAttach).not.toHaveBeenCalled();
-
-  await act(async () => { subscription.resolve(() => {}); });
+  for (const event of events.slice(0, -1)) {
+    await act(async () => { subscriptions.get(event)!.resolve(); });
+    expect(api.terminalAttach).not.toHaveBeenCalled();
+  }
+  await act(async () => { subscriptions.get(events[events.length - 1])!.resolve(); });
   await waitFor(() => expect(api.terminalAttach).toHaveBeenCalledWith("t-1"));
 });
 
@@ -633,19 +664,25 @@ it("remounting reuses the live instance instead of rebuilding and replaying", as
   const view = renderView();
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
   const first = FakeTerminal.last!;
-  const firstWrites = first.written.length;
   const element = first.element;
   expect(element.isConnected).toBe(true);
 
   // 切走（unmount）→ 切回（remount）：实例与 DOM 节点存活。
   view.unmount();
   expect(element.isConnected).toBe(false);
+  act(() => {
+    eventHandlers.get("terminal-output://t-1")!({ payload: { offset: 5, data: btoa("while-away") } });
+    eventHandlers.get("terminal-exit://t-1")!({ payload: { exit_code: 0 } });
+  });
+  expect(new TextDecoder().decode(first.written[first.written.length - 1] as Uint8Array)).toBe("while-away");
+  const firstWrites = first.written.length;
   const second = renderView();
   await waitFor(() => expect(element.isConnected).toBe(true));
   // 同一个实例：没有第二个 Terminal 被构造。
   expect(FakeTerminal.last).toBe(first);
   // 不重放 scrollback：回放正是跨尺寸渲染错乱的根源。
   expect(first.written.length).toBe(firstWrites);
+  expect(screen.getByText(/Agent 已退出/)).toBeTruthy();
   second.unmount();
 });
 
