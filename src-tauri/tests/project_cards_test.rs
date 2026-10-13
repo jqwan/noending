@@ -1,6 +1,5 @@
-//! Projects Experience v0.2 — the `list_project_cards` projection,
-//! plus the review P2-1 contract: search_paths covers EVERY workspace path
-//! while representative_paths stays a display-only truncation.
+//! The `list_project_cards` projection: search_paths covers EVERY workspace
+//! path while representative_paths stays a display-only truncation.
 
 use noending::domain::{Agent, ProjectKind, Workstream};
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -117,7 +116,7 @@ fn board_card_projection_counts_and_paths() {
     let other_card = cards.iter().find(|c| c.id == "p-2").unwrap();
     assert_eq!(other_card.workstream_count, 1);
 
-    // Review P2-1 — representative stays a two-path display truncation while
+    // Representative stays a two-path display truncation while
     // search_paths carries the whole registry slice, canonical order.
     assert_eq!(
         card.representative_paths,

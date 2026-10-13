@@ -241,7 +241,7 @@ fn archive_filters_board_but_preserves_task_projections() {
     let all = active(&db, Scope::All);
     assert!(all.iter().any(|x| x.id == s.id));
 
-    // Workstream cards no longer count the trashed session.
+    // Workstream cards do not count the trashed session.
     let (count_after, latest_after, _) = db.workstream_session_stats(&ws.id).unwrap();
     assert_eq!(count_after, count_before);
     assert_eq!(latest_after, latest_before);
@@ -297,7 +297,6 @@ fn unarchive_keeps_identity_data_and_search() {
     lifecycle::archive_session(&db, &s.id).unwrap();
     let restored = lifecycle::restore_session(&db, &s.id).unwrap();
 
-    // : Trash → Restore keeps the same identity and every fact.
     assert_eq!(restored.id, s.id);
     assert!(restored.archived_at.is_none());
     assert_eq!(restored.tracked_workstream_ids, vec![ws.id]);
@@ -349,7 +348,7 @@ fn active_session_is_never_purgeable_even_when_root_is_missing() {
     // The source disappears (user rm, sync tool) while the session is ACTIVE.
     std::fs::remove_file(&source_file).unwrap();
     assert_eq!(
-        lifecycle::root_source_status(&db, &db.get_session(&s.id).unwrap().unwrap()).unwrap(),
+        lifecycle::root_source_status(&db.get_session(&s.id).unwrap().unwrap()).unwrap(),
         Some(SourceAvailability::Missing),
         "fixture sanity: the adapter confirms the root missing"
     );
@@ -494,8 +493,8 @@ fn the_purge_never_touches_other_files_on_disk() {
     let root_file = PathBuf::from(&s.source_path);
     commit_message(&db, &s.id, "root conversation", 100);
 
-    // An unrelated file in the same temp dir (the old "child transcript"
-    // spot): the purge is a LOCAL row purge with no filesystem step.
+    // An unrelated file in the same temp dir: the purge is a LOCAL row purge
+    // with no filesystem step.
     let sibling_file = dir.path().join("sibling.jsonl");
     std::fs::write(&sibling_file, "unrelated transcript\n").unwrap();
 
@@ -564,7 +563,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     );
 }
 
-// Review P1-1: search stays lifecycle-authoritative across restarts
+// Search stays lifecycle-authoritative across restarts
 
 /// Trash never removes index rows, so the startup backfill must fill in only
 /// what is missing: archived and active sessions are indexed identically, and

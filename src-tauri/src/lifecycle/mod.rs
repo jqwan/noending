@@ -71,7 +71,7 @@ pub fn restore_session(db: &Db, session_id: &str) -> Result<Session> {
 }
 
 /// The fresh source verdict for a session.
-pub fn root_source_status(_db: &Db, session: &Session) -> Result<Option<SourceAvailability>> {
+pub fn root_source_status(session: &Session) -> Result<Option<SourceAvailability>> {
     Ok(Some(
         adapter_for(session.agent).inspect_session_source(session)?,
     ))
@@ -92,7 +92,7 @@ fn require_archived(db: &Db, session_id: &str) -> Result<Session> {
 /// ROOT source verdict the dialog's copy is built from.
 pub fn get_session_local_delete_preview(db: &Db, session_id: &str) -> Result<LocalDeletePreview> {
     let session = require_archived(db, session_id)?;
-    let status = root_source_status(db, &session)?;
+    let status = root_source_status(&session)?;
     let counts = PermanentDeletionCounts::collect(&db.read(), session_id)?;
     Ok(LocalDeletePreview {
         session_id: session.id,

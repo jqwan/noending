@@ -312,7 +312,7 @@ pub struct Session {
     /// never touches the Agent source; permanent deletion removes the row
     /// entirely.
     pub archived_at: Option<String>,
-    // ---- The root source (flattened from the former session_members row) ----
+    // ---- The root source ----
     /// Adapter-owned descriptor of the source shape (`rollout_file`,
     /// `transcript_file`, sqlite store kinds, …).
     pub source_kind: String,
@@ -322,7 +322,7 @@ pub struct Session {
     /// Adapter-specific, non-Conversation structural facts (thread_source,
     /// session_dir, …). Never conversation text.
     pub metadata: serde_json::Value,
-    // ---- The source cursor (flattened from session_member_cursors) ----
+    // ---- The source cursor ----
     /// Stable identity of the source file; a change means replacement.
     pub source_file_identity: String,
     /// The source-shape generation: bumped on replace / truncate / rewrite,
@@ -337,7 +337,7 @@ pub struct Session {
     /// Identity hash of the last message on the CURRENT source chain — the
     /// base the next append batch continues from. Empty until a message exists.
     pub source_tail_hash: String,
-    // ---- The conversation fact frontier (flattened from session_ingest_state) ----
+    // ---- The conversation fact frontier ----
     /// Fact generation of the CURRENT conversation: raised only when a source
     /// rewrite / truncate / reorder changes the effective conversation.
     pub fact_generation: i64,

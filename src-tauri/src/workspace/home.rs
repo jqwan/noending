@@ -54,7 +54,6 @@ pub const LOGS_DIR_NAME: &str = "logs";
 /// NOT reserved: the default working directory, an ordinary WorkspacePath.
 pub const WORKSPACE_DIR_NAME: &str = "workspace";
 pub const DB_FILE_NAME: &str = "noending.db";
-/// Bootstrap pointer file name.
 pub const BOOTSTRAP_FILE_NAME: &str = "home.json";
 
 /// What a Home relocation moves. `workspace/` is absent on purpose: it
@@ -1265,7 +1264,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 必须测试-adjacent: the move happens, `workspace/` does not, and
+    /// The move happens, `workspace/` does not, and
     /// a retry converges instead of double-applying.
     #[test]
     fn data_root_migration_moves_app_dirs_and_keeps_workspace() {
@@ -1474,7 +1473,6 @@ mod tests {
 
     #[test]
     fn ensure_dirs_creates_the_default_workspace() {
-        // the plan wants a launchable directory, not a dangling string.
         let base = unique_temp_dir("ensure");
         let home = NoEndingHome::new(base.join("h").to_str().unwrap(), None).unwrap();
         assert!(!home.default_workspace.exists());

@@ -279,8 +279,6 @@ pub struct ReconcileReport {
     pub failed: Vec<(String, String)>,
 }
 
-// The door
-
 /// The single door for "this path exists and belongs somewhere".
 ///
 /// Runs inside the CALLER's transaction, so path registration commits together

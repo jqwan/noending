@@ -99,10 +99,10 @@ fn like_wildcards_are_matched_literally() {
     );
 }
 
-/// A ROOT conversation message is searchable by its content (doc), with
+/// A ROOT conversation message is searchable by its content, with
 /// `ref_id` = the message id and `parent_id` = the session id — and there is NO
-/// length filter: a short message is as findable as a long one (, every
-/// stored message IS the curated conversation).
+/// length filter: a short message is as findable as a long one. Every
+/// stored message IS the curated conversation.
 #[test]
 fn a_root_message_is_searchable_regardless_of_length() {
     let db = open_db("message");
@@ -241,7 +241,7 @@ fn archive_keeps_session_and_messages_searchable() {
 
 /// The read-side guard is the second half of the lifecycle invariant: a stale
 /// index row left behind by an interrupted write must not surface a trashed or
-/// deleted session in search (review P1-1).
+/// deleted session in search.
 #[test]
 fn the_read_side_guard_hides_rows_without_a_live_session() {
     let db = open_db("stale-guard");

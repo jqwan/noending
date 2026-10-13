@@ -7,8 +7,8 @@ pub mod webview;
 
 use serde::Serialize;
 
-/// Operating systems we explicitly support. v0.2 keeps Windows/macOS
-/// differences behind this layer so Domain code never branches on OS.
+/// Operating systems we explicitly support: Windows/macOS
+/// differences stay behind this layer so Domain code never branches on OS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {

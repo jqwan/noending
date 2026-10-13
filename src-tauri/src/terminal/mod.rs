@@ -2128,8 +2128,6 @@ mod tests {
 
         registry.close(&id).expect("closed");
 
-        // 记录整体移除：不进运行列表、查不到会话、attach 拒绝——显式关闭
-        // 的终端没有回放价值，下一次 Resume 起的是全新终端。
         assert!(!registry.has_live("s-live"));
         assert!(registry.list().iter().all(|t| t.terminal_id != id));
         assert!(registry.for_session("s-live").is_none());

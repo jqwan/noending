@@ -259,10 +259,9 @@ pub fn is_within_with(child: &str, ancestor: &str, style: PathStyle) -> bool {
     if child == ancestor {
         return true;
     }
-    // A bare root ("/", "C:", "\\") already ends the boundary itself.
-    let prefix = if ancestor.ends_with(':') {
-        format!("{ancestor}/")
-    } else if ancestor == "/" {
+    // A bare "/" ends the boundary itself; anything else gets the trailing
+    // separator so "/data" never matches "/database".
+    let prefix = if ancestor == "/" {
         "/".to_string()
     } else {
         format!("{ancestor}/")

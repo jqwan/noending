@@ -148,13 +148,12 @@ pub struct PreparedLaunch {
     pub session_id: Option<String>,
     /// Initial tracking tasks for New; Resume does not carry a task.
     pub initial_workstream_ids: Vec<String>,
-    /// The directory the Agent WILL start in — authoritative. Since
-    /// the spawn step uses this value and nothing else: `launch_prepared` no
-    /// longer re-reads `sessions.cwd`, because re-reading let background
-    /// discovery move a launch between Preview and Launch.
+    /// The directory the Agent WILL start in — authoritative: the spawn step
+    /// uses this value and nothing else; re-reading `sessions.cwd` let
+    /// background discovery move a launch between Preview and Launch.
     pub cwd: Option<String>,
-    /// Which of 's tiers produced `cwd`, so the UI can name it and a
-    /// downgrade can never be silent. Part of `state_fingerprint`.
+    /// Which tier of [`LaunchWorkspace`] produced `cwd`, so the UI can name it
+    /// and a downgrade can never be silent. Part of `state_fingerprint`.
     #[serde(default)]
     pub cwd_resolution: CwdResolution,
     /// NoEnding's runtime override intent, frozen at Preview time. `None`
@@ -215,8 +214,7 @@ pub struct EmbeddedSpawn<'a> {
 }
 
 pub struct SessionLauncher {
-    /// Where launch artifacts go. Since v0.2 that is NoEnding Home's `runtime/`
-    /// rather than the pre-Home `app_data_dir()`.
+    /// Where launch artifacts go: NoEnding Home's `runtime/`.
     pub runtime_dir: PathBuf,
 }
 
@@ -333,7 +331,7 @@ impl SessionLauncher {
         // a refusal with an explicit reason, never a launch into a dead
         // thread. Unavailable (permission, parse, store problems) is NOT
         // missing — the refusal says so.
-        match crate::lifecycle::root_source_status(db, &session)? {
+        match crate::lifecycle::root_source_status(&session)? {
             Some(crate::domain::SourceAvailability::Present) => {}
             Some(crate::domain::SourceAvailability::Missing) => {
                 return Err(other("源会话已不存在，无法继续该会话"));
@@ -426,7 +424,6 @@ impl SessionLauncher {
     ///    re-resolving).
     /// 3. New embedded terminals receive the chosen task in memory. No Context
     ///    file, no injection, no pre-sync.
-    /// `launch_prepared` with the current [`LaunchWorkspace`].
     ///
     /// The default workspace is a Home fact the fingerprint has to re-read from
     /// *now*: if the Home moved after Preview, the prepared launch must abort,
@@ -468,11 +465,6 @@ impl SessionLauncher {
         open: fn(&str) -> Result<()>,
         embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
-        // re-resolve the launch directory from the state that
-        // exists NOW (the Session's own cwd, the Home
-        // default workspace) and hash it. A drift in any of those inputs lands
-        // on a different fingerprint, so a plan whose directory moved is
-        // refused here — the spawn below keeps using `prepared.cwd` verbatim.
         let resolution = recompute_launch_cwd(db, prepared, workspace)?;
         let current_fingerprint = compute_state_fingerprint_with_runtime(
             db,
@@ -596,8 +588,6 @@ impl SessionLauncher {
 
             let install = resolve_install(db, session.agent)?;
             let adapter = crate::adapters::adapter_for(session.agent);
-            // resume starts in the directory the Preview showed, not
-            // in whatever `sessions.cwd` says right now.
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
 
             // the resume identity is the ROOT's, never a member's
@@ -672,67 +662,14 @@ impl SessionLauncher {
         // attach protocol only exists for prepared resume launches.
         self.launch_prepared_in(db, &prepared, workspace, None)
     }
-
-    pub fn resume_session_in(
-        &self,
-        db: &Db,
-        session_id: &str,
-        workspace: &LaunchWorkspace,
-    ) -> Result<LaunchResult> {
-        let prepared = self.prepare_resume_in(db, session_id, workspace)?;
-        // Same as new: the one-shot path (Assistant, legacy command) is
-        // external-terminal only. The embedded flag is frozen by the
-        // prepared-resume command layer, which also passes the registry.
-        self.launch_prepared_in(db, &prepared, workspace, None)
-    }
 }
 
-/// Recompute the fingerprint of a launch **from the database as it is now**,
-/// resolving the chain the same way `prepare_*` does.
-///
-/// This is the "has anything the user saw moved?" question. It takes the same
-/// [`LaunchWorkspace`] the prepare step used: `None` in `default_workspace`
-/// means "this launcher has no Home", which drops 's third tier from the
-/// chain, so the answer is a different statement than the one a real Home
-/// produces.
-///
-/// A caller that already holds a `PreparedLaunch` — where the resolved tier is
-/// a recorded fact, not something to re-derive — uses
-/// [`compute_state_fingerprint_in`] with that same [`CwdResolution`].
-pub fn compute_state_fingerprint(
-    db: &Db,
-    mode: &str,
-    session_id: Option<&str>,
-    initial_workstream_id: Option<&str>,
-    agent: Agent,
-    workspace: &LaunchWorkspace,
-) -> Result<String> {
-    let resolution = if mode == "resume" {
-        match session_id {
-            Some(sid) => resolve_resume_cwd(db, sid, workspace)?,
-            None => CwdResolution::default(),
-        }
-    } else {
-        resolve_new_cwd(None, workspace)?
-    };
-    compute_state_fingerprint_in(
-        db,
-        mode,
-        session_id,
-        initial_workstream_id,
-        agent,
-        workspace,
-        &resolution,
-    )
-}
-
-/// the full fingerprint. Everything that decides what the Agent receives:
+/// The full fingerprint. Everything that decides what the Agent receives:
 ///
 /// * the Agent runtime override intent;
 /// * the initially selected task (or none): title / description / `updated_at`;
 /// * the resolved launch directory and the tier that produced it;
-/// * NoEnding Home's default workspace, which is not in the DB at all
-///   (note 4);
+/// * NoEnding Home's default workspace, which is not in the DB at all;
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
 ///   its source cursor, its **`workspace_path_id`**, its native identity and
 ///   its launch identity.
@@ -869,14 +806,10 @@ fn compute_state_fingerprint_with_runtime(
                 // conversation frontier rides with it, so a preview made
                 // before an ingest cannot silently launch against a
                 // different conversation.
-                if let Ok(session) = db.get_session(sid) {
-                    if let Some(session) = session {
-                        hasher.update(&session.source_generation.to_le_bytes());
-                        hasher.update(&session.source_byte_offset.to_le_bytes());
-                        hasher.update(session.source_tail_hash.as_bytes());
-                        hasher.update(b"|");
-                    }
-                }
+                hasher.update(&s.source_generation.to_le_bytes());
+                hasher.update(&s.source_byte_offset.to_le_bytes());
+                hasher.update(s.source_tail_hash.as_bytes());
+                hasher.update(b"|");
                 if let Ok(seq) = db.ingested_message_sequence(sid) {
                     hasher.update(&seq.to_le_bytes());
                     hasher.update(b"|");
@@ -924,19 +857,19 @@ pub fn expand_tilde(p: &str) -> String {
 ///
 /// An *observation*, never an identity: the path's
 /// WorkspacePath row and its `canonical_path` stay exactly as they are whether
-/// or not the volume is mounted. It matters here because of handing
+/// or not the volume is mounted. It matters here because handing
 /// the terminal a directory that is not there does not fail loudly everywhere:
-/// macOS prints a hint and cds to `$HOME` instead, and `$HOME` is the one place
-/// refuses to treat as a workspace. So an unusable tier is *skipped and
-/// reported*, not launched into.
+/// macOS prints a hint and cds to `$HOME` instead, and `$HOME` is the one
+/// place NoEnding refuses to treat as a workspace. So an unusable tier is
+/// *skipped and reported*, not launched into.
 fn is_usable_directory(path: &str) -> bool {
     !path.trim().is_empty() && std::path::Path::new(path).is_dir()
 }
 
-/// the default workspace is a directory NoEnding owns, so the
+/// The default workspace is a directory NoEnding owns, so the
 /// launcher may create it if Home bootstrap did not. This is the only
 /// filesystem effect a launch resolution has, it is idempotent, and it creates
-/// no domain fact: no row, no Revision, no delivery. Preparation
+/// no domain fact. Preparation
 /// integrity is about *storage*.
 fn ensure_default_workspace(dir: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -1030,9 +963,8 @@ pub fn resolve_resume_cwd(
 }
 
 /// Re-resolve what a prepared launch resolved, from the state that exists at
-/// launch time. This is the *staleness* side of; the Agent still starts in
-/// `prepared.cwd` (see), so a difference here is a refusal, never a
-/// absorbed change.
+/// launch time; the Agent still starts in `prepared.cwd`, so a difference
+/// here is a refusal, never a silent change.
 fn recompute_launch_cwd(
     db: &Db,
     prepared: &PreparedLaunch,

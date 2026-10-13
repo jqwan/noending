@@ -26,35 +26,6 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 ///
 /// No migrations and no backwards compatibility: a database whose generation
 /// differs must be discarded and rebuilt from Agent source data.
-///
-/// v1 — ingestion writes FACTS only (sessions, members, messages, cursors,
-/// the current-message projection, ingest generation); Context is written
-/// only by an explicit user action. The Session frontier is
-/// `(ingest_generation, processed_through_seq)` over the current-message
-/// projection; the Workstream side keeps its own `context_revision` /
-/// `input_revision` plus per-Session consumption frontier.
-///
-/// 2026-09-29 统计功能退役: `session_member_stats` / `usage_events` /
-/// `session_member_usage` / `ingest_usage_claims`（连同各 adapter 的用量分支与
-/// claim 注册表）已删除——产品只保留会话层。对象清单随之收缩，删除时重建。
-///
-/// 2026-10-05 模型溯源退役: `session_messages.provider/model` 与
-/// `session_member_cursors.active_provider/active_model`（连同有状态读取器的
-/// provenance 前沿）已删除。
-///
-/// 2026-10-05 会话扁平化: `session_members` / `session_member_cursors` /
-/// `session_ingest_state` / `ingestion_diagnostics` 四表删除——一个会话恰有一个
-/// 根源、一份游标、一个事实前沿，全部并入 `sessions` 的列；消息表随之去掉
-/// member 维度。拓扑守卫与诊断页失去存在前提（不再存任何非根成员），一并退场。
-/// 删除数据库重建。
-/// v2 — Workstream has only archive state; Session trash becomes archived_at.
-/// v3 — remove unused fields and the Session Project cache; slim FTS metadata.
-/// v4 — remove launch intents; embedded terminals assign ownership by native ID.
-/// v5 — current session/task/project Markdown summaries; retire Context history,
-/// items, conflicts and review; task consumption no longer duplicates fact generations.
-/// v6 — current user/project preferences with user-controlled Agent locks.
-/// v7 — independent project archive state and explicit project deletion.
-/// v8 — direct task/project membership and many-to-many session/task tracking.
 pub const DATABASE_FORMAT_VERSION: i64 = 8;
 
 /// Open an existing current-format database, or create one.
@@ -239,10 +210,8 @@ const CURRENT_SCHEMA: &str = r#"
     );
     -- The Logical Session: user-visible conversation + lifecycle + tracking.
     -- Identity is (agent, root_agent_session_id): the root source's real
-    -- Resume identity. A session IS its root source: the former
-    -- session_members / session_member_cursors / session_ingest_state rows
-    -- live here as columns — exactly one source, one cursor, one frontier
-    -- per session.
+    -- Resume identity. A session IS its root source: exactly one source, one
+    -- cursor, one frontier per session.
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,

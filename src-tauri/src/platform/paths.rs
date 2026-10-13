@@ -197,11 +197,9 @@ pub fn app_bundle_present(name: &str) -> bool {
 /// plain text; no shell is involved anywhere else).
 ///
 /// This is the platform-facing wrapper over
-/// [`crate::workspace::identity::expand_tilde`], which is the repository's only
-/// expander: the previous copy here ignored `~\`, so a Windows
-/// user typing `~\.noending` got a literal `~` directory, and `launcher` had a
-/// *third* expander. One semantics, two spellings (Unix `PathBuf`, domain
-/// `String`), because that is all the type systems allow.
+/// [`crate::workspace::identity::expand_tilde`], the repository's only
+/// expander. One semantics, two spellings (Unix `PathBuf`, domain `String`),
+/// because that is all the type systems allow.
 pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(crate::workspace::identity::expand_tilde(path))
 }

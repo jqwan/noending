@@ -134,7 +134,7 @@ impl PiAdapter {
     }
 }
 
-/// Runtime overrides in Pi's spelling — the only CLI of the three where all
+/// Runtime overrides in Pi's spelling — the only CLI where all
 /// three fields have a flag.
 fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
     let mut args = Vec::new();
@@ -350,7 +350,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
                 text,
             )))
         }
-        // A compaction is a billed model call, but usage is no longer recorded.
+        // A compaction is a billed model call, not conversation.
         "compaction" | "compact" => None,
         _ => None, // session headers and bookkeeping carry nothing
     }

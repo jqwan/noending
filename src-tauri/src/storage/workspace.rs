@@ -5,9 +5,6 @@
 //! when it moves. Policy — when to call them — lives in `workspace::project`, so
 //! nothing here re-reads the filesystem, runs Git, or decides ownership; it only
 //! applies it.
-//!
-//! Column note: the schema calls it `exists_on_disk` because `EXISTS` is a
-//! SQLite keyword; the domain field is `exists`.
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 

@@ -1,13 +1,6 @@
 //! SQLite storage: current schema and repository helpers. Owns domain data, the
 //! Logical Session graph (one row per session: identity, source, read cursor
 //! and fact frontier), context items and FTS search.
-//!
-//! History integrity: `session_messages` is the ONLY conversation store,
-//! append-only and idempotent by `(session_id, source_identity_hash)` — rows
-//! are never replaced. The session row carries the *read* cursor, while
-//! `session_contexts.processed_through_seq` is the separate *processed*
-//! position of Context consumption. One ingest writes messages + projection +
-//! cursor + fact frontier in ONE transaction (`commit_ingest`).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -378,8 +371,6 @@ impl Db {
         ))
     }
 
-    /// Text of the most recently updated active item of `kind`, content
-    /// first, falling back to its title. Returns None when absent or empty.
     pub fn get_workstream(&self, id: &str) -> Result<Option<Workstream>> {
         let conn = self.read();
         get_workstream_conn(&conn, id)
@@ -566,18 +557,6 @@ impl Db {
 
     // Conversation Messages
 
-    /// The atomic member-ingest commit. Messages, the member cursor and the
-    /// activity stamps commit or not at all.
-    ///
-    /// Guards, in order, inside the transaction: the Logical Session still
-    /// exists; the member still belongs to it; and messages require
-    /// `member.relation == root` (an adapter handing child text to the
-    /// conversation is a bug, never silently stored). A failed guard stores
-    /// NOTHING, so a purge racing a parse cannot produce a half commit.
-    ///
-    /// The identity chain starts from genesis on a full re-scan (start offset 0)
-    /// and otherwise continues from the cursor's `identity_tail_hash` — the tail
-    /// of the CURRENT source chain, never "last message in the store".
     pub fn commit_ingest(
         &self,
         session_id: &str,
@@ -863,7 +842,6 @@ impl Db {
         self.get_messages(session_id, Some(processed_ordinal), limit)
     }
 
-    /// The newest `limit` messages of the CURRENT conversation, oldest first.
     /// The newest `limit` messages of the CURRENT conversation, oldest first.
     pub fn recent_messages(&self, session_id: &str, limit: i64) -> Result<Vec<SessionMessage>> {
         let conn = self.read();
@@ -1592,10 +1570,6 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
     Ok(())
 }
 
-/// Insert or refresh one execution member through a caller-held connection, so a
-/// graph-resolution pass can create members in the transaction that creates the
-/// Session they attach to.
-#[allow(clippy::too_many_arguments)]
 /// The CURRENT conversation, joined through the projection. `after_ordinal`
 /// is a projection ordinal; the rows come back in projection order.
 /// One page of the CURRENT conversation: its messages plus the cursor, total
@@ -1847,10 +1821,6 @@ pub fn get_messages_conn(
             .collect(),
     )
 }
-
-/// The stable diagnostic identity of an unattachable member: one row
-/// per (agent, kind, source member), so repeat sightings update instead of
-/// duplicating.
 
 fn row_project(r: &Row) -> rusqlite::Result<Project> {
     Ok(Project {

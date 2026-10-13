@@ -10,14 +10,6 @@
 //! (`<conversation_history_summary>`, `<cb_summary>`) are also `user`-role but
 //! count as compaction; any other `<`-prefixed body is system noise and drops.
 //!
-//! Provenance: the row's `providerData.model` (mirrored by
-//! `requestModelId`/`requestModelName`) is the model that answered — a real
-//! registry id like `deepseek-v4.1-flash`, present on most rows (locally:
-//! 86.5%). A row written under the `auto` preference says `auto` in all
-//! three fields and the actual resolution is NOT recoverable from anywhere in
-//! the transcript, so `auto` attributes nothing (locally: 13.5%). No
-//! provider field exists → NULL.
-//!
 //! One root transcript, one ROOT member. `ai-title` supplies the native title
 //! (last written wins); `function_call` / `function_call_result` are
 //! observations, not text. The bundle DOES embed a Node CLI

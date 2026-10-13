@@ -92,8 +92,6 @@ fn owner_of(db: &Db, session_id: &str) -> Option<String> {
         .next()
 }
 
-// Issue #8: storage / domain consistency
-
 #[test]
 fn list_sessions_all_filter_combinations() {
     let db = open_db("session-filter");

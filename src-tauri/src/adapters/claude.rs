@@ -817,7 +817,7 @@ mod tests {
         assert_eq!(delta.messages[0].content, "真正的问题");
     }
 
-    /// F18: Claude writes its own title (`ai-title`, rewritten — last wins;
+    /// Claude writes its own title (`ai-title`, rewritten — last wins;
     /// `agent-name` as the fallback), so the title chain no longer needs the
     /// first-user-text fallback.
     #[test]

@@ -149,7 +149,7 @@ fn unix_path_identity_vectors_are_stable() {
             "/Users/dev/projects/noending",
             "path-f89dfc8b3a07fb0b6083631898a33217",
         ),
-        // The case pair that 's Test 4 keeps apart, pinned as data too.
+        // The case pair pinned as data too.
         ("/var/data/Repo", "path-ee90d2b156a11b39705abc879aebcde4"),
     ];
     for (canonical, expected) in VECTORS {
@@ -188,7 +188,7 @@ fn unix_path_identity_vectors_are_stable() {
     );
 }
 
-/// + every Windows spelling of one directory carries one
+/// Every Windows spelling of one directory carries one
 /// identity, including the case variants folded into the key, and the
 /// *display* form keeps the case the user typed.
 #[test]
@@ -199,7 +199,7 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
     let expected = path_identity_with(&canonical, w);
     // Separator, trailing-separator, verbatim-prefix, `.`-hop and *case*
     // spellings. Case joins them because on a Windows volume it names the same
-    // directory, and  made the stored key agree with that comparison
+    // directory, so the stored key agrees with that comparison
     // rather than leaving `same_location` and `path_identity` apart.
     for raw in [
         "C:\\Users\\me\\.noending\\workspace",
@@ -225,7 +225,7 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
     );
 }
 
-/// The premise under the launcher's path-list gate (M30).
+/// The premise under the launcher's path-list gate.
 ///
 /// `apply_match` decides whether to grow a Workstream's ordered path list by
 /// comparing `path_identity_of(default_workspace)` against
@@ -296,7 +296,7 @@ fn a_case_variant_of_a_reserved_windows_directory_is_still_reserved() {
     );
 }
 
-/// rule 5 — the aliasing cost is only acceptable because Git
+/// The aliasing cost is only acceptable because Git
 /// convergence actually runs. Without this, "two spellings, one Project" would
 /// be an unverified claim rather than a mechanism.
 #[test]

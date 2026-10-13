@@ -2,7 +2,7 @@
 //!
 //! Ingestion is the AUTOMATIC half: Agent sources flow through the typed
 //! adapters, resolve against the logical Session graph, and land as messages,
-//! stats, cursors and the fact generation. It NEVER calls AI and NEVER writes
+//! cursors and the fact generation. It NEVER calls AI and NEVER writes
 //! Context — the Session summary and Workstream state are written only by an
 //! explicit user action. Pinned end to end through `ingestion::ingest_session`,
 //! the one path reconcilers and launch preparation share.
@@ -204,7 +204,7 @@ fn ingestion_writes_facts_and_zero_context() {
     let ingested = ingestion::ingest_session(&db, &s).unwrap();
     assert_eq!(ingested, 3, "every Agent event is ingested");
 
-    // Facts landed: messages, projection, generation, stats and cursor.
+    // Facts landed: messages, projection, generation and cursor.
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
     assert_eq!(db.ingested_message_sequence(&s.id).unwrap(), 3);
     let state = db.get_session_ingest_state(&s.id).unwrap();

@@ -8,10 +8,9 @@
 //! migrated or repaired.
 //!
 //! The current format keys `sessions` by the root source's Resume identity and
-//! carries the root source, its cursor and the fact frontier as SESSION columns
-//! (the former session_members / session_member_cursors /
-//! session_ingest_state / ingestion_diagnostics rows). The RAW conversation is
-//! `session_messages` (append-only for provenance), the CURRENT conversation is
+//! carries the root source, its cursor and the fact frontier as SESSION columns.
+//! The RAW conversation is
+//! `session_messages` (append-only), the CURRENT conversation is
 //! `session_message_projection`, the Session summary frontier is
 //! `session_contexts`, and the Workstream
 //! revision pair is `workstream_context_state` / `workstream_session_frontiers`.

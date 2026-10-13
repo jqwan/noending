@@ -206,9 +206,6 @@ fn resolve_batch(
         }
     }
 
-    // 会话 = 根会话（2026-09-29 起）：内部执行单元（子代理转录、sidechain、
-    // 派生页）被识别后静默跳过——识别必须保留，否则 codex 的子代理 rollout
-    // 会被误当成独立逻辑会话。
     Ok(ResolvedBatch {
         touched_session_ids,
     })

@@ -3,9 +3,6 @@
 //!
 //! There is no deletion job, no crash recovery and no filesystem step: NoEnding
 //! never deletes an Agent-owned source, so a purge is one SQLite transaction.
-//!
-//! Free functions over `&Connection` / `&Transaction`, matching the `_conn`
-//! convention, so `Db` methods and `Db::tx` closures share the same paths.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
@@ -24,8 +21,8 @@ pub fn archive_session_conn(conn: &Connection, session_id: &str, ts: &str) -> Re
     Ok(n > 0)
 }
 
-/// Archive → Normal: same Session id; tracking, members, messages, cursors and the
-/// Context frontier were never touched, so the next reconcile simply resumes.
+/// Archive → Normal: same Session id; tracking, messages, the source cursor and
+/// the consumption frontier were never touched, so the next reconcile simply resumes.
 pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool> {
     let n = conn.execute(
         "UPDATE sessions SET archived_at = NULL WHERE id = ?1 AND archived_at IS NOT NULL",
@@ -108,8 +105,8 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         crate::storage::bump_input_revision_conn(tx, &tid)?;
     }
 
-    // 4. The Session's current summary and its place in
-    //    every Workstream's consumption frontier.
+    // The Session's current summary and its place in every Workstream's
+    // consumption frontier.
     tx.execute(
         "DELETE FROM session_contexts WHERE session_id = ?1",
         params![session_id],
@@ -118,7 +115,7 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         "DELETE FROM workstream_session_frontiers WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 5. The current-message projection goes with the conversation.
+    // The current-message projection goes with the conversation.
     tx.execute(
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
@@ -128,7 +125,7 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         "DELETE FROM session_messages WHERE session_id = ?1",
         params![session_id],
     )?;
-    // 7. The session row itself, last, once nothing references it.
+    // The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
     // FTS rows of this session's messages go with the data — a failure here
     // rolls the whole purge back, never a half-deleted session in search.

@@ -29,16 +29,14 @@ use crate::workspace::resolver::{
 };
 
 /// [`PathProbe::status`] — why the string is not a WorkspacePath right now.
+/// Serialized mirror of [`ProbeRejection`] (whose variants carry the meanings)
+/// plus the attachable `Ok` face, for UI feedback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
-    /// Can be attached as a working path.
     Ok,
-    /// Empty, un-normalizable, or relative with no base.
     Unresolvable,
-    /// A reserved NoEnding Home path.
     Reserved,
-    /// The user Home itself.
     Home,
 }
 
@@ -151,7 +149,7 @@ pub fn probe_workspace_path(
                     },
                 };
                 match family_project {
-                    // An identity without a Project cannot happen through (the
+                    // An identity without a Project cannot happen (the
                     // Project is created with the family); if the data says
                     // otherwise, "would create one" stays the honest prediction.
                     Some(project) => ProjectHint {

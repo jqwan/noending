@@ -36,11 +36,9 @@ fn scratch(tag: &str) -> PathBuf {
     ));
     std::fs::create_dir_all(&raw).unwrap();
     let real = std::fs::canonicalize(&raw).unwrap_or(raw);
-    // Rule 7: never assert on a temp prefix without normalizing it. The normalized
-    // string used to be computed and discarded, so fixtures handed the resolver the
-    // raw `fs::canonicalize` answer — harmless on macOS, but on Windows a
-    // `\\?\C:\…` verbatim spelling no NoEnding row carries, which reddened five
-    // tests there and none on macOS.
+    // Never assert on a temp prefix without normalizing it: on Windows
+    // `fs::canonicalize` yields a `\\?\C:\…` verbatim spelling no NoEnding
+    // row carries.
     let normalized =
         identity::normalize_path(&real.to_string_lossy()).expect("temp path normalizes");
     PathBuf::from(normalized)

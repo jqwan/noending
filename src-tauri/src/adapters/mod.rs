@@ -673,7 +673,6 @@ pub fn sqlite_replay_cursor_update(
     })
 }
 
-/// Extract a string field from an object if present.
 pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|s| s.as_str())
 }

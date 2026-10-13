@@ -1,10 +1,10 @@
 //! Tauri command surface — the Application Domain API the UI talks to.
 //! The Assistant (LLM runtime, later phase) consumes the same functions.
 //!
-//! Workspace Domain v0.2 split the Project / Workstream / Session-command areas
-//! into sibling modules (`project`, `workstream`, `session_workspace`,
-//! `workspace`) so their boundaries stay explicit.
-//! This file owns the shared state and helpers the submodules borrow.
+//! The Project / Workstream / Session-command areas are sibling modules
+//! (`project`, `workstream`, `session_workspace`, `workspace`) so their
+//! boundaries stay explicit; this file owns the shared state and helpers the
+//! submodules borrow.
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -189,9 +189,6 @@ pub async fn regenerate_session_context(
 
 /// ONE user action → AT MOST ONE Agent invocation → every affected Session Context AND
 /// the task summary, committed atomically.
-///
-/// Async on purpose: same seam as [`update_session_context`] — the model call
-/// must never occupy the UI thread.
 #[tauri::command]
 pub async fn update_workstream_context(
     app: AppHandle,
@@ -1021,10 +1018,7 @@ pub(crate) async fn discover_runtime_options_async(
 
 /// Advisory only: fetch the Agent's model catalog. Runs with no DB lock held
 /// and cannot fail a launch — the caller renders `warnings` and falls back to
-/// Agent default plus custom input.
-///
-/// Async on purpose: the Agent CLI probe blocks for up to 20s, so it goes to
-/// `spawn_blocking` and the UI thread stays responsive. Explicit
+/// Agent default plus custom input. Explicit
 /// user action only — opening Settings never reaches this command.
 #[tauri::command]
 pub async fn refresh_agent_runtime_options(

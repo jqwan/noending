@@ -1,4 +1,4 @@
-//! Agent Runtime Configuration v0.1 — override semantics.
+//! Agent Runtime Configuration — override semantics.
 //!
 //! Invariant under test: NoEnding stores explicit overrides only. `None`
 //! means *Agent default* and must survive persistence as "no argument",

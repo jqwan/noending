@@ -186,7 +186,7 @@ pub struct WorktreeEntry {
 }
 
 /// Raw evidence from git. Strings are exactly as git printed them; canonicalizing
-/// them is [`classify_git`]'s job (rule 6: `fs::canonicalize` may be
+/// them is [`classify_git`]'s job (`fs::canonicalize` may be
 /// applied to git output, never to produce `canonical_path`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProbe {
@@ -409,7 +409,7 @@ pub struct ResolverContext {
     /// dotfiles repository.
     pub user_home: Option<String>,
     /// Base for relative paths. `None` means a relative input is not observable
-    /// rather than being guessed against the process cwd (rule 2).
+    /// rather than being guessed against the process cwd.
     pub base: Option<String>,
     /// The reserved set; empty means "NoEnding Home is unknown", which
     /// reserves nothing rather than reserving everything.
@@ -542,7 +542,7 @@ fn tidy(canonical: Option<String>) -> Option<String> {
     }
     let before = bytes[bytes.len() - 2];
     if before == b':' {
-        return Some(s); // `C:\`
+        return Some(s);
     }
     Some(s[..bytes.len() - 1].to_string())
 }
@@ -1062,7 +1062,7 @@ bare
     }
 
     /// Paths git hands back relative to the cwd must be resolved against the
-    /// observed directory, not the process (rule 6).
+    /// observed directory, not the process.
     #[test]
     fn git_output_is_resolved_against_the_observed_path() {
         let c = ctx();

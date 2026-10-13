@@ -186,8 +186,6 @@ pub fn run() {
             commands::workstream::archive_workstream,
             commands::workstream::restore_workstream,
             commands::workstream::delete_workstream_permanently,
-            // `merge_workstreams` left the API: it moved Context items between
-            // Workstreams without leaving a Revision.
             commands::get_default_agent,
             commands::set_default_agent,
             // Explicit summary reads and user-triggered extraction.

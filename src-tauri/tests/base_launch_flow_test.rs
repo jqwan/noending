@@ -29,8 +29,9 @@ fn open_db(tag: &str) -> Db {
     db
 }
 
-/// A directory that exists — only launches into a usable one, and
-/// note 7 says never compare a canonical path against a literal.
+/// A directory that exists — only launches into a usable one. The fixture
+/// returns a normalized path: a canonical path is never compared against a
+/// literal.
 fn real_dir(tag: &str, name: &str) -> String {
     let dir = std::env::temp_dir().join(format!("noending-base-launch-{}-{}", tag, new_id()));
     let dir = dir.join(name);

@@ -338,8 +338,6 @@ fn parse_member(
         .ok()
     });
     let Some((title, preview, parent, workspaces)) = summary else {
-        // No summary row yet: the parent relation is unknown. Skip — the next
-        // reconcile picks the conversation up once the row has landed.
         eprintln!(
             "[discover] skip {}: no conversation_summaries row yet (relation unknown)",
             db_path.display()
@@ -528,11 +526,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             };
             paths.sort();
             for path in paths {
-                // `unchanged` is deliberately NOT consulted. It stats the main
-                // `.db` file, but this is a live WAL store: new steps can sit
-                // only in `<id>.db-wal` while size and mtime stay identical,
-                // and the conversation's title/parent live in a SECOND store
-                // (`conversation_summaries.db`) the skipset never sees.
                 match parse_member(&path, summaries.as_ref(), source_kind) {
                     Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
@@ -563,11 +556,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         })?;
 
         let mut messages = Vec::new();
-        // Per-member content facts: the newest step's own time is this
-        // conversation's real activity, and MAX(idx) is its position. The
-        // container's size/mtime say nothing — a mere open of the conversation
-        // creates/touches a 0-byte `-wal`, and keyed on that mtime, other
-        // sessions' activity would churn this one's `last_activity_at`.
         let mut max_idx: i64 = 0;
         let mut max_step_secs: Option<f64> = None;
         for row in rows {
@@ -662,6 +650,10 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         Err(other("Antigravity 尚未接入一次性执行（headless）"))
     }
 
+    fn desktop_app_name(&self) -> Option<&'static str> {
+        Some("Antigravity")
+    }
+
     /// The open-method configuration for this Agent's TWO source formats,
     /// keyed on the member's `source_kind` (not on the Agent): a CLI-store
     /// conversation resumes through `agy --conversation` (the terminal
@@ -670,10 +662,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
     /// message — so Continue activates the desktop app; with the app absent
     /// there is no viable route at all. `antigravity_conversation` is the
     /// pre-split kind (legacy rows): their store is re-derived from the path.
-    fn desktop_app_name(&self) -> Option<&'static str> {
-        Some("Antigravity")
-    }
-
     fn continue_route(&self, session: &Session) -> ResumeRoute {
         match session.source_kind.as_str() {
             "antigravity_cli_conversation" => ResumeRoute::Terminal,
@@ -872,13 +860,6 @@ mod tests {
         db
     }
 
-    /// One `gen_metadata` row, shaped as the real blob nests it
-    /// (`1.{4:{1,2,3,5,9,10,11}, 19:model, 20:{last_step_index}}`); the usage
-    /// field values are real rows from an IDE-store conversation (idx 0: no
-    /// cache hit; idx 1: cache hit). `.3` is the one quantity no reading has
-    /// been established for — it is written so a future reader cannot
-    /// silently "claim" it.
-    #[allow(clippy::too_many_arguments)]
     fn summaries(root: &Path, rows: &[(&str, &str, &str, &str)]) {
         let conn = Connection::open(root.join("conversation_summaries.db")).unwrap();
         conn.execute_batch(

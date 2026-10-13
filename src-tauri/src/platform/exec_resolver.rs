@@ -200,8 +200,7 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         // every invocation must name a profile that lives under
         // `$DSH_HOME/profiles`; the name is the user's own setup, and NoEnding
         // cannot know it. Guessing one would boot the wrong tree — or nothing —
-        // so launching waits until a profile can be chosen deliberately
-        //.
+        // so launching waits until a profile can be chosen deliberately.
         Agent::Dsh => vec![],
         // Desktop app: its runtime lives inside the bundle (`zcode.cjs`) and
         // is not usable standalone — the app hosts it.

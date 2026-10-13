@@ -153,9 +153,9 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
 // child/side sources: recognized, then silently skipped
 
 /// A child discovered with no root anywhere: no Logical Session is created
-/// and nothing is recorded. Since the stats retirement a session IS its root
-/// and child/side sources are invisible by design — the recognition itself
-/// is what keeps codex subagent rollouts from becoming fake sessions.
+/// and nothing is recorded — a session IS its root and child/side sources
+/// are invisible by design; the recognition itself is what keeps codex
+/// subagent rollouts from becoming fake sessions.
 #[test]
 fn an_orphan_child_is_skipped_silently_not_a_session() {
     let root_dir = temp_root("orphan-child");

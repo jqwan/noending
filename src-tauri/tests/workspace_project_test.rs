@@ -54,7 +54,7 @@ fn temp_db_locked() -> (PathBuf, Db) {
 }
 
 /// Platform-native canonical form of a test path — also its storage key, so every
-/// assertion compares against this rather than a literal (rule 7).
+/// assertion compares against this rather than a literal.
 fn canon(raw: &str) -> String {
     normalize_path(raw).expect("test paths are absolute")
 }
@@ -392,7 +392,7 @@ fn new_git_path_creates_a_git_backed_project() {
     assert_ne!(
         identity.id,
         path_id_of("/work/repo"),
-        "a Git id is app-assigned, not a second copy of the path hash (design )"
+        "a Git id is app-assigned, not a second copy of the path hash"
     );
     assert_eq!(db.list_projects().unwrap().len(), 1);
     assert_eq!(
@@ -415,9 +415,8 @@ fn new_git_path_creates_a_git_backed_project() {
 /// + an adopted worktree's existence is observed, never assumed.
 ///
 /// `git worktree list` reports registrations whether or not the directory is
-/// still on this machine. Adoption used to hardcode `false`, so the Projects
-/// page claimed "目录不存在" about worktrees that were sitting right there until
-/// some later sweep corrected the row. Missing registrations are not adopted.
+/// still on this machine; adopted worktrees report observed existence, and
+/// missing registrations are not adopted.
 #[test]
 fn adopted_worktrees_report_the_existence_that_was_observed() {
     let (_d, db) = temp_db();
@@ -502,7 +501,7 @@ fn two_worktrees_of_one_repo_share_one_project() {
     );
 }
 
-// / / upgrades, moves, and evidence that disappears
+// Project upgrades, moves, and evidence that disappears
 
 #[test]
 fn path_project_upgrades_to_git_project_without_changing_project_id() {
@@ -561,7 +560,8 @@ fn git_missing_does_not_detach_the_path() {
     let project = project_of(&db, &path);
     let s_keep = session(&db, "s-keep", "/work/repo", &path.id);
 
-    // The `.git` directory vanished. allows exactly one change: `git_state`.
+    // The `.git` directory vanished. The observation allows exactly one
+    // change: `git_state`.
     let missing = ensure(&db, &plain("/work/repo", true));
     assert_eq!(missing.git_state, git_state::MISSING, "");
     assert_eq!(
@@ -633,8 +633,8 @@ fn different_git_family_moves_the_path_and_preserves_the_empty_old_project() {
     let s_a = session(&db, "s-a", "/work/one", &a.id);
     let s_b = session(&db, "s-b", "/work/two", &b.id);
 
-    // `/work/one` now sits inside a DIFFERENT repository. a strong identity
-    // change — this path moves, its sibling keeps its own family.
+    // `/work/one` now sits inside a DIFFERENT repository. That is a strong
+    // identity change — this path moves, its sibling keeps its own family.
     let moved = ensure(
         &db,
         &repo("/work/one", "/other/common-git", GitWorktreeKind::Main, &[]),
@@ -1256,7 +1256,7 @@ fn workspace_attaching_refuses_an_observation_whose_identity_disagrees() {
     assert!(db.list_workspace_paths().unwrap().is_empty());
 }
 
-// / reconcile
+// Reconcile
 
 #[test]
 fn reconcile_a_single_path_reapplies_the_whole_decision_table() {
@@ -1617,7 +1617,7 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
     );
 
     // The whole-object write Project creation uses must not rename a customized
-    // row either — `upsert_project_conn`'s `CASE` db.
+    // row either — `upsert_project_conn`'s `CASE` branch.
     let mut lying = renamed.clone();
     lying.name = "Auto Renamed".into();
     lying.name_customized = false;
@@ -1626,9 +1626,10 @@ fn user_rename_is_customized_and_automatic_naming_stops() {
     assert_eq!(stored.name, "重要的项目");
     assert!(stored.name_customized, "name_customized is one-way");
 
-    // And 's other half: an automatic write that carries no family must never
-    // CLEAR one. (The reverse direction — a caller-supplied non-null `git_id`
-    // replacing a family — is why `update_project` leaves the command surface.)
+    // And the whole-object write's other half: an automatic write that carries
+    // no family must never CLEAR one. (The reverse direction — a
+    // caller-supplied non-null `git_id` replacing a family — is why
+    // `update_project` leaves the command surface.)
     ensure(
         &db,
         &repo(
@@ -1944,7 +1945,7 @@ fn windows_case_aliases_cannot_create_two_projects() {
     registry_is_consistent(&db).expect("consistent after the case alias merged");
 }
 
-// Projects Experience v0.2 workspace refresh contract.
+// Workspace refresh contract.
 // The two refresh entries (global / per-project) ride ONE rule set: the
 // reconcile_workspace_path_ids primitive below is the same observe → ensure →
 // observation pipeline the global sweep runs. These tests lock that contract without

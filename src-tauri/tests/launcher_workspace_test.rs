@@ -1,4 +1,4 @@
-//! Workspace Domain v0.2 launcher integration. Three pinned invariants:
+//! Launcher integration. Three pinned invariants:
 //!
 //! 1. The launch directory comes from the ordered `WorkstreamPath` list plus
 //!    Home's default workspace — never from a frozen `workstreams.default_cwd`

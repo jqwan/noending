@@ -11,9 +11,6 @@
 //! data, sequence)` whose `data.type` is `text` / `reasoning` / `tool` /
 //! `step-start` / `step-finish` / `timeline` / `compaction` / `file`.
 //!
-//! which a retried request would repeat — the rollup cannot double-count an
-//! attempt.) The store states no cost.
-//!
 //! Member mapping: every live session row is a member; a row with a `parent_id`
 //! is a CHILD member of that parent. The source cannot express a genuine user
 //! fork, so no member is ever a ForkRoot — only an explicit fork marker would
@@ -22,8 +19,8 @@
 //! Ingested is exactly the prose: the `text` parts of a message joined in
 //! `sequence` order, under the message's own id, and only for the ROOT member.
 //! Reasoning, tool traffic, step markers, timeline and file references are
-//! user's prompt needs no unwrapping — the environment snapshot lives in
-//! `message.data.contextSnapshot` and leaves `text` clean.
+//! dropped; the user's prompt needs no unwrapping — the environment snapshot
+//! lives in `message.data.contextSnapshot` and leaves `text` clean.
 //!
 //! Three decisions worth recording:
 //! - **`role` is not who wrote it.** `data.semantics.{origin,kind}` is what
@@ -276,8 +273,6 @@ impl ZCodeAdapter {
     }
 
     /// The first settled agent reply — the last resort for a title.
-    /// Settled only: the row appears when streaming starts and is rewritten in
-    /// place, so an early read would name the session after a half sentence.
     fn first_agent_text(conn: &Connection, session_id: &str) -> Result<Option<String>> {
         for (message, parts) in conversation(conn, session_id)? {
             let data = message.get("data").unwrap_or(&Value::Null);
@@ -364,14 +359,6 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
             }
         }
 
-        // Per-member facts, never container file facts: every thread in the
-        // store shares one `db.sqlite` (+wal), so the file's size and mtime move
-        // whenever ANY session writes — keyed on them, one session's update
-        // would churn every member's cursor and stamp a shared mtime onto all
-        // their `last_activity_at`. The thread's own message count is its
-        // content position; the store's own `time_updated` is its real
-        // activity time. Every replay is a full scan; message identity
-        // absorbs the re-read.
         let (count, time_updated): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM message WHERE session_id = ?1),
@@ -890,9 +877,8 @@ mod tests {
         );
     }
 
-    /// Usage comes from the store's own per-turn rollup and adds up across the
-    /// session's turns; the message rows never carry it. `task_type` decides
-    /// the member kind: fork, subagent_child, selection_side_chat.
+    /// `task_type` decides the member kind: fork, subagent_child,
+    /// selection_side_chat.
     #[test]
     fn task_type_decides_the_member_kind() {
         let root = unique_dir("task-type");
@@ -976,7 +962,6 @@ mod tests {
         );
     }
 
-    /// the whole agent's sessions.
     #[test]
     fn another_threads_write_does_not_churn_this_thread() {
         use crate::storage::Db;

@@ -1,4 +1,4 @@
-//! Message Identity & Source mutation tests (Issue #1) — Logical Session model.
+//! Message Identity & Source mutation tests — Logical Session model.
 //!
 //! Fixture-driven real JSONL per adapter: append / no-change / truncate+rewrite
 //! / same-size rewrite / file replacement. The RAW `session_messages` store is

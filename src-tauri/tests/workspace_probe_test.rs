@@ -1,4 +1,4 @@
-//! The read-only path picker supports (`workspace::probe`).
+//! The read-only path picker (`workspace::probe`).
 //!
 //! `probe_workspace_path` must describe what the attacher WOULD decide, from
 //! the same observation the attacher runs — never write anything, and never

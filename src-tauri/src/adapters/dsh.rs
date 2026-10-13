@@ -14,23 +14,16 @@
 //! CHILD member of that parent (otherwise ROOT); `origin` / `delegationDepth` ride
 //! along as metadata.
 //!
-//! Usage lives on the STEP: `assistant/message.data.usage` is
-//! `{inputTokens, outputTokens, cacheReadTokens?}`, one entry per generation step,
-//! so the steps add up. dsh states no cost. A step that produced no prose (tool
-//! calls only) still spent tokens, so usage is counted independently of whether
-//! the step becomes conversation.
-//!
 //! Only the ROOT's conversation is ingested: `user/message` (real user turns) and
 //! `assistant/message`. A `user/message` carrying `data.source.senderSessionId` was
 //! sent by another session — side activity, never conversation. `assistant/attempt`
-//! (a retried request — real spend, no prose) and `compaction/summary` (the
-//! shadowed range really goes to the model) count USAGE without becoming
-//! conversation; `assistant/chunk`, `tool/*`, `todo/write`, `request/*`,
-//! `session/title*` and turn/step bookkeeping are dropped or counted. `seq` is
-//! writer-assigned and monotonic within a generation, so it is the native
-//! message id — and the fork boundary: a header `seedLength` marks how many
-//! leading events a fork copied verbatim from its parent, and rows below it are
-//! never billed here again.
+//! (a retried request — no prose) and `compaction/summary` (the shadowed range
+//! really goes to the model) never become conversation; `assistant/chunk`,
+//! `tool/*`, `todo/write`, `request/*`, `session/title*` and turn/step
+//! bookkeeping are dropped. `seq` is writer-assigned and monotonic within a
+//! generation, so it is the native message id — and the fork boundary: a header
+//! `seedLength` marks how many leading events a fork copied verbatim from its
+//! parent, and rows below it are never ingested here again.
 //!
 //! Two shapes need real work:
 //! - **The user turn is not always the user's words.** dsh injects its own
@@ -373,9 +366,6 @@ impl DshAdapter {
             .and_then(|p| p.as_str())
             .filter(|p| !p.is_empty())
             .map(|p| p.to_string());
-        // The header names the member graph directly: a parentSession
-        // makes this a CHILD of that parent; origin/delegationDepth ride along
-        // as metadata facts.
         let kind = if parent.is_some() {
             DiscoveredMemberKind::Child
         } else {
@@ -424,9 +414,6 @@ impl DshAdapter {
             metadata: serde_json::json!({
                 "origin": header.get("origin").and_then(|o| o.as_str()),
                 "delegation_depth": header.get("delegationDepth").and_then(|d| d.as_i64()),
-                // How many leading events a fork copied verbatim from its
-                // parent: rows below this `seq` are the parent's work and are
-                // never billed here. Absent on 0.2.x installs.
                 "seed_length": header.get("seedLength").and_then(|s| s.as_i64()),
             }),
         }))
@@ -471,8 +458,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
                 let Some(generation) = generation_of(name) else {
                     continue;
                 };
-                // Equal generation in both spellings: the `.zstd` claim wins,
-                // so what a directory with a mixed pair reports is stable.
                 let wins = match &newest {
                     None => true,
                     Some((g, _)) if generation > *g => true,
@@ -562,9 +547,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         )))
     }
 
-    /// The desktop app is dsh's only launch surface: the `dsh` CLI needs a
-    /// profile name only the user knows, so NoEnding never launches it in a
-    /// terminal.
     fn desktop_app_name(&self) -> Option<&'static str> {
         Some("DeepSeek Harness")
     }

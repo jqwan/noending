@@ -21,26 +21,6 @@
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
 //! by the session id the transcript reports, and silent when that store is
 //! absent. Nothing else is taken from there.
-//!
-//! **The model field is a CODE, not a name.**
-//! Each assistant row's `message.usage` identifies a model request. Plan-billed
-//! accounts have structural zero token fields; BYOK/custom-model rows carry measured tokens,
-//! and their `input_tokens` INCLUDES the cached subset (differs from the
-//! Anthropic envelope), so the uncached input is what gets stored, with the
-//! cached subset on its own axis. A subagent's own file is a member of its
-//! own, so its usage rolls up through the session aggregate like every other
-//! member's.
-//!
-//! `message.model` holds an internal model CODE (`qfmodel`, `dfmodel`, …),
-//! not a name. The authoritative display names ship INSIDE the app as
-//! `Resources/dynamic-text/qoder-cn.json` (`en.model.<code>.label`), a file
-//! that updates with the app — the same code can even name a different model
-//! across releases (`gmodel`: GLM-5 → GLM-5.3). That file is read once per
-//! process and preferred; a built-in table (extracted from the 2026-09
-//! build) backs the platforms/shapes where it cannot be read, and unmapped
-//! codes pass through raw rather than being dropped. Locally synthesized
-//! rows (`<synthetic>` error notices) are not generations and stay NULL. No
-//! provider field exists → NULL.
 
 use std::path::{Path, PathBuf};
 

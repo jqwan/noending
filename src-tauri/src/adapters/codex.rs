@@ -468,9 +468,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
     }
 }
 
-/// One rollout line's contribution to the member read. Model-provenance state
-/// events (`turn_context`, `thread_settings_applied`) contribute nothing since
-/// the provenance retirement — only conversation prose does.
+/// One rollout line's contribution to the member read.
 fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
     let vtype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let payload = v.get("payload").cloned().unwrap_or(Value::Null);
@@ -536,7 +534,7 @@ fn parse_line(v: &Value, is_root: bool) -> Option<ParsedLine> {
         }
         "event_msg" => {
             // token_count (usage), compact, task bookkeeping: none of it is
-            // conversation, and usage is no longer recorded.
+            // conversation.
             None
         }
         _ => None, // session_meta and unrecognized payloads carry nothing
