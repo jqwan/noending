@@ -6,6 +6,7 @@
 mod support;
 use noending::domain::{Agent, Session, Workstream};
 use noending::storage::{new_id, now, Db};
+use noending_lib as noending;
 
 fn db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-ws-cards-{}-{}", tag, new_id()));

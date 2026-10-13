@@ -18,6 +18,7 @@ use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
+use noending_lib as noending;
 
 const PROJECT: &str = "p-base-launch";
 
@@ -429,7 +430,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
     let adapter = noending::adapters::adapter_for(Agent::Antigravity);
     let session = db.get_session(&sid).unwrap().unwrap();
     let route = adapter.desktop_resume_route(&session);
-    if noending::platform::paths::app_bundle_present("Antigravity") {
+    if adapter.desktop_app_present() {
         let prepared = prepared.expect("prepare with the desktop app present");
         assert_eq!(prepared.desktop_open.unwrap().uri, "antigravity://");
         match route {
@@ -480,15 +481,15 @@ fn the_continue_route_follows_the_source_format() {
                 prepared.desktop_open.is_some(),
                 "expected the desktop route"
             );
-            assert!(
-                prepared
-                    .desktop_open
-                    .as_ref()
-                    .unwrap()
-                    .uri
-                    .starts_with("workbuddy://chat/"),
-                "workbuddy continue must deep-link the conversation"
-            );
+            let uri = &prepared.desktop_open.as_ref().unwrap().uri;
+            if cfg!(target_os = "windows") {
+                assert_eq!(uri, "workbuddy://");
+            } else {
+                assert!(
+                    uri.starts_with("workbuddy://chat/"),
+                    "workbuddy continue must deep-link the conversation"
+                );
+            }
         }
         Err(e) => {
             // App absent (CI): the refusal must say so — never a silent
@@ -612,7 +613,7 @@ fn antigravity_routes_by_source_format() {
         "antigravity_ide_conversation",
         "/home/x/.gemini/antigravity/conversations/a.db",
     ));
-    if noending::platform::paths::app_bundle_present("Antigravity") {
+    if adapter.desktop_app_present() {
         assert!(matches!(ide, ResumeRoute::Desktop(_)));
     } else {
         assert!(matches!(ide, ResumeRoute::Refused(_)));

@@ -178,12 +178,11 @@ pub fn agent_ingest_roots(agent: Agent) -> Vec<PathBuf> {
 }
 
 /// Is a macOS application bundle with this name present? Probes the two
-/// roots users actually install to. Other platforms return true — bundle
-/// presence is not probed there, and the deep-link dispatch itself surfaces
-/// an OS error when nothing is registered for the scheme.
+/// roots users actually install to. Other platforms have no macOS bundles;
+/// desktop callers use `desktop::app_present` for platform-specific detection.
 pub fn app_bundle_present(name: &str) -> bool {
     if !cfg!(target_os = "macos") {
-        return true;
+        return false;
     }
     let Some(home) = resolve_home() else {
         return false;

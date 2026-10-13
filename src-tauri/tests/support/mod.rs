@@ -6,6 +6,7 @@
 #![allow(dead_code)] // each test binary uses a subset
 
 use noending::domain::{Agent, Id, Project, Session, Workstream};
+use noending_lib as noending;
 
 /// A path-backed, app-named Project.
 pub fn project(id: Id, name: impl Into<String>) -> Project {

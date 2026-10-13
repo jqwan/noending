@@ -5,6 +5,7 @@ use noending::{
     storage::{new_id, Db},
     workspace::{home::NoEndingHome, path_identity, project, wiring::WorkspaceLayer},
 };
+use noending_lib as noending;
 use std::path::PathBuf;
 
 struct Fixture {

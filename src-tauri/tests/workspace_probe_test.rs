@@ -17,6 +17,7 @@ use noending::workspace::probe::{list_recent_workspace_paths, probe_workspace_pa
 use noending::workspace::resolver::{ResolverContext, WorkspaceResolver};
 use noending::workspace::wiring::HomePolicy;
 use noending::workspace::{normalize_path, PathStyle};
+use noending_lib as noending;
 
 // fixtures
 

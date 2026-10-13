@@ -5,6 +5,7 @@
 
 use noending::agent_runtime::{capabilities_of, RuntimeFieldCapability};
 use noending::domain::Agent;
+use noending_lib as noending;
 
 #[test]
 fn capabilities_are_the_backend_contract_not_the_discovery_result() {

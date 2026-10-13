@@ -445,21 +445,26 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         })
     }
 
-    /// Codex 的桌面端是 ChatGPT（com.openai.codex），与 CLI 共用 `~/.codex`
-    /// 的会话存储——终端恢复对桌面端创建的 thread 同样有效，所以 continue
-    /// 仍走终端；这里只是让设置页把 ChatGPT 列为 Codex 的桌面端。
+    /// ChatGPT (the Codex desktop app) and CLI share `~/.codex`.
+    /// Continue still defaults to terminal; Windows uses the codex URI handler.
     fn desktop_app_name(&self) -> Option<&'static str> {
         Some("ChatGPT")
     }
 
-    /// 桌面端打开方式：注册的深链 `codex://threads/{id}` 按 thread id 定位，
-    /// 与终端恢复指向同一个存储。应用缺席 → 拒绝；终端始终是 Codex 的默认
-    /// 打开方式，这条路只在保存的偏好要求桌面端时被换入。
+    /// macOS deep-links the thread; Windows currently activates the app only.
+    /// Missing desktop handlers refuse without affecting terminal continuation.
     fn desktop_resume_route(&self, session: &Session) -> ResumeRoute {
-        if !crate::platform::paths::app_bundle_present("ChatGPT") {
-            return ResumeRoute::Refused(
-                "未找到 ChatGPT（Codex 桌面端），无法在桌面端打开该会话".into(),
-            );
+        if !self.desktop_app_present() {
+            return ResumeRoute::Refused(format!(
+                "未找到 {}（Codex 桌面端），无法在桌面端打开该会话",
+                self.desktop_app_name().unwrap_or("Codex")
+            ));
+        }
+        if cfg!(target_os = "windows") {
+            return ResumeRoute::Desktop(DesktopResume {
+                uri: "codex://".into(),
+                note: "将打开 ChatGPT（Codex 桌面端），不定位到指定会话".into(),
+            });
         }
         ResumeRoute::Desktop(DesktopResume {
             uri: format!("codex://threads/{}", session.root_agent_session_id),
@@ -705,22 +710,25 @@ mod rollout_tests {
         }
     }
 
-    /// ChatGPT（Codex 桌面端）是 codex 格式的第二种打开方式：应用在场时按
-    /// thread 深链定位（与终端恢复同一存储），缺席时拒绝——终端默认不受影响。
+    /// Desktop activation follows each platform's supported route, or refuses.
     #[test]
-    fn the_desktop_route_deep_links_the_thread_when_chatgpt_is_present() {
+    fn the_desktop_route_uses_the_supported_target_when_present() {
         let session = root_session(Path::new("/tmp/rollout.jsonl"));
         match CodexAdapter.desktop_resume_route(&session) {
             ResumeRoute::Desktop(open) => {
-                assert!(
-                    open.uri.starts_with("codex://threads/01a0bee7"),
-                    "the deep link must carry the thread id: {open:?}"
-                );
+                if cfg!(target_os = "windows") {
+                    assert_eq!(open.uri, "codex://");
+                } else {
+                    assert!(
+                        open.uri.starts_with("codex://threads/01a0bee7"),
+                        "the deep link must carry the thread id: {open:?}"
+                    );
+                }
             }
             ResumeRoute::Refused(reason) => {
                 assert!(
-                    !crate::platform::paths::app_bundle_present("ChatGPT"),
-                    "ChatGPT is installed, so the route must not refuse: {reason}"
+                    !CodexAdapter.desktop_app_present(),
+                    "Codex desktop is present, so the route must not refuse: {reason}"
                 );
             }
             other => panic!("unexpected route: {other:?}"),

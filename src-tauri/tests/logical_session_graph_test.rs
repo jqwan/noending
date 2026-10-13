@@ -13,6 +13,7 @@ use noending::adapters::all_adapters;
 use noending::domain::{Agent, ParsedSessionMessage, Session, SessionMessageRole};
 use noending::ingestion;
 use noending::storage::{new_id, now, Db};
+use noending_lib as noending;
 
 fn temp_root(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

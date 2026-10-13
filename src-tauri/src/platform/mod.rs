@@ -1,3 +1,4 @@
+pub mod desktop;
 pub mod exec_resolver;
 pub mod exec_runner;
 pub mod launcher;

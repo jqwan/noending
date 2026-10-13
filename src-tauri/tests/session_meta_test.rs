@@ -11,6 +11,7 @@
 use noending::domain::Agent;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
+use noending_lib as noending;
 
 mod support;
 

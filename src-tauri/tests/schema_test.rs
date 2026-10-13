@@ -18,6 +18,7 @@
 //!
 
 use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
+use noending_lib as noending;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 

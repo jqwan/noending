@@ -7,6 +7,7 @@
 use noending::adapters::{adapter_for, ExecOptions};
 use noending::domain::Agent;
 use noending::platform::exec_resolver::{cli_names, AgentInstallation};
+use noending_lib as noending;
 
 /// The argv contract only exists for Agents that HAVE a CLI. Qoder is
 /// IDE-hosted: there is no command line to render, and its builders must fail

@@ -2,6 +2,7 @@
 use noending::adapters::ExecOptions;
 use noending::domain::Agent;
 use noending::platform::exec_runner::{clean_exec_stdout, run_headless};
+use noending_lib as noending;
 // Real-model smoke tests (#[ignore]: need the authenticated agent CLIs)
 
 #[test]

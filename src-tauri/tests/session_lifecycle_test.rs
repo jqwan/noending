@@ -7,6 +7,7 @@ use noending::domain::{Agent, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
 use noending::search;
 use noending::storage::{new_id, Db};
+use noending_lib as noending;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 

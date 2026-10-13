@@ -10,6 +10,7 @@ use noending::{
     storage::{new_id, Db},
     workspace::{project, workstream},
 };
+use noending_lib as noending;
 struct Fixture {
     db: Option<Db>,
     root: std::path::PathBuf,

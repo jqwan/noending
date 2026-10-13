@@ -22,6 +22,7 @@ use noending::workspace::resolver::{
     is_observable, GitAccess, GitProbe, GitProbeState, ReservedPaths, ResolverContext,
     WorkspaceObserving, WorkspaceResolver,
 };
+use noending_lib as noending;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 

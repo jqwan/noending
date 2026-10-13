@@ -27,6 +27,7 @@ use noending::workspace::session::{
     UnattachedWorkspacePaths,
 };
 use noending::workspace::{normalize_path, path_identity_of, WorkspaceAttaching};
+use noending_lib as noending;
 
 // fixtures
 

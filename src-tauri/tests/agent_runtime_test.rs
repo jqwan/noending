@@ -11,6 +11,7 @@ use noending::agent_runtime::{
 use noending::domain::Agent;
 use noending::storage::{new_id, Db};
 use noending::sync::extractor::{CliExtractor, ExtractionSettings};
+use noending_lib as noending;
 
 fn temp_db() -> Db {
     let dir = std::env::temp_dir().join(format!("noending-runtime-test-{}", new_id()));

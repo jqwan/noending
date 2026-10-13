@@ -259,12 +259,14 @@ fn codex_trust_override(command: &str) -> Result<String> {
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
         builder.mode(0o700);
-    }
+        builder
+    };
     builder.create(path)
 }
 

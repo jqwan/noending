@@ -671,7 +671,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 {
                     return ResumeRoute::Terminal;
                 }
-                if !crate::platform::paths::app_bundle_present("Antigravity") {
+                if !self.desktop_app_present() {
                     return ResumeRoute::Refused(
                         "该会话来自 Antigravity 桌面端：agy CLI 无法读取桌面端会话（存储相互独立），且未找到 Antigravity 桌面应用，无法继续该会话"
                             .into(),

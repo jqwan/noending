@@ -18,6 +18,7 @@ use noending::workspace::{
     normalize_path, normalize_path_with, path_identity, path_identity_of, path_identity_with,
     NormalizeOpts, PathStyle,
 };
+use noending_lib as noending;
 
 mod support;
 

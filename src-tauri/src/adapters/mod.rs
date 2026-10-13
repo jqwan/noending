@@ -768,11 +768,30 @@ pub trait AgentAdapter: Send + Sync {
         source_path: Option<&str>,
     ) -> Result<AgentCommand>;
 
-    /// The macOS application-bundle name of this Agent's desktop app, for
-    /// presence probing before a desktop-mode Continue. `None` = the Agent
-    /// has no desktop surface at all.
+    /// Desktop app display name (also its bundle name on macOS).
+    /// `None` means this Agent has no desktop surface.
     fn desktop_app_name(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Registered URI scheme used to activate the desktop surface.
+    fn desktop_app_scheme(&self) -> Option<&'static str> {
+        match self.agent() {
+            Agent::Codex => Some("codex"),
+            Agent::Qoder => Some("qoder-cn"),
+            Agent::WorkBuddy => Some("workbuddy"),
+            Agent::Dsh => Some("dsh"),
+            Agent::ZCode => Some("zcode"),
+            Agent::Antigravity => Some("antigravity"),
+            Agent::ClaudeCode | Agent::Pi => None,
+        }
+    }
+
+    fn desktop_app_present(&self) -> bool {
+        match (self.desktop_app_name(), self.desktop_app_scheme()) {
+            (Some(name), Some(scheme)) => crate::platform::desktop::app_present(name, scheme),
+            _ => false,
+        }
     }
 
     /// Whether the Agent ships a TUI/CLI surface. Static product fact —

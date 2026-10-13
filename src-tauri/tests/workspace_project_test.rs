@@ -26,6 +26,7 @@ use noending::workspace::project::{
 };
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
+use noending_lib as noending;
 use support::associate_path_project as append_workstream_path_conn;
 
 // fixtures

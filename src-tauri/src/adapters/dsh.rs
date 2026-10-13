@@ -554,7 +554,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
     /// The registered scheme `dsh://` has no known session route, so Continue
     /// can only activate the app. App absent → refuse.
     fn continue_route(&self, _session: &Session) -> ResumeRoute {
-        if !crate::platform::paths::app_bundle_present("DeepSeek Harness") {
+        if !self.desktop_app_present() {
             return ResumeRoute::Refused("未找到 dsh 桌面应用，无法继续该会话".into());
         }
         ResumeRoute::Desktop(DesktopResume {
@@ -1002,7 +1002,7 @@ mod tests {
     fn continue_route_opens_the_desktop_app_or_refuses() {
         let session = session_at(Path::new("/tmp/dsh-session"));
         let route = DshAdapter.continue_route(&session);
-        if crate::platform::paths::app_bundle_present("DeepSeek Harness") {
+        if DshAdapter.desktop_app_present() {
             match route {
                 ResumeRoute::Desktop(d) => assert_eq!(d.uri, "dsh://"),
                 other => panic!("expected a desktop open, got {other:?}"),

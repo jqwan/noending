@@ -16,6 +16,7 @@ use noending::domain::{
     Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceCursorUpdate,
 };
 use noending::storage::{new_id, Db};
+use noending_lib as noending;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

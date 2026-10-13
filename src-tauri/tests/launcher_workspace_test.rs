@@ -28,6 +28,7 @@ use noending::storage::{new_id, now, Db};
 use noending::workspace::session::move_session_to_path_conn;
 use noending::workspace::workstream::create_workstream;
 use noending::workspace::{normalize_path, WorkspaceAttaching};
+use noending_lib as noending;
 
 const PROJECT: &str = "p-launcher-ws";
 

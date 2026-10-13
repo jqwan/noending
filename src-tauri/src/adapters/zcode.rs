@@ -450,7 +450,7 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
     }
 
     fn continue_route(&self, _session: &Session) -> ResumeRoute {
-        if !crate::platform::paths::app_bundle_present("ZCode") {
+        if !self.desktop_app_present() {
             return ResumeRoute::Refused("未找到 ZCode 桌面应用，无法继续该会话".into());
         }
         ResumeRoute::Desktop(DesktopResume {

@@ -888,6 +888,7 @@ mod tests {
 
     /// `sh` exists on every CI this suite runs on (macOS; the spawn tests are
     /// unix-gated below — ConPTY coverage rides on the same code paths).
+    #[cfg(unix)]
     fn sh(script: &str) -> AgentCommand {
         AgentCommand {
             program: "/bin/sh".into(),

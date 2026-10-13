@@ -120,6 +120,7 @@ fn script_name(kind: &str) -> String {
 /// Launch scripts and their ack sentinels are diagnostics of a single
 /// launch; drop anything older than a day so the directory cannot grow
 /// unboundedly. Only `launch-*` files here are ours.
+#[cfg(target_os = "macos")]
 fn prune_old_scripts() {
     let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
     if let Ok(rd) = std::fs::read_dir(script_dir()) {
@@ -259,10 +260,13 @@ mod imp {
     }
 
     pub fn open_uri(uri: &str) -> Result<()> {
-        std::process::Command::new("cmd")
+        let status = std::process::Command::new("cmd")
             .args(["/C", "start", "", uri])
             .status()
             .map_err(|e| other(format!("start {} 失败: {}", uri, e)))?;
+        if !status.success() {
+            return Err(other(format!("无法打开桌面应用: {uri}")));
+        }
         Ok(())
     }
 }

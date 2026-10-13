@@ -9,6 +9,7 @@ use noending::domain::{Agent, SessionMessageRole};
 use noending::lifecycle;
 use noending::search::search;
 use noending::storage::{new_id, Db};
+use noending_lib as noending;
 use std::ops::Deref;
 
 mod support;

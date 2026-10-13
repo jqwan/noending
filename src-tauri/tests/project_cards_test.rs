@@ -6,6 +6,7 @@ use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
 use noending::workspace::project::UnrestrictedWorkspace;
+use noending_lib as noending;
 mod support;
 
 fn temp_db() -> (std::path::PathBuf, Db) {

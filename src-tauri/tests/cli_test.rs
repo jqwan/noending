@@ -4,6 +4,7 @@ use noending::{
     storage::Db,
     workspace::{home::NoEndingHome, wiring::WorkspaceLayer},
 };
+use noending_lib as noending;
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},

@@ -11,6 +11,7 @@ use noending::domain::{Agent, Session, SessionMessageRole, SourceCursorUpdate};
 use noending::launcher;
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
+use noending_lib as noending;
 
 mod support;
 

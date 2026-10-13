@@ -1,6 +1,7 @@
 //! Launch directory selection uses explicit input or NoEnding's default workspace.
 use noending::launcher::{resolve_new_cwd, CwdSource, LaunchWorkspace};
 use noending::storage::new_id;
+use noending_lib as noending;
 use std::path::PathBuf;
 
 fn workspace() -> LaunchWorkspace {

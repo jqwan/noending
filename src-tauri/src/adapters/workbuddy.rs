@@ -432,17 +432,21 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }
 
-    /// WorkBuddy's own task notifications deep-link `workbuddy://chat/{id}`,
-    /// and the id is the transcript file's stem — this member's
-    /// source_member_id. The one app whose Continue can land ON the
-    /// conversation. App absent → refuse (there is no CLI to fall back to).
+    /// macOS task notifications deep-link `workbuddy://chat/{id}`.
+    /// Windows currently activates the app only. No desktop → refuse.
     fn desktop_app_name(&self) -> Option<&'static str> {
         Some("WorkBuddy")
     }
 
     fn continue_route(&self, session: &Session) -> ResumeRoute {
-        if !crate::platform::paths::app_bundle_present("WorkBuddy") {
+        if !self.desktop_app_present() {
             return ResumeRoute::Refused("未找到 WorkBuddy 桌面应用，无法继续该会话".into());
+        }
+        if cfg!(target_os = "windows") {
+            return ResumeRoute::Desktop(DesktopResume {
+                uri: "workbuddy://".into(),
+                note: "将打开 WorkBuddy 桌面应用，不定位到指定会话".into(),
+            });
         }
         ResumeRoute::Desktop(DesktopResume {
             uri: format!("workbuddy://chat/{}", session.root_agent_session_id),

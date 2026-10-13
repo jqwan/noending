@@ -854,10 +854,7 @@ pub fn search(
 /// installed — an uninstalled app must not be advertised.
 pub fn surface_of(agent: Agent) -> &'static str {
     let adapter = crate::adapters::adapter_for(agent);
-    let desktop = adapter
-        .desktop_app_name()
-        .map(crate::platform::paths::app_bundle_present)
-        .unwrap_or(false);
+    let desktop = adapter.desktop_app_present();
     match (adapter.has_terminal_cli(), desktop) {
         (true, true) => "both",
         (true, false) => "tui_cli",
@@ -887,9 +884,7 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
                 "terminal_cli": adapter.has_terminal_cli(),
                 "launch_enabled": crate::agent_runtime::store::launch_enabled(&state.db, *agent)?,
                 "desktop_app": desktop_app,
-                "desktop_app_present": desktop_app
-                    .map(crate::platform::paths::app_bundle_present)
-                    .unwrap_or(false),
+                "desktop_app_present": adapter.desktop_app_present(),
             }),
         );
     }
