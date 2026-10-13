@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
 import PageHeader from "../../layout/PageHeader";
@@ -19,6 +18,9 @@ import { EVT_TERMINALS, type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
+import { connectTerminalKeyboard, isMacTerminal } from "./terminalKeyboard";
+import { terminalOptions, createTerminalRenderer, attachTerminalLayout } from "./terminalPresentation";
+import { connectTerminalLinks } from "./terminalLinks";
 import { subscribeTerminalStream, type TerminalStream } from "./terminalStream";
 
 /**
@@ -33,9 +35,6 @@ import { subscribeTerminalStream, type TerminalStream } from "./terminalStream";
  * 已知的产品边界：关闭 NoEnding 会结束后端里的内嵌 Agent（后端 RunEvent::Exit
  * 统一收割）。
  */
-
-/** 裸修饰键（e.key）：IME 首键直提交时唯一能先到的 keydown，武装差分窗口用。 */
-const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 
 type TerminalState =
   | { kind: "loading" }
@@ -212,13 +211,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     let entry = liveTerminals.get(id);
     if (!entry) {
       if (!stream) return;
-      const term = new Terminal({
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        fontSize: 12.5,
-        cursorBlink: true,
-        scrollback: 5000,
-        minimumContrastRatio: 4.5,
-      });
+      const term = new Terminal(terminalOptions(isMacTerminal()));
       const stopTheme = observeTerminalTheme(term, (data) => {
         if (!snapshot.live || liveTerminals.get(id)?.exited) return;
         void api.terminalInput(id, data).catch(() => {});
@@ -226,165 +219,20 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);
-      try {
-        term.loadAddon(new WebglAddon());
-      } catch {
-        // WebGL 不可用（驱动、虚拟化）时 xterm 回落到 DOM 渲染，功能不受影响。
-      }
-
-      // 复制：有选区时 Cmd/Ctrl+C 是复制，否则交给终端（SIGINT）。
-      //
-      // 粘贴在 keydown 层截获并压制原生路径，改为后端原生读系统剪贴板一次、
-      // 仅交付非空文本，不走 webview 的 paste 事件，避免重复投递。
-      // 图片由 Agent 自己处理，用户直接使用各 TUI 的原生粘贴快捷键。
-      // 中文 IME 的 WKWebView 兼容层。xterm 6 的 input 通路（_inputEvent）在
-      // _keyDownSeen 被 keyup 清零后会同步交付 ev.data，而 IME 直提交的事件
-      // 顺序 WebKit 不保证：首键只有裸修饰键 keydown（字符键被吞、229 第二键
-      // 才出现，探针 A/B 实测），按住修饰键连打时还会对同一次插入派发两次
-      // input——单通道、顺序敏感的修法都会漏或多发。这里的交付与顺序无关：
-      //   1) 武装窗口由 229 和裸修饰键的 keydown 开启（修饰键不产生可打印
-      //      数据，空武装无害）；
-      //   2) 武装窗口内的 insertText 在 .xterm 根元素的捕获层统一收口：就地
-      //      终结事件（xterm 的 input 通路退场，杜绝它的那份），载荷经差分
-      //      扣账交付——窗口内 xterm 经 onData 发过的全部记账，只发余额；
-      //      「载荷相同且 textarea 未再变化」视为同一次插入的重复派发，只交
-      //      第一份（基线只在 textarea 落上新内容时才推进，跨窗口仍有效）；
-      //   3) 组合中间态与窗口外输入一律放行：候选窗归 xterm finalize，emoji
-      //      面板等无 keydown 的输入走 xterm 原路径。
-      let armed = false;
-      let armValue = "";
-      let xtermSent = "";
-      let composing = false;
-      // 重复派发鉴别基线：上一次交付的载荷与其时的 textarea 值。
-      let lastPayload = "";
-      let lastPayloadValue: string | null = null;
-      // 扣账交付：投入的文本先减去 xterm 在本窗口内已经发过的部分——
-      // 无论这条文本来自 input 载荷还是 textarea 差分，都恰好交付一次。
-      const deliverText = (text: string) => {
-        if (!text) return;
-        let residue = text;
-        if (xtermSent) {
-          if (residue.endsWith(xtermSent)) residue = residue.slice(0, residue.length - xtermSent.length);
-          if (residue === xtermSent) residue = "";
-        }
-        if (residue) api.terminalInput(id, residue);
-        xtermSent = "";
-        armValue = term.textarea?.value ?? armValue;
-      };
-      const deliver = () => {
-        if (!armed || composing || !term.textarea) return;
-        const now = term.textarea.value;
-        if (now === armValue || !now.startsWith(armValue)) return;
-        deliverText(now.slice(armValue.length));
-      };
-      const armGesture = () => {
-        deliver(); // 上一窗口若有未交的残余，先交掉、基线推进
-        armed = true;
-        armValue = term.textarea?.value ?? "";
-        xtermSent = "";
-        // 鉴别基线只在 textarea 落上新内容时才推进：同载荷且值未变，跨窗口
-        // 仍视为重复派发（重复派发的两份之间可能隔着一个 229 keydown）。
-        if (term.textarea?.value !== lastPayloadValue) {
-          lastPayload = "";
-          lastPayloadValue = term.textarea?.value ?? null;
-        }
-        setTimeout(deliver, 0);
-        setTimeout(deliver, 120);
-      };
-      term.onData((d) => {
-        if (armed) xtermSent += d;
+      const renderer = createTerminalRenderer(term);
+      const stopLinks = connectTerminalLinks(term, isMacTerminal(), api.openRemoteUrl);
+      const stopKeyboard = connectTerminalKeyboard(term, {
+        mac: isMacTerminal(),
+        writable: () => !liveTerminals.get(id)?.exited && liveTerminals.has(id),
+        readClipboard: api.readClipboardForTerminal,
+        copy: copyToClipboard,
       });
-      term.textarea?.addEventListener("compositionstart", () => {
-        composing = true;
-      });
-      term.textarea?.addEventListener("compositionend", () => {
-        composing = false;
-        setTimeout(deliver, 0);
-        setTimeout(deliver, 120);
-      });
-      // input 的唯一收口（捕获层，先于 xterm 挂在 textarea 上的监听）。
-      term.element?.addEventListener(
-        "input",
-        (e) => {
-          const ie = e as InputEvent;
-          if (!armed || composing || ie.inputType !== "insertText" || !ie.data) return;
-          // 武装窗口内 xterm 的 input 通路退场：_keyDownSeen 已被上一键的
-          // keyup 清零时，它会对同一份 ev.data 再交付一次。
-          e.stopImmediatePropagation();
-          if (ie.data === lastPayload && term.textarea?.value === lastPayloadValue) return;
-          lastPayload = ie.data;
-          lastPayloadValue = term.textarea?.value ?? null;
-          // input 载荷是权威文本：textarea 可能被随时清空，差分读不到，
-          // 但载荷永远带着本次插入的内容（首键丢失的正是这一份）。
-          deliverText(ie.data);
-        },
-        true,
-      );
-
-      term.attachCustomKeyEventHandler((e) => {
-        if (e.type === "keyup") {
-          setTimeout(deliver, 0);
-          return true;
-        }
-        if (e.type !== "keydown") return true;
-        if (e.keyCode === 229) {
-          // IME 接管的键：让 xterm 提前返回（它会对这些键 preventDefault），
-          // 并武装差分窗口。
-          armGesture();
-          return false;
-        }
-        if (MODIFIER_KEYS.has(e.key)) {
-          // 裸修饰键：首键直提交的唯一前置 keydown（探针实测），靠它武装
-          // 窗口，随后的 input 载荷才能被 deliverText 接住。放行给 xterm。
-          armGesture();
-          return true;
-        }
-        armed = false;
-        if ((e.metaKey || e.ctrlKey) && e.key === "c" && term.hasSelection()) {
-          void copyToClipboard(term.getSelection());
-          return false;
-        }
-        const pasteKey =
-          (e.metaKey && e.key === "v") ||
-          (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "v");
-        if (pasteKey && !e.repeat) {
-          // 返回 false 只是让 xterm 不处理这个键；浏览器对 Cmd+V 的**默认动作**
-          // （向 textarea 粘贴并触发 paste 事件）必须显式取消，否则它是一条
-          // 独立于本路由的投递通道，键盘路由再正确也会多出一份。
-          e.preventDefault();
-          void api.readClipboardForTerminal()
-            .then((text) => {
-              // 文本也走打字语义（terminalInput）：term.paste 的 bracketed
-              // 包裹在部分 TUI 下的重绘是双份渲染的残留层，打字语义是所有
-              // TUI 行为的最小公约数；多行文本由 TUI 自己的输入处理消化。
-              if (text) {
-                api.terminalInput(id, text);
-              }
-            })
-            .catch(() => {
-              // 剪贴板读不到（平台/权限）时无操作，不阻断按键。
-            });
-          return false;
-        }
-        return true;
-      });
-
-      // 键盘路由是唯一粘贴通道：凡以事件形式到达的粘贴（默认动作残余、Tauri
-      // 默认菜单的原生 Paste、右键粘贴）在捕获阶段一律终结，杜绝第二条投递。
-      term.element?.addEventListener(
-        "paste",
-        (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        },
-        true,
-      );
 
       // 输入通道随实例常驻：detach 期间没有 UI 焦点自然无输入，无需重建。
-      const stopInput = connectTerminalInput(term, (data) => {
+      const stopInput = connectTerminalInput(term, (data, binary) => {
         const liveNow = liveTerminals.get(id);
         if (!liveNow || liveNow.exited) return;
-        api.terminalInput(id, data).catch(() => {
+        api.terminalInput(id, data, binary).catch(() => {
           // 已退出的终端拒绝输入：横幅已说明，不再打扰。
         });
       });
@@ -392,7 +240,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       entry = {
         term,
         fit,
-        unlisteners: [stopTheme, stopInput, () => stream.dispose()],
+        renderer,
+        dimensions: { cols: snapshot.cols, rows: snapshot.rows },
+        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, () => renderer.dispose(), () => stream.dispose()],
         exited: !snapshot.live || stream.exited,
         onExit: null,
       };
@@ -425,33 +275,22 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       );
     };
 
-    const observer = new ResizeObserver(() => {
-      // The session section stays mounted while another section is visible.
-      // Never resize its PTY to the dimensions of a hidden container.
-      if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
-      try {
-        live.fit.fit();
-        // 尺寸没变就不打扰 PTY：多余的 resize 会触发 TUI 无谓重绘。
-        if (live.term.cols > 0 && live.term.rows > 0) {
-          void api.terminalResize(id, live.term.cols, live.term.rows);
-        }
-      } catch {
-        // 容器尺寸不可测（切页瞬间）时跳过这一帧。
-      }
+    const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {
+      if (live.exited || (cols === live.dimensions.cols && rows === live.dimensions.rows)) return;
+      const previous = live.dimensions;
+      const next = { cols, rows };
+      live.dimensions = next;
+      void api.terminalResize(id, cols, rows).catch(() => {
+        if (live.dimensions === next) live.dimensions = previous;
+      });
     });
-    observer.observe(container);
-    requestAnimationFrame(() => {
-      if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
-      try {
-        live.fit.fit();
-      } catch {
-        // 首帧尺寸不可测时交给 ResizeObserver。
-      }
-    });
+    live.renderer.onDimensionsChange = layout.refresh;
+    layout.refresh();
 
     return () => {
       live.onExit = null;
-      observer.disconnect();
+      live.renderer.onDimensionsChange = null;
+      layout.dispose();
     };
   }, [snapshot, stream]);
 
@@ -520,7 +359,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
             </div>
           )}
           <div className="terminal-body">
-            <div className="terminal-host" ref={containerRef} />
+            <div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} ref={containerRef} />
           </div>
         </>
       )}

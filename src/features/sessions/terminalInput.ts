@@ -4,16 +4,23 @@ import type { Terminal } from "@xterm/xterm";
  * per DOM event, and dampens small trackpad deltas before deciding to emit it.
  * Feed normalized line events back through xterm so it still owns mouse
  * coordinates, modifiers and the application's selected protocol. */
-export function connectTerminalInput(term: Terminal, send: (data: string) => void): () => void {
+export function connectTerminalInput(term: Terminal, send: (data: string, binary?: boolean) => void): () => void {
   const element = term.element!;
   const screen = element.querySelector<HTMLElement>(".xterm-screen");
   let forwarding = false;
   let batch: string | null = null;
+  let binaryBatch = false;
   let remainder = 0;
   let previousMode = "";
   const input = term.onData((data) => {
     if (batch !== null) batch += data;
     else send(data);
+  });
+  // Legacy mouse encodings can contain bytes >= 128. xterm emits these via
+  // onBinary; UTF-8 encoding the string would corrupt their coordinates.
+  const binaryInput = term.onBinary((data) => {
+    if (batch !== null) { batch += data; binaryBatch = true; }
+    else send(data, true);
   });
 
   const wheel = (event: WheelEvent) => {
@@ -53,6 +60,7 @@ export function connectTerminalInput(term: Terminal, send: (data: string) => voi
 
     forwarding = true;
     batch = "";
+    binaryBatch = false;
     try {
       for (let i = 0; i < lines; i++) {
         element.dispatchEvent(new WheelEvent("wheel", {
@@ -68,12 +76,16 @@ export function connectTerminalInput(term: Terminal, send: (data: string) => voi
       forwarding = false;
       // A wheel event can produce many protocol reports, but needs only one
       // frontend/backend call. Keyboard input still goes through immediately.
-      if (data) send(data);
+      if (data) {
+        if (binaryBatch) send(data, true);
+        else send(data);
+      }
     }
   };
   element.addEventListener("wheel", wheel, { capture: true, passive: false });
   return () => {
     element.removeEventListener("wheel", wheel, true);
     input.dispose();
+    binaryInput.dispose();
   };
 }

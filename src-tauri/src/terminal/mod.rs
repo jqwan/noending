@@ -588,6 +588,19 @@ impl TerminalRegistry {
     /// (xterm.js owns key encoding); an exited terminal refuses input with a
     /// stated reason instead of dropping bytes silently.
     pub fn write(&self, terminal_id: &str, data: &str) -> Result<()> {
+        self.write_bytes(terminal_id, data.as_bytes())
+    }
+
+    /// xterm onBinary uses one Unicode codepoint per raw byte, not UTF-8.
+    pub fn write_binary(&self, terminal_id: &str, data: &str) -> Result<()> {
+        let bytes = data
+            .chars()
+            .map(|ch| u8::try_from(ch as u32).map_err(|_| other("无效的终端字节输入")))
+            .collect::<Result<Vec<_>>>()?;
+        self.write_bytes(terminal_id, &bytes)
+    }
+
+    fn write_bytes(&self, terminal_id: &str, data: &[u8]) -> Result<()> {
         let records = self
             .records
             .lock()
@@ -607,7 +620,7 @@ impl TerminalRegistry {
             return Err(other("终端输出流不可用"));
         };
         writer
-            .write_all(data.as_bytes())
+            .write_all(data)
             .and_then(|_| writer.flush())
             .map_err(|e| other(format!("写入终端失败: {e}")))
     }
@@ -2017,6 +2030,40 @@ mod tests {
             replayed.contains("hello-pty"),
             "scrollback must replay after exit, got: {replayed:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_input_preserves_binary_mouse_bytes_and_utf8_text() {
+        let registry = registry();
+        let outcome = spawn_embedded(
+            &sh("stty raw -echo; printf 'INPUT_READY'; dd bs=1 count=9 2>/dev/null | od -An -tx1"),
+            &target(&registry, "s-bytes"),
+        )
+        .unwrap();
+        let id = outcome.terminal_id.unwrap();
+        let output = || {
+            let snapshot = registry.attach(&id).ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(snapshot.scrollback)
+                .ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        until("raw-mode PTY", || {
+            output().filter(|s| s.contains("INPUT_READY"))
+        });
+        assert!(registry.write_binary(&id, "你").is_err());
+        registry
+            .write_binary(&id, "\u{1b}[M\u{80}\u{c8}\u{ff}")
+            .unwrap();
+        registry.write(&id, "你").unwrap();
+        let dump = until("PTY byte dump", || output().filter(|s| s.contains("a0")));
+        let hex: Vec<_> = dump
+            .strip_prefix("INPUT_READY")
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(hex, ["1b", "5b", "4d", "80", "c8", "ff", "e4", "bd", "a0"]);
     }
 
     #[cfg(unix)]

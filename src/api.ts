@@ -221,8 +221,8 @@ export const api = {
     invoke<import("./types").TerminalSummary | null>("terminal_for_session", { sessionId }),
   terminalAttach: (terminalId: string) =>
     invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId }),
-  terminalInput: (terminalId: string, data: string) =>
-    invoke<void>("terminal_input", { terminalId, data }),
+  terminalInput: (terminalId: string, data: string, binary = false) =>
+    invoke<void>("terminal_input", { terminalId, data, binary }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
   // 原生读取系统剪贴板的非空文本；图片由 Agent TUI 自己处理。

@@ -2,12 +2,14 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Terminal } from "@xterm/xterm";
 import { waitFor } from "@testing-library/react";
 import { connectTerminalInput } from "./terminalInput";
+import { connectTerminalKeyboard } from "./terminalKeyboard";
 
 // Use the actual xterm renderer/parser and mouse encoder. jsdom supplies no
 // font layout, canvas or media queries, so give it a 10×20 CSS-pixel cell.
 vi.hoisted(() => vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null));
 let term: Terminal;
 let stop: (() => void) | undefined;
+let stopKeyboard: (() => void) | undefined;
 let screen: HTMLElement;
 const send = vi.fn();
 
@@ -33,6 +35,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stopKeyboard?.();
+  stopKeyboard = undefined;
   stop?.();
   stop = undefined;
   term.dispose();
@@ -105,4 +109,131 @@ it("leaves ordinary scrollback to xterm, clears pending movement on buffer switc
   term.input("after disposal", true);
   wheel(60);
   expect(send.mock.calls).toEqual([["typed"]]);
+});
+
+it("preserves raw legacy mouse bytes beyond ASCII instead of UTF-8 encoding coordinates", async () => {
+  term.resize(200, 24);
+  await write("\x1b[?1000h");
+  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, clientX: 1005 });
+  expect(send.mock.calls).toEqual([["\x1b[Ma\x85#", true]]);
+});
+
+function key(key: string, modifiers: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", {
+    key, keyCode: key.toUpperCase().charCodeAt(0), bubbles: true, cancelable: true, ...modifiers,
+  });
+  term.textarea!.dispatchEvent(event);
+  return event;
+}
+
+it("uses the application's bracketed-paste mode for keyboard and native menu text", async () => {
+  stopKeyboard = connectTerminalKeyboard(term, {
+    mac: true, writable: () => true,
+    readClipboard: async () => "first\n中文\r\nlast", copy: vi.fn().mockResolvedValue(true),
+  });
+  await write("\x1b[?2004h");
+  expect(key("v", { metaKey: true }).defaultPrevented).toBe(true);
+  await waitFor(() => expect(send.mock.calls).toEqual([["\x1b[200~first\r中文\rlast\x1b[201~"]]));
+  await write("\x1b[?2004l");
+  const paste = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, "clipboardData", { value: { getData: () => "menu\ntext" } });
+  term.textarea!.dispatchEvent(paste);
+  await waitFor(() => expect(send.mock.calls[1]).toEqual(["menu\rtext"]));
+  expect(paste.defaultPrevented).toBe(true);
+});
+
+it("keeps Ctrl+C as interrupt on macOS with a selection and passes Agent paste keys through", async () => {
+  const copy = vi.fn().mockResolvedValue(true);
+  const readClipboard = vi.fn();
+  stopKeyboard = connectTerminalKeyboard(term, { mac: true, writable: () => true, readClipboard, copy });
+  await write("selected text");
+  term.select(0, 0, 8);
+  key("c", { metaKey: true });
+  expect(copy).toHaveBeenCalledWith("selected");
+  expect(send).not.toHaveBeenCalled();
+  key("c", { ctrlKey: true });
+  key("v", { ctrlKey: true });
+  expect(send.mock.calls).toEqual([["\x03"], ["\x16"]]);
+  expect(readClipboard).not.toHaveBeenCalled();
+});
+
+it("orders delayed clipboard and menu pastes and discards a read when the terminal is disposed", async () => {
+  let resolve!: (text: string) => void;
+  const pending = new Promise<string>(done => { resolve = done; });
+  const readClipboard = vi.fn().mockReturnValue(pending);
+  stopKeyboard = connectTerminalKeyboard(term, {
+    mac: true, writable: () => true, readClipboard, copy: vi.fn().mockResolvedValue(true),
+  });
+  key("v", { metaKey: true });
+  const paste = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(paste, "clipboardData", { value: { getData: () => "menu" } });
+  term.textarea!.dispatchEvent(paste);
+  expect(send).not.toHaveBeenCalled();
+  resolve("keyboard");
+  await waitFor(() => expect(send.mock.calls).toEqual([["keyboard"], ["menu"]]));
+  let finish!: (text: string) => void;
+  readClipboard.mockReturnValue(new Promise<string>(done => { finish = done; }));
+  key("v", { metaKey: true });
+  stopKeyboard();
+  stopKeyboard = undefined;
+  finish("late text");
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(send.mock.calls).toEqual([["keyboard"], ["menu"]]);
+});
+
+async function preedit(text: string, prefix = "") {
+  term.textarea!.value = prefix;
+  term.textarea!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+  term.textarea!.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: text }));
+  term.textarea!.value = prefix + text;
+  // The last IME key can precede the textarea update in another WebKit event order.
+  key("s", { keyCode: 229 });
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+function endComposition(text: string) {
+  term.textarea!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: text }));
+}
+
+it("commits unconverted Pinyin once without preedit separators when the input source changes", async () => {
+  stopKeyboard = connectTerminalKeyboard(term, {
+    mac: true, writable: () => true, readClipboard: async () => null, copy: vi.fn(),
+  });
+  await preedit("d h j s", "existing text ");
+  expect(send).not.toHaveBeenCalled();
+  key("CapsLock", { keyCode: 20 });
+  key("Unidentified", { keyCode: 0 });
+  // Some switches also expose a modifier before the native compositionend.
+  key("Meta", { keyCode: 91, metaKey: true });
+  expect(send).not.toHaveBeenCalled();
+  endComposition("d h j s");
+  key("CapsLock", { keyCode: 20 });
+  key("Unidentified", { keyCode: 0 });
+  term.textarea!.dispatchEvent(new InputEvent("input", {
+    bubbles: true, inputType: "insertText", data: "d h j s",
+  }));
+  await waitFor(() => expect(send.mock.calls).toEqual([["dhjs"]]));
+  await new Promise(resolve => setTimeout(resolve, 140));
+  expect(send.mock.calls).toEqual([["dhjs"]]);
+  expect(term.textarea!.value).toBe("existing text dhjs");
+  key(" ", { keyCode: 32 });
+  term.textarea!.dispatchEvent(new KeyboardEvent("keypress", {
+    key: " ", keyCode: 32, charCode: 32, bubbles: true, cancelable: true,
+  }));
+  key("a");
+  expect(send.mock.calls).toEqual([["dhjs"], [" "], ["a"]]);
+});
+
+it("keeps converted candidates and explicitly entered composition spaces", async () => {
+  stopKeyboard = connectTerminalKeyboard(term, {
+    mac: true, writable: () => true, readClipboard: async () => null, copy: vi.fn(),
+  });
+  await preedit("d h j s");
+  term.textarea!.value = "对话结束";
+  endComposition("对话结束");
+  await waitFor(() => expect(send.mock.calls).toEqual([["对话结束"]]));
+  await preedit("hello world");
+  key(" ", { keyCode: 229 });
+  endComposition("hello world");
+  await waitFor(() => expect(send.mock.calls[1]).toEqual(["hello world"]));
 });

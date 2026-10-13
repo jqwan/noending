@@ -1092,7 +1092,7 @@ p.ws-card-body.muted { color: var(--text-muted); }
    left:-9999em）。用更高优先级的选择器把它拉回屏幕内（透明 2px，钉在终端
    左上角）；组合期间 xterm 会以内联样式把它挪到光标处，内联优先级更高，
    所以候选窗照常跟随光标。 */
-.terminal-host .xterm .xterm-helper-textarea {
+.terminal-host.terminal-mac .xterm .xterm-helper-textarea {
   left: 0;
   top: 0;
   width: 2px;

@@ -747,8 +747,13 @@ pub fn terminal_input(
     state: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
     data: String,
+    binary: Option<bool>,
 ) -> Result<()> {
-    state.write(&terminal_id, &data)
+    if binary.unwrap_or(false) {
+        state.write_binary(&terminal_id, &data)
+    } else {
+        state.write(&terminal_id, &data)
+    }
 }
 
 #[tauri::command]

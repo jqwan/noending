@@ -64,12 +64,17 @@ const { FakeTerminal } = vi.hoisted(() => {
       FakeTerminal.last = this;
     }
     loadAddon() {}
+    input(data: string) { this.dataHandler(data); }
+    refresh() {}
+    focus() {}
+    clearTextureAtlas() {}
     open(container: HTMLElement) {
       container.appendChild(this.element);
     }
     write(data: string | Uint8Array) {
       this.written.push(data);
     }
+    onBinary() { return { dispose() {} }; }
     onData(handler: (data: string) => void) {
       this.handlers.push(handler);
       return { dispose: () => {} };
@@ -82,6 +87,7 @@ const { FakeTerminal } = vi.hoisted(() => {
     }
     paste(text: string) {
       this.pasted.push(text);
+      this.dataHandler(text);
     }
     hasSelection() {
       return false;
@@ -94,6 +100,7 @@ const { FakeTerminal } = vi.hoisted(() => {
     compositionEndHandler: (() => void) | null = null;
     pasteHandler: ((e: unknown) => void) | null = null;
     textarea = {
+      removeEventListener() {},
       value: "",
       addEventListener: (type: string, handler: (e: unknown) => void) => {
         if (type === "paste") FakeTerminal.last!.pasteHandler = handler;
@@ -109,6 +116,7 @@ const { FakeTerminal } = vi.hoisted(() => {
       const original = el.addEventListener.bind(el);
       el.addEventListener = ((type: string, handler: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => {
         if (type === "paste") FakeTerminal.last!.capturePasteHandler = handler as (e: unknown) => void;
+        if (type === "compositionend") FakeTerminal.last!.compositionEndHandler = handler as () => void;
         if (type === "input") FakeTerminal.last!.captureInputHandler = handler as (e: unknown) => void;
         return original(type, handler, opts);
       }) as typeof el.addEventListener;
@@ -122,7 +130,10 @@ const { FakeTerminal } = vi.hoisted(() => {
 });
 vi.mock("@xterm/xterm", () => ({ Terminal: FakeTerminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {} }));
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: class {
+  onContextLoss() { return { dispose() {} }; }
+  dispose() {}
+} }));
 
 // jsdom 没有 ResizeObserver。
 class FakeResizeObserver {
@@ -137,8 +148,11 @@ class FakeResizeObserver {
 const { toastMock } = vi.hoisted(() => ({ toastMock: vi.fn() }));
 vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 
+let restoreUserAgent: () => void;
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
+  const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+  restoreUserAgent = () => userAgent.mockRestore();
   sessionPages.clear(); sessionTerminals.clear();
   vi.mocked(listen).mockReset().mockImplementation((event, handler) => {
     eventHandlers.set(event, handler as (e: unknown) => void);
@@ -156,6 +170,7 @@ afterEach(() => {
   cleanup();
   resetLiveTerminalsForTests();
   vi.clearAllMocks();
+  restoreUserAgent();
   FakeTerminal.last = null;
   FakeResizeObserver.observed = [];
   delete document.documentElement.dataset.theme;
@@ -216,8 +231,12 @@ it("preserves PTY dimensions while hidden and resizes again when shown", async (
   act(notify);
   expect(api.terminalResize).not.toHaveBeenCalled();
   visible = true;
+  FakeTerminal.last!.cols = 100;
   act(notify);
-  expect(api.terminalResize).toHaveBeenCalledWith("t-1", 80, 24);
+  await waitFor(() => expect(api.terminalResize).toHaveBeenCalledWith("t-1", 100, 24));
+  act(notify);
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  expect(api.terminalResize).toHaveBeenCalledTimes(1);
 });
 
 it("updates a detached cached terminal's theme without restarting or replaying it", async () => {
@@ -250,7 +269,7 @@ it("attaches by terminal ID, replays scrollback and forwards input", async () =>
   ).toBe("hello-pty");
 
   FakeTerminal.last!.handlers.forEach((h) => h("q"));
-  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q"));
+  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q", undefined));
 });
 
 it("retains output and exit events emitted while the attach snapshot is in flight", async () => {
@@ -565,7 +584,7 @@ it("keeps details disabled when an old title request resolves during pending", a
 it("delivers clipboard text once on supported paste shortcuts", async () => {
   const pasteModifiers = [
     { metaKey: true, ctrlKey: false, shiftKey: false },
-    { metaKey: false, ctrlKey: true, shiftKey: true },
+    { metaKey: true, ctrlKey: false, shiftKey: true },
   ];
 
   for (const modifiers of pasteModifiers) {
@@ -576,10 +595,11 @@ it("delivers clipboard text once on supported paste shortcuts", async () => {
     const view = renderView();
     await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
     const term = FakeTerminal.last!;
+    const pastedBefore = term.pasted.length;
     expect(term.keyHandler!({ type: "keydown", ...modifiers, key: "v", preventDefault: () => {} })).toBe(false);
-    await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text"));
+    await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text", undefined));
     expect(api.terminalInput).toHaveBeenCalledTimes(1);
-    expect(term.pasted).toEqual([]);
+    expect(term.pasted.slice(pastedBefore)).toEqual(["pasted text"]);
     view.unmount();
   }
 });
@@ -599,7 +619,7 @@ it("does not receive input when Cmd+V finds no clipboard text", async () => {
   expect(api.terminalInput).not.toHaveBeenCalled();
 });
 
-it("the browser default paste is cancelled and event pastes die at capture", async () => {
+it("cancels the keyboard default and accepts native menu paste through xterm", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   vi.mocked(api.readClipboardForTerminal).mockResolvedValue("x");
 
@@ -612,14 +632,16 @@ it("the browser default paste is cancelled and event pastes die at capture", asy
   ).toBe(false);
   expect(prevented).toHaveBeenCalledTimes(1);
 
-  // 捕获阶段终结一切事件粘贴：菜单/右键/默认动作残余都到不了 xterm。
+  // Native menu paste uses the same xterm paste protocol, without bubbling twice.
   expect(FakeTerminal.last!.capturePasteHandler).not.toBeNull();
   const stopped = vi.fn();
   FakeTerminal.last!.capturePasteHandler!({
     preventDefault: stopped,
-    stopPropagation: () => {},
+    stopImmediatePropagation: () => {},
+    clipboardData: { getData: () => "menu text" },
   });
   expect(stopped).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(FakeTerminal.last!.pasted).toContain("menu text"));
 });
 
 it("passes native TUI paste shortcuts through to xterm", async () => {
@@ -654,7 +676,7 @@ it("copy with a selection goes through the shared clipboard helper", async () =>
   const term = FakeTerminal.last!;
   term.hasSelection = () => true;
   term.getSelection = () => "selected";
-  term.keyHandler!({ type: "keydown", metaKey: true, key: "c" });
+  term.keyHandler!({ type: "keydown", metaKey: true, key: "c", preventDefault: () => {} });
   await waitFor(() => expect(copyMock).toHaveBeenCalledWith("selected"));
 });
 
@@ -700,7 +722,7 @@ it("IME direct-commit punctuation is delivered from the input payload", async ()
   // 直提交的怪癖，差分永远读空），载荷路径也立即交付。
   term.keyHandler!({ type: "keyup", keyCode: 229 });
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
-  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？");
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined);
 });
 
 it("first direct-commit arms on the bare Shift keydown (probe log sequence)", async () => {
@@ -735,7 +757,7 @@ it("armed input events die at capture so xterm's input path never fires", async 
   expect(stopped).toHaveBeenCalledTimes(1);
   // 窗口外放行：普通输入不经捕获终结（xterm 原路径负责）。
   const untouched = vi.fn();
-  term.keyHandler!({ type: "keydown", keyCode: 65, preventDefault: () => {} });
+  term.keyHandler!({ type: "keydown", key: "a", keyCode: 65, preventDefault: () => {} });
   term.captureInputHandler!({ inputType: "insertText", data: "a", stopImmediatePropagation: untouched });
   expect(untouched).not.toHaveBeenCalled();
 });
@@ -750,7 +772,7 @@ it("a re-dispatched identical payload for one insertion is delivered once", asyn
   // 第一次派发：插入落地（textarea 变为 "？"），交付一次。
   term.textarea.value = "？";
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
-  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？");
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined);
   // 按住修饰键连打时 WebKit 会对同一次插入重复派发：载荷相同且 textarea
   // 未再变化 → 不再交付。
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
@@ -798,18 +820,18 @@ it("the diff shim ignores non-IME typing and mid-composition states", async () =
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
   const term = FakeTerminal.last!;
   // 普通按键（非 229）不武装：输入事件归 xterm 的 keypress 通路。
-  term.keyHandler!({ type: "keydown", keyCode: 65, preventDefault: () => {} });
+  term.keyHandler!({ type: "keydown", key: "a", keyCode: 65, preventDefault: () => {} });
   term.textarea.value = "a";
   term.captureInputHandler!({ inputType: "insertText", data: "a", stopImmediatePropagation: () => {} });
   await tick();
-  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "a");
+  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "a", undefined);
   // 候选窗中间态（composition 未结束）不投递。
   term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
   term.compositionStartHandler!();
   term.textarea.value = "ni";
   term.captureInputHandler!({ inputType: "insertCompositionText", data: "ni", stopImmediatePropagation: () => {} });
   await tick();
-  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "ni");
+  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "ni", undefined);
 });
 
 it("shows the exit banner with the exit code for an exited terminal", async () => {

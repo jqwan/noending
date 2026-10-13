@@ -1,9 +1,12 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import type { createTerminalRenderer } from "./terminalPresentation";
 
 type LiveTerminal = {
   term: Terminal;
   fit: FitAddon;
+  renderer: ReturnType<typeof createTerminalRenderer>;
+  dimensions: { cols: number; rows: number };
   unlisteners: (() => void)[];
   exited: boolean;
   onExit: (() => void) | null;
