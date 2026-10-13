@@ -557,10 +557,11 @@ button.sidebar-pinned-header,
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--shadow-menu);
   display: flex;
   flex-direction: column;
   gap: 1px;
+  user-select: none;
 }
 .sidebar-filter-menu-header {
   display: flex;
@@ -590,7 +591,7 @@ button.sidebar-pinned-header,
   align-items: center;
   gap: 7px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 6px 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -604,6 +605,10 @@ button.sidebar-pinned-header,
 }
 .sidebar-filter-item:hover {
   background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.sidebar-filter-item:active {
+  background: var(--bg-active);
   color: var(--text-primary);
 }
 .sidebar-filter-item.checked {
@@ -719,10 +724,11 @@ button.sidebar-pinned-header,
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--shadow-menu);
   display: flex;
   flex-direction: column;
   gap: 1px;
+  user-select: none;
 }
 .sidebar-group-menu-header {
   display: flex;
@@ -740,7 +746,7 @@ button.sidebar-pinned-header,
   align-items: center;
   gap: 7px;
   width: 100%;
-  padding: 5px 6px;
+  padding: 6px 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -754,6 +760,10 @@ button.sidebar-pinned-header,
 }
 .sidebar-group-item:hover {
   background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.sidebar-group-item:active {
+  background: var(--bg-active);
   color: var(--text-primary);
 }
 .sidebar-group-item.checked {
@@ -1163,13 +1173,50 @@ button.sidebar-pinned-header,
   padding: 8px 10px;
 }
 
-.task-detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 32px; }
-.task-detail-main, .task-detail-aside { min-width: 0; }
-.task-detail-aside { border-left: 1px solid var(--border-subtle); padding-left: 24px; }
-.task-detail .ws-detail-head-meta { flex-wrap: wrap; }
-@media (max-width: 1100px) {
-  .task-detail-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .task-detail-aside { border-left: 0; border-top: 1px solid var(--border-subtle); padding: 16px 0 0; }
+/* Unified detail page layout (Agent, Project, Workstream, Session) */
+.detail-layout,
+.task-detail-layout,
+.project-detail-layout,
+.agent-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 24px;
+  align-items: start;
+  width: 100%;
 }
-.task-detail-aside .list-row, .task-detail-aside .side, .task-detail-aside .row { flex-wrap: wrap; }
+.detail-main,
+.task-detail-main,
+.project-detail-main,
+.agent-detail-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.detail-aside,
+.task-detail-aside,
+.project-detail-aside,
+.agent-detail-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  border-left: 0;
+  padding-left: 0;
+}
+.task-detail .ws-detail-head-meta { flex-wrap: wrap; }
+@media (max-width: 900px) {
+  .detail-layout,
+  .task-detail-layout,
+  .project-detail-layout,
+  .agent-detail-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+.detail-aside .list-row,
+.task-detail-aside .list-row,
+.task-detail-aside .side,
+.task-detail-aside .row { flex-wrap: wrap; }
+.detail-aside .list-row .grow,
 .task-detail-aside .list-row .grow { flex-basis: 100%; }

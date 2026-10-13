@@ -351,78 +351,86 @@ export default function WorkstreamDetailView({
 
       {/* Workstream 自身（Base Experience）：与另外两个详情页同形——主栏是内容本身
           （概览、会话、Context），右栏是只读事实（状态、路径、项目）。 */}
-      <div className="task-detail-layout">
-        <div className="task-detail-main">
-        <section className="rail-section">
-          <div className="rail-head">
-            <div className="section-label" style={{ margin: 0 }}>任务概览</div>
-          </div>
-          {workstream.description ? (
-            <p style={{ margin: 0, maxWidth: "72ch", overflowWrap: "anywhere" }}>
-              {workstream.description}
-            </p>
-          ) : (
-            <div className="l1-none">还没有描述。</div>
-          )}
-        </section>
-
-        <WorkstreamSessions
-          sessions={sessions}
-          navigate={navigate}
-          onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
-          allowActions={!archived}
-        />
-
-        <section className="rail-section">
-          <div className="rail-head">
-            <div className="section-label" style={{ margin: 0 }}>任务摘要</div>
-            <div className="actions">
-              {ctxState?.summary && <button className="btn small ghost" onClick={copyContext}>复制</button>}
-              {ctxState?.pending && <button className="btn small primary" disabled={ctxUpdating} onClick={() => updateContext()}>{ctxUpdating ? "更新中…" : "更新摘要"}</button>}
-              <button className="btn small ghost" disabled={ctxUpdating} onClick={() => updateContext(true)}>重新生成</button>
+      <div className="detail-layout task-detail-layout">
+        <div className="detail-main task-detail-main">
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="tasks" />
+                <span>任务概览</span>
+              </h2>
             </div>
-          </div>
-          {ctxState?.pending && <p className="muted">有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
-          {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryMarkdown>{ctxState.summary}</SummaryMarkdown></div> : <p className="muted">尚无任务摘要</p>}
-          {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
-          {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
-          {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
-        </section>
+            {workstream.description ? (
+              <p style={{ margin: 0, maxWidth: "72ch", overflowWrap: "anywhere" }}>
+                {workstream.description}
+              </p>
+            ) : (
+              <div className="l1-none">还没有描述。</div>
+            )}
+          </section>
 
-        </div>
-        <aside className="task-detail-aside">
-        <section className="rail-section">
-          <div className="section-label">状态</div>
-          <span className="badge">{archived ? "已归档" : "未归档"}</span>
-          <div className="small muted" style={{ marginTop: 6 }}>
-            创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
-          </div>
-        </section>
+          <WorkstreamSessions
+            sessions={sessions}
+            navigate={navigate}
+            onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
+            allowActions={!archived}
+          />
 
-        <section className="rail-section">
-          <div className="section-label">项目</div>
-          {false && (
-            <div className="muted small">{""}</div>
-          )}
-          {projectRows.length === 0 && (
-            <div className="l1-none">
-              暂无项目
-            </div>
-          )}
-          {projectRows.map((p) => (
-            <div className="list-row" key={p.id} role="link" tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
-              onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
-              <div className="grow">
-                <div className="title" title={p.name ?? p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Icon name="project" />
-                  <span>{p.name ?? "未命名项目"}</span>
-                </div>
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="spark" />
+                <span>任务摘要</span>
+              </h2>
+              <div className="actions" style={{ display: "flex", gap: 8 }}>
+                {ctxState?.summary && <button className="btn small ghost" onClick={copyContext}>复制</button>}
+                {ctxState?.pending && <button className="btn small primary" disabled={ctxUpdating} onClick={() => updateContext()}>{ctxUpdating ? "更新中…" : "更新摘要"}</button>}
+                <button className="btn small ghost" disabled={ctxUpdating} onClick={() => updateContext(true)}>重新生成</button>
               </div>
             </div>
-          ))}
+            {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
+            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryMarkdown>{ctxState.summary}</SummaryMarkdown></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
+            {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
+            {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
+            {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
+          </section>
+        </div>
 
-        </section>
+        <aside className="detail-aside task-detail-aside">
+          <section className="card detail-section">
+            <h2 className="detail-section-title">
+              <Icon name="info" />
+              <span>状态</span>
+            </h2>
+            <span className="badge" style={{ alignSelf: "flex-start" }}>{archived ? "已归档" : "未归档"}</span>
+            <div className="small muted">
+              创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
+            </div>
+          </section>
+
+          <section className="card detail-section">
+            <h2 className="detail-section-title">
+              <Icon name="project" />
+              <span>项目 ({projectRows.length})</span>
+            </h2>
+            {projectRows.length === 0 && (
+              <div className="l1-none">
+                暂无项目
+              </div>
+            )}
+            {projectRows.map((p) => (
+              <div className="list-row" key={p.id} role="link" tabIndex={0}
+                onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
+                onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
+                <div className="grow">
+                  <div className="title" title={p.name ?? p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Icon name="project" />
+                    <span>{p.name ?? "未命名项目"}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </section>
         </aside>
       </div>
 

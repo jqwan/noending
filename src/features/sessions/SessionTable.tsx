@@ -328,7 +328,7 @@ export default function SessionCards({
 
   return (
     <div className="ws-grid board-grid" key="session-cards">
-      {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
+      {rows.slice(0, visibleCount).map(({ session: s, workstreamFull, project }) => (
         <article
           className="ws-card session-card full"
           key={`card-${s.id}`}
@@ -349,20 +349,21 @@ export default function SessionCards({
                 <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
               </h3>
             </div>
-            <span className="badge session-list-meta" title={agentDisplayLabel(s.agent)}>
-              {agentDisplayLabel(s.agent)}
-            </span>
+            <div className="ws-card-side">
+              <span className="badge session-list-meta" title={agentDisplayLabel(s.agent)}>
+                {agentDisplayLabel(s.agent)}
+              </span>
+            </div>
           </header>
 
           <div className="session-card-body">
-            {workstream && (
-              <div className="session-card-prop" title={workstreamFull ?? undefined}>
+            <div className="board-stats">
+              <span title={workstreamFull ? `跟踪任务: ${workstreamFull}` : "跟踪任务"}>
                 <Icon name="tasks" />
-                <span className="truncate">
-                  {workstream}
-                </span>
-              </div>
-            )}
+                {s.tracked_workstream_ids.length}<span>任务</span>
+                <span className="sr-only">{s.tracked_workstream_ids.length} 个任务</span>
+              </span>
+            </div>
 
             {!project.dim && (
               <div className="session-card-prop" title={project.hint}>

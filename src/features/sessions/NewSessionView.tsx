@@ -398,7 +398,13 @@ export default function NewSessionView({
           <h1 id="new-session-title">你想在 {selectedProject?.name ?? "这里"} 中构建什么？</h1>
           <section className="new-session-tasks" aria-label="跟踪任务（可选）">
             <div className="new-session-tasks-head">
-              <span>跟踪任务 <span className="muted">· 可多选</span></span>
+              <div className="new-session-tasks-title">
+                <Icon name="tasks" />
+                <span>跟踪任务 <span className="muted">· 可多选</span></span>
+                {trackedWorkstreamIds.length > 0 && (
+                  <span className="badge accent">{trackedWorkstreamIds.length} 已选</span>
+                )}
+              </div>
               <button type="button" className="btn ghost icon-button small" aria-label="新建跟踪任务" title="新建任务"
                 disabled={busy || !selectedProject} onClick={() => setShowNewWorkstreamModal(true)}><Icon name="plus" /></button>
             </div>

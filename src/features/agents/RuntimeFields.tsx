@@ -1,4 +1,5 @@
 import { useId } from "react";
+import CustomSelect from "../../components/CustomSelect";
 import type { AgentRuntimeOverrides, AgentRuntimeDiscovery } from "../../types";
 
 export const NATIVE_RUNTIME: AgentRuntimeOverrides = { model: null, provider: null, effort: null };
@@ -77,24 +78,22 @@ export default function RuntimeFields({ value, options, onChange, onDiscover, on
         </label>
       )}
       {options.capabilities.effort !== "unsupported" && (
-        <label className="agent-runtime-field">
+        <div className="agent-runtime-field">
           <span className="agent-runtime-field-title">推理强度</span>
-          <select
-            aria-label="推理强度"
+          <CustomSelect
+            ariaLabel="推理强度"
             value={value.effort ?? ""}
             disabled={disabled}
-            onBlur={onBlur}
-            onChange={(e) => change("effort", e.target.value)}
-          >
-            <option value="">Agent 默认</option>
-            {efforts.map((e) => (
-              <option key={e} value={e}>{e}</option>
-            ))}
-            {value.effort && !efforts.includes(value.effort) && (
-              <option value={value.effort}>{value.effort}（已保存）</option>
-            )}
-          </select>
-        </label>
+            onChange={(raw) => change("effort", raw)}
+            options={[
+              { value: "", label: "Agent 默认" },
+              ...efforts.map((e) => ({ value: e, label: e })),
+              ...(value.effort && !efforts.includes(value.effort)
+                ? [{ value: value.effort, label: `${value.effort}（已保存）` }]
+                : []),
+            ]}
+          />
+        </div>
       )}
     </div>
   );

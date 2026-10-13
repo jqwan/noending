@@ -188,124 +188,133 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       />
 
       {/* 概览数字与类型 / 命名 / 创建时间都收在右栏「属性」块里：标题栏只放标题与图标动作。 */}
-      <div className="project-detail-layout">
-      <div>
-      <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
-      <PreferenceList key={`preferences-${projectId}`} projectId={projectId} />
-      <section className="rail-section">
-        <div className="section-label">任务</div>
+      <div className="detail-layout project-detail-layout">
+        <div className="detail-main project-detail-main">
+          <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
+          <PreferenceList key={`preferences-${projectId}`} projectId={projectId} />
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="tasks" />
+                <span>任务 ({detail.workstreams.length})</span>
+              </h2>
+            </div>
 
-        {detail.workstreams.length === 0 && (
-          <div className="l1-none">还没有任务经由这些目录关联进来。</div>
-        )}
-        {/* 展示所有通过工作路径关联的任务。 */}
-        {detail.workstreams.map(({ workstream: w }) => {
-          const summary = w.description;
-          return (
-            <div key={w.id} className="list-row"
-              onClick={() => navigate({ view: "workstream", workstreamId: w.id, initialTitle: w.title })}>
-              <div className="grow">
-                <div className="title mini-title" title={w.title}>
-                  <span><Icon name="tasks" /></span>
-                  <span className="truncate">{w.title}</span>
+            {detail.workstreams.length === 0 && (
+              <div className="l1-none">还没有任务经由这些目录关联进来。</div>
+            )}
+            {/* 展示所有通过工作路径关联的任务。 */}
+            {detail.workstreams.map(({ workstream: w }) => {
+              const summary = w.description;
+              return (
+                <div key={w.id} className="list-row"
+                  onClick={() => navigate({ view: "workstream", workstreamId: w.id, initialTitle: w.title })}>
+                  <div className="grow">
+                    <div className="title mini-title" title={w.title}>
+                      <span><Icon name="tasks" /></span>
+                      <span className="truncate">{w.title}</span>
+                    </div>
+                    {summary && <div className="meta">{summary}</div>}
+                  </div>
+                  <div className="side">
+                    {w.visibility === "archived" && <span className="badge warn" title="已归档；项目与它只是投影关系">已归档</span>}
+                    <span>{timeAgo(w.updated_at)}</span>
+                  </div>
                 </div>
-                {summary && <div className="meta">{summary}</div>}
-              </div>
-              <div className="side">
-                {w.visibility === "archived" && <span className="badge warn" title="已归档；项目与它只是投影关系">已归档</span>}
-                <span>{timeAgo(w.updated_at)}</span>
-              </div>
+              );
+            })}
+          </section>
+
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="chat" />
+                <span>会话 ({detail.sessions.length})</span>
+              </h2>
+              {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
+                <button
+                  className="btn ghost icon-button small"
+                  title="新建会话"
+                  aria-label="新建会话"
+                  onClick={() => navigate({ view: "new-session", projectId: project.id })}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
             </div>
-          );
-        })}
-      </section>
 
-      <section className="rail-section">
-        <div className="rail-head">
-          <div className="section-label" style={{ margin: 0 }}>会话</div>
-          {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
-            <button
-              className="btn ghost icon-button"
-              title="新建会话"
-              aria-label="新建会话"
-              onClick={() => navigate({ view: "new-session", projectId: project.id })}
-            >
-              <Icon name="plus" />
-            </button>
-          )}
+            <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
+          </section>
         </div>
 
-        <SessionMiniList sessions={sortedSessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
-      </section>
+        <aside className="detail-aside project-detail-aside">
+          <section className="card detail-section">
+            <h2 className="detail-section-title">
+              <Icon name="info" />
+              <span>属性</span>
+            </h2>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span className={`badge ${detail.kind === "git" ? "accent" : ""}`}>
+                {projectKindLabels[detail.kind]}
+              </span>
+              {detail.purpose && <span className="badge accent">{projectPurposeLabels[detail.purpose]}</span>}
+              <span className="badge">{project.visibility === "archived" ? "已归档" : "未归档"}</span>
+              {project.name_customized && <span className="small muted">自定义名称</span>}
+            </div>
+            {detail.remote_url && (
+              <a
+                className="path-link small muted mono"
+                href={httpsRemoteUrl(detail.remote_url)}
+                style={{ display: "block", overflowWrap: "anywhere" }}
+                title="在浏览器打开远程仓库"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
+                  }
+                }}
+              >
+                {httpsRemoteUrl(detail.remote_url)}
+              </a>
+            )}
+            <div className="small muted">
+              {detail.workspace_paths.length} 个工作目录 ·{" "}
+              {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
+            </div>
+            <div className="small muted">
+              创建于 {timeAgo(project.created_at)}
+            </div>
+          </section>
 
-
-
-      </div>
-      <aside>
-      <section className="rail-section" style={{ marginTop: 26 }}>
-        <div className="section-label">属性</div>
-        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <span className={`badge ${detail.kind === "git" ? "accent" : ""}`}>
-            {projectKindLabels[detail.kind]}
-          </span>
-          {detail.purpose && <span className="badge accent">{projectPurposeLabels[detail.purpose]}</span>}
-          <span className="badge">{project.visibility === "archived" ? "已归档" : "未归档"}</span>
-          {project.name_customized && <span className="small muted">自定义名称</span>}
-        </div>
-        {detail.remote_url && (
-          <a
-            className="path-link small muted mono"
-            href={httpsRemoteUrl(detail.remote_url)}
-            style={{ marginTop: 6, display: "block", overflowWrap: "anywhere" }}
-            title="在浏览器打开远程仓库"
-            onClick={(e) => {
-              e.preventDefault();
-              void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                void openRemoteUrl(httpsRemoteUrl(detail.remote_url!));
-              }
-            }}
-          >
-            {httpsRemoteUrl(detail.remote_url)}
-          </a>
-        )}
-        <div className="small muted" style={{ marginTop: 6 }}>
-          {detail.workspace_paths.length} 个工作目录 ·{" "}
-          {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
-        </div>
-        <div className="small muted" style={{ marginTop: 6 }}>
-          创建于 {timeAgo(project.created_at)}
-        </div>
-      </section>
-      <section className="rail-section">
-        <div className="section-label">工作目录</div>
-        {sortedWorkspacePaths.length === 0 && (
-          <div className="l1-none">
-            这个项目目前没有登记目录。
-          </div>
-        )}
-        {sortedWorkspacePaths.map((p) => (
-          <div className="list-row" key={p.id} style={{ cursor: "default" }}>
-            <div className="grow">
-              {/* 不用 .title：它的 nowrap + 尾部省略会把路径末段吃掉，
-                  而末段正是用户用来认目录的那一段。 */}
-              <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
-                <PathText path={p.canonical_path} max={72} />
+          <section className="card detail-section">
+            <h2 className="detail-section-title">
+              <Icon name="folder" />
+              <span>工作目录 ({sortedWorkspacePaths.length})</span>
+            </h2>
+            {sortedWorkspacePaths.length === 0 && (
+              <div className="l1-none">
+                这个项目目前没有登记目录。
               </div>
-            </div>
-            <div className="side">
-              {!p.exists && <MissingBadge />}
-              <GitStateBadge state={p.git_state} kind={p.git_kind} />
-            </div>
-          </div>
-        ))}
-
-      </section>
-
-      </aside>
+            )}
+            {sortedWorkspacePaths.map((p) => (
+              <div className="list-row" key={p.id} style={{ cursor: "default" }}>
+                <div className="grow">
+                  <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                    <PathText path={p.canonical_path} max={72} />
+                  </div>
+                </div>
+                <div className="side">
+                  {!p.exists && <MissingBadge />}
+                  <GitStateBadge state={p.git_state} kind={p.git_kind} />
+                </div>
+              </div>
+            ))}
+          </section>
+        </aside>
       </div>
 
       {renaming && (

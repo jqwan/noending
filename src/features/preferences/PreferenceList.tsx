@@ -48,12 +48,16 @@ export default function PreferenceList({ projectId }: { projectId: string | null
       if (active.current) setBusy(false);
     }
   };
-  return <section className="preference-section" aria-label={title}>
-    <div className="rail-head">
-      <h3>{title}</h3>
-      <button className="btn small ghost" disabled={busy} onClick={() => { setEditing({ id: null, content: "", locked: false }); setEditError(""); }}>新增</button>
-    </div>
-    <p className="muted small">随摘要提取更新；锁定仅禁止 Agent 修改或删除，您仍可编辑和删除。</p>
+  return (
+    <section className="card detail-section preference-section" aria-label={title}>
+      <div className="row between" style={{ alignItems: "center" }}>
+        <h2 className="detail-section-title">
+          <Icon name="settings" />
+          <span>{title}</span>
+        </h2>
+        <button className="btn small ghost" disabled={busy} onClick={() => { setEditing({ id: null, content: "", locked: false }); setEditError(""); }}>新增</button>
+      </div>
+      <p className="muted small" style={{ margin: 0 }}>随摘要提取更新；锁定仅禁止 Agent 修改或删除，您仍可编辑和删除。</p>
     {items.map(item => <div className="preference-row" key={item.id}>
       <div className="grow"><span className="preference-content">{item.content}</span>{item.locked && <span className="badge">已锁定</span>}</div>
       <div className="actions">
@@ -66,13 +70,24 @@ export default function PreferenceList({ projectId }: { projectId: string | null
     {loaded && items.length === 0 && <p className="muted small">暂无偏好或准则。</p>}
     {error && <div role="alert"><p>{error}</p><button className="btn small ghost" disabled={busy} onClick={refresh}>重试</button></div>}
     {editing && <Modal title={editing.id ? "编辑偏好" : "新增偏好"} onClose={() => { if (!busyRef.current) setEditing(null); }}>
-      <label className="field"><span>偏好 / 准则</span><textarea autoFocus value={editing.content} disabled={busy} onChange={e => setEditing({ ...editing, content: e.target.value })} /></label>
-      <label className="row small" style={{ gap: 8 }}><input type="checkbox" checked={editing.locked} disabled={busy} onChange={e => setEditing({ ...editing, locked: e.target.checked })} />锁定，禁止 Agent 修改或删除</label>
+      <label className="field">
+        <span>偏好 / 准则</span>
+        <textarea
+          autoFocus
+          rows={4}
+          value={editing.content}
+          disabled={busy}
+          placeholder="输入需要遵循的准则、开发偏好或代码风格..."
+          onChange={e => setEditing({ ...editing, content: e.target.value })}
+        />
+      </label>
+      <label className="row small" style={{ gap: 8, cursor: "pointer", marginTop: 4 }}><input type="checkbox" checked={editing.locked} disabled={busy} onChange={e => setEditing({ ...editing, locked: e.target.checked })} />锁定，禁止 Agent 修改或删除</label>
       {editError && <p role="alert" className="danger">{editError}</p>}
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)", gap: 10 }}>
         <button className="btn" disabled={busy} onClick={() => setEditing(null)}>取消</button>
         <button className="btn primary" disabled={busy || !editing.content.trim()} onClick={() => mutate(() => api.savePreference(editing.id, projectId, editing.content, editing.locked), true)}>{busy ? "保存中…" : "保存"}</button>
       </div>
     </Modal>}
-  </section>;
+  </section>
+  );
 }

@@ -694,7 +694,7 @@ export default function AgentsView({
               <div
                 key={agent}
                 id={`agent-card-${agent}`}
-                className={`agent-card ${viewMode === "list" ? "agent-list-item" : ""}`}
+                className={`agent-card ws-card full ${viewMode === "list" ? "agent-list-item" : ""}`}
                 role="button"
                 tabIndex={0}
                 aria-label={`查看 ${AGENT_LABELS[agent]} 代理详情`}
@@ -707,33 +707,33 @@ export default function AgentsView({
                 }}
               >
                 {/* 卡片头部：身份与能力胶囊 */}
-                <div className="agent-card-header">
+                <div className="agent-card-header ws-card-head">
                   <div className="agent-identity">
-                    <AgentIcon agent={agent} size={viewMode === "list" ? 22 : 26} />
-                    <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                      <span className="agent-title">{AGENT_LABELS[agent]}</span>
-                      {hasCli && (
-                        <span
-                          className={`badge ${entry?.detected ? "accent" : ""}`}
-                          title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
-                        >
-                          TUI
-                        </span>
-                      )}
-                      {hasDesktop && (
-                        <span
-                          className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
-                          title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
-                        >
-                          桌面端
-                        </span>
-                      )}
-                      {!hasCli && !hasDesktop && (
-                        <span className="badge" title="仅同步历史会话">
-                          仅同步
-                        </span>
-                      )}
-                    </div>
+                    <AgentIcon agent={agent} size={viewMode === "list" ? 22 : 24} />
+                    <span className="agent-title">{AGENT_LABELS[agent]}</span>
+                  </div>
+                  <div className="ws-card-side">
+                    {hasCli && (
+                      <span
+                        className={`badge ${entry?.detected ? "accent" : ""}`}
+                        title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
+                      >
+                        TUI
+                      </span>
+                    )}
+                    {hasDesktop && (
+                      <span
+                        className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
+                        title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
+                      >
+                        桌面端
+                      </span>
+                    )}
+                    {!hasCli && !hasDesktop && (
+                      <span className="badge" title="仅同步历史会话">
+                        仅同步
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -753,10 +753,15 @@ export default function AgentsView({
                           : "未配置桌面应用"}
                       </span>
                     </div>
-                    <div className="agent-card-status-line muted">
-                      <Icon name="chat" />
-                      <span className="small truncate" title={`${sessionCounts[agent] ?? 0} 个会话`}>
-                        {sessionCounts[agent] ?? 0} 个会话
+                    <div className="board-stats">
+                      <span title="会话">
+                        <Icon name="chat" />
+                        {sessionCounts[agent] ?? 0}<span>会话</span>
+                        <span className="sr-only">{sessionCounts[agent] ?? 0} 个会话</span>
+                      </span>
+                      <span title="来源目录">
+                        <Icon name="folder" />
+                        {agentSources.length}<span>目录</span>
                       </span>
                     </div>
                   </div>
@@ -776,13 +781,13 @@ export default function AgentsView({
                   </div>
                 )}
 
-                <div className="agent-card-footer">
+                <div className="agent-card-footer ws-card-meta">
                   <span className="muted small">
                     {agentSources.length === 0
                       ? "未配置来源目录"
                       : `${agentSources.filter((s) => s.enabled).length} / ${agentSources.length} 个来源目录`}
                   </span>
-                  <div className="agent-card-actions" onClick={(e) => e.stopPropagation()}>
+                  <div className="agent-card-actions ws-card-actions" onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
                       className="btn small ghost icon-button"

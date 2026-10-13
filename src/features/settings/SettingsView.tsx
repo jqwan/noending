@@ -57,7 +57,17 @@ function AppearanceSettings() {
 
   return (
     <section>
-      <h3 style={{ marginTop: 0 }}>主题</h3>
+      <div className="settings-section-header">
+        <div>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 0 }}>
+            <Icon name="palette" />
+            <span>主题外观</span>
+          </h3>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            选择应用色彩模式，跟随系统时自动切换浅色与深色。
+          </p>
+        </div>
+      </div>
       <div className="theme-options" role="group" aria-label="主题">
         {(Object.keys(THEME_LABELS) as Theme[]).map((t) => (
           <button key={t} className={theme === t ? "on" : ""} aria-pressed={theme === t} onClick={() => apply(t)}>
@@ -66,9 +76,6 @@ function AppearanceSettings() {
           </button>
         ))}
       </div>
-      <p className="muted small" style={{ marginBottom: 0 }}>
-        跟随系统时自动切换浅色 / 深色。
-      </p>
     </section>
   );
 }
@@ -86,13 +93,15 @@ function ContextDiagnosticsSettings() {
 
   return (
     <section>
-      <h3>Context 更新诊断</h3>
-      <div className="row-line">
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div className="settings-row-label">本地运行日志</div>
-          <div className="settings-row-hint">
+      <div className="settings-section-header">
+        <div>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+            <Icon name="terminal" />
+            <span>Context 更新诊断</span>
+          </h3>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
             记录更新时间、目标、Agent 和失败阶段；不记录提示词、模型输出或终端错误文本，保留 14 天。
-          </div>
+          </p>
         </div>
         <button className="btn small" onClick={openLogs}>打开日志目录</button>
       </div>
@@ -220,7 +229,10 @@ function WorkspaceStorageSettings() {
     <section>
       <div className="settings-section-header">
         <div>
-          <h3>数据存储目录</h3>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+            <Icon name="database" />
+            <span>数据存储目录</span>
+          </h3>
           <p className="muted small" style={{ margin: "4px 0 0" }}>
             管理应用数据库、运行日志与默认工作区的存储路径。
           </p>
@@ -475,7 +487,7 @@ function ChangeHomeModal({ current, onClose, onSaved }: {
         </div>
       )}
 
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)", gap: 10 }}>
         <button className="btn" onClick={onClose} disabled={busy}>取消</button>
         <button className="btn primary" disabled={!canSubmit} onClick={submit}>
           {busy ? "登记中…" : "登记并在下次启动迁移"}

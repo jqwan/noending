@@ -41,20 +41,25 @@ it("limits initial rows and reveals more without losing sessions", async () => {
   fireEvent.click(screen.getByText("显示更多（剩余 1）"));
   expect(screen.getByText("会话100")).toBeTruthy();
 });
-it("shows the single owner workstream in full without 16-char JS truncation and omits unowned row", async () => {
+it("shows tracked workstream count statistic on cards and full title in list view", async () => {
   const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";
-  await renderCards(<SessionCards
-    sessions={[
+  const props = {
+    sessions: [
       { ...session, id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] },
       { ...session, id: "free", title: "没归属", tracked_workstream_ids: [] },
-    ]}
-    workstreamTitleById={new Map([["w1", longTitle]])}
-    projectNameById={new Map()}
-    onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
+    ],
+    workstreamTitleById: new Map([["w1", longTitle]]),
+    projectNameById: new Map(),
+    onOpen: () => {}, onResume: () => {}, onArchive: () => {},
+  };
+  const { rerender } = await renderCards(<SessionCards {...props} />);
 
-  screen.getByText(longTitle);
+  expect(screen.getByText("1 个任务")).toBeTruthy();
+  expect(screen.getByText("0 个任务")).toBeTruthy();
   expect(screen.queryByText("未归属任务")).toBeNull();
-  expect(screen.queryByText(/\+\d/)).toBeNull();
+
+  rerender(<SessionCards {...props} viewMode="list" />);
+  expect(screen.getByText(longTitle)).toBeTruthy();
 });
 
 

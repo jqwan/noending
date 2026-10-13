@@ -4,6 +4,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
+import CustomSelect from "../../components/CustomSelect";
 import { Modal, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSearchFields, cardSummaryLine, searchFieldHint } from "./WorkstreamCard";
@@ -211,22 +212,36 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           />
 
           <div className="toolbar ws-controls">
-            <label className="ws-control">
+            <div className="ws-control">
               <span className="muted small">项目</span>
-              <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-                <option value="all">全部项目</option>
-                {projectOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-                <option value="none">无项目</option>
-              </select>
-            </label>
-            <label className="ws-control">
+              <CustomSelect
+                value={projectId}
+                onChange={(val) => setProjectId(val)}
+                ariaLabel="全部项目"
+                options={[
+                  { value: "all", label: "全部项目" },
+                  ...projectOptions.map(([id, name]) => ({
+                    value: id,
+                    label: name,
+                    icon: "project",
+                  })),
+                  { value: "none", label: "无项目" },
+                ]}
+              />
+            </div>
+            <div className="ws-control">
               <span className="muted small">排序</span>
-              <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-                <option value="recent">最近活动 ↓</option>
-                <option value="created">创建时间</option>
-                <option value="name">名称</option>
-              </select>
-            </label>
+              <CustomSelect
+                value={sort}
+                onChange={(val) => setSort(val as SortKey)}
+                ariaLabel="排序"
+                options={[
+                  { value: "recent", label: "最近活动 ↓" },
+                  { value: "created", label: "创建时间" },
+                  { value: "name", label: "名称" },
+                ]}
+              />
+            </div>
             {filtersActive && <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>}
             {list && (
               <span className="muted small">

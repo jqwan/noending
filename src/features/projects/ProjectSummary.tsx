@@ -5,6 +5,8 @@ import { showToast } from "../../components/Toast";
 import SummaryMarkdown from "../sessions/SummaryMarkdown";
 import type { ProjectContextView, Session } from "../../types";
 
+import Icon from "../../components/Icon";
+
 const cache = new Map<string, ProjectContextView>();
 export function clearProjectSummaryCache() { cache.clear(); }
 
@@ -61,19 +63,24 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
   };
 
   const shownError = error ?? readError;
-  return <section className="rail-section">
-    <div className="rail-head">
-      <div className="section-label" style={{ margin: 0 }}>项目摘要</div>
-      <div className="actions">
-        {view?.summary && <button className="btn small ghost" onClick={async () => showToast(await copyToClipboard(view.summary!) ? "已复制摘要" : "复制失败")}>复制</button>}
-        {view?.pending && <button className="btn small primary" disabled={busy} onClick={() => update()}>{busy ? "更新中…" : "更新摘要"}</button>}
-        <button className="btn small ghost" disabled={busy || !view} onClick={() => update(true)}>重新生成</button>
+  return (
+    <section className="card detail-section project-summary-section">
+      <div className="row between" style={{ alignItems: "center" }}>
+        <h2 className="detail-section-title">
+          <Icon name="spark" />
+          <span>项目摘要</span>
+        </h2>
+        <div className="actions" style={{ display: "flex", gap: 8 }}>
+          {view?.summary && <button className="btn small ghost" onClick={async () => showToast(await copyToClipboard(view.summary!) ? "已复制摘要" : "复制失败")}>复制</button>}
+          {view?.pending && <button className="btn small primary" disabled={busy} onClick={() => update()}>{busy ? "更新中…" : "更新摘要"}</button>}
+          <button className="btn small ghost" disabled={busy || !view} onClick={() => update(true)}>重新生成</button>
+        </div>
       </div>
-    </div>
-    {view?.pending && <p className="muted">有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
-    {view?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryMarkdown>{view.summary}</SummaryMarkdown></div> : <p className="muted">{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
-    {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
-    {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
-    {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}
-  </section>;
+      {view?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
+      {view?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryMarkdown>{view.summary}</SummaryMarkdown></div> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
+      {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
+      {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
+      {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}
+    </section>
+  );
 }

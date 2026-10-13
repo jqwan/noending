@@ -2,23 +2,30 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
+import Icon from "../../components/Icon";
 import type { SummaryPromptKind, SummaryPromptSettings as PromptSettings, SummaryPromptTemplates } from "../../types";
 
 const labels: Record<SummaryPromptKind, string> = { session: "会话", task: "任务", project: "项目", preferences: "偏好" };
 
 export default function SummaryPromptSettings() {
   const [open, setOpen] = useState(false);
-  return <section>
-    <h3>摘要提取提示词</h3>
-    <div className="row-line">
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div className="settings-row-label">摘要与偏好提取模板</div>
-        <div className="settings-row-hint">调整摘要写作与偏好提取要求，预览完整提示词。</div>
+  return (
+    <section>
+      <div className="settings-section-header">
+        <div>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+            <Icon name="edit" />
+            <span>摘要提取提示词</span>
+          </h3>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            调整摘要写作与偏好提取要求，预览完整提示词。
+          </p>
+        </div>
+        <button className="btn small" onClick={() => setOpen(true)}>查看与编辑</button>
       </div>
-      <button className="btn small" onClick={() => setOpen(true)}>查看与编辑</button>
-    </div>
-    {open && <TemplateEditor onClose={() => setOpen(false)} />}
-  </section>;
+      {open && <TemplateEditor onClose={() => setOpen(false)} />}
+    </section>
+  );
 }
 
 function TemplateEditor({ onClose }: { onClose: () => void }) {
@@ -99,7 +106,7 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
         <textarea className="summary-prompt-editor" value={drafts[kind]} disabled={busy} onChange={e => { setDrafts({ ...drafts, [kind]: e.target.value }); setError(""); }} />
       </label>}
       {error && <p role="alert" className="danger">{error}</p>}
-      <div className="row summary-prompt-actions">
+      <div className="row summary-prompt-actions" style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)" }}>
         <button className="btn small ghost" disabled={busy || drafts[kind] === settings.defaults[kind]} onClick={() => { setDrafts({ ...drafts, [kind]: settings.defaults[kind] }); setError(""); }}>恢复默认</button>
         <button className="btn small ghost" disabled={busy || !changed} onClick={() => { setDrafts({ ...drafts, [kind]: settings.templates[kind] }); setError(""); }}>撤销修改</button>
         {previewing && <button className="btn small ghost" disabled={!preview} onClick={async () => showToast(await copyToClipboard(preview) ? "已复制提示词" : "复制失败")}>复制提示词</button>}

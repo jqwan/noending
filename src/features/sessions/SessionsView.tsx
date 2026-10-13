@@ -4,6 +4,7 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
+import CustomSelect from "../../components/CustomSelect";
 import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionCards, {
@@ -339,32 +340,55 @@ export default function SessionsView({ navigate, scope }: {
           />
 
           <div className="toolbar ws-controls">
-            <label className="ws-control">
+            <div className="ws-control">
               <span className="muted small">Agent</span>
-              <select value={agent} onChange={(e) => setAgent(e.target.value as "all" | Agent)}>
-                <option value="all">全部 Agent</option>
-                {Object.entries(AGENT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-              </select>
-            </label>
-            <label className="ws-control">
+              <CustomSelect
+                value={agent}
+                onChange={(val) => setAgent(val as "all" | Agent)}
+                ariaLabel="全部 Agent"
+                options={[
+                  { value: "all", label: "全部 Agent" },
+                  ...Object.entries(AGENT_LABELS).map(([k, v]) => ({
+                    value: k,
+                    label: v,
+                  })),
+                ]}
+              />
+            </div>
+            <div className="ws-control">
               <span className="muted small">任务</span>
-              <select value={wsFilter} onChange={(e) => setWsFilter(e.target.value)}>
-                <option value="all">全部任务</option>
-                {wsOptions.map(([id, title]) => <option key={id} value={id}>{title}</option>)}
-                <option value="unassigned">未跟踪任务</option>
-              </select>
-            </label>
-            <label className="ws-control">
+              <CustomSelect
+                value={wsFilter}
+                onChange={(val) => setWsFilter(val)}
+                ariaLabel="全部任务"
+                options={[
+                  { value: "all", label: "全部任务" },
+                  ...wsOptions.map(([id, title]) => ({
+                    value: id,
+                    label: title,
+                    icon: "tasks" as const,
+                  })),
+                  { value: "unassigned", label: "未跟踪任务" },
+                ]}
+              />
+            </div>
+            <div className="ws-control">
               <span className="muted small">项目</span>
-              <select
+              <CustomSelect
                 value={projectId}
-                onChange={(e) => setProjectId(e.target.value)}
+                onChange={(val) => setProjectId(val)}
+                ariaLabel="全部项目"
                 title="按工作目录所属项目筛选"
-              >
-                <option value="all">全部项目</option>
-                {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </label>
+                options={[
+                  { value: "all", label: "全部项目" },
+                  ...projects.map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                    icon: "project",
+                  })),
+                ]}
+              />
+            </div>
             {filtersActive && (
               <button className="btn small ghost" onClick={clearFilters}>清除筛选</button>
             )}

@@ -53,22 +53,29 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
         </div>
       </header>
 
-      {card.projects.length > 0 && (
-        <div
-          className="task-project"
-          title={card.projects.map((p) => p.name).join("、")}
-        >
-          <Icon name="project" />
-          <span>{card.projects.length} 个项目</span>
+      <div className="ws-card-body">
+        <div className="board-stats">
+          {card.projects.length > 0 && (
+            <span
+              className="task-project"
+              title={card.projects.map((p) => p.name).join("、")}
+            >
+              <Icon name="project" />
+              {card.projects.length}<span>个项目</span>
+              <span className="sr-only">{card.projects.length} 个项目</span>
+            </span>
+          )}
+          <span title="会话">
+            <Icon name="chat" />
+            {card.session_count}<span>会话</span>
+          </span>
         </div>
-      )}
-      {body && <p className="ws-card-body" title={body}>{body}</p>}
+        {body && <p className="ws-card-desc" title={body}>{body}</p>}
+      </div>
 
       <footer className="ws-card-meta">
-        <span>
-          {card.session_count === 0
-            ? "还没有会话"
-            : `${card.session_count} 个会话 · ${timeAgo(card.last_activity_at)}`}
+        <span className="muted small">
+          {timeAgo(card.last_activity_at)}
         </span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
           {!archived && <button

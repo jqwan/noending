@@ -1,4 +1,5 @@
 import Icon from "../../components/Icon";
+import CustomSelect from "../../components/CustomSelect";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -177,35 +178,47 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       />
 
       <div className="toolbar ws-controls">
-        <label className="ws-control">
+        <div className="ws-control">
           <span className="muted small">筛选</span>
-          <select value={filter} onChange={(e) => setFilter(e.target.value as FilterKey)}>
-            <option value="all">全部</option>
-            <option value="ok">正常</option>
-            <option value="missing">有目录缺失</option>
-          </select>
-        </label>
-        <label className="ws-control">
+          <CustomSelect
+            value={filter}
+            onChange={(val) => setFilter(val as FilterKey)}
+            ariaLabel="筛选"
+            options={[
+              { value: "all", label: "全部" },
+              { value: "ok", label: "正常" },
+              { value: "missing", label: "有目录缺失" },
+            ]}
+          />
+        </div>
+        <div className="ws-control">
           <span className="muted small">项目类型</span>
-          <select
-            aria-label="项目类型"
+          <CustomSelect
             value={effectiveKindFilter}
-            onChange={(e) => setKindFilter(e.target.value as ProjectKindFilter)}
-          >
-            <option value="all">全部类型</option>
-            {Object.entries(projectKindLabels).map(([kind, label]) => (
-              <option key={kind} value={kind}>{label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="ws-control">
+            onChange={(val) => setKindFilter(val as ProjectKindFilter)}
+            ariaLabel="项目类型"
+            options={[
+              { value: "all", label: "全部类型" },
+              ...Object.entries(projectKindLabels).map(([kind, label]) => ({
+                value: kind,
+                label,
+              })),
+            ]}
+          />
+        </div>
+        <div className="ws-control">
           <span className="muted small">排序</span>
-          <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
-            <option value="recent">最近活动 ↓</option>
-            <option value="name">名称</option>
-            <option value="paths">目录数</option>
-          </select>
-        </label>
+          <CustomSelect
+            value={sort}
+            onChange={(val) => setSort(val as SortKey)}
+            ariaLabel="排序"
+            options={[
+              { value: "recent", label: "最近活动 ↓" },
+              { value: "name", label: "名称" },
+              { value: "paths", label: "目录数" },
+            ]}
+          />
+        </div>
         {(query || filter !== "all" || effectiveKindFilter !== "all") && <button className="btn small ghost" onClick={() => { setQuery(""); setFilter("all"); setKindFilter("all"); }}>清除筛选</button>}
         {list && <span className="muted small">{list.length} 个项目</span>}
         <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
@@ -365,10 +378,12 @@ function ProjectCard({ card, navigate, onChanged }: {
         </div>
       </div>
 
-      <div className="board-stats">
-        <span title="工作目录"><Icon name="folder" />{card.path_count}<span>目录</span></span>
-        <span title="与本项目有工作路径关联的任务"><Icon name="tasks" />{card.workstream_count}<span>任务</span></span>
-        <span title="会话"><Icon name="chat" />{card.session_count}<span>会话</span></span>
+      <div className="ws-card-body">
+        <div className="board-stats">
+          <span title="工作目录"><Icon name="folder" />{card.path_count}<span>目录</span></span>
+          <span title="与本项目有工作路径关联的任务"><Icon name="tasks" />{card.workstream_count}<span>任务</span></span>
+          <span title="会话"><Icon name="chat" />{card.session_count}<span>会话</span></span>
+        </div>
       </div>
       <div className="ws-card-meta">
         <span className="muted small">{timeAgo(card.last_activity_at)}</span>

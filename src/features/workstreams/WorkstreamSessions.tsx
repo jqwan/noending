@@ -17,11 +17,14 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
   );
 
   return (
-    <section className="rail-section">
-      <div className="rail-head">
-        <div className="section-label" style={{ margin: 0 }}>会话</div>
+    <section className="card detail-section">
+      <div className="row between" style={{ alignItems: "center" }}>
+        <h2 className="detail-section-title">
+          <Icon name="chat" />
+          <span>会话</span>
+        </h2>
         {allowActions && onNewSession && (
-          <button className="btn ghost icon-button" title="新建会话" aria-label="新建会话"
+          <button className="btn ghost icon-button small" title="新建会话" aria-label="新建会话"
             onClick={onNewSession}>
             <Icon name="plus" />
           </button>

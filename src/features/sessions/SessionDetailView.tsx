@@ -294,312 +294,351 @@ export default function SessionDetailView({
       )}
 
       {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
-      <div className="task-detail-layout">
-      <div className="task-detail-main">
-      {/* 当前摘要只读；更新合并增量，重新生成从完整历史重建。 */}
-      <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
-        <div className="section-label" style={{ margin: 0 }}>Context</div>
-        <div className="row" style={{ gap: 8 }}>
-          <button
-            className="btn small ghost"
-            disabled={!sessionCtx?.fields}
-            title={sessionCtx?.fields ? "复制摘要" : "暂无摘要"}
-            onClick={copyContext}
-          >
-            复制
-          </button>
-          {canRegenerateSummary && (
-            <button className="btn small ghost" disabled={ctxBusy} onClick={() => updateSummary(true)}>
-              重新生成
-            </button>
-          )}
-          {canUpdateSummary && (
-            <button className="btn small primary" disabled={ctxBusy} onClick={() => updateSummary()}>
-              {ctxBusy ? "更新中…" : "更新摘要"}
-            </button>
-          )}
-        </div>
-      </div>
-      {sessionCtx?.pending && (
-        <div className="small muted" style={{ marginTop: 4 }}>
-          有新消息待并入摘要。
-        </div>
-      )}
-      {ctxReadError && (
-        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere" }}>
-          {ctxReadError.message}
-        </div>
-      )}
-      {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
-      {ctxError && (
-        <div className="badge warn" style={{ marginTop: 8, overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
-          <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
-          {ctxError.operationId && (
-            <button className="btn small ghost" onClick={async () => {
-              const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
-              showToast(ok ? "已复制错误详情" : "复制失败");
-            }}>复制错误详情</button>
-          )}
-        </div>
-      )}
-      {sessionCtx?.fields ? (
-        <div className="md-body" style={{ marginTop: 10, overflowWrap: "anywhere" }}>
-          <SummaryMarkdown>
-            {sessionCtx.fields.summary}
-          </SummaryMarkdown>
-        </div>
-      ) : (
-        <div className="l1-none" style={{ marginTop: 8 }}>
-          {!hasMessages ? "暂无消息" : "暂无摘要"}
-        </div>
-      )}
-
-      {/* 消息 */}
-      <div className="row between" style={{ marginTop: 34, alignItems: "center" }}>
-        <div className="section-label" style={{ margin: 0 }}>会话消息</div>
-        {detail.ingested_message_sequence > 0 && (
-          <button
-            className="btn small ghost"
-            onClick={() =>
-              navigate({
-                view: "session",
-                sessionId,
-                entry: "conversation",
-                initialTitle: title,
-                initialAgent: session.agent,
-                initialTotal: detail.ingested_message_sequence,
-              })
-            }
-          >
-            查看全部历史消息（共 {detail.ingested_message_sequence} 条）
-          </button>
-        )}
-      </div>
-      {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
-      {detail.ingested_message_sequence > messages.length && (
-        <p className="muted small" style={{ marginTop: 10 }}>
-          以上是最近 {messages.length} 条。
-        </p>
-      )}
-      {messages.length === 0 && (
-        <div className="empty">
-          还没有同步消息。
-          <div className="small" style={{ marginTop: 4 }}>
-            重新读取以加载已同步的原始会话。
-          </div>
-          <div className="invite">
-            <button className="btn small" onClick={refresh}>重新读取</button>
-          </div>
-        </div>
-      )}
-      </div>
-
-      <aside className="task-detail-aside">
-      {/* 只读事实一律在右栏，并且与另外两个详情页同形：rail-section + section-label，
-          直接用展开的正文，不用 <details>——默认收起把这页最有用的事实藏了起来。 */}
-      <section className="rail-section">
-      <div className="section-label">会话信息</div>
-      <div>
-        <span>{agentDisplayLabel(session.agent)}</span>
-      </div>
-      {/* 消息条数在下面的统计里有，这里只留状态徽标；两个都没有就不摆空行。 */}
-      {(untitled || archived) && (
-        <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-          {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-          {archived && <span className="badge warn">已归档</span>}
-        </div>
-      )}
-
-      {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
-      <div className="session-info-fields">
-        <Field label="开始时间">
-          {session.started_at
-            ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
-            : <span className="muted">未知</span>}
-        </Field>
-        <Field label="最近活动">
-          {session.last_activity_at ? (
-            <span title={session.last_activity_at}>
-              {timeAgo(session.last_activity_at)}
-              <span className="muted small"> · {formatDateTime(session.last_activity_at)}</span>
-            </span>
-          ) : <span className="muted">未知</span>}
-        </Field>
-        <Field label="会话统计">
-          <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-            <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
-            <span>代理回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
-          </span>
-        </Field>
-        <Field label="项目">
-          {workspacePath ? (
-            derivedProjectName ? (
-              <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                <button
-                  className="link"
-                  title={`打开项目：${derivedProjectName}`}
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                  onClick={() => navigate({ view: "project", projectId: workspacePath.project_id, initialTitle: derivedProjectName })}
-                >
-                  <Icon name="project" />
-                  <span>{derivedProjectName}</span>
-                </button>
-
-              </span>
-            ) : (
-                  <span className="muted small">项目信息暂不可用</span>
-            )
-          ) : session.project_id ? (
-            <span className="muted small" style={{ wordBreak: "break-word" }}>
-              {projectIdOnlyCell.text}
-              {" —— "}
-              {projectIdOnlyCell.hint}
-            </span>
-          ) : (
-            <span className="muted small">无关联项目</span>
-          )}
-        </Field>
-        <Field
-          label="工作目录"
-          copyValue={workspacePath ? workspacePath.canonical_path : (cwd || undefined)}
-          copyTitle="复制工作目录"
-        >
-          {workspacePath ? (
-            <>
-              <button
-                type="button"
-                className="link mono path-text-with-icon"
-                title={workspacePath.canonical_path}
-                onClick={() => void openPath(workspacePath.canonical_path)}
-              >
-                <Icon name="folder" />
-                <span>{workspacePath.canonical_path}</span>
-              </button>
-              {cwd !== "" && cwd !== workspacePath.canonical_path && (
-                <div className="muted small" style={{ marginTop: 4 }}>
-                  Agent 原始记录：
-                  <button
-                    type="button"
-                    className="link mono path-text-with-icon"
-                    title={cwd}
-                    onClick={() => void openPath(cwd)}
-                  >
-                    <Icon name="folder" />
-                    <span>{cwd}</span>
-                  </button>
-                </div>
-              )}
-              {!workspacePath.exists && (
-                <div style={{ marginTop: 4 }}>
-                  <span
-                    className="badge warn"
-                    title="磁盘中未找到该目录"
-                  >
-                    目录不存在
-                  </span>
-                </div>
-              )}
-            </>
-          ) : cwd ? (
-            <>
-              <button
-                type="button"
-                className="link mono path-text-with-icon"
-                title={cwd}
-                onClick={() => void openPath(cwd)}
-              >
-                <Icon name="folder" />
-                <span>{cwd}</span>
-              </button>
-              <div className="muted small" style={{ marginTop: 4 }}>
-                未登记为工作路径
+      <div className="detail-layout session-detail-layout">
+        <div className="detail-main session-detail-main">
+          {/* 当前摘要只读；更新合并增量，重新生成从完整历史重建。 */}
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <div className="detail-section-title">
+                <Icon name="spark" />
+                <span>Context</span>
               </div>
-            </>
-          ) : (
-            <span className="muted">{NO_CWD}（无目录记录）</span>
-          )}
-        </Field>
-        {/* 源会话：会话自己的源文件。
-            状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
-            路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
-        <Field
-          label="源会话"
-          copyValue={session.source_path}
-          copyTitle="复制源会话路径"
-        >
-          {canRevealSource ? (
-            <button
-              className="link mono"
-              title={session.source_path}
-              style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
-              onClick={() => void revealSource()}
-            >
-              {session.source_path}
-            </button>
-          ) : (
-            <span
-              className="mono"
-              title={session.source_path}
-              style={{ minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
-            >
-              {session.source_path}
-            </span>
-          )}
-          {sourceMissing && (
-            <div className="session-source-warning">源会话已不存在</div>
-          )}
-          {sourceUnavailable && (
-            <div className="session-source-warning">无法确认源会话状态</div>
-          )}
-        </Field>
-        <Field label="会话 ID" copyValue={session.id} copyTitle="复制会话 ID">
-          <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
-            {session.id}
-          </div>
-        </Field>
-        <Field
-          label="Agent 会话 ID"
-          copyValue={session.root_agent_session_id}
-          copyTitle="复制 Agent 会话 ID"
-        >
-          <div
-            className="mono"
-            title="原始会话 ID"
-            style={{ wordBreak: "break-all", userSelect: "all" }}
-          >
-            {session.root_agent_session_id}
-          </div>
-        </Field>
-        {/* Fork：唯一的会话→会话链接。来源只是 provenance，
-            生命周期完全独立；来源不在本地库时也如实说明。 */}
-        {(detail.forked_from || session.forked_from_session_id) && (
-          <Field label="来源">
-            {detail.forked_from ? (
-              <button
-                className="link"
-                style={{ textAlign: "left", wordBreak: "break-word" }}
-                title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
-                onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialAgent: detail.forked_from!.agent })}
-              >
-                分叉自：{sessionDisplayTitle(detail.forked_from.title)}
-                {detail.forked_from.archived_at !== null && (
-                  <span className="badge warn" style={{ marginLeft: 6 }}>已归档</span>
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  className="btn small ghost"
+                  disabled={!sessionCtx?.fields}
+                  title={sessionCtx?.fields ? "复制摘要" : "暂无摘要"}
+                  onClick={copyContext}
+                >
+                  复制
+                </button>
+                {canRegenerateSummary && (
+                  <button className="btn small ghost" disabled={ctxBusy} onClick={() => updateSummary(true)}>
+                    重新生成
+                  </button>
                 )}
-              </button>
-            ) : (
-              <span className="muted small">
-                来源会话不在 NoEnding 库里
-                <span className="mono" style={{ wordBreak: "break-all" }}>
-                  {" · "}{session.forked_from_session_id}
-                </span>
-              </span>
+                {canUpdateSummary && (
+                  <button className="btn small primary" disabled={ctxBusy} onClick={() => updateSummary()}>
+                    {ctxBusy ? "更新中…" : "更新摘要"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {sessionCtx?.pending && (
+              <div className="small muted">
+                有新消息待并入摘要。
+              </div>
             )}
-          </Field>
-        )}
-      </div>
-      </section>
+            {ctxReadError && (
+              <div className="badge warn" style={{ overflowWrap: "anywhere" }}>
+                {ctxReadError.message}
+              </div>
+            )}
+            {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
+            {ctxError && (
+              <div className="badge warn" style={{ overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
+                <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
+                {ctxError.operationId && (
+                  <button className="btn small ghost" onClick={async () => {
+                    const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
+                    showToast(ok ? "已复制错误详情" : "复制失败");
+                  }}>复制错误详情</button>
+                )}
+              </div>
+            )}
+            {sessionCtx?.fields ? (
+              <div className="md-body" style={{ overflowWrap: "anywhere" }}>
+                <SummaryMarkdown>
+                  {sessionCtx.fields.summary}
+                </SummaryMarkdown>
+              </div>
+            ) : (
+              <div className="l1-none">
+                {!hasMessages ? "暂无消息" : "暂无摘要"}
+              </div>
+            )}
+          </section>
 
-      </aside>
+          {/* 消息 */}
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <div className="detail-section-title">
+                <Icon name="chat" />
+                <span>会话消息</span>
+              </div>
+              {detail.ingested_message_sequence > 0 && (
+                <button
+                  className="btn small ghost"
+                  onClick={() =>
+                    navigate({
+                      view: "session",
+                      sessionId,
+                      entry: "conversation",
+                      initialTitle: title,
+                      initialAgent: session.agent,
+                      initialTotal: detail.ingested_message_sequence,
+                    })
+                  }
+                >
+                  查看全部历史消息（共 {detail.ingested_message_sequence} 条）
+                </button>
+              )}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
+              {detail.ingested_message_sequence > messages.length && (
+                <p className="muted small" style={{ margin: 0 }}>
+                  以上是最近 {messages.length} 条。
+                </p>
+              )}
+              {messages.length === 0 && (
+                <div className="empty">
+                  还没有同步消息。
+                  <div className="small" style={{ marginTop: 4 }}>
+                    重新读取以加载已同步的原始会话。
+                  </div>
+                  <div className="invite">
+                    <button className="btn small" onClick={refresh}>重新读取</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+
+        <aside className="detail-aside session-detail-aside">
+          {/* 只读事实在右栏模块化卡片中展示 */}
+          <section className="card detail-section">
+            <div className="detail-section-title">
+              <Icon name="info" />
+              <span>会话信息</span>
+            </div>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 550 }}>{agentDisplayLabel(session.agent)}</span>
+              {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
+              {archived && <span className="badge warn">已归档</span>}
+            </div>
+
+            {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
+            <div className="session-info-fields">
+              <Field label="开始时间">
+                {session.started_at
+                  ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
+                  : <span className="muted">未知</span>}
+              </Field>
+              <Field label="最近活动">
+                {session.last_activity_at ? (
+                  <span title={session.last_activity_at}>
+                    {timeAgo(session.last_activity_at)}
+                    <span className="muted small"> · {formatDateTime(session.last_activity_at)}</span>
+                  </span>
+                ) : <span className="muted">未知</span>}
+              </Field>
+              <Field label="会话统计">
+                <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+                  <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
+                  <span>代理回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+                </span>
+              </Field>
+            </div>
+          </section>
+
+          <section className="card detail-section">
+            <div className="detail-section-title">
+              <Icon name="folder" />
+              <span>目录与关联</span>
+            </div>
+
+            <div className="session-info-fields">
+              <Field label="跟踪任务">
+                {detail.tracked_workstreams.length > 0 ? (
+                  <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                    {detail.tracked_workstreams.map((task) => (
+                      <button
+                        key={task.id}
+                        type="button"
+                        className="link"
+                        title={`打开任务：${task.title}`}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                        onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
+                      >
+                        <Icon name="tasks" />
+                        <span>{task.title}</span>
+                        {task.visibility === "archived" && <span className="badge">已归档</span>}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="muted small">未跟踪任何任务</span>
+                )}
+              </Field>
+              <Field label="项目">
+                {workspacePath ? (
+                  derivedProjectName ? (
+                    <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                      <button
+                        className="link"
+                        title={`打开项目：${derivedProjectName}`}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                        onClick={() => navigate({ view: "project", projectId: workspacePath.project_id, initialTitle: derivedProjectName })}
+                      >
+                        <Icon name="project" />
+                        <span>{derivedProjectName}</span>
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="muted small">项目信息暂不可用</span>
+                  )
+                ) : session.project_id ? (
+                  <span className="muted small" style={{ wordBreak: "break-word" }}>
+                    {projectIdOnlyCell.text}
+                    {" —— "}
+                    {projectIdOnlyCell.hint}
+                  </span>
+                ) : (
+                  <span className="muted small">无关联项目</span>
+                )}
+              </Field>
+              <Field
+                label="工作目录"
+                copyValue={workspacePath ? workspacePath.canonical_path : (cwd || undefined)}
+                copyTitle="复制工作目录"
+              >
+                {workspacePath ? (
+                  <>
+                    <button
+                      type="button"
+                      className="link mono path-text-with-icon"
+                      title={workspacePath.canonical_path}
+                      onClick={() => void openPath(workspacePath.canonical_path)}
+                    >
+                      <Icon name="folder" />
+                      <span>{workspacePath.canonical_path}</span>
+                    </button>
+                    {cwd !== "" && cwd !== workspacePath.canonical_path && (
+                      <div className="muted small" style={{ marginTop: 4 }}>
+                        Agent 原始记录：
+                        <button
+                          type="button"
+                          className="link mono path-text-with-icon"
+                          title={cwd}
+                          onClick={() => void openPath(cwd)}
+                        >
+                          <Icon name="folder" />
+                          <span>{cwd}</span>
+                        </button>
+                      </div>
+                    )}
+                    {!workspacePath.exists && (
+                      <div style={{ marginTop: 4 }}>
+                        <span
+                          className="badge warn"
+                          title="磁盘中未找到该目录"
+                        >
+                          目录不存在
+                        </span>
+                      </div>
+                    )}
+                  </>
+                ) : cwd ? (
+                  <>
+                    <button
+                      type="button"
+                      className="link mono path-text-with-icon"
+                      title={cwd}
+                      onClick={() => void openPath(cwd)}
+                    >
+                      <Icon name="folder" />
+                      <span>{cwd}</span>
+                    </button>
+                    <div className="muted small" style={{ marginTop: 4 }}>
+                      未登记为工作路径
+                    </div>
+                  </>
+                ) : (
+                  <span className="muted">{NO_CWD}（无目录记录）</span>
+                )}
+              </Field>
+              {/* 源会话：会话自己的源文件。
+                  状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
+                  路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
+              <Field
+                label="源会话"
+                copyValue={session.source_path}
+                copyTitle="复制源会话路径"
+              >
+                {canRevealSource ? (
+                  <button
+                    className="link mono"
+                    title={session.source_path}
+                    style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
+                    onClick={() => void revealSource()}
+                  >
+                    {session.source_path}
+                  </button>
+                ) : (
+                  <span
+                    className="mono"
+                    title={session.source_path}
+                    style={{ minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
+                  >
+                    {session.source_path}
+                  </span>
+                )}
+                {sourceMissing && (
+                  <div className="session-source-warning">源会话已不存在</div>
+                )}
+                {sourceUnavailable && (
+                  <div className="session-source-warning">无法确认源会话状态</div>
+                )}
+              </Field>
+              <Field label="会话 ID" copyValue={session.id} copyTitle="复制会话 ID">
+                <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
+                  {session.id}
+                </div>
+              </Field>
+              <Field
+                label="Agent 会话 ID"
+                copyValue={session.root_agent_session_id}
+                copyTitle="复制 Agent 会话 ID"
+              >
+                <div
+                  className="mono"
+                  title="原始会话 ID"
+                  style={{ wordBreak: "break-all", userSelect: "all" }}
+                >
+                  {session.root_agent_session_id}
+                </div>
+              </Field>
+              {/* Fork：唯一的会话→会话链接。来源只是 provenance，
+                  生命周期完全独立；来源不在本地库时也如实说明。 */}
+              {(detail.forked_from || session.forked_from_session_id) && (
+                <Field label="来源">
+                  {detail.forked_from ? (
+                    <button
+                      className="link"
+                      style={{ textAlign: "left", wordBreak: "break-word" }}
+                      title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
+                      onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialAgent: detail.forked_from!.agent })}
+                    >
+                      分叉自：{sessionDisplayTitle(detail.forked_from.title)}
+                      {detail.forked_from.archived_at !== null && (
+                        <span className="badge warn" style={{ marginLeft: 6 }}>已归档</span>
+                      )}
+                    </button>
+                  ) : (
+                    <span className="muted small">
+                      来源会话不在 NoEnding 库里
+                      <span className="mono" style={{ wordBreak: "break-all" }}>
+                        {" · "}{session.forked_from_session_id}
+                      </span>
+                    </span>
+                  )}
+                </Field>
+              )}
+            </div>
+          </section>
+        </aside>
       </div>
 
       {/* 危险操作：删除只在正常状态下出现；已归档的动作在顶部横幅。
