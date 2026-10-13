@@ -52,7 +52,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::domain::{git_state, GitDetection, GitWorktreeKind, WorkspaceObservation};
+use crate::domain::{GitDetection, GitWorktreeKind, WorkspaceObservation};
 use crate::platform::exec_resolver::resolve_executable;
 use crate::platform::exec_runner;
 use crate::workspace::identity::{self, NormalizeOpts, PathStyle};
@@ -823,30 +823,6 @@ pub fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// Fold an observation into a stored `git_state`, for the caller that owns
-/// persistence: losing `.git` is `detected → missing`, and nothing else.
-/// `workspace::project` is the only place with the prior state this needs, so the
-/// resolver reports `None` and stops.
-///
-/// [`GitProbeState::Unavailable`] keeps the stored value on purpose: "we could
-/// not ask" must never be recorded as "this is not a repository", because losing
-/// a Project's Git identity on a transient failure is forbidden.
-pub fn git_state_after_observation(prior: &str, detection: &GitDetection) -> String {
-    match detection {
-        GitDetection::Detected { .. } => git_state::DETECTED.to_string(),
-        GitDetection::Missing => git_state::MISSING.to_string(),
-        // "No evidence right now" keeps a path that was once Git-backed in
-        // `missing`: a lost `.git` must not detach the WorkspacePath or clear
-        // anything, and must not forget that it was ever a repository. Demoting
-        // `missing → none` would erase that fact.
-        GitDetection::None if prior == git_state::DETECTED || prior == git_state::MISSING => {
-            git_state::MISSING.to_string()
-        }
-        GitDetection::None => git_state::NONE.to_string(),
-        GitDetection::Unavailable => prior.to_string(),
-    }
-}
-
 /// The checkout a `<dir>/.git` common dir belongs to. Nothing is inferred for a
 /// bare repository (`/srv/repo.git` has no working tree), because inventing a
 /// toplevel there is how a wrong Project gets created.
@@ -1154,55 +1130,6 @@ bare
             classify_git(&ctx(), "/work/bare.git", &detected_probe(".", None)),
             GitDetection::Detected { .. }
         ));
-    }
-
-    /// Missing `.git` — the resolver's raw answer is `None`, and only the
-    /// caller's prior state turns it into `missing`.
-    #[test]
-    fn missing_git_is_the_callers_derivation_not_the_resolvers() {
-        let c = ctx();
-        let none = classify_git(
-            &c,
-            "/Users/me/repo",
-            &GitProbe::nothing(GitProbeState::NotARepository),
-        );
-        assert_eq!(none, GitDetection::None);
-        assert_eq!(
-            git_state_after_observation(git_state::DETECTED, &none),
-            git_state::MISSING
-        );
-        assert_eq!(
-            git_state_after_observation(git_state::NONE, &none),
-            git_state::NONE
-        );
-        assert_eq!(
-            git_state_after_observation(git_state::MISSING, &none),
-            git_state::MISSING,
-            "already-missing stays missing"
-        );
-        // "Could not ask" changes nothing at all — the whole point of keeping the
-        // variant distinct.
-        assert_eq!(
-            git_state_after_observation(git_state::DETECTED, &GitDetection::Unavailable),
-            git_state::DETECTED
-        );
-        assert_eq!(
-            git_state_after_observation(git_state::NONE, &GitDetection::Unavailable),
-            git_state::NONE
-        );
-        assert_eq!(
-            git_state_after_observation(
-                git_state::NONE,
-                &GitDetection::Detected {
-                    common_dir: "/r/.git".into(),
-                    toplevel: None,
-                    kind: GitWorktreeKind::Main,
-                    worktrees: vec![],
-                    remotes: vec![],
-                }
-            ),
-            git_state::DETECTED
-        );
     }
 
     /// Every way git can fail collapses into an enum, never an error.

@@ -18,8 +18,6 @@
 //! The retired objects must stay absent.
 //!
 
-use noending::domain::{Agent, SessionMessageRole};
-use noending::domain::{ParsedSessionMessage, SourceCursorUpdate};
 use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -373,66 +371,6 @@ fn logical_session_schema_enforces_its_invariants() {
             .unwrap();
         assert_eq!(n, 0, "cascade delete must remove {what} ({table})");
     }
-}
-
-/// The storage-layer round trip over the same invariants: a session ingest
-/// commits messages with NoEnding's own sequence and dedups re-scans by
-/// identity.
-#[test]
-fn storage_round_trip_matches_the_schema_promises() {
-    let path = db_path("round-trip");
-    let db = Db::open(path.path()).unwrap();
-
-    let (s_id, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "root-1",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    let messages = [
-        ParsedSessionMessage {
-            source_message_id: Some("m1".into()),
-            source_position: "0".into(),
-            ts: None,
-            role: SessionMessageRole::User,
-            content: "first".into(),
-        },
-        ParsedSessionMessage {
-            source_message_id: Some("m2".into()),
-            source_position: "1".into(),
-            ts: None,
-            role: SessionMessageRole::Assistant,
-            content: "second".into(),
-        },
-    ];
-    let source = SourceCursorUpdate {
-        file_identity: "identity".into(),
-        generation: 1,
-        byte_offset: 100,
-        last_seen_size: 100,
-        mtime: None,
-        start_byte_offset: 0,
-        prefix_hash: String::new(),
-    };
-    let stored = db.commit_ingest(&s_id, &messages, &source).unwrap();
-    assert_eq!(stored.len(), 2);
-    assert_eq!(
-        stored.iter().map(|m| m.sequence).collect::<Vec<_>>(),
-        vec![1, 2],
-        "sequence is NoEnding's own per-session counter starting at 1"
-    );
-
-    // A full re-scan of the same source dedups by identity.
-    let replay = db.commit_ingest(&s_id, &messages, &source).unwrap();
-    assert!(replay.is_empty(), "a re-scan must not duplicate messages");
-    assert_eq!(db.message_count(&s_id).unwrap(), 2);
-    assert_eq!(db.ingested_message_sequence(&s_id).unwrap(), 2);
 }
 
 /// Reopening a current-format database reads the format marker and checks the

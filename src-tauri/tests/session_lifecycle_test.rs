@@ -281,8 +281,8 @@ fn inflight_ingest_commits_after_archive() {
     assert_eq!(db.message_count(&s.id).unwrap(), 2);
 }
 
-/// Restore keeps the same id/Owner/messages/cursors/frontier and
-/// reindexes the conversation.
+/// Restore keeps the same id/Owner/messages/cursors/frontier. Trash is a thin
+/// filter: search was never disabled, so nothing needs reindexing.
 #[test]
 fn unarchive_keeps_identity_data_and_search() {
     let db = open_db("restore-keeps");
@@ -313,15 +313,6 @@ fn unarchive_keeps_identity_data_and_search() {
         context_frontier(&db, &s.id),
         1,
         "the frontier was never touched"
-    );
-
-    // The conversation is searchable again (reindex inside the restore tx).
-    let hits = search::search(&db, "sqlite", 20).unwrap();
-    assert!(
-        hits.iter()
-            .any(|h| h.kind == "message" && h.ref_id == stored[0].id),
-        "restore reindexes the messages: {:?}",
-        hits.iter().map(|h| h.ref_id.clone()).collect::<Vec<_>>()
     );
 }
 
@@ -575,9 +566,9 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
 
 // Review P1-1: search stays lifecycle-authoritative across restarts
 
-/// The startup backfill must not re-index what a Trash unindexed: only ACTIVE
-/// sessions are ever filled in, so the recycle bin cannot leak back into
-/// search after a restart.
+/// Trash never removes index rows, so the startup backfill must fill in only
+/// what is missing: archived and active sessions are indexed identically, and
+/// a restart can never drop an archived conversation out of search.
 #[test]
 fn startup_backfill_includes_archived_sessions() {
     let db = open_db("backfill-trashed");
@@ -589,7 +580,7 @@ fn startup_backfill_includes_archived_sessions() {
     let trashed_stored = commit_message(&db, &trashed.id, "unique trashed marker goals", 100);
 
     lifecycle::archive_session(&db, &trashed.id).unwrap();
-    // 模拟重启：startup backfill 不得把已归档加回来。
+    // 模拟重启：backfill 补齐索引，对归档会话与活跃会话一视同仁。
     db.backfill_search_index().unwrap();
 
     let hits = search::search(&db, "goals", 20).unwrap();
@@ -602,14 +593,5 @@ fn startup_backfill_includes_archived_sessions() {
         hits.iter()
             .any(|h| h.kind == "message" && h.ref_id == trashed_stored[0].id),
         "the archived session remains searchable after startup backfill"
-    );
-
-    // Restore 之后回到索引 —— 生命周期与索引同进退。
-    lifecycle::restore_session(&db, &trashed.id).unwrap();
-    let hits = search::search(&db, "goals", 20).unwrap();
-    assert!(
-        hits.iter()
-            .any(|h| h.kind == "message" && h.ref_id == trashed_stored[0].id),
-        "restore brings the conversation back into search"
     );
 }

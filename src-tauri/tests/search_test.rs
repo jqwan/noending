@@ -135,14 +135,6 @@ fn a_root_message_is_searchable_regardless_of_length() {
             .any(|h| h.kind == "message" && h.ref_id == stored[1].id),
         "a short message must be searchable: {hits:?}"
     );
-
-    // A child member produces no messages at all, so there is nothing to
-    // leak into the index: the conversation store only ever holds root turns.
-    assert_eq!(
-        db.message_count(&_session.id).unwrap(),
-        2,
-        "only the seeded root turns exist"
-    );
 }
 
 /// The Logical Session's own document (`kind = 'session'`) carries the title

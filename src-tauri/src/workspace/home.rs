@@ -1147,26 +1147,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn default_workspace_is_derived() {
-        // `<home>/workspace`, and `ensure_dirs` is what makes
-        // it real; the fs part is covered in tests/workspace_resolver_test.rs.
-        let home = home_at("/Users/me/.noending");
-        assert_eq!(
-            home.default_workspace,
-            PathBuf::from("/Users/me/.noending/workspace")
-        );
-        assert_eq!(home.logs_dir, PathBuf::from("/Users/me/.noending/logs"));
-        assert_eq!(
-            home.runtime_dir,
-            PathBuf::from("/Users/me/.noending/runtime")
-        );
-        // A hostile-looking root still keeps its children inside it.
-        let tricky = home_at("/Users/me/.noending");
-        assert_eq!(tricky.data_dir, PathBuf::from("/Users/me/.noending/data"));
-        assert!(!tricky.db_path.to_string_lossy().contains(".."));
-    }
-
     /// The bootstrap pointer is the only file this module writes outside the
     /// Home, and it must round-trip through JSON.
     #[test]

@@ -69,19 +69,10 @@ fn codex_model_and_effort_override_roundtrip() {
     assert_eq!(opts.provider, None, "provider was never overridden");
 }
 
-#[test]
-fn claude_effort_override_is_accepted_and_forwarded() {
-    let db = temp_db();
-    set_runtime_overrides(
-        &db,
-        Agent::ClaudeCode,
-        &overrides(Some("sonnet"), None, Some("high")),
-    )
-    .expect("claude supports model + effort");
-    let opts = runtime_exec_options(&db, Agent::ClaudeCode).unwrap();
-    assert_eq!(opts.model.as_deref(), Some("sonnet"));
-    assert_eq!(opts.effort.as_deref(), Some("high"));
-}
+// ClaudeCode shares Codex's override matrix (model/effort overridable,
+// provider unsupported), so one roundtrip pins the shared cell;
+// `unsupported_fields_are_rejected_on_write_and_on_read` covers ClaudeCode's
+// provider refusal.
 
 #[test]
 fn pi_provider_model_and_thinking_override() {
@@ -194,12 +185,6 @@ fn a_corrupt_override_row_is_an_error_not_a_silent_default() {
     let err = get_runtime_overrides(&db, Agent::Pi).unwrap_err();
     assert!(err.to_string().contains("Pi"), "names the agent: {err}");
     assert!(runtime_exec_options(&db, Agent::Pi).is_err());
-}
-
-#[test]
-fn overrides_serialise_without_inventing_defaults() {
-    let json = serde_json::to_string(&overrides(Some("sonnet"), None, None).normalized()).unwrap();
-    assert_eq!(json, r#"{"model":"sonnet","provider":null,"effort":null}"#);
 }
 
 /// The UI reads these spellings literally, so a rename is a breaking change.

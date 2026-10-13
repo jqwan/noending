@@ -785,8 +785,10 @@ mod tests {
         session_row(&conn, "s", None, "/repo", 100);
         message_row(&conn, "m1", "s", 0, reminder("todo_reminder"));
         part_row(&conn, "p1", "m1", "s", 0, text_part("tool reminder"));
-        message_row(&conn, "m2", "s", 1, reminder("system_reminder"));
-        part_row(&conn, "p2", "m2", "s", 0, text_part("system reminder"));
+        // The compaction summary is generated text, so the message itself is
+        // not prose either; the `compaction` PART is the structural marker.
+        message_row(&conn, "m2", "s", 1, reminder("compact_summary"));
+        part_row(&conn, "p2", "m2", "s", 0, text_part("系统摘要"));
         message_row(&conn, "m3", "s", 2, prompt());
         part_row(&conn, "p3", "m3", "s", 0, text_part("人写的"));
         message_row(&conn, "m4", "s", 3, reply(true));
@@ -888,44 +890,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compaction_is_a_boundary_not_a_message() {
-        let root = unique_dir("compact");
-        let db = store(&root);
-        let conn = open(&db);
-        session_row(&conn, "s", None, "/repo", 100);
-        // The summary is generated text, so the message itself is not prose;
-        // the `compaction` PART is the structural marker.
-        message_row(&conn, "m1", "s", 0, reminder("compact_summary"));
-        part_row(
-            &conn,
-            "cmp1",
-            "m1",
-            "s",
-            0,
-            serde_json::json!({"type": "compaction"}),
-        );
-        part_row(
-            &conn,
-            "p1",
-            "m1",
-            "s",
-            1,
-            text_part("这是摘要，不是用户说的话"),
-        );
-        drop(conn);
-
-        let delta = ZCodeAdapter
-            .read_session_delta(
-                &session_of(&db, "s"),
-                &crate::domain::SourceCursor::default(),
-            )
-            .unwrap();
-        assert!(delta.messages.is_empty());
-    }
-
     /// Usage comes from the store's own per-turn rollup and adds up across the
-    /// session's turns; the message rows never carry it.
+    /// session's turns; the message rows never carry it. `task_type` decides
+    /// the member kind: fork, subagent_child, selection_side_chat.
     #[test]
     fn task_type_decides_the_member_kind() {
         let root = unique_dir("task-type");
@@ -1007,42 +974,6 @@ mod tests {
                 .unwrap(),
             SourceAvailability::Unavailable
         );
-    }
-
-    /// A settled assistant response parses whether its data names a model
-    /// (either field spelling) or nothing at all.
-    #[test]
-    fn settled_assistant_responses_parse_regardless_of_model_fields() {
-        let root = unique_dir("prov");
-        let db = store(&root);
-        let conn = open(&db);
-        session_row(&conn, "s", None, "/repo", 100);
-        let mut pascal = reply(true);
-        pascal["modelID"] = serde_json::json!("GLM-5.3");
-        pascal["providerID"] = serde_json::json!("builtin:bigmodel");
-        message_row(&conn, "m1", "s", 1, pascal);
-        part_row(&conn, "p1", "m1", "s", 1, text_part("回答一"));
-        let mut camel = reply(true);
-        camel["modelId"] = serde_json::json!("GLM-5.3-Flash");
-        camel["providerId"] = serde_json::json!("bigmodel-api");
-        message_row(&conn, "m2", "s", 2, camel);
-        part_row(&conn, "p2", "m2", "s", 1, text_part("回答二"));
-        message_row(&conn, "m3", "s", 3, reply(true));
-        part_row(&conn, "p3", "m3", "s", 1, text_part("回答三"));
-        drop(conn);
-
-        let delta = ZCodeAdapter
-            .read_session_delta(
-                &session_of(&db, "s"),
-                &crate::domain::SourceCursor::default(),
-            )
-            .unwrap();
-        let assistant = delta
-            .messages
-            .iter()
-            .filter(|m| m.role == SessionMessageRole::Assistant)
-            .count();
-        assert_eq!(assistant, 3);
     }
 
     /// the whole agent's sessions.

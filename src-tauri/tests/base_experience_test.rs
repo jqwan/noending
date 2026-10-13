@@ -398,22 +398,17 @@ fn archived_session_still_ingests_its_source() {
 }
 
 /// `refresh_session` is the per-Session incremental entry point (Resume
-/// trigger). It shares `ingest_session`'s facts-only contract.
+/// trigger); its unchanged-source and Context contracts are the ones
+/// `rescanning_an_unchanged_source_adds_nothing` pins for `ingest_session`.
 #[test]
-fn refresh_session_ingests_incrementally_and_writes_no_context() {
+fn refresh_session_ingests_incrementally() {
     let dir = unique_dir("refresh");
     let db = open_db("refresh");
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
 
     assert_eq!(ingestion::refresh_session(&db, &s.id).unwrap(), 3);
-    assert_eq!(
-        ingestion::refresh_session(&db, &s.id).unwrap(),
-        0,
-        "nothing new on an unchanged source"
-    );
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
-    assert_eq!(context_footprint(&db), (0, 0, 0));
 }
 
 /// The Conversation reader: a preview is the TAIL of the conversation, and the

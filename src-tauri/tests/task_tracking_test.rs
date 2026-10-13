@@ -1,7 +1,9 @@
 //! Observable task membership, tracking and project/preference lifecycle contracts.
 mod support;
 use noending::storage::{
-    preferences, workspace::insert_workspace_path_conn, workstream_projects as relations,
+    preferences,
+    workspace::{insert_workspace_path_conn, reassign_workspace_path_project_conn},
+    workstream_projects as relations,
 };
 use noending::{
     domain::Agent,
@@ -108,7 +110,7 @@ fn directory_reassignment_moves_session_but_never_explicit_task_projects_or_trac
     let f = Fixture::new();
     let task = f.task("Keep scope", &["a"]);
     f.db().set_session_tracking(&f.sid, &task, true).unwrap();
-    project::reassign_workspace_path_conn(&f.db().write(), &f.path, "b").unwrap();
+    reassign_workspace_path_project_conn(&f.db().write(), &f.path, "b").unwrap();
     assert_eq!(
         f.db()
             .get_session(&f.sid)

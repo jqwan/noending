@@ -1008,38 +1008,6 @@ mod tests {
         assert_eq!(texts, vec!["first prompt", "first reply"], "{texts:?}");
     }
 
-    #[test]
-    fn assistant_rows_of_every_source_kind_parse_to_prose() {
-        let id = "session-prov";
-        let with_model = r#"{"type":"assistant/message","seq":10,"time":1788969948545,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答一"}],"source":{"kind":"model","provider":"openai-codex","model":"gpt-5.6-luna"}}}}"#;
-        let non_model = r#"{"type":"assistant/message","seq":11,"time":1788969948546,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答二"}],"source":{"kind":"plugin","provider":"x","model":"y"}}}}"#;
-        let no_source = r#"{"type":"assistant/message","seq":12,"time":1788969948547,"data":{"message":{"role":"assistant","content":[{"type":"text","text":"答三"}]}}}"#;
-        let dir = session_dir(
-            &unique_dir("prov"),
-            id,
-            "session.v2.jsonl.zstd",
-            &[
-                &header(id, ""),
-                RUNTIME_CTX,
-                REMINDER,
-                &user(3, "问"),
-                with_model,
-                non_model,
-                no_source,
-            ],
-        );
-        let file = dir.join("session.v2.jsonl.zstd");
-        let delta = DshAdapter
-            .read_session_delta(&session_at(&file), &crate::domain::SourceCursor::default())
-            .unwrap();
-        let assistant = delta
-            .messages
-            .iter()
-            .filter(|m| m.role == SessionMessageRole::Assistant)
-            .count();
-        assert_eq!(assistant, 3);
-    }
-
     /// dsh 只有桌面端这一个启动面。回归守卫：它曾被误标为 TUI/CLI。
     #[test]
     fn dsh_is_desktop_only() {

@@ -422,8 +422,8 @@ mod tests {
         assert_eq!(found[0].cwd.as_deref(), Some("/repo"));
     }
 
-    /// Prose only; the injected env block and the toolResult message
-    /// are not conversation; the compaction marker is a count.
+    /// A missing file is the only confirmed-absent verdict: the store is
+    /// Present as long as the file is there.
     #[test]
     fn inspect_reports_missing_only_for_a_confirmed_absent_file() {
         let dir = unique_dir("inspect");
@@ -440,46 +440,6 @@ mod tests {
             SourceAvailability::Missing
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Entries carrying `message.provider` / `message.model` (or lacking
-    /// them) parse to the same prose either way since the provenance
-    /// retirement.
-    #[test]
-    fn assistant_entries_parse_alike_with_or_without_model_fields() {
-        let dir = unique_dir("prov");
-        let file = dir.join("a.jsonl");
-        let line = |id: &str, provider: Option<&str>, model: Option<&str>| {
-            let mut m = serde_json::json!({
-                "type": "message", "id": id, "parentId": "p",
-                "timestamp": "2026-09-18T12:40:05.000Z",
-                "message": { "role": "assistant", "content": [ { "type": "text", "text": "看完了。" } ] },
-            });
-            if let Some(p) = provider {
-                m["message"]["provider"] = serde_json::json!(p);
-            }
-            if let Some(mo) = model {
-                m["message"]["model"] = serde_json::json!(mo);
-            }
-            m.to_string()
-        };
-        std::fs::write(
-            &file,
-            [
-                line("m1", Some("openai-codex"), Some("gpt-5.6-luna")),
-                line("m2", None, None),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        let delta = PiAdapter
-            .read_session_delta(
-                &root_session(&file),
-                &crate::domain::SourceCursor::default(),
-            )
-            .unwrap();
-        assert_eq!(delta.messages.len(), 2);
     }
 
     #[test]

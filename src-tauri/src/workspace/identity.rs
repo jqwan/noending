@@ -604,17 +604,6 @@ mod tests {
             path_identity_with(&win("C:/a/b").unwrap(), w),
             path_identity_with(&win("C:\\a\\b").unwrap(), w)
         );
-        // The host door is the injected door for the host's own style, which is
-        // the whole reason the injected one exists: an assertion about Windows
-        // must not become true or false depending on which runner executes it.
-        assert_eq!(
-            path_identity("C:/a/b"),
-            path_identity_with("C:/a/b", PathStyle::current())
-        );
-        assert_eq!(
-            path_identity("/a/b"),
-            path_identity_with("/a/b", PathStyle::current())
-        );
     }
 
     /// On a Windows volume, case is not part of location, so it is

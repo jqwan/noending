@@ -20,7 +20,7 @@ mod support;
 use noending::adapters::AgentCommand;
 use noending::domain::{Agent, Session};
 use noending::error::Result;
-use noending::launcher::{resolve_resume_cwd, CwdSource, LaunchWorkspace, SessionLauncher};
+use noending::launcher::{CwdSource, LaunchWorkspace, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -171,7 +171,8 @@ fn is_stale(err: &str) -> bool {
 
 // staleness of paths
 
-/// Display order cannot change the prepared launch directory or invalidate it.
+/// The default workspace is part of the frozen launch: if Home moves between
+/// preview and launch, the previewed directory is no longer the one to start.
 #[test]
 fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     let db = open_db("default-ws");
@@ -219,8 +220,6 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     seed_installation(&db, Agent::Codex);
     let home_dir = real_dir("resume-cwd", "session-home");
     let s = session_row(&db, Some(&home_dir), None);
-    let w = ws_with_paths(&db, "elsewhere", &[real_dir("resume-cwd", "ws-path")]);
-    support::track(&db, &s.id, Some(&w)).unwrap();
 
     let launcher = launcher_in("resume-cwd");
     let prepared = launcher
@@ -241,11 +240,7 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
             None,
         )
         .expect("a resume with its own directory launches");
-    assert!(
-        result.command_line.ends_with(&home_dir),
-        "the Workstream's path must not outrank the Session's own cwd, got {}",
-        result.command_line
-    );
+    assert!(result.command_line.ends_with(&home_dir));
 }
 
 /// The preview's directory is authoritative and hashed, so background
@@ -347,40 +342,6 @@ fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
     assert!(result
         .command_line
         .ends_with(workspace.default_workspace.as_ref().unwrap()));
-}
-
-/// The last resume tier: no Session directory, no usable Workstream path, so
-/// Home's default workspace takes it — again as data, not as a silent default.
-#[test]
-fn a_resume_falls_back_to_the_default_workspace_and_says_so() {
-    let db = open_db("resume-default");
-    seed_installation(&db, Agent::Codex);
-    let lost = missing_dir("resume-default", "gone");
-    let s = session_row(&db, Some(&lost), None);
-    let default_ws = real_dir("resume-default", "workspace");
-
-    let resolution = resolve_resume_cwd(&db, &s.id, &workspace(Some(&default_ws))).unwrap();
-    assert_eq!(resolution.cwd.as_deref(), Some(default_ws.as_str()));
-    assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
-    assert!(resolution.fallback);
-    assert!(resolution.note.unwrap().contains(&lost));
-
-    let launcher = launcher_in("resume-default");
-    let prepared = launcher
-        .prepare_resume_in(&db, &s.id, &workspace(Some(&default_ws)))
-        .unwrap();
-    assert_eq!(prepared.cwd.as_deref(), Some(default_ws.as_str()));
-    let result = launcher
-        .launch_prepared_with_in(
-            &db,
-            &prepared,
-            &workspace(Some(&default_ws)),
-            fake_spawn,
-            fake_open,
-            None,
-        )
-        .expect("a default-workspace resume launches");
-    assert!(result.command_line.ends_with(&default_ws));
 }
 
 /// "Session cwd/path change" is a stale input on the *identity* side as

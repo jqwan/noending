@@ -992,46 +992,6 @@ mod tests {
         assert!(delta.messages[0].ts.is_some());
     }
 
-    /// A repeated responseId (a future version re-writing a row) is counted
-    /// once; a row without a responseId is never deduped away.
-    #[test]
-    fn an_answer_only_turn_is_ingested_instead_of_dropped() {
-        let root = temp_dir("answer-only");
-        let id = "336f551c-58e8-491b-a31f-13b362786c85";
-        store(
-            &root,
-            id,
-            &[
-                (
-                    14,
-                    [timestamp(1_789_480_258), msg(19, &str(2, "把日报整理一下"))].concat(),
-                ),
-                (
-                    15,
-                    [timestamp(1_789_480_261), msg(20, &str(1, "日报已整理好。"))].concat(),
-                ),
-            ],
-        );
-        summaries(&root, &[(id, "", "把日报整理一下", &repo_workspaces())]);
-
-        let db = root.join("conversations").join(format!("{id}.db"));
-        let delta = AntigravityAdapter
-            .read_session_delta(&root_session(&db), &crate::domain::SourceCursor::default())
-            .unwrap();
-        let roles: Vec<(SessionMessageRole, &str)> = delta
-            .messages
-            .iter()
-            .map(|m| (m.role, m.content.as_str()))
-            .collect();
-        assert_eq!(
-            roles,
-            vec![
-                (SessionMessageRole::User, "把日报整理一下"),
-                (SessionMessageRole::Assistant, "日报已整理好。"),
-            ]
-        );
-    }
-
     /// Discovery: only conversation DBs are claimed; title falls back to the
     /// first user input; a parent makes the conversation a child member.
     #[test]

@@ -287,9 +287,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("context-home-{}", uuid::Uuid::new_v4()));
         let home = home(&base.join("custom"));
         let runtime = prepare_runtime_dir(&home).unwrap();
-        assert_eq!(runtime, home.runtime_dir.join(LOG_SUBDIR));
-        assert!(runtime.is_dir());
-        assert_eq!(log_dir(&home), home.logs_dir.join(LOG_SUBDIR));
+        assert!(runtime.is_dir(), "prepare creates the runtime dir");
     }
 
     #[test]

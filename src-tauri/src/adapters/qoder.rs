@@ -658,33 +658,17 @@ mod tests {
         assert!(!is_resolved_title(None));
     }
 
-    /// Assistant rows carrying a model code (including the synthesized
-    /// `<synthetic>` notice) parse to prose since the provenance retirement,
-    /// and the `runtime-config` line itself contributes nothing.
+    /// The `runtime-config` line is runtime bookkeeping, not conversation.
     #[test]
-    fn assistant_rows_parse_regardless_of_model_codes() {
-        let dir = unique_dir("prov");
+    fn a_runtime_config_line_contributes_nothing() {
+        let dir = unique_dir("runtime-config");
         let file = dir.join("s.jsonl");
-        let line = |idx: usize, vtype: &str, model: Option<&str>| {
-            let mut v = serde_json::json!({
-                "type": vtype,
-                "uuid": format!("u{idx}"),
-                "timestamp": format!("2026-09-20T15:01:{idx:02}.000Z"),
-                "message": { "role": if vtype == "user" { "user" } else { "assistant" },
-                             "content": [ { "type": "text", "text": if vtype == "user" { "问" } else { "答" } } ] },
-            });
-            if let Some(m) = model {
-                v["message"]["model"] = serde_json::json!(m);
-            }
-            v.to_string()
-        };
         std::fs::write(
             &file,
             [
                 r#"{"type":"runtime-config","sessionId":"s","model":"dfmodel","timestamp":1790089288825}"#.to_string(),
-                line(1, "user", None),
-                line(2, "assistant", Some("dfmodel")),
-                line(3, "assistant", Some("<synthetic>")),
+                r#"{"type":"user","uuid":"u1","timestamp":"2026-09-20T15:01:01.000Z","message":{"role":"user","content":[{"type":"text","text":"问"}]}}"#.to_string(),
+                r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-20T15:01:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"答"}]}}"#.to_string(),
             ]
             .join("\n")
                 + "\n",
@@ -696,11 +680,10 @@ mod tests {
                 &crate::domain::SourceCursor::default(),
             )
             .unwrap();
-        let assistant: Vec<&crate::domain::ParsedSessionMessage> = delta
-            .messages
-            .iter()
-            .filter(|m| m.role == SessionMessageRole::Assistant)
-            .collect();
-        assert_eq!(assistant.len(), 2);
+        let roles: Vec<SessionMessageRole> = delta.messages.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![SessionMessageRole::User, SessionMessageRole::Assistant]
+        );
     }
 }

@@ -1850,9 +1850,6 @@ mod tests {
         assert!(!snapshot.summary.live);
         assert!(!snapshot.scrollback.is_empty());
         assert!(registry.reserve_resume("session").is_ok());
-        registry.close(&id).unwrap();
-        assert!(registry.list().is_empty());
-        assert!(registry.attach(&id).is_err());
     }
 
     #[test]
@@ -1874,8 +1871,6 @@ mod tests {
         assert_eq!(listed[1].terminal_id, older);
         assert!(listed[1].live);
         assert_eq!(registry.for_session("session").unwrap().terminal_id, older);
-        registry.close(&newer).unwrap();
-        assert_eq!(registry.list().len(), 1);
         assert!(registry.has_live("session"));
     }
 

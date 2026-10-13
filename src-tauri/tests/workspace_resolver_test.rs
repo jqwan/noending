@@ -336,13 +336,6 @@ fn a_removed_git_directory_leaves_the_path_but_not_the_evidence() {
         "path_id is not a function of Git state"
     );
     assert_eq!(after.git, GitDetection::None);
-    assert_eq!(
-        noending::workspace::resolver::git_state_after_observation(
-            noending::domain::git_state::DETECTED,
-            &after.git
-        ),
-        noending::domain::git_state::MISSING
-    );
 
     std::fs::remove_dir_all(&root).ok();
 }

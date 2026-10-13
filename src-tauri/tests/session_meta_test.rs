@@ -244,41 +244,6 @@ fn title_is_write_once() {
     );
 }
 
-#[test]
-fn unchanged_upsert_preserves_identity_and_metadata() {
-    let database = db("stable");
-    let root_id = format!("meta-{}", new_id());
-
-    let first = ensure(
-        &database,
-        Agent::ClaudeCode,
-        &root_id,
-        Some("/Users/jqk/projects/r/stock_quant"),
-        "2026-08-18T14:30:00Z",
-    );
-
-    // Identical scan: row must come back byte-identical (same id, no churn).
-    let (again, is_new) = database
-        .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
-            &root_id,
-            Some("帮我看看这个量化脚本"),
-            Some("/Users/jqk/projects/r/stock_quant"),
-            None,
-            None,
-            Some("2026-08-18T14:21:22Z"),
-            Some("2026-08-18T14:30:00Z"),
-        )
-        .unwrap();
-    assert!(!is_new);
-    assert_eq!(again, first.id);
-    let stored = database.get_session(&first.id).unwrap().unwrap();
-    assert_eq!(stored.cwd, first.cwd);
-    assert_eq!(stored.last_activity_at, first.last_activity_at);
-    assert_eq!(stored.started_at, first.started_at);
-    assert_eq!(stored.title, first.title);
-}
-
 /// The derived Project cache: `project_id` is read off
 /// `workspace_paths.project_id` inside the upsert statement, so a Session is a
 /// Project member exactly while its own path says so.

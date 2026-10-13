@@ -155,7 +155,7 @@ fn an_embedded_new_launch_spawns_unbound() {
             Some(&noending::launcher::EmbeddedSpawn {
                 reconnect: None,
                 registry: &noending::terminal::TerminalRegistry::new(None),
-                spawn: fake_embedded_spawn,
+                spawn: unbound_embedded_spawn,
             }),
         )
         .expect("embedded new launch must succeed");
@@ -634,6 +634,21 @@ fn fake_embedded_spawn(
             "the launcher must hold the resume reservation throughout spawn"
         );
     }
+    Ok(LaunchOutcome {
+        launched_via: "test-embedded-spawn".into(),
+        command_line: format!("embedded session={:?}", target.session_id),
+        pid: Some(77),
+        terminal_id: Some("term-test-1".into()),
+    })
+}
+
+/// New flow only: the embedded target must arrive unbound — the launcher
+/// hands out no session_id, ingestion binds the terminal later.
+fn unbound_embedded_spawn(
+    _cmd: &AgentCommand,
+    target: &noending::terminal::EmbeddedTarget,
+) -> Result<LaunchOutcome> {
+    assert!(target.session_id.is_none());
     Ok(LaunchOutcome {
         launched_via: "test-embedded-spawn".into(),
         command_line: format!("embedded session={:?}", target.session_id),

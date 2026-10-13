@@ -20,9 +20,9 @@ use noending::storage::workspace::{insert_workspace_path_conn, rename_project_co
 use noending::storage::Db;
 use noending::workspace::project::{
     apply_projection_effect, delete_project_permanently, ensure_workspace_path,
-    ensure_workspace_path_conn, merge_projects_conn, project_detail, reassign_workspace_path_conn,
-    reconcile_workspace_paths, registry_is_consistent, set_project_archived, ProjectProjection,
-    ProjectionEffect, UnrestrictedWorkspace, WorkspacePolicy,
+    ensure_workspace_path_conn, merge_projects_conn, project_detail, reconcile_workspace_paths,
+    registry_is_consistent, set_project_archived, ProjectProjection, ProjectionEffect,
+    UnrestrictedWorkspace, WorkspacePolicy,
 };
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
@@ -862,13 +862,17 @@ fn one_workspace_path_never_belongs_to_two_projects() {
         1
     );
 
-    // Reassignment is the one legal move, and it is a move, not a copy.
-    db.tx(|tx| reassign_workspace_path_conn(tx, &id, "p-other").map(|_| ()))
-        .unwrap();
-    let rows = db.list_workspace_paths().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].project_id, "p-other");
-    registry_is_consistent(&db).expect("no path with two owners, none with zero");
+    // Reassignment is the one legal move, and it is a move, not a copy; the
+    // move itself is covered at the real function in session_workspace_test
+    // (`reassign_workspace_path_project_conn`).
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM workspace_paths WHERE canonical_path = ?1",
+            &canon("/shared/path")
+        ),
+        1
+    );
 }
 
 #[test]
@@ -1252,43 +1256,6 @@ fn workspace_attaching_refuses_an_observation_whose_identity_disagrees() {
     assert!(db.list_workspace_paths().unwrap().is_empty());
 }
 
-#[test]
-fn the_string_door_reports_its_effect_to_the_transaction_owner() {
-    // A caller that writes inside its own transaction cannot reach
-    // `apply_projection_effect` by accident, so the seam has to hand the effect
-    // back — otherwise a Project created during ingest stays invisible to search.
-    let (_d, db) = temp_db();
-    let observer = Scripted::new();
-    observer.set(
-        "/work/repo",
-        repo("/work/repo", "/work/repo/.git", GitWorktreeKind::Main, &[]),
-    );
-    let projection = ProjectProjection::new(&observer);
-    let outcome = db
-        .tx(|tx| projection.ensure_path_outcome(tx, "/work/repo"))
-        .unwrap()
-        .expect("attached");
-    assert!(!outcome.effect.projects_touched.is_empty());
-    let project_id = outcome.path.project_id.clone();
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
-            &project_id
-        ),
-        0
-    );
-    apply_projection_effect(&db, &outcome.effect);
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
-            &project_id
-        ),
-        1
-    );
-}
-
 // / reconcile
 
 #[test]
@@ -1410,7 +1377,7 @@ fn reconcile_sweep_preserves_unreferenced_registered_paths() {
 // naming, rename, detail
 
 #[test]
-fn default_workspace_project_is_named_noending_workspace() {
+fn default_workspace_project_is_named_noending_chat() {
     let (_d, db) = temp_db();
     let home = Home::new(
         "/Users/me/.noending",
@@ -2046,27 +2013,6 @@ fn project_refresh_does_not_scan_unrelated_projects() {
         .unwrap()
         .expect("b registered");
     assert!(b.exists, "unrelated project's path was never re-observed");
-}
-
-#[test]
-fn refresh_marks_deleted_directory_missing() {
-    let (_d, db) = temp_db_locked();
-    let observer = Scripted::new();
-    observer.set("/work/a", plain("/work/a", false));
-    let projection = ProjectProjection::new(&observer);
-    let wp = {
-        let wp = ensure(&db, &plain("/work/a", true));
-        // 目录缺失不能改变会话关联。
-        session(&db, "s-a", "/work/a", &wp.id);
-        wp
-    };
-
-    let report =
-        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
-    assert_eq!(report.missing_paths, 1);
-    let after = { db.get_workspace_path(&wp.id).unwrap() };
-    let after = after.expect("row survives the observation");
-    assert!(!after.exists);
 }
 
 #[test]

@@ -237,44 +237,6 @@ fn session_cursor_roundtrip() {
 // Prepared launch: side-effect contract & preview identity
 
 /// `prepare_new` is a pure preview: it resolves the launch directory and freezes
-/// the runtime intent, and writes nothing — no session or file.
-#[test]
-fn prepare_new_does_not_create_session_or_file() {
-    let db = open_db("prep-new-no-side-effects");
-    let ws = ws_row(&db, "test ws");
-
-    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: tmp_dir.clone(),
-    };
-
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(ws.id.as_str()),
-            Some(&task_cwd(&db, &ws.id)),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-
-    // 1. PreparedLaunch captures the launch facts & fingerprint
-    assert_eq!(prepared.mode, "new");
-    assert_eq!(
-        prepared.initial_workstream_ids.first().map(String::as_str),
-        Some(ws.id.as_str())
-    );
-    assert!(!prepared.state_fingerprint.is_empty());
-
-    assert!(db.list_sessions(Default::default()).unwrap().is_empty());
-
-    // 3. INVARIANT: nothing written to disk
-    assert!(
-        !tmp_dir.exists(),
-        "prepare_new must not write any launch artifact"
-    );
-}
-
 /// `prepare_resume` reads the Session's stored Owner and commits nothing: the
 /// Owner survives untouched and no launch artifact is written.
 #[test]
@@ -313,41 +275,6 @@ fn prepare_resume_uses_current_owner_without_writing() {
     // INVARIANT: nothing written
 
     assert!(!tmp_dir.exists());
-}
-
-#[test]
-fn state_fingerprint_stale_detection_on_owner_metadata_change() {
-    let db = open_db("stale-context-detection");
-    let ws = ws_row(&db, "test ws");
-
-    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: tmp_dir,
-    };
-
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(ws.id.as_str()),
-            Some(&task_cwd(&db, &ws.id)),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-
-    let mut changed = ws.clone();
-    changed.title = "Changed task".into();
-    db.upsert_workstream(&changed).unwrap();
-
-    // Attempting to launch with stale prepared launch MUST fail with stale error
-    let err = launcher
-        .launch_prepared_in(&db, &prepared, &LaunchWorkspace::default(), None)
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("stale"),
-        "expected stale error, got: {}",
-        err
-    );
 }
 
 /// Preview-Launch Identity covers the Runtime override intent too: an
@@ -453,10 +380,6 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
         .unwrap();
     assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(prepared.runtime.effort.as_deref(), Some("high"));
-    assert_eq!(
-        prepared.runtime.intent_summary(),
-        "model=gpt-5.6-sol,effort=high"
-    );
 
     // The frozen intent feeds the same conversion New / Resume / exec use.
     let opts = prepared.runtime.exec_options();

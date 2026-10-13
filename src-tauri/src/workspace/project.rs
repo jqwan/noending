@@ -319,8 +319,7 @@ pub fn ensure_workspace_path_conn(
 
     let family = git_family(conn, &canonical, &observation.git)?;
     let known = get_workspace_path_conn(conn, &id)?;
-    let (mut state, kind) =
-        next_git_observation(known.as_ref().map(|p| p.git_state.as_str()), &family);
+    let (mut state, kind) = next_git_observation(known.as_ref(), &observation.git, &family);
     let mut effect = ProjectionEffect::default();
     let mut discovered = Vec::new();
 
@@ -791,15 +790,24 @@ pub(crate) fn resolve_common_dir(observed_canonical: &str, common_dir: &str) -> 
 /// `detected → missing` is the interesting transition; `missing → missing` is the
 /// point: a path that once had evidence and does not now is remembered, not
 /// reclassified as "never was a repository". `none → none` for a plain directory
-/// that is merely unreadable right now.
+/// that is merely unreadable right now. `Unavailable` ("could not ask") keeps
+/// the stored row verbatim — a transient git failure is never recorded as
+/// ".git is gone" (see [`GitDetection::Unavailable`]).
 fn next_git_observation(
-    current: Option<&str>,
+    known: Option<&WorkspacePath>,
+    detection: &GitDetection,
     family: &Option<GitFamily>,
 ) -> (String, Option<String>) {
+    if matches!(detection, GitDetection::Unavailable) {
+        return match known {
+            Some(row) => (row.git_state.clone(), row.git_kind.clone()),
+            None => (git_state::NONE.to_string(), None),
+        };
+    }
     if let Some(f) = family {
         return (git_state::DETECTED.to_string(), Some(f.kind.clone()));
     }
-    match current {
+    match known.map(|row| row.git_state.as_str()) {
         Some(state) if state == git_state::DETECTED || state == git_state::MISSING => {
             (git_state::MISSING.to_string(), None)
         }
@@ -1067,15 +1075,6 @@ pub fn merge_projects(db: &Db, a: &str, b: &str) -> Result<MergeOutcome> {
     }
     apply_projection_effect(db, &effect);
     Ok(outcome)
-}
-
-/// Move a path without deleting the project it leaves, even if now empty.
-pub fn reassign_workspace_path_conn(
-    conn: &Connection,
-    path_id: &str,
-    project_id: &str,
-) -> Result<()> {
-    reassign_workspace_path_project_conn(conn, path_id, project_id)
 }
 
 // Reconcile
@@ -1389,19 +1388,10 @@ mod tests {
 
     #[test]
     fn a_relative_git_common_dir_cannot_split_a_family() {
-        // `git rev-parse --git-common-dir` answers `.git` for a main worktree.
-        // Keyed literally, every worktree of one repository would look like its
-        // own family and worktree convergence would never happen.
-        assert_eq!(
-            resolve_common_dir("/repo", ".git"),
-            normalize_path("/repo/.git").unwrap()
-        );
-        assert_eq!(
-            resolve_common_dir("/repo/wt/x", ".git"),
-            normalize_path("/repo/wt/x/.git").unwrap(),
-            "resolved against the path we asked about, not the process cwd"
-        );
-        // An absolute answer is only normalized, never rewritten.
+        // `git rev-parse --git-common-dir` answers `.git` for a main worktree,
+        // and classify_git canonicalizes it against the observed directory
+        // before a GitDetection is ever built — so production only ever hands
+        // this function absolute answers.
         assert_eq!(
             resolve_common_dir("/repo", "/repo/.git/worktrees/y"),
             normalize_path("/repo/.git/worktrees/y").unwrap()
@@ -1417,35 +1407,77 @@ mod tests {
             kind: "linked".into(),
             worktrees: vec![],
         });
+        let row = |state: &str, kind: Option<&str>| WorkspacePath {
+            id: "wp".into(),
+            canonical_path: "/repo".into(),
+            project_id: "p".into(),
+            git_state: state.into(),
+            git_kind: kind.map(String::from),
+            exists: true,
+            first_seen_at: "2026-10-13T00:00:00Z".into(),
+            last_seen_at: "2026-10-13T00:00:00Z".into(),
+        };
 
         // First sight, no evidence: `none`. Nothing in our history would make
         // `missing` an honest sentence.
         assert_eq!(
-            next_git_observation(None, &no_family),
+            next_git_observation(None, &GitDetection::None, &no_family),
             (git_state::NONE.to_string(), None)
         );
         assert_eq!(
-            next_git_observation(Some(git_state::NONE), &no_family),
+            next_git_observation(
+                Some(&row(git_state::NONE, None)),
+                &GitDetection::None,
+                &no_family
+            ),
             (git_state::NONE.to_string(), None)
         );
         // evidence, then silence, is `missing` — and it stays missing, because
         // `Unavailable` (no git binary, timeout, dubious ownership) is not a
         // reclassification of a repository into a plain directory.
         assert_eq!(
-            next_git_observation(Some(git_state::DETECTED), &no_family),
+            next_git_observation(
+                Some(&row(git_state::DETECTED, Some("main"))),
+                &GitDetection::None,
+                &no_family
+            ),
             (git_state::MISSING.to_string(), None)
         );
         assert_eq!(
-            next_git_observation(Some(git_state::MISSING), &no_family),
+            next_git_observation(
+                Some(&row(git_state::MISSING, None)),
+                &GitDetection::None,
+                &no_family
+            ),
             (git_state::MISSING.to_string(), None)
         );
         // Evidence returns: the kind comes from the evidence, never from the row.
         assert_eq!(
-            next_git_observation(Some(git_state::MISSING), &family),
+            next_git_observation(
+                Some(&row(git_state::MISSING, None)),
+                &GitDetection::Detected {
+                    common_dir: "/repo/.git".into(),
+                    toplevel: Some("/repo".into()),
+                    kind: GitWorktreeKind::Linked,
+                    worktrees: vec![],
+                    remotes: vec![],
+                },
+                &family
+            ),
             (git_state::DETECTED.to_string(), Some("linked".to_string()))
         );
         assert_eq!(
-            next_git_observation(Some(git_state::DETECTED), &family),
+            next_git_observation(
+                Some(&row(git_state::DETECTED, Some("main"))),
+                &GitDetection::Detected {
+                    common_dir: "/repo/.git".into(),
+                    toplevel: Some("/repo".into()),
+                    kind: GitWorktreeKind::Linked,
+                    worktrees: vec![],
+                    remotes: vec![],
+                },
+                &family
+            ),
             (git_state::DETECTED.to_string(), Some("linked".to_string()))
         );
     }

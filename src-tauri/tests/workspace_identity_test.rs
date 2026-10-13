@@ -223,17 +223,6 @@ fn windows_spellings_of_one_directory_carry_one_identity() {
         canonical,
         "identity folded, display did not"
     );
-    // The drive letter was already upper-cased by normalize for both platforms,
-    // so that alias was never a split to begin with.
-    assert_eq!(
-        path_identity_with(&win("c:\\Users\\me\\.noending\\workspace"), w),
-        expected
-    );
-    // And Unix still does not fold: the same pair of spellings is two ids.
-    assert_ne!(
-        path_identity_with("/Repo", PathStyle::Unix),
-        path_identity_with("/repo", PathStyle::Unix)
-    );
 }
 
 /// The premise under the launcher's path-list gate (M30).

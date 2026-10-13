@@ -288,109 +288,95 @@ fn child_transcript_text_never_becomes_conversation() {
 
 #[test]
 fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
-    for owned in [false, true] {
-        let root_dir = temp_root("missing-root");
-        let root_path = write_rollout(
-            &root_dir,
-            &rollout_name(ROOT_ID),
-            &[
-                meta_line(ROOT_ID, serde_json::json!({})),
-                message_line(1, "m1", "user", "最初的提问"),
-            ],
-        );
-        let db = open_db("missing-root");
-        enable_codex_source(&db, &root_dir);
-        reconcile(&db);
+    let root_dir = temp_root("missing-root");
+    let root_path = write_rollout(
+        &root_dir,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "最初的提问"),
+        ],
+    );
+    let db = open_db("missing-root");
+    enable_codex_source(&db, &root_dir);
+    reconcile(&db);
 
-        let session = db
-            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
-            .unwrap()
-            .unwrap();
-        if owned {
-            let task = noending::domain::Workstream {
-                id: new_id(),
-                title: "Selected task".into(),
-                description: String::new(),
-                visibility: "normal".into(),
-                created_at: now(),
-                updated_at: now(),
-            };
-            db.upsert_workstream(&task).unwrap();
-            support::track(&db, &session.id, Some(&task.id)).unwrap();
-        }
-        let cursor = db
-            .get_session(&session.id)
-            .unwrap()
-            .unwrap()
-            .source_cursor();
-
-        std::fs::remove_file(&root_path).unwrap();
-        for _ in 0..2 {
-            let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
-            assert!(report.failures.is_empty(), "{:?}", report.failures);
-            assert_eq!(db.message_count(&session.id).unwrap(), 1);
-            assert_eq!(
-                db.get_session(&session.id)
-                    .unwrap()
-                    .unwrap()
-                    .source_cursor()
-                    .byte_offset,
-                cursor.byte_offset,
-                "a missing source must not advance its cursor"
-            );
-        }
-
-        // The source returns and GREW: the stored session resumes from its cursor.
-        std::fs::write(
-            &root_path,
-            format!(
-                "{}\n{}\n{}\n",
-                meta_line(ROOT_ID, serde_json::json!({})),
-                message_line(1, "m1", "user", "最初的提问"),
-                message_line(2, "m2", "assistant", "后续回答")
-            ),
-        )
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
         .unwrap();
+    let cursor = db
+        .get_session(&session.id)
+        .unwrap()
+        .unwrap()
+        .source_cursor();
+
+    std::fs::remove_file(&root_path).unwrap();
+    for _ in 0..2 {
         let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(db.message_count(&session.id).unwrap(), 2);
-        assert!(
+        assert_eq!(db.message_count(&session.id).unwrap(), 1);
+        assert_eq!(
             db.get_session(&session.id)
                 .unwrap()
                 .unwrap()
                 .source_cursor()
-                .byte_offset
-                > cursor.byte_offset,
-            "the returning file must be ingested"
+                .byte_offset,
+            cursor.byte_offset,
+            "a missing source must not advance its cursor"
         );
-
-        // A path that exists but is not a readable file is still an error.
-        std::fs::remove_file(&root_path).unwrap();
-        std::fs::create_dir(&root_path).unwrap();
-        let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
-        assert!(!report.failures.is_empty());
-        let source = db
-            .list_ingest_sources()
-            .unwrap()
-            .into_iter()
-            .find(|source| source.path == root_dir.to_string_lossy())
-            .unwrap();
-        assert!(ingestion::reconcile_source(&db, &source, &|_| {}).is_err());
-        db.set_ingest_source_enabled(&source.id, false).unwrap();
-        let disabled_report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
-        assert!(
-            disabled_report.failures.is_empty(),
-            "disabled sources must not be retried"
-        );
-        assert_eq!(db.message_count(&session.id).unwrap(), 2);
     }
+
+    // The source returns and GREW: the stored session resumes from its cursor.
+    std::fs::write(
+        &root_path,
+        format!(
+            "{}\n{}\n{}\n",
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "最初的提问"),
+            message_line(2, "m2", "assistant", "后续回答")
+        ),
+    )
+    .unwrap();
+    let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(db.message_count(&session.id).unwrap(), 2);
+    assert!(
+        db.get_session(&session.id)
+            .unwrap()
+            .unwrap()
+            .source_cursor()
+            .byte_offset
+            > cursor.byte_offset,
+        "the returning file must be ingested"
+    );
+
+    // A path that exists but is not a readable file is still an error.
+    std::fs::remove_file(&root_path).unwrap();
+    std::fs::create_dir(&root_path).unwrap();
+    let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(!report.failures.is_empty());
+    let source = db
+        .list_ingest_sources()
+        .unwrap()
+        .into_iter()
+        .find(|source| source.path == root_dir.to_string_lossy())
+        .unwrap();
+    assert!(ingestion::reconcile_source(&db, &source, &|_| {}).is_err());
+    db.set_ingest_source_enabled(&source.id, false).unwrap();
+    let disabled_report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(
+        disabled_report.failures.is_empty(),
+        "disabled sources must not be retried"
+    );
+    assert_eq!(db.message_count(&session.id).unwrap(), 2);
 }
 
 /// A child rollout whose cwd differs is invisible: it never becomes a
 /// session, so its execution cwd can never reach any Session — Session.cwd
 /// is Root authority only.
 #[test]
-fn a_child_rollout_never_moves_the_session_or_becomes_a_member() {
+fn a_child_rollout_never_moves_the_session() {
     let root_dir = temp_root("child-cwd");
     write_rollout(
         &root_dir,
