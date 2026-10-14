@@ -11,7 +11,7 @@ import { timeAgo, useRefreshSignal } from "../../components/common";
 import { EVT_SYNCED, type Route } from "../../app/routes";
 import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal } from "./ProjectLifecycleActions";
 import type { ProjectCardData, ProjectKind } from "../../types";
-import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
+import { projectKindLabels, isDirectoryGroupProject } from "./projectKind";
 
 /**
  * Projects Board：Projects 是一等浏览页面——物理工作空间，由工作目录自动派生。
@@ -317,8 +317,6 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 <div className="project-list-title" title={c.name}>
                   <Icon name="project" />
                   <span>{c.name}</span>
-                  <span className="badge">{projectKindLabels[c.kind]}</span>
-                  {c.purpose && <span className="badge accent">{projectPurposeLabels[c.purpose]}</span>}
                   {c.missing_path_count > 0 && (
                     <span className="badge warn">{c.missing_path_count} 个目录缺失</span>
                   )}
@@ -391,13 +389,11 @@ function ProjectCard({ card, navigate, onChanged }: {
           <Icon name="project" />
           <span className="truncate">{card.name}</span>
         </div>
-        <div className="ws-card-side">
-          <span className="badge">{projectKindLabels[card.kind]}</span>
-          {card.purpose && <span className="badge accent">{projectPurposeLabels[card.purpose]}</span>}
-          {card.missing_path_count > 0 && (
+        {card.missing_path_count > 0 && (
+          <div className="ws-card-side">
             <span className="badge warn">{card.missing_path_count} 个目录缺失</span>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       <div className="ws-card-body">

@@ -696,3 +696,29 @@ fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
         "a replaced conversation raises the generation"
     );
 }
+
+/// When a conversation's earliest messages are non-final (e.g. intermediate assistant outputs),
+/// reaching the top of the conversation skeleton reports remaining = 0 and next_before_ordinal = None.
+#[test]
+fn conversation_starting_with_intermediate_message_reports_no_older_messages_at_top() {
+    let db = open_db("intermediate-start");
+    let (session, _) = support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "intermediate-start",
+        &[
+            support::parsed_message("m1", SessionMessageRole::Assistant, "思考或中间消息"),
+            support::parsed_message("m2", SessionMessageRole::Assistant, "最终回复"),
+        ],
+    );
+
+    let window = db.message_window(&session.id, None, 10).unwrap();
+    assert_eq!(window.messages.len(), 1);
+    assert_eq!(window.messages[0].message.content, "最终回复");
+    assert_eq!(window.messages[0].ordinal, 2);
+    assert_eq!(window.remaining, 0, "no older visible messages remain");
+    assert_eq!(
+        window.next_before_ordinal, None,
+        "cursor is none when no older messages remain"
+    );
+}

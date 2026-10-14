@@ -349,15 +349,20 @@ export default function SessionCards({
                 <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
               </h3>
             </div>
-            <div className="ws-card-side">
-              <span className="badge session-list-meta" title={agentDisplayLabel(s.agent)}>
-                {agentDisplayLabel(s.agent)}
-              </span>
-            </div>
+            {s.archived_at && (
+              <div className="ws-card-side">
+                <span className="badge warn">已归档</span>
+              </div>
+            )}
           </header>
 
           <div className="session-card-body">
             <div className="board-stats">
+              <span title="历史消息">
+                <Icon name="chatLines" />
+                {s.latest_message_seq ?? 0}<span>消息</span>
+                <span className="sr-only">{s.latest_message_seq ?? 0} 条消息</span>
+              </span>
               <span title={workstreamFull ? `跟踪任务: ${workstreamFull}` : "跟踪任务"}>
                 <Icon name="tasks" />
                 {s.tracked_workstream_ids.length}<span>任务</span>

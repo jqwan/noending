@@ -4,7 +4,7 @@ import Icon, { type IconName } from "./Icon";
 export interface CustomSelectOption {
   value: string;
   label: string;
-  icon?: IconName | string;
+  icon?: IconName | string | React.ReactNode;
   disabled?: boolean;
 }
 
@@ -148,7 +148,7 @@ export default function CustomSelect({
                 >
                   {opt.icon && (
                     <span className="custom-select-item-icon">
-                      <Icon name={opt.icon as IconName} />
+                      {typeof opt.icon === "string" ? <Icon name={opt.icon as IconName} /> : opt.icon}
                     </span>
                   )}
                   <span className="custom-select-item-label truncate">{opt.label}</span>

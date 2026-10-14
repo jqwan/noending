@@ -186,7 +186,7 @@ export default function SessionDetailView({
   const copyContext = async () => {
     if (!sessionCtx?.fields) return;
     const ok = await copyToClipboard(sessionCtx.fields.summary);
-    showToast(ok ? "已复制 Context" : "复制失败");
+    showToast(ok ? "已复制会话摘要" : "复制失败");
   };
 
   const title = sessionDisplayTitle(session.title);
@@ -218,8 +218,9 @@ export default function SessionDetailView({
     : null;
   /** 这条会话「属于」哪个项目：工作目录与 Session API 使用相同的项目派生链。 */
 
-  /** Conversation：只有 root 的 user/assistant prose。 */
+  /** Conversation：只有 root 的 user/assistant prose。仅展示最近 3 条消息。 */
   const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
+  const recentMessages = messages.slice(-3);
   const hasMessages = messages.length > 0 || detail.ingested_message_sequence > 0;
 
   /** 更新处理增量；重新生成即使没有增量也可从完整历史重建。归档不影响这两项操作。 */
@@ -262,6 +263,7 @@ export default function SessionDetailView({
               agent={session.agent}
               sourceKind={session.source_kind}
               archived={archived}
+              canResume={detail.can_resume}
               navigate={navigate}
             />
             <SessionHeaderActions
@@ -270,6 +272,7 @@ export default function SessionDetailView({
               sourceKind={session.source_kind}
               title={title}
               archived={archived}
+              cwdExists={workspacePath ? workspacePath.exists : (detail.session.cwd ? detail.can_resume : true)}
               onChanged={refresh}
               onPurge={() => setPurgeOpen(true)}
               onRestore={doRestore}
@@ -286,7 +289,7 @@ export default function SessionDetailView({
             <div className="row between" style={{ alignItems: "center" }}>
               <div className="detail-section-title">
                 <Icon name="spark" />
-                <span>Context</span>
+                <span>会话摘要</span>
               </div>
               <div className="row" style={{ gap: 8 }}>
                 <button
@@ -370,7 +373,7 @@ export default function SessionDetailView({
               )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {messages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
+              {recentMessages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
               {messages.length === 0 && (
                 <div className="empty">
                   还没有同步消息。
@@ -394,7 +397,7 @@ export default function SessionDetailView({
               <span>会话信息</span>
             </div>
             <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span style={{ fontWeight: 550 }}>{agentDisplayLabel(session.agent)}</span>
+              <span className="badge" title={agentDisplayLabel(session.agent)}>{agentDisplayLabel(session.agent)}</span>
               {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
               {archived && <span className="badge warn">已归档</span>}
             </div>
@@ -422,7 +425,7 @@ export default function SessionDetailView({
               <Field label="会话统计">
                 <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
                   <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
-                  <span>代理回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+                  <span>Agent 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
                 </span>
               </Field>
             </div>

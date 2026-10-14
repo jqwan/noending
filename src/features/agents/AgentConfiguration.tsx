@@ -94,36 +94,11 @@ export default function AgentConfiguration({
         <div className="agent-detail-main">
           {sourcesSection}
 
-          <section className="card agent-settings-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <h2>
-                <Icon name="chat" />
-                <span>会话 ({sessions.length})</span>
-              </h2>
-              {Boolean(entry?.terminal_cli && entry?.detected) && (
-                <button
-                  className="btn ghost icon-button"
-                  title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
-                  aria-label="新建会话"
-                  onClick={() => navigate({ view: "new-session", agent })}
-                >
-                  <Icon name="plus" />
-                </button>
-              )}
-            </div>
-
-            <SessionMiniList
-              sessions={sortedSessions}
-              emptyText="该代理下还没有会话。"
-              navigate={navigate}
-            />
-          </section>
-
           {terminals.length > 0 && (
             <section className="card agent-settings-section">
               <h2>
                 <Icon name="terminal" />
-                <span>终端会话绑定</span>
+                <span>终端会话</span>
               </h2>
               <div className="agent-terminal-list">
                 {terminals.map((t) => (
@@ -145,6 +120,31 @@ export default function AgentConfiguration({
               </div>
             </section>
           )}
+
+          <section className="card agent-settings-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2>
+                <Icon name="chat" />
+                <span>会话 ({sessions.length})</span>
+              </h2>
+              {Boolean(entry?.terminal_cli && entry?.detected) && (
+                <button
+                  className="btn ghost icon-button"
+                  title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                  aria-label="新建会话"
+                  onClick={() => navigate({ view: "new-session", agent })}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
+            </div>
+
+            <SessionMiniList
+              sessions={sortedSessions}
+              emptyText="该 Agent 下还没有会话。"
+              navigate={navigate}
+            />
+          </section>
         </div>
 
         <aside className="agent-detail-aside">
@@ -182,7 +182,7 @@ export default function AgentConfiguration({
                 )}
               </div>
             ) : (
-              <p className="muted">该代理不支持新建终端会话，可同步历史会话。</p>
+              <p className="muted">该 Agent 不支持新建终端会话，可同步历史会话。</p>
             )}
 
             {entry?.desktop_app && (

@@ -8,7 +8,7 @@ afterEach(cleanup);
 it("opens the existing primary pages", () => {
   const sections = [
     ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-    ["代理", "agents"], ["设置", "settings"],
+    ["Agent", "agents"], ["设置", "settings"],
   ] as const;
 
   for (const [label, view] of sections) {

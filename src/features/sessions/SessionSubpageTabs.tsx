@@ -9,7 +9,7 @@ import { preferredTerminal, rememberSessionPage, terminalDestination } from "./s
 import { useSessionTerminals } from "./useSessionTerminals";
 
 /** One titlebar navigation group for history, detail and all bound terminals. */
-export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, navigate }: {
+export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, canResume = true, navigate }: {
   sessionId: string | null;
   entry?: SessionEntry;
   terminalId?: string;
@@ -18,6 +18,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   agent?: Agent;
   sourceKind?: string;
   archived?: boolean;
+  canResume?: boolean;
   navigate: (r: Route) => void;
 }) {
   const { terminals, loading } = useSessionTerminals();
@@ -50,7 +51,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   const openTerminal = async () => {
     if (terminalId) return;
     if (selected) { navigate({ ...terminalDestination(selected), initialTitle: title ?? selected.session_title ?? undefined }); return; }
-    if (!sessionId || !agent || archived || launchPending.current || loading) return;
+    if (!sessionId || !agent || archived || !canResume || launchPending.current || loading) return;
     launchPending.current = true;
     setLaunching(true);
     try { await openSessionTerminal({ id: sessionId, title, agent, archived_at: archived ? "archived" : null }, peers, navigate); }
@@ -59,6 +60,9 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   const terminalLabel = terminalId || selected
     ? `终端 · ${live === undefined ? "正在连接" : live ? "运行中" : "已退出"}`
     : "在终端中继续";
+  const terminalTitle = !terminalId && !selected && !canResume
+    ? "工作目录不存在，无法继续会话"
+    : terminalLabel;
 
   return <div className="session-navigation" ref={root} onKeyDown={e => {
     if (!open || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
@@ -79,8 +83,8 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
         onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>
       {canTerminal && <>
         <button className={`${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
-          aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalLabel}
-          disabled={launching || !terminalId && !selected && (loading || archived || !sessionId)}
+          aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalTitle}
+          disabled={launching || !terminalId && !selected && (loading || archived || !sessionId || !canResume)}
           onClick={() => void openTerminal()}><Icon name="terminal" /></button>
         {peers.length > 1 && <button className="terminal-dropdown" aria-label="切换终端" title="切换终端"
           aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(value => !value)}><Icon name="chevronDown" /></button>}

@@ -147,13 +147,13 @@ describe("AgentsView", () => {
   it("renders synchronization counts, configured source counts and both Antigravity formats", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
-    expect(await screen.findByText("代理")).toBeTruthy();
+    expect(await screen.findByText("Agent")).toBeTruthy();
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
     expect(await screen.findByText(/同步发现 5 条记录 · 写入 12 条新消息/)).toBeTruthy();
 
     expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
 
-    expect(screen.getByRole("button", { name: "查看 Antigravity 代理详情" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看 Antigravity Agent 详情" })).toBeTruthy();
     expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
   });
 
@@ -265,7 +265,7 @@ describe("AgentsView", () => {
     await waitFor(() => expect(api.reconcileSource).toHaveBeenCalledWith("src-1"));
 
     // Navigate to details
-    fireEvent.click(await screen.findByRole("button", { name: "查看 Antigravity 代理详情" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看 Antigravity Agent 详情" }));
     expect(navigate).toHaveBeenCalledWith({ view: "agents", agent: "antigravity" });
     view.unmount();
 
@@ -312,7 +312,7 @@ describe("AgentsView", () => {
     render(<AgentsView navigate={navigate} initialAgent="codex" />);
     expect(await screen.findByText("模型与思考等级")).toBeTruthy();
     expect(screen.getByText("会话 (0)")).toBeTruthy();
-    expect(screen.getByText("该代理下还没有会话。")).toBeTruthy();
+    expect(screen.getByText("该 Agent 下还没有会话。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", agent: "codex" });
 
@@ -347,7 +347,7 @@ describe("AgentsView", () => {
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="dsh" />);
-    await screen.findByText("该代理不支持新建终端会话，可同步历史会话。");
+    await screen.findByText("该 Agent 不支持新建终端会话，可同步历史会话。");
     expect(screen.queryByText("模型与思考等级")).toBeNull();
     expect(screen.queryByLabelText("用于新建会话")).toBeNull();
     expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();

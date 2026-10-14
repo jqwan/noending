@@ -75,8 +75,10 @@ export default function NewSessionView({
   const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const projectRef = useRef<HTMLDivElement>(null);
   const dirRef = useRef<HTMLDivElement>(null);
+  const agentRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
@@ -91,7 +93,7 @@ export default function NewSessionView({
   }, []);
 
   useEffect(() => {
-    if (!projectMenuOpen && !dirMenuOpen) return;
+    if (!projectMenuOpen && !dirMenuOpen && !agentMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (projectMenuOpen && !projectRef.current?.contains(e.target as Node)) {
         setProjectMenuOpen(false);
@@ -99,11 +101,15 @@ export default function NewSessionView({
       if (dirMenuOpen && !dirRef.current?.contains(e.target as Node)) {
         setDirMenuOpen(false);
       }
+      if (agentMenuOpen && !agentRef.current?.contains(e.target as Node)) {
+        setAgentMenuOpen(false);
+      }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setProjectMenuOpen(false);
         setDirMenuOpen(false);
+        setAgentMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", handleClickOutside);
@@ -112,7 +118,7 @@ export default function NewSessionView({
       window.removeEventListener("mousedown", handleClickOutside);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [projectMenuOpen, dirMenuOpen]);
+  }, [projectMenuOpen, dirMenuOpen, agentMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -462,6 +468,7 @@ export default function NewSessionView({
                 if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
                 setProjectMenuOpen((v) => !v);
                 setDirMenuOpen(false);
+                setAgentMenuOpen(false);
               }}
               onKeyDown={(e) => {
                 if (busy) return;
@@ -470,6 +477,7 @@ export default function NewSessionView({
                     e.preventDefault();
                     setProjectMenuOpen(true);
                     setDirMenuOpen(false);
+                    setAgentMenuOpen(false);
                   }
                 }
               }}
@@ -556,6 +564,7 @@ export default function NewSessionView({
                     if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
                     setDirMenuOpen((v) => !v);
                     setProjectMenuOpen(false);
+                    setAgentMenuOpen(false);
                   }}
                   onKeyDown={(e) => {
                     if (busy || !canSwitchDir) return;
@@ -564,6 +573,7 @@ export default function NewSessionView({
                         e.preventDefault();
                         setDirMenuOpen(true);
                         setProjectMenuOpen(false);
+                        setAgentMenuOpen(false);
                       }
                     }
                   }}
@@ -628,7 +638,7 @@ export default function NewSessionView({
             })()}
           </div>
 
-          {!agentAvailable && <p role="alert">没有可用的新建会话代理，请确保本地已安装支持的 Agent CLI。</p>}
+          {!agentAvailable && <p role="alert">没有可用的新建会话 Agent，请确保本地已安装支持的 Agent CLI。</p>}
           <div className="new-session-composer" aria-busy={busy}>
             <textarea
               autoFocus
@@ -647,7 +657,34 @@ export default function NewSessionView({
             />
             <div className="new-session-composer-footer">
               <div className="new-session-composer-footer-left">
-                <label className="new-session-picker new-session-agent">
+                <div
+                  className={`new-session-picker new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
+                  ref={agentRef}
+                  onClick={(e) => {
+                    if (busy) return;
+                    if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                    setAgentMenuOpen((v) => !v);
+                    setProjectMenuOpen(false);
+                    setDirMenuOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (busy) return;
+                    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                      if (!agentMenuOpen) {
+                        e.preventDefault();
+                        setAgentMenuOpen(true);
+                        setProjectMenuOpen(false);
+                        setDirMenuOpen(false);
+                      }
+                    }
+                  }}
+                  tabIndex={busy ? -1 : 0}
+                  role="button"
+                  aria-haspopup="menu"
+                  aria-expanded={agentMenuOpen}
+                  aria-label={`Agent：${agentLabel}`}
+                  title={agentLabel}
+                >
                   <AgentIcon agent={selectedAgent} size={16} />
                   <span className="new-session-picker-label">{agentLabel}</span>
                   <Icon name="chevronDown" className="new-session-chevron" />
@@ -657,6 +694,7 @@ export default function NewSessionView({
                     value={selectedAgent}
                     onChange={(e) => handleAgentChange(e.target.value as Agent)}
                     disabled={busy}
+                    tabIndex={-1}
                   >
                     {cliAgents.map((a) => (
                       <option key={a} value={a}>
@@ -665,7 +703,41 @@ export default function NewSessionView({
                       </option>
                     ))}
                   </select>
-                </label>
+
+                  {agentMenuOpen && (
+                    <div className="new-session-dropdown-menu dropup" role="menu" aria-label="Agent 列表">
+                      <div className="new-session-menu-list">
+                        {cliAgents.map((a) => {
+                          const isSelected = a === selectedAgent;
+                          const notDetected = agentStatus && !agentStatus[a]?.detected;
+                          return (
+                            <button
+                              key={a}
+                              type="button"
+                              className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                              onClick={() => {
+                                handleAgentChange(a);
+                                setAgentMenuOpen(false);
+                              }}
+                              title={AGENT_LABELS[a]}
+                            >
+                              <span className="menu-item-icon">
+                                <AgentIcon agent={a} size={16} />
+                              </span>
+                              <span className="menu-item-label">
+                                {AGENT_LABELS[a]}
+                                {notDetected && <span className="menu-item-extra muted"> (未检测到 TUI)</span>}
+                              </span>
+                              {isSelected && (
+                                <span className="menu-item-check"><Icon name="check" /></span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="new-session-composer-footer-right">
                 <RuntimePopover

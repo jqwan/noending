@@ -32,7 +32,7 @@ export const SIDEBAR_GROUP_OPTIONS: Array<{
   icon: "tasks" | "project" | "bot" | "chat";
 }> = [
   { key: "project", label: "项目", fullLabel: "按项目归类", icon: "project" },
-  { key: "agent", label: "代理", fullLabel: "按代理归类", icon: "bot" },
+  { key: "agent", label: "Agent", fullLabel: "按 Agent 归类", icon: "bot" },
   { key: "none", label: "会话", fullLabel: "不分组（全部会话）", icon: "chat" },
 ];
 
@@ -294,7 +294,7 @@ export function groupSidebarSessions(
         groupTitle = agentKey;
       } else {
         groupId = "__unknown_agent__";
-        groupTitle = "未知代理";
+        groupTitle = "未知 Agent";
       }
     }
 
@@ -319,7 +319,7 @@ export function groupSidebarSessions(
       : 0;
   }
 
-  // 2. 项目/任务 也是按创建/发现时间排序，代理按是否可终端继续和名称进行排序；无任务/无项目固定沉底
+  // 2. 项目/任务 也是按创建/发现时间排序，Agent 按是否可终端继续和名称进行排序；无任务/无项目固定沉底
   const groupsList = Array.from(groupsMap.values());
 
   if (groupBy === "project") {

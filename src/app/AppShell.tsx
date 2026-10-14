@@ -263,6 +263,16 @@ export default function AppShell() {
               <path d="M7 4v10" />
             </svg>
           </button>
+          {sidebarCollapsed && (
+            <button
+              className="history-button"
+              aria-label="新建会话"
+              title="新建会话"
+              onClick={() => navigate({ view: "new-session" })}
+            >
+              <Icon name="chatPlus" />
+            </button>
+          )}
         </div>
         <div className="titlebar-divider" aria-hidden="true" />
       </header>

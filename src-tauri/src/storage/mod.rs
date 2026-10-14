@@ -1720,21 +1720,23 @@ fn message_window_from(
     session_id: &str,
     rows: Vec<(i64, SessionMessage)>,
 ) -> Result<MessageWindow> {
-    let next_before_ordinal = rows
-        .first()
-        .map(|(ordinal, _)| ordinal - 1)
-        .filter(|cursor| *cursor > 0);
-    let remaining = match next_before_ordinal {
+    let first_ordinal = rows.first().map(|(ordinal, _)| *ordinal);
+    let remaining = match first_ordinal {
         None => 0,
-        Some(before) => {
+        Some(first) => {
             let mut st = conn.prepare(
                 "SELECT COUNT(*) FROM session_message_projection p
                  JOIN session_messages m ON m.id = p.session_message_id
                  WHERE p.session_id = ?1 AND p.ordinal < ?2
                    AND (m.role = 'user' OR m.turn_final = 1)",
             )?;
-            st.query_row(params![session_id, before], |r| r.get::<_, i64>(0))?
+            st.query_row(params![session_id, first], |r| r.get::<_, i64>(0))?
         }
+    };
+    let next_before_ordinal = if remaining > 0 {
+        first_ordinal.map(|o| o - 1).filter(|cursor| *cursor > 0)
+    } else {
+        None
     };
     let turns = turn_summaries_conn(conn, session_id, &rows)?;
     Ok(MessageWindow {

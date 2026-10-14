@@ -260,7 +260,7 @@ impl SessionLauncher {
         runtime_override: Option<&AgentRuntimeOverrides>,
     ) -> Result<PreparedLaunch> {
         if !crate::agent_runtime::store::launch_enabled(db, agent)? {
-            return Err(other("该 Agent 已关闭用于新建会话，请在代理设置中启用"));
+            return Err(other("该 Agent 已关闭用于新建会话，请在 Agent 设置中启用"));
         }
         let mut initial_workstream_ids = initial_workstream_ids.to_vec();
         initial_workstream_ids.sort();
@@ -307,10 +307,9 @@ impl SessionLauncher {
     /// INVARIANT: Zero premature side effects. Does NOT change task tracking and
     /// does NOT write any file.
     ///
-    /// The Session's own cwd wins while it is a real directory; when it is gone
-    /// the launch falls back to
-    /// the default workspace, and the fallback is recorded in
-    /// `cwd_resolution` instead of being absorbed.
+    /// The Session's own cwd wins while it is a real directory; when it is gone,
+    /// resume is refused with an explicit error rather than falling back to an
+    /// unrelated directory.
     pub fn prepare_resume_in(
         &self,
         db: &Db,
@@ -340,6 +339,13 @@ impl SessionLauncher {
                 return Err(other(
                     "无法确认源会话当前可用（可能无权限或源不可读），已拒绝继续",
                 ));
+            }
+        }
+        if let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+            if !is_usable_directory(cwd) {
+                return Err(other(format!(
+                    "原工作目录不存在或当前不可用（{cwd}），无法继续该会话"
+                )));
             }
         }
 
@@ -862,7 +868,7 @@ pub fn expand_tilde(p: &str) -> String {
 /// macOS prints a hint and cds to `$HOME` instead, and `$HOME` is the one
 /// place NoEnding refuses to treat as a workspace. So an unusable tier is
 /// *skipped and reported*, not launched into.
-fn is_usable_directory(path: &str) -> bool {
+pub fn is_usable_directory(path: &str) -> bool {
     !path.trim().is_empty() && std::path::Path::new(path).is_dir()
 }
 
@@ -913,9 +919,11 @@ pub fn resolve_new_cwd(
     })
 }
 
-/// Resume uses the Session's own directory when usable, otherwise NoEnding's
-/// default workspace. A fallback is reported to the user. Task paths do not
-/// override the Session's directory, regardless of their display order.
+/// Resume uses the Session's own directory when usable. If the Session has a
+/// recorded directory that is no longer usable, resume is refused with an
+/// explicit error rather than falling back. Sessions with no recorded directory
+/// fall back to NoEnding's default workspace. Task paths do not override the
+/// Session's directory, regardless of their display order.
 pub fn resolve_resume_cwd(
     db: &Db,
     session_id: &str,
@@ -929,7 +937,7 @@ pub fn resolve_resume_cwd(
             ..Default::default()
         });
     };
-    if let Some(cwd) = session.cwd.as_deref() {
+    if let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) {
         if is_usable_directory(cwd) {
             return Ok(CwdResolution {
                 source: CwdSource::SessionCwd,
@@ -937,27 +945,16 @@ pub fn resolve_resume_cwd(
                 ..Default::default()
             });
         }
+        return Err(other(format!(
+            "原工作目录不存在或当前不可用（{cwd}），无法继续该会话"
+        )));
     }
-    let lost = session
-        .cwd
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-        .unwrap_or_else(|| "(未记录)".into());
-    if let Some(mut resolution) = default_workspace_resolution(workspace)? {
-        resolution.fallback = true;
-        resolution.note = Some(format!(
-            "原 Session 的工作目录 {} 当前不可用，改用 NoEnding 默认工作目录",
-            lost
-        ));
+    if let Some(resolution) = default_workspace_resolution(workspace)? {
         return Ok(resolution);
     }
     Ok(CwdResolution {
         source: CwdSource::Unresolved,
-        fallback: true,
-        note: Some(format!(
-            "原 Session 的工作目录 {} 当前不可用，且没有任何可用的替代目录",
-            lost
-        )),
+        note: Some("没有可解析的工作目录，Agent 将在终端默认目录启动".into()),
         ..Default::default()
     })
 }

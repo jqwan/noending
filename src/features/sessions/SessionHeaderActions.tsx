@@ -7,15 +7,15 @@ import { capsOf } from "./sessionFormats";
 import { continueSessionDesktopWithToast, desktopContinueState, useAgentStatus } from "./continueDesktop";
 import type { Agent, AgentStatusEntry } from "../../types";
 
-export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, agentStatus, className = "btn ghost icon-button", label = "在桌面应用中继续" }: {
-  sessionId: string; agent: Agent; sourceKind?: string; archived: boolean;
+export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, cwdExists, agentStatus, className = "btn ghost icon-button", label = "在桌面应用中继续" }: {
+  sessionId: string; agent: Agent; sourceKind?: string; archived: boolean; cwdExists?: boolean;
   agentStatus?: Record<string, AgentStatusEntry> | null; className?: string; label?: string;
 }) {
   const localStatus = useAgentStatus(agentStatus === undefined);
   const status = agentStatus === undefined ? localStatus : agentStatus;
   const [busy, setBusy] = useState(false);
   if (!capsOf(agent, sourceKind).desktop) return null;
-  const availability = desktopContinueState({ agent, source_kind: sourceKind, archived_at: archived ? "archived" : null }, status?.[agent]);
+  const availability = desktopContinueState({ agent, source_kind: sourceKind, archived_at: archived ? "archived" : null, cwd_exists: cwdExists }, status?.[agent]);
   return <button className={className} aria-label={label} title={availability.title}
     disabled={busy || availability.disabled} onClick={(e) => {
       e.stopPropagation();
@@ -26,9 +26,9 @@ export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, 
 }
 
 /** Record/detail actions. Terminal navigation lives in the shared titlebar switcher. */
-export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, onChanged, onPurge, onRestore }: {
+export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, cwdExists, onChanged, onPurge, onRestore }: {
   sessionId: string; agent: Agent; sourceKind: string | undefined; title: string;
-  archived: boolean; onChanged: () => void;
+  archived: boolean; cwdExists?: boolean; onChanged: () => void;
   onPurge?: () => void; onRestore?: () => void;
 }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
@@ -65,7 +65,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
     }
   };
   return <>
-    <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} />
+    <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} cwdExists={cwdExists} />
     <button className="btn ghost icon-button" aria-label="增量同步" title="同步最新对话" disabled={syncing}
       onClick={() => void handleSync()}><Icon name="refresh" /></button>
     {!archived ? (

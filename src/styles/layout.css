@@ -13,6 +13,8 @@
   height: 100%;
 }
 .app.mac-titlebar { --titlebar-gutter: 211px; } /* 87 + 28*4 + 4*3 */
+.app.sidebar-collapsed { --titlebar-gutter: 168px; } /* 12 + 28*5 + 4*4 */
+.app.mac-titlebar.sidebar-collapsed { --titlebar-gutter: 243px; } /* 87 + 28*5 + 4*4 */
 .app-titlebar { position: absolute; inset: 0 0 auto; height: var(--titlebar-height); display: flex; align-items: center; padding-left: 12px; }
 .mac-titlebar .app-titlebar { padding-left: 87px; }
 /* 窗口拖动只有一条路：带 data-tauri-drag-region 的元素（tauri 注入的 scripts/drag.js

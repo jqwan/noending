@@ -485,6 +485,13 @@ pub fn continue_session_desktop(
         if session.is_archived() {
             return Err(other("会话已在已归档，无法继续；请先恢复会话"));
         }
+        if let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+            if !crate::launcher::is_usable_directory(cwd) {
+                return Err(other(format!(
+                    "原工作目录不存在或当前不可用（{cwd}），无法继续该会话"
+                )));
+            }
+        }
         Ok(crate::adapters::adapter_for(session.agent).desktop_resume_route(&session))
     })?;
     match route {

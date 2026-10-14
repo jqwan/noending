@@ -107,7 +107,7 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
   };
 }
 
-function switchGroupBy(name: "按项目归类" | "按项目归类" | "按代理归类" | "不分组（全部会话）") {
+function switchGroupBy(name: "按项目归类" | "按 Agent 归类" | "不分组（全部会话）") {
   const trigger = screen.getByRole("button", { name: /会话归类/ });
   fireEvent.click(trigger);
   const item = screen.getByRole("menuitemradio", { name });
@@ -254,7 +254,7 @@ describe("Sidebar 最近活动", () => {
     });
     const desktopOnlySession = session({
       id: "s-desktop",
-      title: "桌面代理会话",
+      title: "桌面 Agent 会话",
       agent: "qoder",
       last_conversation_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
     });
@@ -274,7 +274,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
     expect(screen.getByText("较旧会话")).toBeTruthy();
     expect(screen.getByText("已归档会话")).toBeTruthy();
-    expect(screen.getByText("桌面代理会话")).toBeTruthy();
+    expect(screen.getByText("桌面 Agent 会话")).toBeTruthy();
 
     // 3. Open filter menu
     const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
@@ -297,7 +297,7 @@ describe("Sidebar 最近活动", () => {
     const filterCanContinueBtn = screen.getByRole("menuitemcheckbox", { name: "可终端继续" });
     fireEvent.click(filterCanContinueBtn);
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
-    expect(screen.queryByText("桌面代理会话")).toBeNull();
+    expect(screen.queryByText("桌面 Agent 会话")).toBeNull();
   });
 
   it("exempts sessions with started terminals from sidebar filters", async () => {
@@ -478,7 +478,7 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    switchGroupBy("按代理归类");
+    switchGroupBy("按 Agent 归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Codex/ })).toBeTruthy();
@@ -525,7 +525,7 @@ describe("Sidebar 最近活动", () => {
     const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
     fireEvent.click(filterRecentBtn);
 
-    switchGroupBy("按代理归类");
+    switchGroupBy("按 Agent 归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByText("近5天有新消息的会话")).toBeTruthy();
@@ -574,7 +574,7 @@ describe("Sidebar 最近活动", () => {
     ]);
 
     renderSidebar();
-    switchGroupBy("按代理归类");
+    switchGroupBy("按 Agent 归类");
 
     await screen.findByRole("button", { name: /Claude Code/ });
     const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
@@ -730,7 +730,7 @@ describe("Sidebar 最近活动", () => {
     expect(groupTrigger.getAttribute("aria-expanded")).toBe("true");
 
     const projectOpt = screen.getByRole("menuitemradio", { name: "按项目归类" });
-    const agentOpt = screen.getByRole("menuitemradio", { name: "按代理归类" });
+    const agentOpt = screen.getByRole("menuitemradio", { name: "按 Agent 归类" });
     const noneOpt = screen.getByRole("menuitemradio", { name: "不分组（全部会话）" });
     expect(projectOpt.getAttribute("aria-checked")).toBe("true");
     expect(agentOpt.getAttribute("aria-checked")).toBe("false");
@@ -1044,7 +1044,7 @@ it("restores sidebar grouping, filters, sorting and display preferences after a 
   ]);
   renderSidebar();
   await screen.findByText("归档内容");
-  switchGroupBy("按代理归类");
+  switchGroupBy("按 Agent 归类");
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
   fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "未归档" }));
   fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
@@ -1055,7 +1055,7 @@ it("restores sidebar grouping, filters, sorting and display preferences after a 
   renderSidebar();
   await screen.findByText("未归档内容");
   expect(screen.queryByText("归档内容")).toBeNull();
-  screen.getByRole("button", { name: "会话归类：按代理归类" });
+  screen.getByRole("button", { name: "会话归类：按 Agent 归类" });
   expect(screen.queryByRole("menu")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
   expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");

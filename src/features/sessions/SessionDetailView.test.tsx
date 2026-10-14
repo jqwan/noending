@@ -167,7 +167,7 @@ it("renders session message stats and tracked tasks in aside", async () => {
 
   expect(screen.getByText("会话统计")).toBeTruthy();
   expect(screen.getByText("用户消息 5")).toBeTruthy();
-  expect(screen.getByText("代理回复 8")).toBeTruthy();
+  expect(screen.getByText("Agent 回复 8")).toBeTruthy();
   expect(screen.getByText("跟踪任务 (1)")).toBeTruthy();
   expect(screen.getByText("测试任务")).toBeTruthy();
   expect(screen.queryByText("任务描述")).toBeNull();
@@ -515,4 +515,31 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
   await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
   expect(screen.getByRole("heading").textContent).toBe("稳定标题");
+});
+
+it("blocks continue when working directory does not exist", async () => {
+  const missingDirSession = session("missing-dir", { cwd: "/deleted/path" });
+  const d = detail(missingDirSession, {
+    can_resume: false,
+    workspace_path: {
+      id: "wp1",
+      canonical_path: "/deleted/path",
+      exists: false,
+      project_id: "p1",
+      project_name: "Deleted Project",
+    },
+  });
+  await renderDetail(d);
+
+  const desktopBtn = screen.getByRole("button", { name: "在桌面应用中继续" }) as HTMLButtonElement;
+  expect(desktopBtn.disabled).toBe(true);
+  expect(desktopBtn.title).toBe("工作目录不存在，无法继续会话");
+
+  const terminalBtn = screen.getByRole("button", { name: "在终端中继续" }) as HTMLButtonElement;
+  expect(terminalBtn.disabled).toBe(true);
+  expect(terminalBtn.title).toBe("工作目录不存在，无法继续会话");
+
+  fireEvent.click(terminalBtn);
+  expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+  expect(api.continueSessionDesktop).not.toHaveBeenCalled();
 });

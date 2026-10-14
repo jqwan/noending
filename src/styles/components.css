@@ -139,7 +139,9 @@
 .new-session-context .new-session-picker.open {
   background: var(--bg-active);
 }
-.new-session-context .new-session-dropdown-menu {
+.new-session-context .new-session-dropdown-menu,
+.new-session-agent .new-session-dropdown-menu,
+.new-session-dropdown-menu.dropup {
   top: auto;
   bottom: calc(100% + 8px);
 }
@@ -310,10 +312,14 @@
   width: 14px;
   height: 14px;
   margin-left: auto;
-  color: var(--text-primary);
+  color: var(--accent);
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.new-session-menu-item .menu-item-extra {
+  margin-left: 6px;
+  font-size: 11px;
 }
 .new-session-menu-divider {
   height: 1px;
@@ -2181,8 +2187,11 @@ button.icon-button.small .ui-icon {
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout aside .list-row { flex-wrap: wrap; }
 .project-detail-layout aside .grow { flex-basis: 100%; }
-.project-detail-layout aside .project-sessions-section .list-row { flex-wrap: nowrap; }
-.project-detail-layout aside .project-sessions-section .grow { flex: 1 1 auto; min-width: 0; flex-basis: auto; }
+.project-detail-layout aside .session-tracked-task-row,
+.task-detail-aside .list-row { flex-wrap: nowrap; }
+.project-detail-layout aside .session-tracked-task-row .grow,
+.task-detail-aside .list-row .grow { flex: 1 1 auto; min-width: 0; flex-basis: auto; }
+.task-detail-aside .side { flex-wrap: nowrap; }
 @media (max-width: 1100px) {
   .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
@@ -2546,7 +2555,7 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
 /* 图标按钮的激活态：中间回复隐藏开关等 toggle 用。 */
 .btn.ghost.icon-button.on { color: var(--text-primary); background: var(--bg-active); }
 
-/* ---------- Agents Page (代理面板优化) ---------- */
+/* ---------- Agents Page (Agent 面板优化) ---------- */
 .agents-page {
   width: 100%;
 }

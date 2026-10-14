@@ -132,7 +132,7 @@ it("restores the last session page and parameters across history navigation", ()
 it("remembers a background launch result without changing the current section", () => {
   render(<AppShell />);
   const finishLaunch = sessionNavigation.navigate!;
-  fireEvent.click(screen.getByRole("button", { name: "代理" }));
+  fireEvent.click(screen.getByRole("button", { name: "Agent" }));
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
@@ -159,12 +159,18 @@ it("remembers keyboard resizing, clamps width, resets on double click, and hides
   fireEvent.doubleClick(restored);
   expect(localStorage.getItem("noending.sidebarWidth")).toBe("248");
 
-  // Hides resize handle while collapsed
+  // Shows new session button in titlebar and hides resize handle while collapsed
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
   expect(screen.queryByRole("separator")).toBeNull();
   expect(localStorage.getItem("noending.sidebarCollapsed")).toBe("true");
+  const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
+  expect(newSessionBtn).toBeTruthy();
+  fireEvent.click(newSessionBtn);
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
   expect(screen.getByRole("separator")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
 });
 
 it("queues ingestion only after the window returns from the background", async () => {

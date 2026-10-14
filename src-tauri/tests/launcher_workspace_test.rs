@@ -301,48 +301,48 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     assert!(result.command_line.ends_with(&moved));
 }
 
-/// "resume fallback visible": a Session whose directory is gone no longer
-/// resolves to "no cwd, land in $HOME" — it falls back through, and the
-/// payload says which tier and why.
+/// "resume with missing directory refused": a Session whose recorded directory
+/// is gone is refused with an explicit error, rather than falling back to an
+/// unrelated default workspace.
 #[test]
-fn a_resume_fallback_is_recorded_in_the_prepared_payload() {
-    let db = open_db("resume-fallback");
+fn a_resume_with_missing_working_directory_is_refused() {
+    let db = open_db("resume-missing-dir");
     seed_installation(&db, Agent::Codex);
-    let lost = missing_dir("resume-fallback", "deleted-repo");
-    let primary = real_dir("resume-fallback", "ws-primary");
+    let lost = missing_dir("resume-missing-dir", "deleted-repo");
+    let primary = real_dir("resume-missing-dir", "ws-primary");
     let s = session_row(&db, Some(&lost), None);
-    let w = ws_with_paths(&db, "carries on", &[primary.clone()]);
+    let w = ws_with_paths(&db, "carries on", &[primary]);
     support::track(&db, &s.id, Some(&w)).unwrap();
 
     let workspace = LaunchWorkspace {
-        default_workspace: Some(real_dir("resume-fallback", "default")),
+        default_workspace: Some(real_dir("resume-missing-dir", "default")),
     };
-    let launcher = launcher_in("resume-fallback");
+    let launcher = launcher_in("resume-missing-dir");
+    let err = launcher
+        .prepare_resume_in(&db, &s.id, &workspace)
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("工作目录不存在") || msg.contains("不可用"),
+        "the error must explain that the working directory is unusable, got: {msg}"
+    );
+    assert!(msg.contains(&lost));
+}
+
+/// A session with no recorded cwd at all uses NoEnding's default workspace.
+#[test]
+fn a_resume_with_no_recorded_cwd_uses_default_workspace() {
+    let db = open_db("resume-no-cwd");
+    seed_installation(&db, Agent::Codex);
+    let s = session_row(&db, None, None);
+    let default_dir = real_dir("resume-no-cwd", "default");
+    let workspace = LaunchWorkspace {
+        default_workspace: Some(default_dir.clone()),
+    };
+    let launcher = launcher_in("resume-no-cwd");
     let prepared = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
-
-    assert_eq!(
-        prepared.cwd.as_deref(),
-        workspace.default_workspace.as_deref()
-    );
-    let resolution = &prepared.cwd_resolution;
-    assert_eq!(resolution.source, CwdSource::DefaultWorkspace);
-    assert!(
-        resolution.fallback,
-        "a resume that lost its directory is the case the UI must warn about"
-    );
-    let note = resolution.note.clone().unwrap_or_default();
-    assert!(
-        note.contains(&lost) || note.contains("不可用"),
-        "the note must name what happened, got: {note}"
-    );
-
-    // And the Agent really starts there — `prepared.cwd`, not a re-read value.
-    let result = launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-        .expect("a fallback is a legitimate launch");
-    assert!(result
-        .command_line
-        .ends_with(workspace.default_workspace.as_ref().unwrap()));
+    assert_eq!(prepared.cwd.as_deref(), Some(default_dir.as_str()));
+    assert_eq!(prepared.cwd_resolution.source, CwdSource::DefaultWorkspace);
 }
 
 /// "Session cwd/path change" is a stale input on the *identity* side as

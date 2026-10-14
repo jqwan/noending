@@ -180,6 +180,23 @@ it("opens on the newest page and counts the older messages left above it", async
   expect(document.querySelectorAll(".turn-toggle")).toHaveLength(0);
 });
 
+it("does not show load more messages button when remaining is 0 even if cursor is set", async () => {
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({
+    messages: [
+      message(2, "assistant", "首条最终回答"),
+    ],
+    total: 2,
+    tail_ordinal: 2,
+    remaining: 0,
+    next_before_ordinal: 1,
+  }));
+
+  await renderConversation();
+
+  await screen.findByText("首条最终回答");
+  expect(screen.queryByRole("button", { name: /加载更早的消息/ })).toBeNull();
+});
+
 it("collapses each turn's intermediates into a block that expands and collapses in place", async () => {
   // 一轮带 2 条中间回复（10:00:00 提问 → 10:03:04 最终回复 = 3 分 4 秒），
   // 另一轮没有中间回复：默认收起，展开就地插入提问与最终回复之间，收起即丢。

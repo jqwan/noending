@@ -344,13 +344,6 @@ export default function WorkstreamDetailView({
             )}
           </section>
 
-          <WorkstreamSessions
-            sessions={sessions}
-            navigate={navigate}
-            onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
-            allowActions={!archived}
-          />
-
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center" }}>
               <h2 className="detail-section-title">
@@ -382,6 +375,13 @@ export default function WorkstreamDetailView({
               创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
             </div>
           </section>
+
+          <WorkstreamSessions
+            sessions={sessions}
+            navigate={navigate}
+            onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
+            allowActions={!archived}
+          />
 
           <section className="card detail-section">
             <h2 className="detail-section-title">

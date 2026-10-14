@@ -360,6 +360,7 @@ export default function SessionConversationView({
 
   /** 滚动停稳之后再去取更早的一页（读者点按钮是明确动作，那个直接调 loadOlder）。 */
   const scheduleOlder = () => {
+    if (cursorRef.current === null || remaining <= 0) return;
     if (settleRef.current !== null) window.clearTimeout(settleRef.current);
     settleRef.current = window.setTimeout(() => {
       settleRef.current = null;
@@ -563,7 +564,7 @@ export default function SessionConversationView({
 
       <div className="conversation-body">
         <div className="conversation-scroll" ref={scrollRef} onScroll={onScroll}>
-          {cursor !== null && (
+          {cursor !== null && remaining > 0 && (
             <div className="conversation-more">
               <button className="btn small ghost" disabled={working} onClick={() => void loadOlder()}>
                 {working ? "正在加载…" : `加载更早的消息（还有 ${remaining} 条）`}

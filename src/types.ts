@@ -220,7 +220,7 @@ export interface SessionMessage {
   role: SessionMessageRole;
   content: string;
   ts: string | null;
-  /** 仅 Assistant 有意义：是否该轮的最终回复（下一条投影消息不再是代理回复）。 */
+  /** 仅 Assistant 有意义：是否该轮的最终回复（下一条投影消息不再是 Agent 回复）。 */
   turn_final: boolean;
   source_message_id: string | null;
   source_generation: number;
@@ -364,7 +364,7 @@ export interface SessionDetail {
   session: Session;
   /** Conversation：只含根源的 user/assistant 消息。 */
   messages: SessionMessage[];
-  /** 会话消息统计：用户消息与代理回复总数。 */
+  /** 会话消息统计：用户消息与 Agent 回复总数。 */
   message_stats?: SessionMessageStats;
   /** 会话显式跟踪的任务，包含已归档任务。 */
   tracked_workstreams: Workstream[];

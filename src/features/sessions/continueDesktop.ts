@@ -21,10 +21,11 @@ export function resolveSessionContinueMode(
 
 /** 「继续」按钮的可用性与说明。格式判别只需要 agent 与 source_kind。 */
 export function desktopContinueState(
-  session: { agent: Agent; source_kind?: string | null; archived_at?: string | null },
+  session: { agent: Agent; source_kind?: string | null; archived_at?: string | null; cwd_exists?: boolean },
   status: AgentStatusEntry | null | undefined,
 ): { disabled: boolean; title: string } {
   if (session.archived_at) return { disabled: true, title: "已归档的会话不能继续，请先取消归档" };
+  if (session.cwd_exists === false) return { disabled: true, title: "工作目录不存在，无法继续会话" };
   const caps = capsOf(session.agent, session.source_kind);
   const desktopAbsent = caps.desktop && status != null && !status.desktop_app_present;
   return {

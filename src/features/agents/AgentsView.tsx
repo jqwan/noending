@@ -415,7 +415,7 @@ export default function AgentsView({
               disabled={running || agentSources.length === 0}
               onClick={handleScanAll}
               aria-label="增量同步全部"
-              title="增量同步当前代理来源目录"
+              title="增量同步当前 Agent 来源目录"
             >
               <Icon name="refresh" className={running ? "spinning" : ""} />
             </button>
@@ -538,7 +538,7 @@ export default function AgentsView({
   return (
     <div className="main board-page agents-page" ref={scrollRef}>
       <PageHeader
-        title="代理"
+        title="Agent"
         actions={
           <button
             className="btn ghost icon-button"
@@ -565,7 +565,7 @@ export default function AgentsView({
 
         <div className="toolbar ws-controls">
           <div className="ws-controls-group">
-            <div className="agents-filter-pills" role="tablist" aria-label="代理分类筛选">
+            <div className="agents-filter-pills" role="tablist" aria-label="Agent 分类筛选">
               <button
                 type="button"
                 role="tab"
@@ -685,7 +685,7 @@ export default function AgentsView({
                 className={`agent-card ws-card full ${viewMode === "list" ? "agent-list-item" : ""}`}
                 role="button"
                 tabIndex={0}
-                aria-label={`查看 ${AGENT_LABELS[agent]} 代理详情`}
+                aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
                 onClick={() => navigate({ view: "agents", agent })}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {

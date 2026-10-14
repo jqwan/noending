@@ -133,16 +133,12 @@ describe("Projects Board", () => {
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "single_directory" } });
-    const normal = screen.getByRole("button", { name: /Normal Directory/ });
-    expect(normal.textContent).toContain("单目录项目");
-    expect(normal.textContent).toContain("助手");
+    expect(screen.getByText("Normal Directory")).toBeTruthy();
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
     fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory_group" } });
-    const chat = screen.getByRole("button", { name: /Renamed Chats/ });
-    expect(chat.textContent).toContain("目录组项目");
-    expect(chat.textContent).toContain("聊天");
+    expect(screen.getByText("Renamed Chats")).toBeTruthy();
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
   });

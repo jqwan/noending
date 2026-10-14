@@ -58,7 +58,7 @@ pub fn get_session_tracking(state: State<AppState>, session_id: String) -> Resul
 
 /// How many Conversation messages the detail page previews. The conversation
 /// itself is read through `get_session_messages`, never wholesale.
-const DETAIL_MESSAGE_PREVIEW: i64 = 5;
+const DETAIL_MESSAGE_PREVIEW: i64 = 3;
 
 /// Page size for the conversation reader: what one upward scroll asks for.
 const MESSAGE_PAGE_DEFAULT: i64 = 60;
@@ -151,7 +151,14 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .into_iter()
             .flatten()
             .collect();
-        let can_resume = !session.is_archived() && source_status == SourceAvailability::Present;
+        let cwd_usable = session
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map_or(true, crate::launcher::is_usable_directory);
+        let can_resume =
+            !session.is_archived() && source_status == SourceAvailability::Present && cwd_usable;
         let workspace_path = match session.workspace_path_id.as_deref() {
             Some(id) => db.get_workspace_path(id)?.map(|wp| {
                 Ok::<_, crate::error::AppError>(SessionWorkspacePath {
@@ -262,7 +269,7 @@ pub struct SessionMessageMark {
 /// an older page is fetched by passing the previous page's cursor back.
 /// `after_ordinal` reads the other direction — the messages NEWER than it —
 /// which is how a reader that jumped into the middle keeps going forward.
-/// 一页按「用户消息 + 每轮最终回复」计（骨架），代理的中间输出不占加载配额，
+/// 一页按「用户消息 + 每轮最终回复」计（骨架），Agent 的中间输出不占加载配额，
 /// 由每条最终回复的 `turn` 摘要标注成可展开的块。
 #[tauri::command]
 pub fn get_session_messages(
