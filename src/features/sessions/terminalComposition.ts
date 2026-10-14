@@ -10,11 +10,13 @@ export function connectWindowsComposition(term: Terminal, query: () => Promise<C
   const screen = element.querySelector<HTMLElement>(".xterm-screen")!;
   let disposed = false;
   let composing = false;
+  let generation = 0;
   let cached: Cursor | null = null;
   let pending: Promise<void> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastQuery = 0;
   const apply = () => {
+    delete element.dataset.nativeComposition;
     if (!composing || !cached || cached.cols !== term.cols || cached.rows !== term.rows) return;
     const rect = screen.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -23,34 +25,41 @@ export function connectWindowsComposition(term: Terminal, query: () => Promise<C
     element.dataset.nativeComposition = "true";
   };
   const refresh = () => {
-    if (disposed || !element.isConnected || document.activeElement !== textarea) return;
+    if (disposed || !composing || !element.isConnected || document.activeElement !== textarea) return;
     if (pending) return pending;
     lastQuery = performance.now();
-    pending = query().then(cursor => { if (!disposed) { cached = cursor; apply(); } })
-      .catch(error => console.warn("Terminal IME cursor query failed", error))
-      .finally(() => { pending = undefined; });
+    const current = generation;
+    pending = query().then(cursor => {
+      if (!disposed && current === generation) { cached = cursor; apply(); }
+    }).catch(error => {
+      if (current === generation) { cached = null; apply(); }
+      console.warn("Terminal IME cursor query failed", error);
+    }).finally(() => {
+      pending = undefined;
+      if (!disposed && composing && current !== generation) schedule();
+    });
     return pending;
   };
-  // Prefetch after quiet output; continuous output does not start a stream
-  // of helper processes. Cached background terminals do not query the OS.
+  // Native queries spawn a helper. Restrict them to active composition;
+  // ordinary Agent output must not launch helper processes.
   const schedule = () => {
     clearTimeout(timer);
+    if (!composing) return;
     timer = setTimeout(() => void refresh(), Math.max(30, 250 - (performance.now() - lastQuery)));
   };
-  const start = () => { composing = true; apply(); void refresh(); };
+  const start = () => { composing = true; generation++; cached = null; apply(); void refresh(); };
   const update = () => apply();
-  const end = () => { composing = false; delete element.dataset.nativeComposition; schedule(); };
+  const end = () => { composing = false; generation++; clearTimeout(timer); delete element.dataset.nativeComposition; };
   const output = term.onWriteParsed(schedule);
-  textarea.addEventListener("focus", schedule);
+  const resize = term.onResize(apply);
   textarea.addEventListener("compositionstart", start);
   textarea.addEventListener("compositionupdate", update);
   textarea.addEventListener("compositionend", end);
-  schedule();
   return () => {
     disposed = true;
     clearTimeout(timer);
     output.dispose();
-    textarea.removeEventListener("focus", schedule);
+    resize.dispose();
     textarea.removeEventListener("compositionstart", start);
     textarea.removeEventListener("compositionupdate", update);
     textarea.removeEventListener("compositionend", end);

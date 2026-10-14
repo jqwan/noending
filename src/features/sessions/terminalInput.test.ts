@@ -82,16 +82,13 @@ it("retains mouse modifiers without applying the TUI's acceleration a second tim
   expect(send.mock.calls[1]).toEqual(["\x1b[<80;3;3M".repeat(2)]);
 });
 
-it("does not change Agent prompt history with wheel in a Windows alternate screen lacking mouse reports", async () => {
+it("preserves Windows alternate-screen scrolling when an application has no mouse reports", async () => {
   await write("\x1b[?1049h");
   wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE });
-  expect(send).not.toHaveBeenCalled();
+  expect(send.mock.calls).toEqual([["\x1b[B".repeat(3)]]);
   await write("\x1b[?1h");
-  wheel(-1, { deltaMode: WheelEvent.DOM_DELTA_PAGE });
-  expect(send).not.toHaveBeenCalled();
-  expect(wheel(-20, { shiftKey: true }).defaultPrevented).toBe(true);
-  term.input("\x1b[A", true);
-  expect(send.mock.calls).toEqual([["\x1b[A"]]); // Actual keys still navigate.
+  wheel(-1, { deltaMode: WheelEvent.DOM_DELTA_LINE });
+  expect(send.mock.calls[1]).toEqual(["\x1bOA"]);
 });
 
 it("preserves the existing non-Windows alternate-screen fallback and acceleration", async () => {

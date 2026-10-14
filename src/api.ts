@@ -219,12 +219,14 @@ export const api = {
     invoke<LaunchResult>("launch_embedded_resume", { sessionId }),
   terminalForSession: (sessionId: string) =>
     invoke<import("./types").TerminalSummary | null>("terminal_for_session", { sessionId }),
-  terminalAttach: (terminalId: string) =>
-    invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId }),
+  terminalAttach: (terminalId: string, consumerId?: string) =>
+    invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId, consumerId }),
   terminalInput: (terminalId: string, data: string, binary = false) =>
     invoke<void>("terminal_input", { terminalId, data, binary }),
-  terminalAcknowledgeOutput: (terminalId: string, offset: number) =>
-    invoke<void>("terminal_acknowledge_output", { terminalId, offset }),
+  terminalAcknowledgeOutput: (terminalId: string, offset: number, consumerId: string) =>
+    invoke<void>("terminal_acknowledge_output", { terminalId, offset, consumerId }),
+  terminalReleaseOutput: (terminalId: string, consumerId: string) =>
+    invoke<void>("terminal_release_output", { terminalId, consumerId }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
   terminalInputCursor: (terminalId: string) =>

@@ -742,8 +742,12 @@ pub fn terminal_attach(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
+    consumer_id: Option<String>,
 ) -> Result<crate::terminal::TerminalSnapshot> {
-    let mut snapshot = terminal.attach(&terminal_id)?;
+    let mut snapshot = match consumer_id.as_deref() {
+        Some(consumer) => terminal.attach_output(&terminal_id, consumer)?,
+        None => terminal.attach(&terminal_id)?,
+    };
     if let Some(session_id) = &snapshot.summary.session_id {
         if let Some(session) = with_db(&state, |db| db.get_session(session_id))? {
             snapshot.summary.session_title = session.title;
@@ -771,8 +775,18 @@ pub fn terminal_acknowledge_output(
     state: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
     offset: u64,
+    consumer_id: String,
 ) {
-    state.acknowledge_output(&terminal_id, offset);
+    state.acknowledge_output(&terminal_id, &consumer_id, offset);
+}
+
+#[tauri::command]
+pub fn terminal_release_output(
+    state: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+    consumer_id: String,
+) {
+    state.release_output(&terminal_id, &consumer_id);
 }
 
 #[tauri::command]

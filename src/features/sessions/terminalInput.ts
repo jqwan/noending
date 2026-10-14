@@ -31,15 +31,6 @@ export function connectTerminalInput(term: Terminal, send: (data: string, binary
     const mode = `${mouse}/${alternate}`;
     if (mode !== previousMode) remainder = 0;
     previousMode = mode;
-    if (windows && alternate && !reportsWheel) {
-      // An alternate buffer has no terminal history. xterm's arrow-key
-      // fallback selects prompt history in Agents such as Pi; only a mouse
-      // protocol explicitly enabled by the application can scroll its TUI.
-      remainder = 0;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
     if (!reportsWheel && !alternate) {
       remainder = 0;
       return; // Let xterm scroll its own history normally.

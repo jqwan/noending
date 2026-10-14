@@ -19,7 +19,6 @@ import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
 import { connectWindowsClipboard, isWindowsTerminal } from "./terminalWindows";
-import { connectTerminalRenderer } from "./terminalRenderer";
 import { connectTerminalLayout } from "./terminalLayout";
 import { connectTerminalViewport } from "./terminalViewport";
 import { connectWindowsComposition } from "./terminalComposition";
@@ -163,11 +162,16 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     // 缓存实例已经持有常驻输出订阅，重挂时不能再订阅或重放。
     const cached = liveTerminals.get(terminalId);
     const stream = cached ? null : subscribeTerminalStream(terminalId,
-      isWindowsTerminal() ? offset => api.terminalAcknowledgeOutput(terminalId, offset) : undefined);
+      isWindowsTerminal() ? {
+        acknowledge: (offset, consumerId) => api.terminalAcknowledgeOutput(terminalId, offset, consumerId),
+        release: consumerId => api.terminalReleaseOutput(terminalId, consumerId),
+      } : undefined);
     void Promise.all([identityReady, stream?.ready])
       .then(async () => {
         if (!active) return;
-        const snapshot = await api.terminalAttach(terminalId);
+        const snapshot = await (stream
+          ? stream.attach(consumerId => consumerId ? api.terminalAttach(terminalId, consumerId) : api.terminalAttach(terminalId))
+          : api.terminalAttach(terminalId));
         if (!active) return;
         applyIdentity(snapshot, true);
         setState({ kind: "ready", snapshot, stream, exited: !snapshot.live || !!cached?.exited || !!stream?.exited });
@@ -235,9 +239,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       let stopViewport = () => {};
       let stopComposition = () => {};
       let output: ReturnType<typeof createTerminalOutput> | undefined;
-      const renderer = windows
-        ? { onDimensionsChange: null as (() => void) | null, dispose: connectTerminalRenderer(term) }
-        : createTerminalRenderer(term);
+      const renderer = createTerminalRenderer(term);
       if (windows) {
         term.loadAddon(new Unicode11Addon());
         term.unicode.activeVersion = "11";
@@ -307,7 +309,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     if (isWindowsTerminal()) {
       const stopLayout = connectTerminalLayout(live.term, live.fit, container,
         (cols, rows) => live.exited ? Promise.resolve() : api.terminalResize(id, cols, rows), snapshot);
-      return () => { live.onExit = null; stopLayout(); };
+      return () => { live.onExit = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); stopLayout(); };
     }
 
     const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {

@@ -250,6 +250,7 @@ pub fn run() {
             commands::terminal_attach,
             commands::terminal_input,
             commands::terminal_acknowledge_output,
+            commands::terminal_release_output,
             commands::terminal_resize,
             commands::terminal_input_cursor,
             commands::search,

@@ -75,7 +75,7 @@ it("pastes keyboard and menu text once, respecting bracketed paste and normalizi
   Object.defineProperty(menu, "clipboardData", { value: { getData: () => "菜单\n文本" } });
   term.textarea!.dispatchEvent(menu);
   expect(menu.defaultPrevented).toBe(true);
-  expect(data[1]).toBe("\x1b[200~菜单\r文本\x1b[201~");
+  await waitFor(() => expect(data[1]).toBe("\x1b[200~菜单\r文本\x1b[201~"));
   await write("\x1b[?2004l");
   read.mockResolvedValue("normal\ntext");
   key("Insert", { shiftKey: true });
@@ -167,4 +167,54 @@ it("parses coalesced split UTF-8 and VT bytes with modern emoji cell widths", as
   expect(line.getCell(4)!.getChars()).toBe("X");
   expect(line.getCell(4)!.isBold()).toBeTruthy();
   output.dispose();
+});
+
+
+it("delivers consecutive deliberate keyboard and menu pastes in gesture order", async () => {
+  const reads: ((text: string) => void)[] = [];
+  read.mockImplementation(() => new Promise(resolve => reads.push(resolve)));
+  key("v", { ctrlKey: true });
+  key("v", { ctrlKey: true });
+  expect(reads).toHaveLength(2);
+  const menu = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(menu, "clipboardData", { value: { getData: () => "third" } });
+  term.textarea!.dispatchEvent(menu);
+  reads[1]("second");
+  await Promise.resolve();
+  expect(data).toEqual([]);
+  reads[0]("first");
+  await waitFor(() => expect(data).toEqual(["first", "second", "third"]));
+});
+
+it("hides a cached terminal's menu on navigation and closes it when keyboard focus leaves", () => {
+  key("F10", { shiftKey: true });
+  expect(document.querySelector('[role="menu"]')).not.toBeNull();
+  term.element!.dispatchEvent(new Event("terminal-view-detached"));
+  const host = term.element!.parentElement!;
+  host.remove(); document.body.append(host);
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  key("F10", { shiftKey: true });
+  const outside = document.createElement("button"); document.body.append(outside);
+  outside.focus();
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+});
+
+it("does not query native cursor for ordinary output and falls back after composition dimensions change", async () => {
+  const query = vi.fn().mockResolvedValue({ x: 2, y: 3, cols: 80, rows: 24 });
+  const dispose = connectWindowsComposition(term, query);
+  vi.spyOn(term.element!.querySelector<HTMLElement>(".xterm-screen")!, "getBoundingClientRect")
+    .mockReturnValue({ width: 800, height: 480 } as DOMRect);
+  try {
+    term.focus();
+    await write("ordinary output");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(query).not.toHaveBeenCalled();
+    term.textarea!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    await waitFor(() => expect(term.element!.dataset.nativeComposition).toBe("true"));
+    term.resize(90, 24);
+    term.textarea!.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "ni" }));
+    expect(term.element!.dataset.nativeComposition).toBeUndefined();
+    term.textarea!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally { dispose(); }
 });

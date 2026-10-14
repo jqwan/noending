@@ -8,19 +8,47 @@ function decodeBase64(data: string): Uint8Array {
 /** Subscribe before attach, buffer until xterm exists, and skip snapshot overlap.
  * In particular, Windows ConPTY's initial cursor query must never be dropped.
  * Ownership transfers to the cached terminal when replay starts. */
-export function subscribeTerminalStream(id: string, acknowledge?: (offset: number) => Promise<unknown>) {
+export function subscribeTerminalStream(id: string, flow?: {
+  acknowledge: (offset: number, consumerId: string) => Promise<unknown>;
+  release: (consumerId: string) => Promise<unknown>;
+}) {
   let disposed = false;
+  const consumerId = flow ? crypto.randomUUID() : undefined;
+  let attachment: Promise<TerminalSnapshot> | undefined;
   let offset = 0;
   let write: ((data: Uint8Array, done: () => void) => void) | null = null;
   let ackTimer: ReturnType<typeof setTimeout> | undefined;
   let parsedOffset = 0;
+  let acknowledgedOffset = -1;
+  let acknowledging = false;
+  let retryDelay = 50;
+  const scheduleAck = (delay = 0) => {
+    if (!flow || disposed || acknowledging || ackTimer !== undefined) return;
+    ackTimer = setTimeout(async () => {
+      ackTimer = undefined;
+      if (disposed) return;
+      acknowledging = true;
+      const position = parsedOffset;
+      let failed = false;
+      try {
+        await flow.acknowledge(position, consumerId!);
+        acknowledgedOffset = position;
+        retryDelay = 50;
+      } catch (error) {
+        failed = true;
+        console.warn("Terminal output acknowledgement failed", error);
+      } finally {
+        acknowledging = false;
+        if (failed || parsedOffset > acknowledgedOffset) {
+          scheduleAck(failed ? retryDelay : 0);
+          if (failed) retryDelay = Math.min(1000, retryDelay * 2);
+        }
+      }
+    }, delay);
+  };
   const parsed = (position: number) => {
     parsedOffset = Math.max(parsedOffset, position);
-    if (!acknowledge || disposed || ackTimer !== undefined) return;
-    ackTimer = setTimeout(() => {
-      ackTimer = undefined;
-      if (!disposed) void acknowledge(parsedOffset).catch(error => console.warn("Terminal output acknowledgement failed", error));
-    }, 0);
+    scheduleAck();
   };
   let onExit: (() => void) | null = null;
   let pending: TerminalOutput[] = [];
@@ -45,6 +73,10 @@ export function subscribeTerminalStream(id: string, acknowledge?: (offset: numbe
     retained: false,
     exited: false,
     ready: Promise.resolve(),
+    attach(load: (consumerId?: string) => Promise<TerminalSnapshot>) {
+      attachment = load(consumerId);
+      return attachment;
+    },
     replay(snapshot: TerminalSnapshot, sink: (data: Uint8Array, done: () => void) => void, exit: () => void) {
       if (disposed) return;
       stream.retained = true;
@@ -59,8 +91,22 @@ export function subscribeTerminalStream(id: string, acknowledge?: (offset: numbe
       if (stream.exited) exit();
     },
     dispose() {
+      if (disposed) return;
       disposed = true;
       clearTimeout(ackTimer);
+      // An attach already in flight may acquire credit after unmount. Release
+      // only once it settles. The token protects a newer receiver from late
+      // release/ACK messages belonging to this subscription.
+      if (flow) {
+        const release = (delay = 50): void => {
+          void flow.release(consumerId!).catch(error => {
+            console.warn("Terminal output release failed", error);
+            setTimeout(() => release(Math.min(1000, delay * 2)), delay);
+          });
+        };
+        if (attachment) void attachment.then(() => release(), () => release());
+        else release();
+      }
       stops.splice(0).forEach(stop => stop());
       pending = [];
       write = null;

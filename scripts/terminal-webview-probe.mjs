@@ -16,7 +16,7 @@ const expression = `(${async function probe(mode) {
   const { FitAddon } = await import('/node_modules/.vite/deps/@xterm_addon-fit.js');
   const { WebglAddon } = await import('/node_modules/.vite/deps/@xterm_addon-webgl.js');
   const { createTerminalOutput } = await import('/src/features/sessions/terminalOutput.ts');
-  const { connectTerminalRenderer } = await import('/src/features/sessions/terminalRenderer.ts');
+  const { createTerminalRenderer } = await import('/src/features/sessions/terminalPresentation.ts');
   const { connectTerminalViewport } = await import('/src/features/sessions/terminalViewport.ts');
   const { Unicode11Addon } = await import('/node_modules/.vite/deps/@xterm_addon-unicode11.js');
   const { observeTerminalTheme } = await import('/src/features/sessions/terminalTheme.ts');
@@ -36,7 +36,7 @@ const expression = `(${async function probe(mode) {
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host);
     if (adapted) {
       term.loadAddon(new Unicode11Addon()); term.unicode.activeVersion = '11';
-      cleanups.push(connectTerminalRenderer(term));
+      cleanups.push(createTerminalRenderer(term).dispose);
       cleanups.push(connectTerminalViewport(term));
     } else { term.loadAddon(new WebglAddon()); }
     fit.fit();

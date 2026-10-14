@@ -48,7 +48,9 @@ export function createTerminalRenderer(term: Terminal) {
     term.loadAddon(addon);
     loss = addon.onContextLoss(() => {
       fallback();
+      term.refresh(0, term.rows - 1);
       renderer.onDimensionsChange?.();
+      term.element?.dispatchEvent(new Event("terminal-renderer-changed"));
     });
   } catch {
     fallback();

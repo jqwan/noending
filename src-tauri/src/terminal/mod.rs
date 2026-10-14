@@ -589,6 +589,10 @@ impl TerminalRegistry {
     }
 
     pub fn attach(&self, terminal_id: &str) -> Result<TerminalSnapshot> {
+        self.snapshot(terminal_id, None)
+    }
+
+    fn snapshot(&self, terminal_id: &str, consumer: Option<&str>) -> Result<TerminalSnapshot> {
         let records = self
             .records
             .lock()
@@ -602,9 +606,16 @@ impl TerminalRegistry {
             .lock()
             .map_err(|_| other("terminal record lock poisoned"))?;
         #[cfg(windows)]
-        if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
-            flow.attach(record.scrollback.output_offset - record.scrollback.data.len() as u64);
+        if let Some(consumer) = consumer {
+            if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
+                flow.attach(
+                    consumer,
+                    record.scrollback.output_offset - record.scrollback.data.len() as u64,
+                );
+            }
         }
+        #[cfg(not(windows))]
+        let _ = consumer;
         Ok(TerminalSnapshot {
             summary: record.summary.clone(),
             scrollback: base64::engine::general_purpose::STANDARD.encode(record.scrollback.bytes()),
@@ -614,14 +625,29 @@ impl TerminalRegistry {
         })
     }
 
-    /// Absolute raw-byte position parsed by xterm, not merely received by JS.
-    pub fn acknowledge_output(&self, terminal_id: &str, offset: u64) {
+    /// Only a subscribed frontend may acquire output credit. Identity lookups
+    /// and other snapshot reads deliberately remain side-effect free.
+    pub fn attach_output(&self, terminal_id: &str, consumer: &str) -> Result<TerminalSnapshot> {
+        self.snapshot(terminal_id, Some(consumer))
+    }
+
+    pub fn release_output(&self, terminal_id: &str, consumer: &str) {
         #[cfg(windows)]
         if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
-            flow.acknowledge(offset);
+            flow.release(consumer);
         }
         #[cfg(not(windows))]
-        let _ = (terminal_id, offset);
+        let _ = (terminal_id, consumer);
+    }
+
+    /// Absolute raw-byte position parsed by xterm, not merely received by JS.
+    pub fn acknowledge_output(&self, terminal_id: &str, consumer: &str, offset: u64) {
+        #[cfg(windows)]
+        if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
+            flow.acknowledge(consumer, offset);
+        }
+        #[cfg(not(windows))]
+        let _ = (terminal_id, consumer, offset);
     }
 
     /// Frontend keystrokes → PTY master. `data` is the xterm-encoded string
@@ -1004,7 +1030,7 @@ mod tests {
             .unwrap();
         let read = || {
             let s = registry.attach(&id).unwrap();
-            registry.acknowledge_output(&id, s.output_offset);
+            registry.acknowledge_output(&id, "test", s.output_offset);
             String::from_utf8(
                 base64::engine::general_purpose::STANDARD
                     .decode(s.scrollback)
@@ -1082,7 +1108,7 @@ mod tests {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(snapshot.scrollback)
                 .unwrap();
-            registry.acknowledge_output(&id, snapshot.output_offset);
+            registry.acknowledge_output(&id, "test", snapshot.output_offset);
             let text = String::from_utf8_lossy(&bytes).to_string();
             if text.contains("\x1b[6n") && !text.contains("READY") {
                 registry.write(&id, "\x1b[1;1R").unwrap();
@@ -1104,7 +1130,7 @@ mod tests {
         registry.write(&id, "中文 input\r").unwrap();
         until("Unicode PTY input echoed by child", || {
             let snapshot = registry.attach(&id).unwrap();
-            registry.acknowledge_output(&id, snapshot.output_offset);
+            registry.acknowledge_output(&id, "test", snapshot.output_offset);
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(snapshot.scrollback)
                 .unwrap();
@@ -1121,6 +1147,58 @@ mod tests {
                 .unwrap();
             assert!(output.status.success());
             (!String::from_utf8_lossy(&output.stdout).contains(&format!("\"{child_pid}\"")))
+                .then_some(())
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_snapshot_lookup_keeps_unviewed_output_running() {
+        let registry = registry();
+        struct Cleanup<'a>(&'a TerminalRegistry);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.kill_all();
+            }
+        }
+        let _cleanup = Cleanup(&registry);
+        let cmd = AgentCommand {
+            program: "powershell".into(),
+            args: vec!["-NoProfile".into(), "-Command".into(),
+                "[Console]::Write('READY'); [Console]::ReadLine() | Out-Null; [Console]::Write(('x' * 600000)); [Console]::Write('UNVIEWED-END')".into()],
+            cwd: None,
+        };
+        let id = spawn_embedded(&cmd, &target(&registry, "unviewed-probe"))
+            .unwrap()
+            .terminal_id
+            .unwrap();
+        let mut answered = false;
+        until("unviewed child ready", || {
+            let snapshot = registry.attach(&id).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(snapshot.scrollback)
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            if !answered && text.contains("\x1b[6n") {
+                registry.write(&id, "\x1b[1;1R").unwrap();
+                answered = true;
+            }
+            text.contains("READY").then_some(())
+        });
+        registry.write(&id, "\r").unwrap();
+        until("unviewed process finishes without parser ACK", || {
+            registry
+                .list()
+                .iter()
+                .find(|t| t.terminal_id == id && !t.live)
+                .map(|_| ())
+        });
+        until("unviewed output tail drains", || {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(registry.attach(&id).unwrap().scrollback)
+                .unwrap();
+            String::from_utf8_lossy(&bytes)
+                .contains("UNVIEWED-END")
                 .then_some(())
         });
     }
@@ -1149,6 +1227,7 @@ mod tests {
             .unwrap()
             .terminal_id
             .unwrap();
+        registry.attach_output(&id, "test").unwrap();
         let mut answered = false;
         let stalled = until("high output watermark", || {
             let snapshot = registry.attach(&id).unwrap();
@@ -1165,8 +1244,8 @@ mod tests {
             stalled <= 256 * 1024 + 4096,
             "reader exceeded its bounded credit: {stalled}"
         );
-        // Inspect the flow lock directly instead of attaching again: an attach
-        // legitimately grants credit for bytes evicted from replay.
+        // Observe progress without acquiring a new output receiver or granting
+        // replay credit. Read-only snapshot lookups must not alter the flow.
         std::thread::sleep(Duration::from_millis(50));
         let offset = registry
             .records
@@ -1179,10 +1258,10 @@ mod tests {
             .scrollback
             .output_offset;
         assert_eq!(offset, stalled);
-        registry.acknowledge_output(&id, stalled);
+        registry.acknowledge_output(&id, "test", stalled);
         until("final bytes after backpressure resumes", || {
             let snapshot = registry.attach(&id).unwrap();
-            registry.acknowledge_output(&id, snapshot.output_offset);
+            registry.acknowledge_output(&id, "test", snapshot.output_offset);
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(snapshot.scrollback)
                 .unwrap();

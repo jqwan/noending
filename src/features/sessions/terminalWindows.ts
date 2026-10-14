@@ -1,7 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 
 export const isWindowsTerminal = () => /Win/.test(navigator.platform);
-export const isMacTerminal = () => /Mac/.test(navigator.platform);
 
 /** WebView2 uses xterm's Chromium composition path. Do not intercept input or
  * composition events here: the WKWebView repair belongs only to macOS. */
@@ -12,7 +11,7 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
 }): () => void {
   const element = term.element!;
   let disposed = false;
-  let pasting = false;
+  let pasteQueue = Promise.resolve();
   const accessibilityKey = "noending.terminal.windows.screenReader";
   const accessibilityEvent = "noending:terminal-accessibility";
   const updateAccessibility = () => { term.options.screenReaderMode = localStorage.getItem(accessibilityKey) === "true"; };
@@ -20,19 +19,19 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
   window.addEventListener(accessibilityEvent, updateAccessibility);
   let menu: HTMLElement | undefined;
   const closeMenu = () => { menu?.remove(); menu = undefined; };
-  const paste = async (nativeImageKey = false) => {
-    if (pasting || disposed || !clipboard.live()) return;
-    pasting = true;
-    try {
-      const text = await clipboard.read();
-      if (disposed || !clipboard.live()) return;
+  const enqueuePaste = (pending: Promise<string | null>, nativeImageKey: boolean) => {
+    // Read at each gesture, then deliver in gesture order. A second deliberate
+    // paste is not a duplicate browser event and must never be discarded.
+    const result = pending.catch(error => { console.warn("Terminal clipboard read failed", error); return undefined; });
+    pasteQueue = pasteQueue.then(async () => {
+      const text = await result;
+      if (disposed || !clipboard.live() || !element.isConnected || text === undefined) return;
       if (text) term.paste(text);
-      // Pi and other TUIs read images from the OS clipboard on Ctrl+V.
-      // Never turn an image into a browser file/path paste.
       else if (nativeImageKey) term.input("\x16", true);
-    } catch (error) {
-      console.warn("Terminal clipboard read failed", error);
-    } finally { pasting = false; }
+    }).catch(error => console.warn("Terminal paste failed", error));
+  };
+  const paste = (nativeImageKey = false) => {
+    if (!disposed && clipboard.live() && element.isConnected) enqueuePaste(clipboard.read(), nativeImageKey);
   };
   const copy = (clear: boolean) => {
     const text = term.getSelection();
@@ -75,7 +74,11 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
         buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
       }
     });
-    document.body.append(menu);
+    // Keep it in the mounted view, outside xterm's mouse/input handlers.
+    element.parentElement?.append(menu);
+    menu.addEventListener("focusout", event => {
+      if (!menu?.contains(event.relatedTarget as Node | null)) closeMenu();
+    });
     menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   };
   const dismissMenu = (event: Event) => { if (menu && !menu.contains(event.target as Node)) closeMenu(); };
@@ -110,10 +113,10 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
   const onPaste = (event: ClipboardEvent) => {
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (!clipboard.live() || disposed || pasting) return;
+    if (!clipboard.live() || disposed || !element.isConnected) return;
     const text = event.clipboardData?.getData("text/plain");
-    if (text) term.paste(text);
-    else void paste(true);
+    if (text) enqueuePaste(Promise.resolve(text), false);
+    else paste(true);
   };
   const onContextMenu = (event: MouseEvent) => {
     // Mouse-reporting applications keep their native right button. Shift is
@@ -139,6 +142,7 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
     // executing after xterm has delivered the same key to the Agent.
     event.stopPropagation();
   };
+  element.addEventListener("terminal-view-detached", closeMenu);
   element.addEventListener("paste", onPaste, true);
   element.addEventListener("contextmenu", onContextMenu);
   element.addEventListener("keydown", onKeyDown);
@@ -150,5 +154,6 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
     element.removeEventListener("paste", onPaste, true);
     element.removeEventListener("contextmenu", onContextMenu);
     element.removeEventListener("keydown", onKeyDown);
+    element.removeEventListener("terminal-view-detached", closeMenu);
   };
 }

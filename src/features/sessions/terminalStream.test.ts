@@ -21,6 +21,8 @@ afterEach(() => {
   terminals.splice(0).forEach(term => term.dispose());
   handlers.clear();
   vi.clearAllMocks();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 async function subscribe() {
@@ -70,7 +72,7 @@ it("replays overlapping snapshot/events exactly once at raw-byte boundaries", as
 
 it("acknowledges only parsed raw bytes, including replay and overlap, and cancels on dispose", async () => {
   const acknowledge = vi.fn().mockResolvedValue(undefined);
-  const stream = subscribeTerminalStream("t-1", acknowledge);
+  const stream = subscribeTerminalStream("t-1", { acknowledge, release: vi.fn().mockResolvedValue(undefined) });
   streams.push(stream);
   await stream.ready;
   const completed: (() => void)[] = [];
@@ -78,14 +80,55 @@ it("acknowledges only parsed raw bytes, including replay and overlap, and cancel
   stream.replay(snapshot("ab"), (_, done) => completed.push(done), () => {});
   expect(acknowledge).not.toHaveBeenCalled();
   completed[0]();
-  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(2));
+  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(2, expect.any(String)));
   completed[1]();
-  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(3));
+  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(3, expect.any(String)));
   output(0, "abc");
   expect(completed).toHaveLength(2);
   output(3, "d");
   completed[2]();
   stream.dispose();
   await new Promise(resolve => setTimeout(resolve, 5));
-  expect(acknowledge.mock.calls).toEqual([[2], [3]]);
+  expect(acknowledge.mock.calls.map(call => call[0])).toEqual([2, 3]);
+});
+
+
+it("releases a cancelled attachment only after acquisition settles, using its own consumer", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const release = vi.fn().mockRejectedValueOnce(new Error("temporary release failure")).mockResolvedValue(undefined);
+  const stream = subscribeTerminalStream("t-1", { acknowledge: vi.fn(), release });
+  streams.push(stream);
+  await stream.ready;
+  let finish!: (value: TerminalSnapshot) => void;
+  let owner: string | undefined;
+  const attached = stream.attach(consumer => { owner = consumer; return new Promise(resolve => { finish = resolve; }); });
+  stream.dispose();
+  expect(release).not.toHaveBeenCalled();
+  finish(snapshot("pending"));
+  await attached;
+  expect(release.mock.calls).toEqual([[owner]]);
+  stream.dispose();
+  expect(release).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(release.mock.calls).toEqual([[owner], [owner]]);
+});
+
+it("retries failed parser acknowledgements even when no further output arrives, and stops after disposal", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const acknowledge = vi.fn().mockRejectedValueOnce(new Error("temporary IPC failure")).mockResolvedValue(undefined);
+  const stream = subscribeTerminalStream("t-1", { acknowledge, release: vi.fn().mockResolvedValue(undefined) });
+  streams.push(stream);
+  await stream.ready;
+  stream.replay(snapshot("tail"), (_, done) => done(), () => {});
+  await vi.advanceTimersByTimeAsync(100);
+  expect(acknowledge.mock.calls.map(call => call[0])).toEqual([4, 4]);
+  acknowledge.mockRejectedValue(new Error("offline"));
+  output(4, "next");
+  await vi.advanceTimersByTimeAsync(0);
+  stream.dispose();
+  const count = acknowledge.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(acknowledge).toHaveBeenCalledTimes(count);
 });
