@@ -663,6 +663,16 @@ pub fn read_clipboard_for_terminal() -> Result<Option<String>> {
     Ok(clipboard.get_text().ok().filter(|text| !text.is_empty()))
 }
 
+/// Windows terminal copy should not depend on WebView clipboard permission.
+#[tauri::command]
+pub fn write_clipboard_for_terminal(text: String) -> Result<()> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| other(format!("写入剪贴板失败: {e}")))?;
+    clipboard
+        .set_text(text)
+        .map_err(|e| other(format!("写入剪贴板失败: {e}")))
+}
+
 // ---------------- Embedded terminal (terminal subpage) ----------------
 //
 // The PTYs themselves are created by `launch_prepared`'s embedded spawn step
@@ -753,6 +763,37 @@ pub fn terminal_input(
         state.write_binary(&terminal_id, &data)
     } else {
         state.write(&terminal_id, &data)
+    }
+}
+
+#[tauri::command]
+pub fn terminal_acknowledge_output(
+    state: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+    offset: u64,
+) {
+    state.acknowledge_output(&terminal_id, offset);
+}
+
+#[tauri::command]
+pub async fn terminal_input_cursor(
+    state: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+) -> Result<Option<crate::terminal::TerminalCursor>> {
+    #[cfg(windows)]
+    {
+        let Some(pid) = state.cursor_pid(&terminal_id) else {
+            return Ok(None);
+        };
+        tauri::async_runtime::spawn_blocking(move || crate::platform::terminal_cursor::query(pid))
+            .await
+            .map_err(|e| other(e.to_string()))?
+            .map(Some)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (state, terminal_id);
+        Ok(None)
     }
 }
 

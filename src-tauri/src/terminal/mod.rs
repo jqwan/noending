@@ -11,6 +11,8 @@
 //! An Agent that must outlive the app belongs in the external terminal,
 //! which keeps working exactly as before.
 
+#[cfg(any(windows, test))]
+mod flow;
 pub mod identity;
 pub mod spawn;
 
@@ -146,7 +148,17 @@ impl Scrollback {
 /// commands (input / resize / attach) all touch it — each holds the lock only
 /// across its own field update, never across a Db call and never across an
 /// emit, so contention is bounded to microseconds.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TerminalCursor {
+    pub x: u16,
+    pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 struct TerminalRecord {
+    #[cfg(windows)]
+    pid: Option<u32>,
     summary: TerminalSummary,
     /// Current native root identity, supplied by the launch or an Agent event.
     /// It also retains a switched-to identity while its source is not ingested.
@@ -172,6 +184,8 @@ struct PendingTracking {
 /// webview) and `None` in tests (emits are skipped, everything else runs).
 pub struct TerminalRegistry {
     records: Mutex<HashMap<String, std::sync::Arc<Mutex<TerminalRecord>>>>,
+    #[cfg(windows)]
+    output_flows: Mutex<HashMap<String, std::sync::Arc<flow::OutputFlow>>>,
     /// Prevent close/switch from racing the first binding's task tracking write.
     /// Database work happens without holding a terminal record or PTY lock.
     identity_mutations: Mutex<()>,
@@ -198,9 +212,17 @@ impl Drop for ResumeReservation<'_> {
 }
 
 impl TerminalRegistry {
+    #[cfg(windows)]
+    pub fn cursor_pid(&self, id: &str) -> Option<u32> {
+        let record = self.records.lock().ok()?.get(id)?.clone();
+        let record = record.lock().ok()?;
+        record.summary.live.then_some(record.pid).flatten()
+    }
     pub fn new(app: Option<AppHandle>) -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
+            #[cfg(windows)]
+            output_flows: Mutex::new(HashMap::new()),
             identity_mutations: Mutex::new(()),
             resume_reservations: Mutex::new(HashSet::new()),
             app,
@@ -545,6 +567,10 @@ impl TerminalRegistry {
             };
             records.remove(terminal_id)
         }?;
+        #[cfg(windows)]
+        if let Some(flow) = self.output_flows.lock().ok()?.remove(terminal_id) {
+            flow.close();
+        }
         let (summary, bridge) = {
             let Ok(mut record) = removed.lock() else {
                 return None;
@@ -575,6 +601,10 @@ impl TerminalRegistry {
         let record = record
             .lock()
             .map_err(|_| other("terminal record lock poisoned"))?;
+        #[cfg(windows)]
+        if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
+            flow.attach(record.scrollback.output_offset - record.scrollback.data.len() as u64);
+        }
         Ok(TerminalSnapshot {
             summary: record.summary.clone(),
             scrollback: base64::engine::general_purpose::STANDARD.encode(record.scrollback.bytes()),
@@ -582,6 +612,16 @@ impl TerminalRegistry {
             cols: record.cols,
             rows: record.rows,
         })
+    }
+
+    /// Absolute raw-byte position parsed by xterm, not merely received by JS.
+    pub fn acknowledge_output(&self, terminal_id: &str, offset: u64) {
+        #[cfg(windows)]
+        if let Some(flow) = self.output_flows.lock().unwrap().get(terminal_id) {
+            flow.acknowledge(offset);
+        }
+        #[cfg(not(windows))]
+        let _ = (terminal_id, offset);
     }
 
     /// Frontend keystrokes → PTY master. `data` is the xterm-encoded string
@@ -638,22 +678,32 @@ impl TerminalRegistry {
         let mut record = record
             .lock()
             .map_err(|_| other("terminal record lock poisoned"))?;
-        record.cols = cols;
-        record.rows = rows;
+        let cols = cols.clamp(1, i16::MAX as u16);
+        let rows = rows.clamp(1, i16::MAX as u16);
+        if record.cols == cols && record.rows == rows {
+            return Ok(());
+        }
         record
             .master
             .resize(portable_pty::PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| other(format!("调整终端尺寸失败: {e}")))
+            .map_err(|e| other(format!("调整终端尺寸失败: {e}")))?;
+        record.cols = cols;
+        record.rows = rows;
+        Ok(())
     }
 
     /// App exit: end every embedded Agent. Children die with the PTY master
     /// on Unix anyway; killing explicitly makes it true on ConPTY too.
     pub fn kill_all(&self) {
+        #[cfg(windows)]
+        for flow in self.output_flows.lock().unwrap().values() {
+            flow.close();
+        }
         let Ok(records) = self.records.lock() else {
             return;
         };
@@ -661,7 +711,9 @@ impl TerminalRegistry {
             let Ok(mut record) = record.lock() else {
                 continue;
             };
-            let _ = record.killer.kill();
+            if record.summary.live {
+                let _ = record.killer.kill();
+            }
         }
     }
 
@@ -681,7 +733,18 @@ impl TerminalRegistry {
         child: Box<dyn portable_pty::Child + Send + Sync>,
     ) -> TerminalSummary {
         let terminal_id = summary.terminal_id.clone();
+        #[cfg(windows)]
+        let output_flow = {
+            let flow = std::sync::Arc::new(flow::OutputFlow::default());
+            self.output_flows
+                .lock()
+                .unwrap()
+                .insert(terminal_id.clone(), flow.clone());
+            flow
+        };
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
+            #[cfg(windows)]
+            pid: child.process_id(),
             pending_tracking: (summary.session_id.is_none()
                 && !summary.initial_workstream_ids.is_empty())
             .then(|| PendingTracking {
@@ -707,8 +770,8 @@ impl TerminalRegistry {
         }
 
         // Reader: PTY master → scrollback → webview event. The lock is taken
-        // per chunk and dropped BEFORE the emit, so a slow webview never
-        // stalls the pump.
+        // per chunk and dropped BEFORE the emit. On Windows parser ACKs bound
+        // unread output; a slow WebView2 applies pressure only to its own PTY.
         let reader_record = record.clone();
         let reader_app = self.app.clone();
         let reader_id = terminal_id.clone();
@@ -716,6 +779,10 @@ impl TerminalRegistry {
             let mut reader = reader;
             let mut chunk = [0u8; 4096];
             loop {
+                #[cfg(windows)]
+                if !output_flow.wait() {
+                    break;
+                }
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -725,6 +792,8 @@ impl TerminalRegistry {
                             };
                             let offset = record.scrollback.output_offset;
                             record.scrollback.push(&chunk[..n]);
+                            #[cfg(windows)]
+                            output_flow.produced(record.scrollback.output_offset);
                             TerminalOutput {
                                 offset,
                                 data: base64::engine::general_purpose::STANDARD.encode(&chunk[..n]),
@@ -817,10 +886,15 @@ pub fn spawn_embedded(
     // The webview uses xterm; a GUI launch may have no TERM or inherit "dumb",
     // which makes Codex stop before its lifecycle hooks can run.
     wrapped.env("TERM", "xterm-256color");
+    #[cfg(windows)]
+    wrapped.env("COLORTERM", "truecolor");
     let child = pty.spawn_command(&wrapped)?;
     let pid = child.process_id();
     let reader = pty.take_reader()?;
     let writer = pty.take_writer()?;
+    #[cfg(windows)]
+    let killer = spawn::process_tree_killer(child.as_ref());
+    #[cfg(not(windows))]
     let killer = child.clone_killer();
 
     let summary = TerminalSummary {
@@ -897,6 +971,225 @@ mod tests {
 
     fn registry() -> TerminalRegistry {
         TerminalRegistry::new(None)
+    }
+
+    /// Real Windows ConPTY and built-in PowerShell are prerequisites, and
+    /// startup cursor queries must be answered just as xterm does in the app.
+    #[test]
+    #[cfg(windows)]
+    fn windows_conpty_preserves_mouse_modes_before_agent_raw_input() {
+        use std::os::windows::process::CommandExt;
+        assert!(std::process::Command::new("node")
+            .arg("--version")
+            .creation_flags(0x08000000)
+            .output()
+            .expect("protocol regression requires installed Node.js")
+            .status
+            .success());
+        let registry = registry();
+        struct Cleanup<'a>(&'a TerminalRegistry);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.kill_all();
+            }
+        }
+        let _cleanup = Cleanup(&registry);
+        // Pi's exact order: enter alternate screen and enable mouse, THEN
+        // initialize Node raw input. Cooked ConPTY otherwise eats DECSET.
+        let cmd = AgentCommand { program: "node".into(), args: vec!["-e".into(),
+            "process.stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h'); process.stdin.setRawMode(true); process.stdout.write('MOUSE-READY\\x1b[4;3H\\x1b[?25l'); process.stdin.on('data',d=>process.stdout.write('HEX='+d.toString('hex'))); setInterval(()=>{},1000);".into()], cwd: None };
+        let id = spawn_embedded(&cmd, &target(&registry, "windows-mouse"))
+            .unwrap()
+            .terminal_id
+            .unwrap();
+        let read = || {
+            let s = registry.attach(&id).unwrap();
+            registry.acknowledge_output(&id, s.output_offset);
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(s.scrollback)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let mut answered = false;
+        let output = until("mouse mode before raw initialization", || {
+            let text = read();
+            if !answered && text.contains("\x1b[6n") {
+                registry.write(&id, "\x1b[1;1R").unwrap();
+                answered = true;
+            }
+            text.contains("MOUSE-READY").then_some(text)
+        });
+        assert!(
+            output.contains("\x1b[?1000h"),
+            "ConPTY dropped mouse tracking: {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[?1006h"),
+            "ConPTY dropped SGR encoding: {output:?}"
+        );
+        // The GUI entry point must be built before this real helper test.
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("noending.exe");
+        assert!(executable.exists(), "requires cargo build --bin noending");
+        let native = crate::platform::terminal_cursor::query_with_executable(
+            &executable,
+            registry.cursor_pid(&id).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (native.x, native.y, native.cols, native.rows),
+            (2, 3, INITIAL_COLS, INITIAL_ROWS)
+        );
+        assert!(
+            !read().contains("\"cols\""),
+            "helper JSON must stay off the Agent's output stream"
+        );
+        registry.write(&id, "\x1b[<64;3;4M").unwrap();
+        until("SGR wheel delivered to Agent", || {
+            read().contains("1b5b3c36343b333b344d").then_some(())
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_conpty_resize_input_exit_and_process_tree_close() {
+        use std::os::windows::process::CommandExt;
+        let registry = registry();
+        struct Cleanup<'a>(&'a TerminalRegistry);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.kill_all();
+            }
+        }
+        let _cleanup = Cleanup(&registry);
+        let cmd = AgentCommand {
+            program: "powershell".into(),
+            args: vec!["-NoProfile".into(), "-Command".into(),
+                "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Write-Output ('CHILD=' + $PID); Write-Output 'READY'; $line = [Console]::ReadLine(); Write-Output ('ECHO=' + $line); Write-Output ('SIZE=' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight); Start-Sleep -Seconds 120".into()],
+            cwd: None,
+        };
+        let launched = spawn_embedded(&cmd, &target(&registry, "windows-probe")).unwrap();
+        let id = launched.terminal_id.unwrap();
+        let output = until("ConPTY child ready", || {
+            let snapshot = registry.attach(&id).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(snapshot.scrollback)
+                .unwrap();
+            registry.acknowledge_output(&id, snapshot.output_offset);
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            if text.contains("\x1b[6n") && !text.contains("READY") {
+                registry.write(&id, "\x1b[1;1R").unwrap();
+            }
+            text.contains("READY").then_some(text)
+        });
+        let child_pid: u32 = output
+            .split("CHILD=")
+            .nth(1)
+            .unwrap()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap();
+        registry.resize(&id, 101, 31).unwrap();
+        let size = registry.attach(&id).unwrap();
+        assert_eq!((size.cols, size.rows), (101, 31));
+        registry.write(&id, "中文 input\r").unwrap();
+        until("Unicode PTY input echoed by child", || {
+            let snapshot = registry.attach(&id).unwrap();
+            registry.acknowledge_output(&id, snapshot.output_offset);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(snapshot.scrollback)
+                .unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            (text.contains("ECHO=中文 input") && text.contains("SIZE=101x31")).then_some(())
+        });
+        registry.close(&id).unwrap();
+        assert!(registry.attach(&id).is_err());
+        until("Agent descendant terminated", || {
+            let output = std::process::Command::new("tasklist.exe")
+                .args(["/FI", &format!("PID eq {child_pid}"), "/FO", "CSV", "/NH"])
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            (!String::from_utf8_lossy(&output.stdout).contains(&format!("\"{child_pid}\"")))
+                .then_some(())
+        });
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_conpty_output_backpressure_resumes_and_drains_tail() {
+        let registry = registry();
+        struct Cleanup<'a>(&'a TerminalRegistry);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                self.0.kill_all();
+            }
+        }
+        let _cleanup = Cleanup(&registry);
+        let cmd = AgentCommand {
+            program: "powershell".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[Console]::Write(('x' * 600000)); [Console]::Write('DRAINED-END')".into(),
+            ],
+            cwd: None,
+        };
+        let id = spawn_embedded(&cmd, &target(&registry, "flow-probe"))
+            .unwrap()
+            .terminal_id
+            .unwrap();
+        let mut answered = false;
+        let stalled = until("high output watermark", || {
+            let snapshot = registry.attach(&id).unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&snapshot.scrollback)
+                .unwrap();
+            if !answered && bytes.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                registry.write(&id, "\x1b[1;1R").unwrap();
+                answered = true;
+            }
+            (snapshot.output_offset >= 256 * 1024).then_some(snapshot.output_offset)
+        });
+        assert!(
+            stalled <= 256 * 1024 + 4096,
+            "reader exceeded its bounded credit: {stalled}"
+        );
+        // Inspect the flow lock directly instead of attaching again: an attach
+        // legitimately grants credit for bytes evicted from replay.
+        std::thread::sleep(Duration::from_millis(50));
+        let offset = registry
+            .records
+            .lock()
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .scrollback
+            .output_offset;
+        assert_eq!(offset, stalled);
+        registry.acknowledge_output(&id, stalled);
+        until("final bytes after backpressure resumes", || {
+            let snapshot = registry.attach(&id).unwrap();
+            registry.acknowledge_output(&id, snapshot.output_offset);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(snapshot.scrollback)
+                .unwrap();
+            String::from_utf8_lossy(&bytes)
+                .contains("DRAINED-END")
+                .then_some(())
+        });
     }
 
     /// `sh` exists on every CI this suite runs on (macOS; the spawn tests are
@@ -977,6 +1270,8 @@ mod tests {
         let writer = pty.take_writer().unwrap();
         let terminal_id = new_id();
         let record = TerminalRecord {
+            #[cfg(windows)]
+            pid: None,
             summary: TerminalSummary {
                 terminal_id: terminal_id.clone(),
                 session_id: session_id.map(str::to_string),

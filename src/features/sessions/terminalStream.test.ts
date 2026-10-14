@@ -67,3 +67,25 @@ it("replays overlapping snapshot/events exactly once at raw-byte boundaries", as
   const bytes = Uint8Array.from(chunks.flatMap(chunk => Array.from(chunk)));
   expect(new TextDecoder().decode(bytes)).toBe("你!ready!");
 });
+
+it("acknowledges only parsed raw bytes, including replay and overlap, and cancels on dispose", async () => {
+  const acknowledge = vi.fn().mockResolvedValue(undefined);
+  const stream = subscribeTerminalStream("t-1", acknowledge);
+  streams.push(stream);
+  await stream.ready;
+  const completed: (() => void)[] = [];
+  output(1, "bc");
+  stream.replay(snapshot("ab"), (_, done) => completed.push(done), () => {});
+  expect(acknowledge).not.toHaveBeenCalled();
+  completed[0]();
+  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(2));
+  completed[1]();
+  await waitFor(() => expect(acknowledge).toHaveBeenLastCalledWith(3));
+  output(0, "abc");
+  expect(completed).toHaveLength(2);
+  output(3, "d");
+  completed[2]();
+  stream.dispose();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  expect(acknowledge.mock.calls).toEqual([[2], [3]]);
+});

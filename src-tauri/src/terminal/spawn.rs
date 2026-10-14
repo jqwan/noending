@@ -133,7 +133,27 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
 pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilder {
     use crate::platform::launcher::ps_quote;
 
-    let mut script = String::new();
+    let mut script = String::from(
+        "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n",
+    );
+    // Pi emits DECSET mouse modes before Node's setRawMode. ConPTY consumes
+    // those modes while VT input is disabled, leaving xterm unaware of them.
+    // Start with VT input enabled; the Agent still owns its subsequent modes.
+    script.push_str(
+        r#"Add-Type 'using System; using System.Runtime.InteropServices; public static class NoEndingTerminalConsole {
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint mode);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint mode);
+}'
+$terminalInputHandle = [NoEndingTerminalConsole]::GetStdHandle(-10)
+[uint32]$terminalInputMode = 0
+if ([NoEndingTerminalConsole]::GetConsoleMode($terminalInputHandle, [ref]$terminalInputMode)) {
+    if (-not [NoEndingTerminalConsole]::SetConsoleMode($terminalInputHandle, $terminalInputMode -bor 0x200)) {
+        throw 'NoEnding: 无法开启终端 VT 输入模式'
+    }
+}
+"#,
+    );
     if let Some(cwd) = &cmd.cwd {
         let dir = ps_quote(&cwd.to_string_lossy());
         script.push_str(&format!(
@@ -146,10 +166,61 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
         script.push_str(&ps_quote(arg));
     }
 
-    let mut wrapped = portable_pty::CommandBuilder::new("powershell");
+    let shell = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut wrapped = portable_pty::CommandBuilder::new(shell);
     wrapped.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]);
     wrapped.arg(script);
     wrapped
+}
+
+/// portable-pty 0.9 kills the PowerShell wrapper alone on Windows. Its Agent
+/// and descendants must share the existing close/exit lifetime contract.
+#[cfg(windows)]
+pub(crate) fn process_tree_killer(
+    child: &(dyn portable_pty::Child + Send + Sync),
+) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+    #[derive(Debug)]
+    struct TreeKiller {
+        pid: u32,
+        fallback: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    }
+    impl portable_pty::ChildKiller for TreeKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            use std::os::windows::process::CommandExt;
+            let taskkill = std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+                .join("System32/taskkill.exe");
+            let status = std::process::Command::new(taskkill)
+                .args(["/PID", &self.pid.to_string(), "/T", "/F"])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if status.is_ok_and(|status| status.success()) {
+                Ok(())
+            } else {
+                self.fallback.kill()
+            }
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self {
+                pid: self.pid,
+                fallback: self.fallback.clone_killer(),
+            })
+        }
+    }
+    match child.process_id() {
+        Some(pid) => Box::new(TreeKiller {
+            pid,
+            fallback: child.clone_killer(),
+        }),
+        None => child.clone_killer(),
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +259,54 @@ mod tests {
         ] {
             assert_eq!(spawn_error_detail(error), error);
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_wrapper_preserves_unicode_arguments_cwd_and_utf8_output() {
+        use std::os::windows::process::CommandExt;
+        let cwd =
+            std::env::temp_dir().join(format!("noending quote's {}", crate::storage::new_id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cmd = AgentCommand {
+            program: "Write-Output".into(),
+            args: vec!["中文，你好 😀 '$literal'".into()],
+            cwd: Some(cwd.clone()),
+        };
+        let wrapped = wrapped_command(&cmd);
+        let argv = wrapped.get_argv();
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        let cwd_cmd = AgentCommand {
+            program: "powershell".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[Console]::Write((Get-Location).Path)".into(),
+            ],
+            cwd: Some(cwd.clone()),
+        };
+        let wrapped_cwd = wrapped_command(&cwd_cmd);
+        let cwd_argv = wrapped_cwd.get_argv();
+        let cwd_output = std::process::Command::new(&cwd_argv[0])
+            .args(&cwd_argv[1..])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "中文，你好 😀 '$literal'"
+        );
+        assert!(cwd_output.status.success(), "{:?}", cwd_output.stderr);
+        assert_eq!(
+            String::from_utf8(cwd_output.stdout).unwrap(),
+            cwd.to_string_lossy()
+        );
     }
 
     #[test]

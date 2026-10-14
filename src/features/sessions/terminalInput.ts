@@ -4,7 +4,7 @@ import type { Terminal } from "@xterm/xterm";
  * per DOM event, and dampens small trackpad deltas before deciding to emit it.
  * Feed normalized line events back through xterm so it still owns mouse
  * coordinates, modifiers and the application's selected protocol. */
-export function connectTerminalInput(term: Terminal, send: (data: string, binary?: boolean) => void): () => void {
+export function connectTerminalInput(term: Terminal, send: (data: string, binary?: boolean) => void, windows = false): () => void {
   const element = term.element!;
   const screen = element.querySelector<HTMLElement>(".xterm-screen");
   let forwarding = false;
@@ -31,21 +31,31 @@ export function connectTerminalInput(term: Terminal, send: (data: string, binary
     const mode = `${mouse}/${alternate}`;
     if (mode !== previousMode) remainder = 0;
     previousMode = mode;
+    if (windows && alternate && !reportsWheel) {
+      // An alternate buffer has no terminal history. xterm's arrow-key
+      // fallback selects prompt history in Agents such as Pi; only a mouse
+      // protocol explicitly enabled by the application can scroll its TUI.
+      remainder = 0;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     if (!reportsWheel && !alternate) {
       remainder = 0;
       return; // Let xterm scroll its own history normally.
     }
-    if (!event.deltaY || event.shiftKey) return;
+    if (!event.deltaY || event.shiftKey) { remainder = 0; return; }
 
     const rowHeight = (screen?.getBoundingClientRect().height ?? 0) / term.rows;
     if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL && rowHeight <= 0) return;
     let distance = event.deltaY;
     if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) distance /= rowHeight;
     else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) distance *= term.rows;
-    distance *= term.options.scrollSensitivity ?? 1;
+    const sensitivity = term.options.scrollSensitivity ?? 1;
+    distance *= sensitivity;
     // Mouse-aware TUIs own Alt/Ctrl acceleration; applying it here as well
     // would multiply their native speed a second time (e.g. Pi's Alt+wheel).
-    if (!reportsWheel && (event.altKey || event.ctrlKey)) {
+    if (!reportsWheel && (event.altKey || (!windows && event.ctrlKey))) {
       distance *= term.options.fastScrollSensitivity ?? 5;
     }
     if (Math.sign(distance) !== Math.sign(remainder)) remainder = 0;
@@ -65,7 +75,10 @@ export function connectTerminalInput(term: Terminal, send: (data: string, binary
       for (let i = 0; i < lines; i++) {
         element.dispatchEvent(new WheelEvent("wheel", {
           bubbles: true, cancelable: true,
-          deltaMode: WheelEvent.DOM_DELTA_LINE, deltaY: Math.sign(distance),
+          // xterm 6 emits one report/cursor sequence per nonzero line event,
+          // even when its internal modifier calculation yields more lines.
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY: Math.sign(distance),
           clientX: event.clientX, clientY: event.clientY,
           altKey: event.altKey, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
         }));

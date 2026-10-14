@@ -155,3 +155,22 @@ it("follows system changes only while the app uses the system theme", async () =
   media.dispatchEvent(new Event("change"));
   expect(term.options.theme).toBe(held);
 });
+
+it("preserves explicit Agent OSC colors across appearance changes until reset", async () => {
+  const term = terminal();
+  const stop = observeTerminalTheme(term, () => {}, true);
+  await write(term, "\x1b]10;rgb:12/34/56;#223344\x07\x1b]4;1;rgb:aa/bb/cc;200;#a1b2c3\x07");
+  await setAppTheme("dark");
+  expect(term.options.theme?.foreground).toBe("#123456");
+  expect(term.options.theme?.background).toBe("#223344");
+  expect(term.options.theme?.red).toBe("#aabbcc");
+  expect(term.options.theme?.extendedAnsi?.[184]).toBe("#a1b2c3");
+  await write(term, "\x1b]110\x07\x1b]111\x07\x1b]104;1\x07");
+  await setAppTheme("light");
+  expect(term.options.theme?.foreground).toBe("#111111");
+  expect(term.options.theme?.background).toBe("#ffffff");
+  expect(term.options.theme?.red).toBe("#cf222e");
+  await write(term, "\x1b]10;#fff\x07\x1bc");
+  expect(term.options.theme?.foreground).toBe("#111111");
+  stop();
+});

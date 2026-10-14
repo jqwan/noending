@@ -43,12 +43,27 @@ export function readTerminalTheme(): ITheme {
 }
 
 /** Lives with the cached xterm, including while its view is detached. */
-export function observeTerminalTheme(term: Terminal, respond: (data: string) => void): () => void {
+export function observeTerminalTheme(term: Terminal, respond: (data: string) => void, preserveAgentColors = false): () => void {
   // xterm 6.0 answers OSC color queries, but lacks DEC mode 2031. Advertise
   // and implement it so native auto themes can re-query colors and redraw.
   // https://contour-terminal.org/vt-extensions/color-palette-update-notifications/
   let reporting = false;
   let previous = "";
+  const overrides: ITheme = {};
+  const color = (value: string): string | undefined => {
+    const match = /^rgb:([\da-f]{1,4})\/([\da-f]{1,4})\/([\da-f]{1,4})$/i.exec(value);
+    if (match) return "#" + match.slice(1).map(part => Math.round(parseInt(part, 16) * 255 / (16 ** part.length - 1)).toString(16).padStart(2, "0")).join("");
+    const hex = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{9}|[\da-f]{12})$/i.exec(value);
+    if (hex) {
+      const size = hex[1].length / 3;
+      return "#" + [0, 1, 2].map(index => {
+        const part = hex[1].slice(index * size, (index + 1) * size);
+        return Math.round(parseInt(part, 16) * 255 / (16 ** size - 1)).toString(16).padStart(2, "0");
+      }).join("");
+    }
+    return undefined;
+  };
+  const ansi = Object.keys(palettes.dark) as (keyof typeof palettes.dark)[];
   const report = () => respond(`\x1b[?997;${isDarkTheme() ? 1 : 2}n`);
   const handlers = [
     term.parser.registerCsiHandler({ prefix: "?", intermediates: "$", final: "p" }, (params) => {
@@ -71,13 +86,53 @@ export function observeTerminalTheme(term: Terminal, respond: (data: string) => 
     ),
     term.parser.registerEscHandler({ final: "c" }, () => {
       reporting = false;
+      for (const key of Object.keys(overrides) as (keyof ITheme)[]) delete overrides[key];
+      if (preserveAgentColors) term.options.theme = readTerminalTheme();
       return false;
     }),
   ];
+  if (preserveAgentColors) {
+    for (const [osc, key] of [[10, "foreground"], [11, "background"], [12, "cursor"]] as const) {
+      handlers.push(term.parser.registerOscHandler(osc, data => {
+        const keys = ["foreground", "background", "cursor"] as const;
+        data.split(";").forEach((part, index) => {
+          const value = color(part);
+          const target = keys[osc - 10 + index];
+          if (value && target) overrides[target] = value;
+        });
+        return false; // xterm remains the protocol implementation/query owner.
+      }));
+      handlers.push(term.parser.registerOscHandler(osc + 100, () => {
+        delete overrides[key];
+        term.options.theme = { ...readTerminalTheme(), ...overrides };
+        return false;
+      }));
+    }
+    handlers.push(term.parser.registerOscHandler(4, data => {
+      const parts = data.split(";");
+      for (let i = 0; i + 1 < parts.length; i += 2) {
+        const index = Number(parts[i]);
+        const value = color(parts[i + 1]);
+        if (Number.isInteger(index) && ansi[index] && value) overrides[ansi[index]] = value;
+        else if (Number.isInteger(index) && index >= 16 && index < 256 && value) {
+          (overrides.extendedAnsi ??= [])[index - 16] = value;
+        }
+      }
+      return false;
+    }));
+    handlers.push(term.parser.registerOscHandler(104, data => {
+      const indexes = data ? data.split(";").map(Number) : ansi.map((_, index) => index);
+      indexes.forEach(index => { if (ansi[index]) delete overrides[ansi[index]]; });
+      if (!data) delete overrides.extendedAnsi;
+      else indexes.forEach(index => { if (overrides.extendedAnsi && index >= 16) delete overrides.extendedAnsi[index - 16]; });
+      term.options.theme = { ...readTerminalTheme(), ...overrides };
+      return false;
+    }));
+  }
   const update = () => {
     const theme = readTerminalTheme();
     const palette = JSON.stringify(theme);
-    term.options.theme = theme;
+    term.options.theme = { ...theme, ...overrides };
     if (reporting && previous !== palette) report();
     previous = palette;
   };

@@ -18,6 +18,13 @@ import { EVT_TERMINALS, type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
+import { connectWindowsClipboard, isWindowsTerminal } from "./terminalWindows";
+import { connectTerminalRenderer } from "./terminalRenderer";
+import { connectTerminalLayout } from "./terminalLayout";
+import { connectTerminalViewport } from "./terminalViewport";
+import { connectWindowsComposition } from "./terminalComposition";
+import { createTerminalOutput } from "./terminalOutput";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { connectTerminalKeyboard, isMacTerminal } from "./terminalKeyboard";
 import { terminalOptions, createTerminalRenderer, attachTerminalLayout } from "./terminalPresentation";
 import { connectTerminalLinks } from "./terminalLinks";
@@ -155,7 +162,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     });
     // 缓存实例已经持有常驻输出订阅，重挂时不能再订阅或重放。
     const cached = liveTerminals.get(terminalId);
-    const stream = cached ? null : subscribeTerminalStream(terminalId);
+    const stream = cached ? null : subscribeTerminalStream(terminalId,
+      isWindowsTerminal() ? offset => api.terminalAcknowledgeOutput(terminalId, offset) : undefined);
     void Promise.all([identityReady, stream?.ready])
       .then(async () => {
         if (!active) return;
@@ -211,17 +219,38 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     let entry = liveTerminals.get(id);
     if (!entry) {
       if (!stream) return;
-      const term = new Terminal(terminalOptions(isMacTerminal()));
+      const windows = isWindowsTerminal();
+      const term = new Terminal({ ...terminalOptions(isMacTerminal()), ...(windows ? {
+        cols: snapshot.cols, rows: snapshot.rows,
+        fontFamily: "Consolas, 'Courier New', monospace", fontSize: 14,
+        cursorBlink: false, minimumContrastRatio: 1, allowProposedApi: true,
+      } : {}) });
       const stopTheme = observeTerminalTheme(term, (data) => {
         if (!snapshot.live || liveTerminals.get(id)?.exited) return;
         void api.terminalInput(id, data).catch(() => {});
-      });
+      }, windows);
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);
-      const renderer = createTerminalRenderer(term);
+      let stopViewport = () => {};
+      let stopComposition = () => {};
+      let output: ReturnType<typeof createTerminalOutput> | undefined;
+      const renderer = windows
+        ? { onDimensionsChange: null as (() => void) | null, dispose: connectTerminalRenderer(term) }
+        : createTerminalRenderer(term);
+      if (windows) {
+        term.loadAddon(new Unicode11Addon());
+        term.unicode.activeVersion = "11";
+        stopViewport = connectTerminalViewport(term);
+        stopComposition = connectWindowsComposition(term, () => api.terminalInputCursor(id));
+        output = createTerminalOutput(term);
+        term.textarea?.setAttribute("aria-label", "终端输入；F6 返回页面操作");
+      }
       const stopLinks = connectTerminalLinks(term, isMacTerminal(), api.openRemoteUrl);
-      const stopKeyboard = connectTerminalKeyboard(term, {
+      const stopKeyboard = windows ? connectWindowsClipboard(term, {
+        read: api.readClipboardForTerminal, copy: api.writeClipboardForTerminal,
+        live: () => !liveTerminals.get(id)?.exited && liveTerminals.has(id),
+      }) : connectTerminalKeyboard(term, {
         mac: isMacTerminal(),
         writable: () => !liveTerminals.get(id)?.exited && liveTerminals.has(id),
         readClipboard: api.readClipboardForTerminal,
@@ -235,19 +264,19 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         api.terminalInput(id, data, binary).catch(() => {
           // 已退出的终端拒绝输入：横幅已说明，不再打扰。
         });
-      });
+      }, windows);
 
       entry = {
         term,
         fit,
         renderer,
         dimensions: { cols: snapshot.cols, rows: snapshot.rows },
-        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, () => renderer.dispose(), () => stream.dispose()],
+        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, stopViewport, stopComposition, () => output?.dispose(), () => renderer.dispose(), () => stream.dispose()],
         exited: !snapshot.live || stream.exited,
         onExit: null,
       };
       liveTerminals.set(id, entry);
-      stream.replay(snapshot, data => term.write(data), () => {
+      stream.replay(snapshot, (data, done) => output ? output.write(data, done) : term.write(data, done), () => {
         const live = liveTerminals.get(id);
         if (live) {
           live.exited = true;
@@ -274,6 +303,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           : prev,
       );
     };
+
+    if (isWindowsTerminal()) {
+      const stopLayout = connectTerminalLayout(live.term, live.fit, container,
+        (cols, rows) => live.exited ? Promise.resolve() : api.terminalResize(id, cols, rows), snapshot);
+      return () => { live.onExit = null; stopLayout(); };
+    }
 
     const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {
       if (live.exited || (cols === live.dimensions.cols && rows === live.dimensions.rows)) return;
@@ -359,7 +394,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
             </div>
           )}
           <div className="terminal-body">
-            <div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} ref={containerRef} />
+            <div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} />
           </div>
         </>
       )}

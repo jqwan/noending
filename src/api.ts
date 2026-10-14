@@ -223,11 +223,17 @@ export const api = {
     invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId }),
   terminalInput: (terminalId: string, data: string, binary = false) =>
     invoke<void>("terminal_input", { terminalId, data, binary }),
+  terminalAcknowledgeOutput: (terminalId: string, offset: number) =>
+    invoke<void>("terminal_acknowledge_output", { terminalId, offset }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
+  terminalInputCursor: (terminalId: string) =>
+    invoke<{ x: number; y: number; cols: number; rows: number } | null>("terminal_input_cursor", { terminalId }),
   // 原生读取系统剪贴板的非空文本；图片由 Agent TUI 自己处理。
   readClipboardForTerminal: () =>
     invoke<string | null>("read_clipboard_for_terminal"),
+  writeClipboardForTerminal: (text: string) =>
+    invoke<void>("write_clipboard_for_terminal", { text }),
 
   listIngestSources: () =>
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),

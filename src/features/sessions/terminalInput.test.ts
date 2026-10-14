@@ -31,7 +31,7 @@ beforeEach(() => {
     x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 480,
     width: 800, height: 480, toJSON() {},
   });
-  stop = connectTerminalInput(term, send);
+  stop = connectTerminalInput(term, send, true);
 });
 
 afterEach(() => {
@@ -82,13 +82,28 @@ it("retains mouse modifiers without applying the TUI's acceleration a second tim
   expect(send.mock.calls[1]).toEqual(["\x1b[<80;3;3M".repeat(2)]);
 });
 
-it("uses cursor sequences in the alternate screen without mouse reporting, including application mode", async () => {
+it("does not change Agent prompt history with wheel in a Windows alternate screen lacking mouse reports", async () => {
   await write("\x1b[?1049h");
   wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE });
-  expect(send.mock.calls).toEqual([["\x1b[B".repeat(3)]]);
+  expect(send).not.toHaveBeenCalled();
   await write("\x1b[?1h");
   wheel(-1, { deltaMode: WheelEvent.DOM_DELTA_PAGE });
-  expect(send.mock.calls[1]).toEqual(["\x1bOA".repeat(24)]);
+  expect(send).not.toHaveBeenCalled();
+  expect(wheel(-20, { shiftKey: true }).defaultPrevented).toBe(true);
+  term.input("\x1b[A", true);
+  expect(send.mock.calls).toEqual([["\x1b[A"]]); // Actual keys still navigate.
+});
+
+it("preserves the existing non-Windows alternate-screen fallback and acceleration", async () => {
+  stop!();
+  stop = connectTerminalInput(term, send);
+  await write("\x1b[?1049h");
+  term.options.scrollSensitivity = 2;
+  term.options.fastScrollSensitivity = 5;
+  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, altKey: true });
+  expect(send.mock.calls).toEqual([["\x1b[B".repeat(10)]]);
+  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, ctrlKey: true });
+  expect(send.mock.calls[1]).toEqual(["\x1b[B".repeat(10)]);
 });
 
 it("leaves ordinary scrollback to xterm, clears pending movement on buffer switches, and disposes input forwarding", async () => {

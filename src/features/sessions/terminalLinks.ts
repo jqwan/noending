@@ -3,9 +3,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 
 /** Ordinary web links and native OSC 8 links share the system-browser opener.
  * No editor references or workbench command URIs are interpreted here. */
-export function connectTerminalLinks(term: Terminal, mac: boolean, open: (url: string) => Promise<void>): () => void {
+export function connectTerminalLinks(term: Terminal, mac: boolean, open: (url: string) => Promise<unknown>): () => void {
   const activate = (event: MouseEvent, text: string) => {
     if (!(mac ? event.metaKey : event.ctrlKey)) return;
+    if (!mac && (event.altKey || event.shiftKey || term.hasSelection() || term.modes.mouseTrackingMode !== "none")) return;
     let url: URL;
     try { url = new URL(text); } catch { return; }
     if (url.protocol !== "http:" && url.protocol !== "https:") return;
@@ -15,5 +16,5 @@ export function connectTerminalLinks(term: Terminal, mac: boolean, open: (url: s
   term.options.linkHandler = { activate, allowNonHttpProtocols: false };
   const addon = new WebLinksAddon(activate);
   term.loadAddon(addon);
-  return () => addon.dispose();
+  return () => { addon.dispose(); if (!mac) term.options.linkHandler = null; };
 }
