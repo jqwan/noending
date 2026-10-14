@@ -8,10 +8,12 @@ export function isMacTerminal(): boolean {
  * Composition itself remains owned by xterm; only WebKit's missing/duplicate
  * insertText events are reconciled. */
 function connectWebkitIme(term: Terminal) {
-  const timers = new Set<ReturnType<typeof setTimeout>>();
-  const later = (delay: number) => {
-    const timer = setTimeout(() => { timers.delete(timer); deliver(); }, delay);
-    timers.add(timer);
+  // Reconcile at the end of the native event chain, with at most one check.
+  // input/keyup supply later changes; a fixed 120ms poll is unnecessary.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const later = () => {
+    if (!armed || composing || timer !== undefined) return;
+    timer = setTimeout(() => { timer = undefined; deliver(); }, 0);
   };
   let armed = false;
   let armValue = "";
@@ -30,7 +32,6 @@ function connectWebkitIme(term: Terminal) {
     let residue = text;
     if (xtermSent) {
       if (residue.endsWith(xtermSent)) residue = residue.slice(0, residue.length - xtermSent.length);
-      if (residue === xtermSent) residue = "";
     }
     if (residue) term.input(residue, true);
     xtermSent = "";
@@ -53,8 +54,7 @@ function connectWebkitIme(term: Terminal) {
       lastPayload = "";
       lastPayloadValue = term.textarea?.value ?? null;
     }
-    later(0);
-    later(120);
+    later();
   };
   const accounting = term.onData((d) => {
     if (armed) xtermSent += d;
@@ -92,7 +92,8 @@ function connectWebkitIme(term: Terminal) {
   // input 的唯一收口（捕获层，先于 xterm 挂在 textarea 上的监听）。
   const input = (e: Event) => {
     const ie = e as InputEvent;
-    if (ie.inputType !== "insertText" || !ie.data) return;
+    if (ie.inputType !== "insertText") return;
+    if (!ie.data) { later(); return; }
     if (composing || (commit && term.textarea?.value === commit.value &&
       (ie.data === commit.raw || ie.data === commit.text))) {
       // A composition's final input event is not a second commit. Keep it
@@ -115,7 +116,7 @@ function connectWebkitIme(term: Terminal) {
 
   return {
     key(event: KeyboardEvent) {
-      if (event.type === "keyup") { later(0); return true; }
+      if (event.type === "keyup") { later(); return true; }
       if (event.type !== "keydown") return true;
       const modifier = ["Shift", "Control", "Alt", "Meta"].includes(event.key);
       if (composing && (modifier || event.keyCode === 20 || event.key === "Fn" || event.key === "Unidentified" ||
@@ -128,7 +129,10 @@ function connectWebkitIme(term: Terminal) {
       if (!composing && !modifier && event.keyCode !== 20 && event.key !== "Fn" && event.key !== "Unidentified") {
         commit = undefined;
       }
-      if (event.keyCode === 229) { armGesture(); return false; }
+      if (event.keyCode === 229) {
+        if (!composing) armGesture();
+        return false;
+      }
       if (modifier) {
         armGesture();
         return true;
@@ -137,7 +141,7 @@ function connectWebkitIme(term: Terminal) {
       return true;
     },
     dispose() {
-      timers.forEach(clearTimeout);
+      clearTimeout(timer);
       accounting.dispose();
       term.textarea?.removeEventListener("compositionstart", compositionStart);
       term.textarea?.removeEventListener("compositionupdate", compositionUpdate);

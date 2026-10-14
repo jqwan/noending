@@ -67,15 +67,20 @@ export function attachTerminalLayout(
   let disposed = false;
   let frame: number | undefined;
   let first = true;
+  let repaint = true;
   const refresh = () => {
     if (disposed || frame !== undefined) return;
     frame = requestAnimationFrame(() => {
       frame = undefined;
       if (disposed || !container.isConnected || container.clientWidth <= 0 || container.clientHeight <= 0) return;
       try {
+        const { cols, rows } = term;
         fit.fit();
         if (term.cols > 0 && term.rows > 0) resize(term.cols, term.rows);
-        term.refresh(0, term.rows - 1);
+        // FitAddon already redraws when the geometry changes. Only remount
+        // and visibility/focus recovery need an explicit same-size repaint.
+        if (repaint && cols === term.cols && rows === term.rows) term.refresh(0, term.rows - 1);
+        repaint = false;
         if (first) { first = false; term.focus(); }
       } catch {
         // A detached/unmeasurable view will be fitted on its next attachment.
@@ -84,6 +89,13 @@ export function attachTerminalLayout(
   };
   const resume = () => {
     if (disposed || document.visibilityState === "hidden" || !container.isConnected || container.clientWidth <= 0 || container.clientHeight <= 0) return;
+    repaint = true;
+    refresh();
+  };
+  const fontsChanged = () => {
+    if (disposed || !container.isConnected || container.clientWidth <= 0 || container.clientHeight <= 0) return;
+    // A font load may replace glyphs without changing their cell dimensions.
+    // Window activation alone does not invalidate the font texture cache.
     term.clearTextureAtlas();
     refresh();
   };
@@ -92,8 +104,8 @@ export function attachTerminalLayout(
   window.addEventListener("resize", refresh);
   window.addEventListener("focus", resume);
   document.addEventListener("visibilitychange", resume);
-  document.fonts?.addEventListener("loadingdone", resume);
-  void document.fonts?.ready.then(() => { if (!disposed) resume(); });
+  document.fonts?.addEventListener("loadingdone", fontsChanged);
+  void document.fonts?.ready.then(refresh);
   return {
     refresh,
     dispose() {
@@ -103,7 +115,7 @@ export function attachTerminalLayout(
       window.removeEventListener("resize", refresh);
       window.removeEventListener("focus", resume);
       document.removeEventListener("visibilitychange", resume);
-      document.fonts?.removeEventListener("loadingdone", resume);
+      document.fonts?.removeEventListener("loadingdone", fontsChanged);
     },
   };
 }

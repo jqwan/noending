@@ -269,3 +269,26 @@ it("keeps converted candidates and explicitly entered composition spaces", async
   endComposition("hello world");
   await waitFor(() => expect(send.mock.calls[1]).toEqual(["hello world"]));
 });
+
+it("delivers value-only direct commits after input arrives late and reconciles already sent repeated characters", async () => {
+  stopKeyboard = connectTerminalKeyboard(term, {
+    mac: true, writable: () => true, readClipboard: async () => null, copy: vi.fn(),
+  });
+  key("Shift", { keyCode: 16 });
+  key("Shift", { keyCode: 16 });
+  // WebKit may expose the value after the initial key's deferred check.
+  await new Promise(resolve => setTimeout(resolve, 10));
+  expect(send).not.toHaveBeenCalled();
+  term.textarea!.value = "？";
+  term.textarea!.dispatchEvent(new InputEvent("input", {
+    bubbles: true, inputType: "insertText", data: null,
+  }));
+  await waitFor(() => expect(send.mock.calls).toEqual([["？"]]));
+  key("s", { keyCode: 229 });
+  term.input("哈", true);
+  term.textarea!.value += "哈哈";
+  term.textarea!.dispatchEvent(new InputEvent("input", {
+    bubbles: true, inputType: "insertText", data: "哈哈",
+  }));
+  await waitFor(() => expect(send.mock.calls.map(call => call[0]).join("")).toBe("？哈哈"));
+});
