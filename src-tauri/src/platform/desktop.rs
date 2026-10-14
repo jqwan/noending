@@ -73,23 +73,46 @@ fn protocol_handler_present(scheme: &str) -> bool {
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use std::os::windows::process::CommandExt;
 
     #[test]
     fn windows_presence_requires_a_resolvable_protocol_handler() {
         // Windows PowerShell is required, as for the existing Windows launcher.
         // Use unique per-user keys; never alter a real Agent's registration.
         fn registry_script(script: &str) {
-            let status = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-Command", script])
-                .status()
+            let encoded = base64::engine::general_purpose::STANDARD.encode(
+                script
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-EncodedCommand", &encoded])
+                .creation_flags(0x08000000)
+                .output()
                 .expect("Windows protocol test requires PowerShell");
-            assert!(status.success(), "protocol registry fixture failed");
+            assert!(
+                output.status.success(),
+                "protocol registry fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         let prefix = format!("noending-test-{}", crate::storage::new_id());
         let bare = format!("{prefix}-bare");
         let registered = format!("{prefix}-registered");
         let root = "HKCU:\\Software\\Classes";
-        struct Cleanup(Vec<String>);
+        // Give the fixture its own executable and explicit friendly name. A
+        // system cmd.exe's application registration/MUI varies by runner image.
+        let executable = std::env::temp_dir().join(format!("{prefix}.exe"));
+        let system_root = std::env::var_os("SystemRoot").expect("Windows SystemRoot");
+        std::fs::copy(
+            std::path::PathBuf::from(system_root).join("System32/cmd.exe"),
+            &executable,
+        )
+        .unwrap();
+        let application = format!("{root}\\Applications\\{prefix}.exe");
+        struct Cleanup(Vec<String>, std::path::PathBuf);
         impl Drop for Cleanup {
             fn drop(&mut self) {
                 for key in &self.0 {
@@ -97,12 +120,19 @@ mod tests {
                         "$ErrorActionPreference='Stop'; if (Test-Path -LiteralPath '{key}') {{ Remove-Item -LiteralPath '{key}' -Recurse -Force }}"
                     ));
                 }
+                std::fs::remove_file(&self.1).unwrap();
             }
         }
-        let _cleanup = Cleanup(vec![
-            format!("{root}\\{bare}"),
-            format!("{root}\\{registered}"),
-        ]);
+        let _cleanup = Cleanup(
+            vec![
+                format!("{root}\\{bare}"),
+                format!("{root}\\{registered}"),
+                application.clone(),
+            ],
+            executable.clone(),
+        );
+        let command = format!("\"{}\" \"%1\"", executable.display());
+        let command = crate::platform::launcher::ps_quote(&command);
         registry_script(&format!(
             "$ErrorActionPreference='Stop'; \
              foreach ($scheme in @('{bare}','{registered}')) {{ \
@@ -110,7 +140,9 @@ mod tests {
              New-ItemProperty -LiteralPath $key -Name 'URL Protocol' -Value '' -Force | Out-Null }}; \
              $command='{root}\\{registered}\\shell\\open\\command'; \
              New-Item -Path $command -Force | Out-Null; \
-             Set-Item -LiteralPath $command -Value ('\"'+$env:SystemRoot+'\\System32\\cmd.exe\" \"%1\"')"
+             Set-Item -LiteralPath $command -Value {command}; \
+             New-Item -Path '{application}' -Force | Out-Null; \
+             New-ItemProperty -LiteralPath '{application}' -Name 'FriendlyAppName' -Value 'NoEnding Protocol Test' -Force | Out-Null"
         ));
         assert!(!app_present("NoEnding Test", &format!("{prefix}-missing")));
         assert!(!app_present("NoEnding Test", &bare));

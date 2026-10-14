@@ -280,6 +280,11 @@ mod tests {
             .creation_flags(0x08000000)
             .output()
             .unwrap();
+        // PowerShell expands 8.3 paths (RUNNER~1 on hosted Windows). Compare
+        // directory identity while the fixture still exists, not path spelling.
+        let expected_cwd = std::fs::canonicalize(&cwd).unwrap();
+        let actual_cwd =
+            std::fs::canonicalize(String::from_utf8(cwd_output.stdout.clone()).unwrap());
         std::fs::remove_dir_all(&cwd).unwrap();
         assert!(output.status.success(), "{:?}", output.stderr);
         assert_eq!(
@@ -287,10 +292,7 @@ mod tests {
             "中文，你好 😀 '$literal'"
         );
         assert!(cwd_output.status.success(), "{:?}", cwd_output.stderr);
-        assert_eq!(
-            String::from_utf8(cwd_output.stdout).unwrap(),
-            cwd.to_string_lossy()
-        );
+        assert_eq!(actual_cwd.unwrap(), expected_cwd);
     }
 
     #[test]
