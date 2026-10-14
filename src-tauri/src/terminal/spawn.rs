@@ -20,6 +20,8 @@ pub(crate) struct PtyPair {
 
 impl PtyPair {
     pub(crate) fn open() -> Result<Self> {
+        #[cfg(windows)]
+        crate::platform::conpty::ensure_loaded()?;
         let pair = portable_pty::native_pty_system()
             .openpty(portable_pty::PtySize {
                 rows: super::INITIAL_ROWS,
@@ -135,24 +137,6 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
 
     let mut script = String::from(
         "$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n",
-    );
-    // Pi emits DECSET mouse modes before Node's setRawMode. ConPTY consumes
-    // those modes while VT input is disabled, leaving xterm unaware of them.
-    // Start with VT input enabled; the Agent still owns its subsequent modes.
-    script.push_str(
-        r#"Add-Type 'using System; using System.Runtime.InteropServices; public static class NoEndingTerminalConsole {
-[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
-[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint mode);
-[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint mode);
-}'
-$terminalInputHandle = [NoEndingTerminalConsole]::GetStdHandle(-10)
-[uint32]$terminalInputMode = 0
-if ([NoEndingTerminalConsole]::GetConsoleMode($terminalInputHandle, [ref]$terminalInputMode)) {
-    if (-not [NoEndingTerminalConsole]::SetConsoleMode($terminalInputHandle, $terminalInputMode -bor 0x200)) {
-        throw 'NoEnding: 无法开启终端 VT 输入模式'
-    }
-}
-"#,
     );
     if let Some(cwd) = &cmd.cwd {
         let dir = ps_quote(&cwd.to_string_lossy());

@@ -148,17 +148,7 @@ impl Scrollback {
 /// commands (input / resize / attach) all touch it — each holds the lock only
 /// across its own field update, never across a Db call and never across an
 /// emit, so contention is bounded to microseconds.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct TerminalCursor {
-    pub x: u16,
-    pub y: u16,
-    pub cols: u16,
-    pub rows: u16,
-}
-
 struct TerminalRecord {
-    #[cfg(windows)]
-    pid: Option<u32>,
     summary: TerminalSummary,
     /// Current native root identity, supplied by the launch or an Agent event.
     /// It also retains a switched-to identity while its source is not ingested.
@@ -212,12 +202,6 @@ impl Drop for ResumeReservation<'_> {
 }
 
 impl TerminalRegistry {
-    #[cfg(windows)]
-    pub fn cursor_pid(&self, id: &str) -> Option<u32> {
-        let record = self.records.lock().ok()?.get(id)?.clone();
-        let record = record.lock().ok()?;
-        record.summary.live.then_some(record.pid).flatten()
-    }
     pub fn new(app: Option<AppHandle>) -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
@@ -769,8 +753,6 @@ impl TerminalRegistry {
             flow
         };
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
-            #[cfg(windows)]
-            pid: child.process_id(),
             pending_tracking: (summary.session_id.is_none()
                 && !summary.initial_workstream_ids.is_empty())
             .then(|| PendingTracking {
@@ -1055,28 +1037,6 @@ mod tests {
             output.contains("\x1b[?1006h"),
             "ConPTY dropped SGR encoding: {output:?}"
         );
-        // The GUI entry point must be built before this real helper test.
-        let executable = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("noending.exe");
-        assert!(executable.exists(), "requires cargo build --bin noending");
-        let native = crate::platform::terminal_cursor::query_with_executable(
-            &executable,
-            registry.cursor_pid(&id).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            (native.x, native.y, native.cols, native.rows),
-            (2, 3, INITIAL_COLS, INITIAL_ROWS)
-        );
-        assert!(
-            !read().contains("\"cols\""),
-            "helper JSON must stay off the Agent's output stream"
-        );
         registry.write(&id, "\x1b[<64;3;4M").unwrap();
         until("SGR wheel delivered to Agent", || {
             read().contains("1b5b3c36343b333b344d").then_some(())
@@ -1349,8 +1309,6 @@ mod tests {
         let writer = pty.take_writer().unwrap();
         let terminal_id = new_id();
         let record = TerminalRecord {
-            #[cfg(windows)]
-            pid: None,
             summary: TerminalSummary {
                 terminal_id: terminal_id.clone(),
                 session_id: session_id.map(str::to_string),

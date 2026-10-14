@@ -252,7 +252,6 @@ pub fn run() {
             commands::terminal_acknowledge_output,
             commands::terminal_release_output,
             commands::terminal_resize,
-            commands::terminal_input_cursor,
             commands::search,
             commands::get_agent_status,
             commands::set_agent_launch_enabled,

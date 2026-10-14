@@ -790,28 +790,6 @@ pub fn terminal_release_output(
 }
 
 #[tauri::command]
-pub async fn terminal_input_cursor(
-    state: State<'_, crate::terminal::TerminalRegistry>,
-    terminal_id: String,
-) -> Result<Option<crate::terminal::TerminalCursor>> {
-    #[cfg(windows)]
-    {
-        let Some(pid) = state.cursor_pid(&terminal_id) else {
-            return Ok(None);
-        };
-        tauri::async_runtime::spawn_blocking(move || crate::platform::terminal_cursor::query(pid))
-            .await
-            .map_err(|e| other(e.to_string()))?
-            .map(Some)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (state, terminal_id);
-        Ok(None)
-    }
-}
-
-#[tauri::command]
 pub fn terminal_resize(
     state: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,

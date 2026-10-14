@@ -1103,17 +1103,14 @@ p.ws-card-body.muted { color: var(--text-muted); }
   min-width: 0;
   background: var(--bg-app);
 }
-.terminal-host[data-platform="windows"]:focus-within { outline: 1px solid var(--accent); outline-offset: -1px; }
-/* Chromium reveals a composing textarea even inside overflow:hidden. At the
-   last column that scrolls the entire terminal horizontally. clip excludes
-   this host from scroll containers; xterm's own viewport still owns history. */
-.terminal-host[data-platform="windows"] { overflow: clip; overscroll-behavior: contain; }
-.terminal-host[data-platform="windows"] .xterm-helper-textarea { min-height: 0; }
-.terminal-host[data-platform="windows"] .xterm[data-native-composition="true"] .xterm-helper-textarea,
-.terminal-host[data-platform="windows"] .xterm[data-native-composition="true"] .composition-view {
-  left: var(--terminal-ime-x) !important;
-  top: var(--terminal-ime-y) !important;
+/* IME preedit expands from xterm's cursor near the right edge. Prevent its
+   overflow from scrolling the host horizontally; xterm's viewport continues
+   to own vertical history scrolling and its textarea owns IME positioning. */
+.terminal-host[data-platform="windows"] {
+  overflow-x: clip;
+  overflow-y: visible;
 }
+.terminal-host[data-platform="windows"]:focus-within { outline: 1px solid var(--accent); outline-offset: -1px; }
 .terminal-context-menu {
   position: fixed;
   z-index: 1000;

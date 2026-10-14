@@ -229,8 +229,6 @@ export const api = {
     invoke<void>("terminal_release_output", { terminalId, consumerId }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
-  terminalInputCursor: (terminalId: string) =>
-    invoke<{ x: number; y: number; cols: number; rows: number } | null>("terminal_input_cursor", { terminalId }),
   // 原生读取系统剪贴板的非空文本；图片由 Agent TUI 自己处理。
   readClipboardForTerminal: () =>
     invoke<string | null>("read_clipboard_for_terminal"),

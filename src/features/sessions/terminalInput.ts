@@ -1,10 +1,18 @@
 import type { Terminal } from "@xterm/xterm";
 
-/** Preserve wheel distance in TUIs. xterm 6 otherwise emits at most one report
- * per DOM event, and dampens small trackpad deltas before deciding to emit it.
- * Feed normalized line events back through xterm so it still owns mouse
- * coordinates, modifiers and the application's selected protocol. */
+/** Windows forwards xterm's native input directly. Other platforms retain
+ * their existing wheel-distance adaptation independently. */
 export function connectTerminalInput(term: Terminal, send: (data: string, binary?: boolean) => void, windows = false): () => void {
+  if (windows) {
+    // xterm owns scrollback, mouse reporting and alternate-screen fallback.
+    // Keep legacy mouse bytes binary instead of UTF-8 encoding coordinates.
+    const input = term.onData(data => send(data));
+    const binaryInput = term.onBinary(data => send(data, true));
+    return () => { input.dispose(); binaryInput.dispose(); };
+  }
+
+  // Preserve wheel distance in non-Windows TUIs. Normalize line events through
+  // xterm so it still owns coordinates, modifiers and the selected protocol.
   const element = term.element!;
   const screen = element.querySelector<HTMLElement>(".xterm-screen");
   let forwarding = false;
@@ -46,7 +54,7 @@ export function connectTerminalInput(term: Terminal, send: (data: string, binary
     distance *= sensitivity;
     // Mouse-aware TUIs own Alt/Ctrl acceleration; applying it here as well
     // would multiply their native speed a second time (e.g. Pi's Alt+wheel).
-    if (!reportsWheel && (event.altKey || (!windows && event.ctrlKey))) {
+    if (!reportsWheel && (event.altKey || event.ctrlKey)) {
       distance *= term.options.fastScrollSensitivity ?? 5;
     }
     if (Math.sign(distance) !== Math.sign(remainder)) remainder = 0;

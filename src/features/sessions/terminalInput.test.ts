@@ -31,7 +31,7 @@ beforeEach(() => {
     x: 0, y: 0, left: 0, top: 0, right: 800, bottom: 480,
     width: 800, height: 480, toJSON() {},
   });
-  stop = connectTerminalInput(term, send, true);
+  stop = connectTerminalInput(term, send);
 });
 
 afterEach(() => {
@@ -83,12 +83,30 @@ it("retains mouse modifiers without applying the TUI's acceleration a second tim
 });
 
 it("preserves Windows alternate-screen scrolling when an application has no mouse reports", async () => {
+  stop!();
+  stop = connectTerminalInput(term, send, true);
   await write("\x1b[?1049h");
   wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE });
-  expect(send.mock.calls).toEqual([["\x1b[B".repeat(3)]]);
+  expect(send.mock.calls).toEqual([["\x1b[B"]]);
   await write("\x1b[?1h");
   wheel(-1, { deltaMode: WheelEvent.DOM_DELTA_LINE });
   expect(send.mock.calls[1]).toEqual(["\x1bOA"]);
+});
+
+it("forwards Windows native SGR wheel reports without replaying distances or batching input", async () => {
+  stop!();
+  stop = connectTerminalInput(term, send, true);
+  await write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+  wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE, altKey: true });
+  wheel(-2, { deltaMode: WheelEvent.DOM_DELTA_LINE, ctrlKey: true });
+  expect(send.mock.calls).toEqual([["\x1b[<73;3;3M"], ["\x1b[<80;3;3M"]]);
+  term.input("typed", true);
+  expect(send.mock.calls[2]).toEqual(["typed"]);
+  stop();
+  stop = undefined;
+  term.input("after disposal", true);
+  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE });
+  expect(send).toHaveBeenCalledTimes(3);
 });
 
 it("preserves the existing non-Windows alternate-screen fallback and acceleration", async () => {
@@ -124,6 +142,8 @@ it("leaves ordinary scrollback to xterm, clears pending movement on buffer switc
 });
 
 it("preserves raw legacy mouse bytes beyond ASCII instead of UTF-8 encoding coordinates", async () => {
+  stop!();
+  stop = connectTerminalInput(term, send, true);
   term.resize(200, 24);
   await write("\x1b[?1000h");
   wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, clientX: 1005 });

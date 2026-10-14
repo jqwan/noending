@@ -196,8 +196,9 @@ fn prepare_at(
             // layer. SessionFlags add a source; lower user/project layers keep
             // their hooks even though ordinary config arrays are overridden.
             let group = format!(
-                "[{{hooks=[{{type=\"command\",command={},timeout=3,async=false}}]}}]",
-                serde_json::to_string(&hook)?
+                "[{{hooks=[{{type={},command={},timeout=3,async=false}}]}}]",
+                codex_cli_toml_string("command")?,
+                codex_cli_toml_string(&hook)?
             );
             vec![
                 "-c".into(),
@@ -226,6 +227,24 @@ fn prepare_at(
     }))
 }
 
+/// PowerShell 5.1's legacy native argument passing removes embedded double
+/// quotes, including through npm's .cmd shim. Our Windows hook command uses
+/// EncodedCommand, so these controlled strings can use TOML literal quotes.
+/// Do not change the decoded values: Codex fingerprints the parsed handlers.
+fn codex_cli_toml_string(value: &str) -> Result<String> {
+    #[cfg(windows)]
+    {
+        if value.contains(['\'', '\r', '\n']) {
+            return Err(other("Codex hook 配置无法编码为单行 TOML 字符串"));
+        }
+        Ok(format!("'{value}'"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(serde_json::to_string(value)?)
+    }
+}
+
 fn codex_trust_override(command: &str) -> Result<String> {
     // These fingerprints are Codex's own versioned hook identity contract
     // (codex-rs/hooks/lib.rs and config/fingerprint.rs, rust-v0.160.1).
@@ -247,15 +266,25 @@ fn codex_trust_override(command: &str) -> Result<String> {
             "sha256:{:x}",
             Sha256::digest(serde_json::to_vec(&normalized)?)
         );
-        let key = serde_json::to_string(&format!("{source}:{event}:0:0"))?;
+        let key = codex_cli_toml_string(&format!("{source}:{event}:0:0"))?;
         entries.push(format!(
             "{key}={{enabled=true,trusted_hash={}}}",
-            serde_json::to_string(&hash)?
+            codex_cli_toml_string(&hash)?
         ));
     }
     // The CLI's dotted override parser does not understand quoted keys that
     // themselves contain dots. Put complete keys inside one inline table.
-    Ok(format!("hooks.state={{{}}}", entries.join(",")))
+    #[cfg(windows)]
+    {
+        // Whitespace makes PowerShell quote the whole native argument. Keep
+        // it even though TOML permits a compact form: CMD must not interpret
+        // the angle brackets in <session-flags> as input/output redirection.
+        Ok(format!("hooks.state={{ {} }}", entries.join(", ")))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(format!("hooks.state={{{}}}", entries.join(",")))
+    }
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {

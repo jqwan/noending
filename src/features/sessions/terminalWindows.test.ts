@@ -5,7 +5,6 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { connectWindowsClipboard } from "./terminalWindows";
 import { connectTerminalLinks } from "./terminalLinks";
 import { createTerminalOutput } from "./terminalOutput";
-import { connectWindowsComposition } from "./terminalComposition";
 
 vi.hoisted(() => vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null));
 let term: Terminal;
@@ -41,23 +40,14 @@ it("leaves native window close available without delivering Alt+F4 to the Agent"
   expect(data).toEqual([]);
 });
 
-it("keeps Chromium composition submission single while reading the hidden native cursor, and stops queries after disposal", async () => {
-  const query = vi.fn().mockResolvedValue({ x: 2, y: 3, cols: 80, rows: 24 });
-  const dispose = connectWindowsComposition(term, query);
+it("keeps Chromium composition submission single through xterm's native input path", async () => {
   term.focus();
   term.textarea!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-  await waitFor(() => expect(query).toHaveBeenCalled());
   term.textarea!.value = "你";
   term.textarea!.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "你" }));
   await new Promise(resolve => setTimeout(resolve, 0));
   term.textarea!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "你" }));
   await waitFor(() => expect(data).toEqual(["你"]));
-  dispose();
-  const count = query.mock.calls.length;
-  await write("output after disposal");
-  term.textarea!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-  await new Promise(resolve => setTimeout(resolve, 300));
-  expect(query).toHaveBeenCalledTimes(count);
 });
 function key(key: string, modifiers: KeyboardEventInit = {}) {
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key, ...modifiers });
@@ -197,24 +187,4 @@ it("hides a cached terminal's menu on navigation and closes it when keyboard foc
   const outside = document.createElement("button"); document.body.append(outside);
   outside.focus();
   expect(document.querySelector('[role="menu"]')).toBeNull();
-});
-
-it("does not query native cursor for ordinary output and falls back after composition dimensions change", async () => {
-  const query = vi.fn().mockResolvedValue({ x: 2, y: 3, cols: 80, rows: 24 });
-  const dispose = connectWindowsComposition(term, query);
-  vi.spyOn(term.element!.querySelector<HTMLElement>(".xterm-screen")!, "getBoundingClientRect")
-    .mockReturnValue({ width: 800, height: 480 } as DOMRect);
-  try {
-    term.focus();
-    await write("ordinary output");
-    await new Promise(resolve => setTimeout(resolve, 300));
-    expect(query).not.toHaveBeenCalled();
-    term.textarea!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
-    await waitFor(() => expect(term.element!.dataset.nativeComposition).toBe("true"));
-    term.resize(90, 24);
-    term.textarea!.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "ni" }));
-    expect(term.element!.dataset.nativeComposition).toBeUndefined();
-    term.textarea!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
-    await new Promise(resolve => setTimeout(resolve, 10));
-  } finally { dispose(); }
 });

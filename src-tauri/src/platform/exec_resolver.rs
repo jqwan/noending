@@ -5,6 +5,8 @@
 //! We resolve concrete executable paths once, cache them in
 //! `agent_installations`, and re-verify on every app start.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -94,7 +96,11 @@ fn candidate_file_names(name: &str) -> Vec<String> {
 /// string, and a hanging probe can never stall app startup.
 fn probe_version(exec: &PathBuf) -> Option<String> {
     const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-    let mut child = std::process::Command::new(exec)
+    let mut command = std::process::Command::new(exec);
+    // Version probes must not share the parent terminal's console/title.
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let mut child = command
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

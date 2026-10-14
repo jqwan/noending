@@ -13,6 +13,8 @@
 //! conversations use the ordinary launcher and terminal instead.
 
 use std::io::Read;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -120,6 +122,10 @@ fn run_process(
     env: &[(&str, &str)],
 ) -> std::result::Result<HeadlessOutput, ProcessFailure> {
     let mut command = Command::new(program);
+    // Headless CLI shims must not inherit the dev terminal's console:
+    // cmd `title` and Node process.title can otherwise rename its tab.
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     command
         .args(args)
         .stdin(Stdio::null())

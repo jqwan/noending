@@ -21,7 +21,6 @@ import { connectTerminalInput } from "./terminalInput";
 import { connectWindowsClipboard, isWindowsTerminal } from "./terminalWindows";
 import { connectTerminalLayout } from "./terminalLayout";
 import { connectTerminalViewport } from "./terminalViewport";
-import { connectWindowsComposition } from "./terminalComposition";
 import { createTerminalOutput } from "./terminalOutput";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { connectTerminalKeyboard, isMacTerminal } from "./terminalKeyboard";
@@ -237,14 +236,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       term.loadAddon(fit);
       term.open(container);
       let stopViewport = () => {};
-      let stopComposition = () => {};
       let output: ReturnType<typeof createTerminalOutput> | undefined;
       const renderer = createTerminalRenderer(term);
       if (windows) {
         term.loadAddon(new Unicode11Addon());
         term.unicode.activeVersion = "11";
         stopViewport = connectTerminalViewport(term);
-        stopComposition = connectWindowsComposition(term, () => api.terminalInputCursor(id));
         output = createTerminalOutput(term);
         term.textarea?.setAttribute("aria-label", "终端输入；F6 返回页面操作");
       }
@@ -273,7 +270,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         fit,
         renderer,
         dimensions: { cols: snapshot.cols, rows: snapshot.rows },
-        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, stopViewport, stopComposition, () => output?.dispose(), () => renderer.dispose(), () => stream.dispose()],
+        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, stopViewport, () => output?.dispose(), () => renderer.dispose(), () => stream.dispose()],
         exited: !snapshot.live || stream.exited,
         onExit: null,
       };

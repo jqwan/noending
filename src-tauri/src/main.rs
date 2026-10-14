@@ -3,10 +3,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    #[cfg(windows)]
-    if let Some(code) = noending_lib::platform::terminal_cursor::run_helper_if_requested() {
-        std::process::exit(code);
-    }
     if let Some(code) = noending_lib::terminal::identity::run_hook_helper_if_requested() {
         std::process::exit(code);
     }
