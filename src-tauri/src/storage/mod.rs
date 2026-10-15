@@ -769,13 +769,25 @@ impl Db {
             // Source activity advances only when its observed cursor changes;
             // reading an unchanged file is not Agent activity.
             if source_changed {
-                let observed = mtime_timestamp(source.mtime);
+                let (agent, current): (String, Option<String>) = tx.query_row(
+                    "SELECT agent, last_activity_at FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                // Codex compresses cold rollouts and expands them on resume.
+                // Its filesystem mtime therefore includes maintenance; only
+                // transcript timestamps may advance conversation activity.
+                let observed = if agent == Agent::Codex.as_str() {
+                    messages
+                        .iter()
+                        .filter_map(|m| m.ts.as_deref())
+                        .fold(None, |latest, ts| {
+                            later_timestamp(latest.as_deref(), Some(ts))
+                        })
+                } else {
+                    mtime_timestamp(source.mtime)
+                };
                 if let Some(observed) = observed {
-                    let current: Option<String> = tx.query_row(
-                        "SELECT last_activity_at FROM sessions WHERE id = ?1",
-                        params![session_id],
-                        |r| r.get(0),
-                    )?;
                     let activity = later_timestamp(current.as_deref(), Some(&observed));
                     if let Some(activity) = activity {
                         tx.execute(

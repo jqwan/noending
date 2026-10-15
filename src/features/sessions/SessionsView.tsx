@@ -1,3 +1,4 @@
+import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
@@ -92,6 +93,9 @@ export default function SessionsView({ navigate, scope }: {
     ])
       .then(([ss, ps, ws]) => {
         if (cancelled) return;
+        ss = ss.filter(s => !removedTargets.sessions.has(s.id));
+        ps = ps?.filter(p => !removedTargets.projects.has(p.id));
+        ws = ws?.filter(w => !removedTargets.workstreams.has(w.id));
         const wsMap = new Map((ws ?? []).map((w) => [w.id, w.title]));
         setWorkstreamTitleById(wsMap);
         cachedWorkstreamTitleById = wsMap;
@@ -109,6 +113,11 @@ export default function SessionsView({ navigate, scope }: {
       });
     return () => { cancelled = true; };
   }, [archivedMode]);
+  useEffect(() => {
+    const remove = () => setSessions(rows => rows?.filter(s => !removedTargets.sessions.has(s.id)) ?? null);
+    window.addEventListener(EVT_REMOVED, remove);
+    return () => window.removeEventListener(EVT_REMOVED, remove);
+  }, []);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
   useEffect(() => {

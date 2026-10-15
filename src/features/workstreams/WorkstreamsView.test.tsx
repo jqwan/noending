@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { invalidateTargets, removedTargets } from "../../app/removedTargets";
+import { act, renderHook, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WorkstreamsView from "./WorkstreamsView";
 import { api } from "../../api";
@@ -7,10 +8,10 @@ import type { WorkstreamCardData } from "../../types";
 
 const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi.fn() }));
 vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
-vi.mock("../../api", () => ({ api: { archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
+vi.mock("../../api", () => ({ api: { listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
 const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "", summary: null, last_activity_at: null, latest_session: null });
-beforeEach(() => { vi.clearAllMocks(); viewState.clear(); localStorage.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
+beforeEach(() => { Object.values(removedTargets).forEach(ids => ids.clear()); vi.clearAllMocks(); viewState.clear(); localStorage.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 
 it("uses the same searchable cards for both scopes with the correct toolbar actions", () => {
@@ -82,4 +83,17 @@ it("shows and filters every related project in both board views", () => {
   fireEvent.change(projectFilter, { target: { value: "none" } });
   screen.getByText("无项目任务");
   expect(screen.queryByText("跨项目任务")).toBeNull();
+});
+
+it("removes deleted tasks from the real board data source even when an old request returns", async () => {
+  const { useWorkstreamCards, clearWorkstreamCardsCache } = await vi.importActual<typeof import("./useWorkstreamCards")>("./useWorkstreamCards");
+  clearWorkstreamCardsCache();
+  vi.mocked(api.listWorkstreamCards).mockResolvedValue([card("gone"), card("kept")]);
+  vi.mocked(api.getDefaultAgent).mockResolvedValue("codex");
+  const { result } = renderHook(() => useWorkstreamCards());
+  await waitFor(() => expect(result.current.cards?.map(w => w.id)).toEqual(["gone", "kept"]));
+  act(() => invalidateTargets({ workstreamIds: ["gone"] }));
+  expect(result.current.cards?.map(w => w.id)).toEqual(["kept"]);
+  await act(async () => {});
+  expect(result.current.cards?.map(w => w.id)).toEqual(["kept"]);
 });

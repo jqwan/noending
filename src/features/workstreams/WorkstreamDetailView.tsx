@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
@@ -40,6 +41,8 @@ export default function WorkstreamDetailView({
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const currentWorkstreamId = useRef(workstreamId);
   currentWorkstreamId.current = workstreamId;
   const cached = workstreamDetailCache.get(workstreamId);
@@ -80,7 +83,7 @@ export default function WorkstreamDetailView({
     setActionError("");
 
     api.getWorkstreamContext(workstreamId).then((c) => {
-      if (cancelled) return;
+      if (cancelled || removedTargets.workstreams.has(workstreamId)) return;
       setCtx(c);
       const prev = workstreamDetailCache.get(workstreamId);
       workstreamDetailCache.set(workstreamId, {
@@ -90,7 +93,7 @@ export default function WorkstreamDetailView({
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
 
     api.getWorkstreamContextState(workstreamId).then((s) => {
-      if (cancelled) return;
+      if (cancelled || removedTargets.workstreams.has(workstreamId)) return;
       setCtxState(s);
       const prev = workstreamDetailCache.get(workstreamId);
       if (prev) {
@@ -106,7 +109,7 @@ export default function WorkstreamDetailView({
   // Background refresh only reads task data and summary state.
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then((c) => {
-      if (currentWorkstreamId.current !== workstreamId) return;
+      if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setCtx(c);
       const prev = workstreamDetailCache.get(workstreamId);
       workstreamDetailCache.set(workstreamId, {
@@ -116,7 +119,7 @@ export default function WorkstreamDetailView({
     }).catch(console.error);
 
     api.getWorkstreamContextState(workstreamId).then((s) => {
-      if (currentWorkstreamId.current !== workstreamId) return;
+      if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setCtxState(s);
       const prev = workstreamDetailCache.get(workstreamId);
       if (prev) {
@@ -138,7 +141,7 @@ export default function WorkstreamDetailView({
     setFailedSessions([]);
     try {
       const out = await (regenerate ? api.regenerateWorkstreamContext(workstreamId) : api.updateWorkstreamContext(workstreamId));
-      if (currentWorkstreamId.current !== workstreamId) return;
+      if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setFailedSessions(out.failed_sessions);
       setPreferenceError(out.preference_error);
       showToast(
@@ -252,7 +255,7 @@ export default function WorkstreamDetailView({
     try {
       await api.deleteWorkstreamPermanently(workstream.id);
       workstreamDetailCache.delete(workstream.id);
-      goBack({ view: "workstreams" });
+      if (mounted.current) navigate({ view: "workstreams", scope: "archived" });
     } catch (e) {
       console.error(e);
       setActionError(`永久删除失败：${String(e)}`);
@@ -386,7 +389,7 @@ export default function WorkstreamDetailView({
           <section className="card detail-section">
             <h2 className="detail-section-title">
               <Icon name="project" />
-              <span>项目 ({projectRows.length})</span>
+              <span>关联项目（{projectRows.length}）</span>
             </h2>
             {projectRows.length === 0 && (
               <div className="l1-none">

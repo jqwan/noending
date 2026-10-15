@@ -1,3 +1,4 @@
+import { invalidateTargets, removedTargets } from "../app/removedTargets";
 // Sidebar contract: grouped sessions, retained terminals and exact native identity.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -22,6 +23,7 @@ vi.mock("../api", () => ({
 }));
 
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
   vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
   vi.mocked(api.terminalForSession).mockReset().mockResolvedValue(null);
@@ -1174,4 +1176,18 @@ it("restores sidebar grouping, filters, running-only, sorting and display prefer
   expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemradio", { name: "最近更新" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemcheckbox", { name: "显示会话图标" }).getAttribute("aria-checked")).toBe("false");
+});
+
+it("immediately removes a deleted pinned session and all its terminals even while an old list refresh returns", async () => {
+  localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["deleted", "kept"]));
+  vi.mocked(api.listSessions).mockResolvedValue([session({ id: "deleted", title: "待删除" }), session({ id: "kept", title: "保留" })]);
+  vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "closed", session_id: "deleted", live: false })]);
+  renderSidebar();
+  await screen.findByText("待删除");
+  act(() => invalidateTargets({ sessionIds: ["deleted"], terminalIds: ["closed"] }));
+  expect(screen.queryByText("待删除")).toBeNull();
+  await act(async () => {});
+  expect(screen.queryByText("待删除")).toBeNull();
+  expect(screen.getByText("保留")).toBeTruthy();
+  expect(JSON.parse(localStorage.getItem("noending.sidebar.pinnedSessions")!)).toEqual(["kept"]);
 });

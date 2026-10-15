@@ -1,3 +1,4 @@
+import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import Icon from "../../components/Icon";
 import CustomSelect from "../../components/CustomSelect";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
@@ -72,14 +73,20 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
     api
       .listProjectCards()
       .then((cs) => {
-        cachedProjectCards = cs;
-        setCards(cs);
+        const current = cs.filter(p => !removedTargets.projects.has(p.id));
+        cachedProjectCards = current;
+        setCards(current);
         setListError("");
       })
       .catch((e) => {
         setCards(null);
         setListError(`读取项目失败：${String(e)}`);
       });
+  }, []);
+  useEffect(() => {
+    const remove = () => setCards(rows => rows?.filter(p => !removedTargets.projects.has(p.id)) ?? null);
+    window.addEventListener(EVT_REMOVED, remove);
+    return () => window.removeEventListener(EVT_REMOVED, remove);
   }, []);
   useEffect(refresh, [refresh]);
   // 单次卡片查询足够便宜，refresh 信号不再需要防抖。

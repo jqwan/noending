@@ -1,3 +1,4 @@
+import { invalidateTargets, removedTargets } from "../../app/removedTargets";
 import { viewState } from "../../hooks/useViewState";
 // Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选。
 
@@ -26,6 +27,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const navigate = vi.fn();
 
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   navigate.mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.addProjectPath).mockReset();
@@ -295,4 +297,15 @@ describe("Projects Board", () => {
     expect(api.deleteProjectPermanently).toHaveBeenCalledWith("empty");
   });
 
+});
+
+it("immediately removes a deleted project and ignores its stale list response", async () => {
+  vi.mocked(api.listProjectCards).mockResolvedValue([card({ id: "gone", name: "删除项目" }), card({ id: "kept", name: "保留项目" })]);
+  render(<ProjectsView navigate={navigate} />);
+  await screen.findByText("删除项目");
+  act(() => invalidateTargets({ projectIds: ["gone"] }));
+  expect(screen.queryByText("删除项目")).toBeNull();
+  await act(async () => {});
+  expect(screen.queryByText("删除项目")).toBeNull();
+  expect(screen.getByText("保留项目")).toBeTruthy();
 });

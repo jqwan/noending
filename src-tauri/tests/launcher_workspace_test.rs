@@ -692,7 +692,17 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
     let db = open_db("availability");
     seed_installation(&db, Agent::Codex);
     let cwd = real_dir("availability", "working");
-    let session = session_row(&db, Some(&cwd), None);
+    let mut session = session_row(&db, Some(&cwd), None);
+    let plain = std::path::PathBuf::from(&session.source_path)
+        .with_file_name(format!("rollout-{}.jsonl", new_id()));
+    std::fs::rename(&session.source_path, &plain).unwrap();
+    session.source_path = plain.to_string_lossy().into_owned();
+    support::ensure_session_source(
+        &db,
+        Agent::Codex,
+        &session.root_agent_session_id,
+        &session.source_path,
+    );
     let launcher = launcher_in("availability");
     let probe = || {
         terminal_resume_states(&db, &[session.id.clone()])
@@ -716,6 +726,20 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
     assert!(launcher
         .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
         .is_err());
+    // The stored path can still be .jsonl when Codex has already compressed it.
+    let compressed = plain.with_extension("jsonl.zst");
+    let body = serde_json::json!({"type":"session_meta", "payload":{
+        "id":session.root_agent_session_id, "cwd":cwd,
+    }})
+    .to_string()
+        + "\n";
+    std::fs::write(&compressed, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
+    assert!(probe().available);
+    assert!(launcher
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .is_ok());
+    std::fs::remove_file(&compressed).unwrap();
+    assert!(!probe().available);
     std::fs::write(&session.source_path, "").unwrap();
     db.write()
         .execute(

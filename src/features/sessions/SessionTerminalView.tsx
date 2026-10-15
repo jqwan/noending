@@ -1,3 +1,4 @@
+import { invalidateTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -14,7 +15,7 @@ import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
-import { EVT_TERMINALS, type Route } from "../../app/routes";
+import { type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
@@ -109,16 +110,15 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     setClosing(true);
     try {
       const closed = await api.terminalClose(terminalId);
-      disposeTerminal(terminalId);
-      window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
       let remaining: import("../../types").TerminalSummary[] = [];
       try { remaining = await api.terminalList(); } catch { /* Closing succeeded; still leave the removed terminal. */ }
-      if (!mountedRef.current) return;
       const peers = remaining.filter(t => t.terminal_id !== terminalId && t.session_id === closed.session_id && !!closed.session_id);
       const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
-      navigate(next ? terminalDestination(next)
+      const destination: Route = next ? terminalDestination(next)
         : closed.session_id ? { view: "session", sessionId: closed.session_id, ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
-        : { view: "sessions" });
+        : { view: "sessions" };
+      if (mountedRef.current) navigate(destination);
+      invalidateTargets({ terminalIds: [terminalId], replacement: destination });
     } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }
     finally { closingRef.current = false; if (mountedRef.current) setClosing(false); }
   };

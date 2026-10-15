@@ -5,6 +5,7 @@ import { projectDetailCache } from "../features/projects/ProjectDetail";
 import { workstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
 import { sessionPages } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
+import { isRemovedRoute } from "./removedTargets";
 
 /** Known titles navigate synchronously. ID-only links resolve before changing pages. */
 export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
@@ -16,7 +17,7 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     const initialAgent = route.initialAgent ?? cached?.agent ?? seed?.initialAgent;
     if (initialTitle && initialAgent) return { ...route, initialTitle, initialAgent };
     return api.getSessionDetail(route.sessionId).then(detail => {
-      sessionDetailCache.set(route.sessionId, detail);
+      if (!isRemovedRoute(route)) sessionDetailCache.set(route.sessionId, detail);
       return { ...route, initialTitle: sessionDisplayTitle(detail.session.title), initialAgent: detail.session.agent };
     });
   }
@@ -25,7 +26,7 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     if (initialTitle !== undefined) return { ...route, initialTitle };
     return api.getWorkstreamContext(route.workstreamId).then(ctx => {
       const cached = workstreamDetailCache.get(route.workstreamId);
-      workstreamDetailCache.set(route.workstreamId, { ctx, ctxState: cached?.ctxState ?? null });
+      if (!isRemovedRoute(route)) workstreamDetailCache.set(route.workstreamId, { ctx, ctxState: cached?.ctxState ?? null });
       return { ...route, initialTitle: ctx.workstream.title };
     });
   }
@@ -33,7 +34,7 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     const initialTitle = route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name;
     if (initialTitle !== undefined) return { ...route, initialTitle };
     return api.getProjectDetail(route.projectId).then(detail => {
-      projectDetailCache.set(route.projectId, detail);
+      if (!isRemovedRoute(route)) projectDetailCache.set(route.projectId, detail);
       return { ...route, initialTitle: detail.project.name };
     });
   }

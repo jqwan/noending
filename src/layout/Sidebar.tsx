@@ -1,3 +1,4 @@
+import { EVT_REMOVED, removedTargets, type RemovedTargets } from "../app/removedTargets";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
@@ -573,7 +574,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     api
       .terminalList()
       .then((next) => {
-        if (seq === refreshSeq.current) { setTerminals(next); setTerminalsLoading(false); }
+        if (seq === refreshSeq.current) { setTerminals(next.filter(t => !removedTargets.terminals.has(t.terminal_id) && !removedTargets.sessions.has(t.session_id ?? ""))); setTerminalsLoading(false); }
       })
       .catch(error => { if (seq === refreshSeq.current) setTerminalsLoading(false); console.error(error); });
   }, []);
@@ -584,8 +585,8 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       api.listProjectCards(),
     ])
       .then(([sList, prjList]) => {
-        setSessions(sList);
-        setProjects(prjList);
+        setSessions(sList.filter(s => !removedTargets.sessions.has(s.id)));
+        setProjects(prjList.filter(p => !removedTargets.projects.has(p.id)));
       })
       .catch(console.error);
   }, []);
@@ -647,6 +648,22 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
 
   const [pinnedSessionIds, setPinnedSessionIds] = useState<string[]>(getStoredPinnedSessions);
   const [pinnedCollapsed, setPinnedCollapsed] = useViewPreference<boolean>(`${statePrefix}.pinned.collapsed`, false, booleanPreference);
+
+  useEffect(() => {
+    const removed = (event: Event) => {
+      const targets = (event as CustomEvent<RemovedTargets>).detail;
+      setSessions(rows => rows.filter(s => !removedTargets.sessions.has(s.id)));
+      setTerminals(rows => rows.filter(t => !removedTargets.terminals.has(t.terminal_id) && !removedTargets.sessions.has(t.session_id ?? "")));
+      setProjects(rows => rows.filter(p => !removedTargets.projects.has(p.id)));
+      if (targets.sessionIds?.length || targets.terminalIds?.length) setPinnedSessionIds(ids => {
+        const next = ids.filter(id => !removedTargets.sessions.has(id) && !removedTargets.terminals.has(id.replace(/^terminal:/, "")));
+        try { localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(next)); } catch { /* In-memory removal still applies. */ }
+        return next;
+      });
+    };
+    window.addEventListener(EVT_REMOVED, removed);
+    return () => window.removeEventListener(EVT_REMOVED, removed);
+  }, []);
 
   const isSessionPinned = useCallback(
     (s: { id: string; sessionId: string | null }) => {

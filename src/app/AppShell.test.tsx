@@ -1,3 +1,4 @@
+import { invalidateTargets, removedTargets } from "./removedTargets";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AppShell from "./AppShell";
@@ -25,9 +26,11 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn() } }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
+const pageNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
   const [draft, setDraft] = useState("");
+  pageNavigation.navigate = navigate;
   if (["new-session", "sessions", "session", "terminal"].includes(route.view)) sessionNavigation.navigate = navigate;
   return <>
     <output aria-label="当前页面">{route.view}</output>
@@ -42,6 +45,7 @@ vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(listen).mockClear();
   sessionDetailCache.clear();
   vi.mocked(api.getSessionDetail).mockReset();
@@ -211,4 +215,47 @@ it("keeps assistant project launches and terminals in the session section", asyn
   fireEvent.click(screen.getByRole("button", { name: "项目" }));
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "assistant-terminal" });
+});
+
+it.each([
+  { route: { view: "session", sessionId: "deleted", initialTitle: "S", initialAgent: "codex" }, targets: { sessionIds: ["deleted"] }, replacement: { view: "sessions", scope: "archived" }, section: "会话" },
+  { route: { view: "workstream", workstreamId: "deleted", initialTitle: "T" }, targets: { workstreamIds: ["deleted"] }, replacement: { view: "workstreams", scope: "archived" }, section: "任务" },
+  { route: { view: "project", projectId: "deleted", initialTitle: "P" }, targets: { projectIds: ["deleted"] }, replacement: { view: "projects", scope: "archived" }, section: "项目" },
+  { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialAgent: "codex" }, section: "会话" },
+] as const)("removes invalid $route.view routes from back/forward and section memory", ({ route, targets, replacement, section }) => {
+  render(<AppShell />);
+  act(() => pageNavigation.navigate!(route));
+  if (route.view === "session") act(() => pageNavigation.navigate!({ ...route, entry: "conversation" }));
+  act(() => invalidateTargets({ ...targets, replacement }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
+  fireEvent.click(screen.getByRole("button", { name: "Agent" }));
+  fireEvent.click(screen.getByRole("button", { name: section }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
+});
+
+it("prunes deleted targets while keeping an unrelated current page and rejects late title loads", async () => {
+  let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
+  vi.mocked(api.getSessionDetail).mockImplementation(() => new Promise(done => { resolve = done; }));
+  render(<AppShell />);
+  act(() => pageNavigation.navigate!({ view: "session", sessionId: "pending-delete" }));
+  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  act(() => invalidateTargets({ sessionIds: ["pending-delete"] }));
+  await act(async () => resolve({ session: { id: "pending-delete", title: "Old", agent: "codex" } } as never));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
+  expect(sessionDetailCache.has("pending-delete")).toBe(false);
+});
+
+it("removes a replaced terminal from earlier history while retaining the new terminal", () => {
+  render(<AppShell />);
+  act(() => pageNavigation.navigate!({ view: "terminal", terminalId: "old" }));
+  const replacement: Route = { view: "terminal", terminalId: "new" };
+  act(() => { pageNavigation.navigate!(replacement); invalidateTargets({ terminalIds: ["old"], replacement }); });
+  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
 });

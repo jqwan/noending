@@ -34,15 +34,29 @@ pub fn get_session_local_delete_preview(
     })
 }
 
+#[derive(serde::Serialize)]
+pub struct SessionDeleteResult {
+    #[serde(flatten)]
+    pub outcome: lifecycle::PermanentDeleteResult,
+    pub terminal_ids: Vec<String>,
+}
+
 /// Execute the permanent LOCAL deletion. NoEnding data only — the
 /// Agent source availability only affects the confirmation copy. No code path
 /// here can touch it: NoEnding never deletes Agent-owned sources.
 #[tauri::command]
 pub fn permanently_delete_session(
     state: State<AppState>,
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
     session_id: String,
-) -> Result<lifecycle::PermanentDeleteResult> {
-    with_db(&state, |db| {
-        lifecycle::permanently_delete_session(db, &session_id)
+) -> Result<SessionDeleteResult> {
+    let (result, ids) = terminal.with_session_removal(&session_id, || {
+        with_db(&state, |db| {
+            lifecycle::permanently_delete_session(db, &session_id)
+        })
+    })?;
+    Ok(SessionDeleteResult {
+        outcome: result,
+        terminal_ids: ids,
     })
 }

@@ -1050,3 +1050,190 @@ fn a_native_title_renames_and_a_fallback_title_only_fills() {
         Some("改名之后")
     );
 }
+
+/// Cold storage is a representation change, not a new conversation or activity.
+#[test]
+fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
+    use noending::adapters::AgentAdapter;
+    use noending::domain::{SessionContextFields, SourceAvailability};
+    let root = temp_root("compressed-roundtrip");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&meta_line(ROOT_ID, serde_json::json!({}))).unwrap();
+    meta["timestamp"] = serde_json::json!("2026-09-20T13:00:00Z");
+    let body = [
+        meta.to_string(),
+        message_line(1, "m1", "user", "保留我的消息"),
+        message_line(2, "m2", "assistant", "已有回答"),
+    ]
+    .join("\n")
+        + "\n";
+    let plain = root.join(rollout_name(ROOT_ID));
+    let compressed = plain.with_extension("jsonl.zst");
+    std::fs::write(&plain, &body).unwrap();
+    let db = open_db("compressed-roundtrip");
+    enable_codex_source(&db, &root);
+    assert_eq!(reconcile(&db).1, 2);
+    let before = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    let original_ids: Vec<_> = db
+        .get_messages(&before.id, None, 100)
+        .unwrap()
+        .iter()
+        .map(|m| m.id.clone())
+        .collect();
+    db.tx(|tx| {
+        noending::storage::context_repo::commit_session_context_conn(
+            tx,
+            &before.id,
+            &SessionContextFields {
+                summary: "已有摘要".into(),
+                ..Default::default()
+            },
+            0,
+            before.fact_generation,
+            2,
+        )
+    })
+    .unwrap();
+    let adapter = noending::adapters::codex::CodexAdapter;
+    std::fs::write(&compressed, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
+    std::fs::remove_file(&plain).unwrap();
+    // Before any discovery, resume/source actions already find the compressed sibling.
+    assert_eq!(adapter.session_source_path(&before), compressed);
+    assert_eq!(
+        adapter.inspect_session_source(&before).unwrap(),
+        SourceAvailability::Present
+    );
+    assert_eq!(ingestion::ingest_session(&db, &before).unwrap(), 0);
+    assert_eq!(reconcile(&db).1, 0);
+    let cold = db.get_session(&before.id).unwrap().unwrap();
+    assert_eq!(cold.source_path, compressed.to_string_lossy());
+    assert_eq!(cold.fact_generation, before.fact_generation);
+    assert_eq!(cold.last_activity_at, before.last_activity_at);
+    assert_eq!(cold.last_conversation_at, before.last_conversation_at);
+    let summary = db.get_session_context(&before.id).unwrap().unwrap();
+    assert_eq!(summary.fields.summary, "已有摘要");
+    assert_eq!(summary.ingest_generation, before.fact_generation);
+    assert_eq!(summary.processed_through_seq, 2);
+    // A completed raw-byte cursor means the unchanged archive is not decoded again.
+    assert!(adapter
+        .read_session_delta(&cold, &cold.source_cursor())
+        .unwrap()
+        .source
+        .is_none());
+    std::fs::write(&compressed, zstd::encode_all(body.as_bytes(), 9).unwrap()).unwrap();
+    assert_eq!(reconcile(&db).1, 0);
+    let repacked = db.get_session(&before.id).unwrap().unwrap();
+    assert_eq!(repacked.fact_generation, before.fact_generation);
+    assert_eq!(repacked.last_activity_at, before.last_activity_at);
+    assert_eq!(
+        db.get_messages(&before.id, None, 100)
+            .unwrap()
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>(),
+        original_ids
+    );
+    // Native resume expands the file; both spellings can coexist briefly.
+    std::fs::write(&plain, &body).unwrap();
+    assert_eq!(adapter.session_source_path(&cold), plain);
+    let found = adapter
+        .discover_members_in(&[root.clone()], &|_| false)
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].source_path, plain);
+    assert_eq!(reconcile(&db).1, 0);
+    let restored = db.get_session(&before.id).unwrap().unwrap();
+    assert_eq!(restored.fact_generation, before.fact_generation);
+    assert_eq!(restored.last_activity_at, before.last_activity_at);
+    use std::io::Write;
+    let mut new_message: serde_json::Value =
+        serde_json::from_str(&message_line(3, "m3", "user", "恢复后新消息")).unwrap();
+    new_message["timestamp"] = serde_json::json!("2026-09-21T13:00:00Z");
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&plain)
+            .unwrap(),
+        "{new_message}"
+    )
+    .unwrap();
+    assert_eq!(reconcile(&db).1, 1);
+    assert_eq!(db.list_sessions(Default::default()).unwrap().len(), 1);
+    let updated = db.get_session(&before.id).unwrap().unwrap();
+    assert!(updated.last_activity_at > before.last_activity_at);
+    assert_eq!(
+        db.get_messages(&before.id, None, 100)
+            .unwrap()
+            .last()
+            .unwrap()
+            .content,
+        "恢复后新消息"
+    );
+}
+
+#[test]
+fn compressed_codex_discovery_append_and_damage_preserve_current_history() {
+    use noending::adapters::AgentAdapter;
+    let root = temp_root("compressed-discovery");
+    let compressed = root.join(rollout_name(ROOT_ID) + ".zst");
+    // Codex CLI's native header does not require the desktop-only ordinal.
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&meta_line(ROOT_ID, serde_json::json!({}))).unwrap();
+    meta.as_object_mut().unwrap().remove("ordinal");
+    let body = [meta.to_string(), message_line(1, "m1", "user", "压缩历史")].join("\n") + "\n";
+    std::fs::write(&compressed, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
+    let db = open_db("compressed-discovery");
+    enable_codex_source(&db, &root);
+    assert_eq!(reconcile(&db).1, 1);
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    use std::io::Write;
+    let tail = message_line(2, "m2", "assistant", "追加压缩帧") + "\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&compressed)
+        .unwrap()
+        .write_all(&zstd::encode_all(tail.as_bytes(), 3).unwrap())
+        .unwrap();
+    assert_eq!(reconcile(&db).1, 1);
+    let before = db.get_session(&session.id).unwrap().unwrap();
+    let messages = db.get_messages(&session.id, None, 100).unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        ["压缩历史", "追加压缩帧"]
+    );
+    let valid = std::fs::read(&compressed).unwrap();
+    for damaged in [&valid[..valid.len() - 5], b"not a zstd frame".as_slice()] {
+        std::fs::write(&compressed, damaged).unwrap();
+        let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+        assert!(!report.failures.is_empty());
+        let after = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(after.source_byte_offset, before.source_byte_offset);
+        assert_eq!(after.fact_generation, before.fact_generation);
+        assert_eq!(
+            db.get_messages(&session.id, None, 100)
+                .unwrap()
+                .iter()
+                .map(|m| &m.id)
+                .collect::<Vec<_>>(),
+            messages.iter().map(|m| &m.id).collect::<Vec<_>>()
+        );
+    }
+    std::fs::write(&compressed, valid).unwrap();
+    assert_eq!(reconcile(&db).1, 0);
+    std::fs::remove_file(&compressed).unwrap();
+    assert_eq!(
+        noending::adapters::codex::CodexAdapter
+            .inspect_session_source(&session)
+            .unwrap(),
+        noending::domain::SourceAvailability::Missing
+    );
+}

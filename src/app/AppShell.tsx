@@ -14,6 +14,13 @@ import ToastHost, { showToast } from "../components/Toast";
 import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, type Route } from "./routes";
+import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
+import { sessionDetailCache } from "../features/sessions/SessionDetailView";
+import { clearSessionsCache } from "../features/sessions/SessionsView";
+import { clearProjectDetailCache } from "../features/projects/ProjectDetail";
+import { clearProjectCardsCache } from "../features/projects/ProjectsView";
+import { clearWorkstreamCardsCache } from "../features/workstreams/useWorkstreamCards";
+import { clearWorkstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
 
 type NavigationState = { entries: Route[]; index: number };
 
@@ -117,9 +124,10 @@ export default function AppShell() {
   }, []);
 
   const navigate = useCallback((target: Route) => {
+    if (isRemovedRoute(target)) return;
     const request = ++navigationRequest.current;
     const commit = (r: Route) => {
-      if (request !== navigationRequest.current) return;
+      if (request !== navigationRequest.current || isRemovedRoute(r)) return;
       setNavigation((current) => {
         const entries = current.entries.slice(0, current.index + 1);
         const currentRoute = entries[entries.length - 1];
@@ -144,9 +152,38 @@ export default function AppShell() {
   // An async launch can finish after switching sections. Remember its result
   // for the session section without pulling the user away from another page.
   const navigateSession = useCallback((target: Route) => {
+    if (isRemovedRoute(target)) return;
     if (isSessionRoute(currentRoute.current)) navigate(target);
     else if (isSessionRoute(target)) lastSessionRoute.current = withoutAction(normalizeRoute(target));
   }, [navigate]);
+
+  useEffect(() => {
+    const removed = (event: Event) => {
+      const targets = (event as CustomEvent<RemovedTargets>).detail;
+      for (const id of targets.sessionIds ?? []) sessionDetailCache.delete(id);
+      if (targets.sessionIds?.length) clearSessionsCache();
+      if (targets.projectIds?.length) { clearProjectDetailCache(); clearProjectCardsCache(); }
+      if (targets.workstreamIds?.length) { clearWorkstreamDetailCache(); clearWorkstreamCardsCache(); }
+      const replacement: Route = targets.replacement && !isRemovedRoute(targets.replacement)
+        ? targets.replacement : { view: "sessions" };
+      if (isRemovedRoute(lastSessionRoute.current)) lastSessionRoute.current = isSessionRoute(replacement)
+        ? replacement : { view: "sessions" };
+      setNavigation(current => {
+        const entries: Route[] = [];
+        let index = 0;
+        current.entries.forEach((entry, originalIndex) => {
+          const invalid = isRemovedRoute(entry);
+          if (invalid && originalIndex !== current.index) return;
+          const next = invalid ? replacement : entry;
+          if (!entries.length || !sameRoute(entries[entries.length - 1], next)) entries.push(next);
+          if (originalIndex === current.index) index = entries.length - 1;
+        });
+        return { entries, index };
+      });
+    };
+    window.addEventListener(EVT_REMOVED, removed);
+    return () => window.removeEventListener(EVT_REMOVED, removed);
+  }, []);
 
   const goBack = useCallback((fallback?: Route) => {
     ++navigationRequest.current;

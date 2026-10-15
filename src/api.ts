@@ -1,3 +1,4 @@
+import { invalidateTargets } from "./app/removedTargets";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Preference, Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
@@ -37,7 +38,10 @@ export const api = {
     invoke<Project>("rename_project", { projectId, name }),
   archiveProject: (projectId: string) => invoke<Project>("archive_project", { projectId }),
   restoreProject: (projectId: string) => invoke<Project>("restore_project", { projectId }),
-  deleteProjectPermanently: (projectId: string) => invoke<void>("delete_project_permanently", { projectId }),
+  deleteProjectPermanently: async (projectId: string) => {
+    await invoke<void>("delete_project_permanently", { projectId });
+    invalidateTargets({ projectIds: [projectId], replacement: { view: "projects", scope: "archived" } });
+  },
   addProjectPath: (path: string) =>
     invoke<AddProjectPathResult>("add_project_path", { path }),
 
@@ -71,8 +75,10 @@ export const api = {
   restoreWorkstream: (workstreamId: string) =>
     invoke<Workstream>("restore_workstream", { workstreamId }),
   /** Only reachable for an archived Workstream; Sessions survive it. */
-  deleteWorkstreamPermanently: (workstreamId: string) =>
-    invoke<void>("delete_workstream_permanently", { workstreamId }),
+  deleteWorkstreamPermanently: async (workstreamId: string) => {
+    await invoke<void>("delete_workstream_permanently", { workstreamId });
+    invalidateTargets({ workstreamIds: [workstreamId], replacement: { view: "workstreams", scope: "archived" } });
+  },
 
   getWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamContext>("get_workstream_context", { workstreamId }),
@@ -90,8 +96,12 @@ export const api = {
   getSessionLocalDeletePreview: (sessionId: string) =>
     invoke<LocalDeletePreview>("get_session_local_delete_preview", { sessionId }),
   /** 仅已归档的会话可永久删除；不删除 Agent 源文件。 */
-  permanentlyDeleteSession: (sessionId: string) =>
-    invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId }),
+  permanentlyDeleteSession: async (sessionId: string) => {
+    const result = await invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId });
+    invalidateTargets({ sessionIds: [sessionId], terminalIds: result.terminal_ids,
+      replacement: { view: "sessions", scope: "archived" } });
+    return result;
+  },
   getSessionTracking: (sessionId: string) => invoke<SessionTracking>("get_session_tracking", {sessionId}),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { EVT_SYNCED } from "../../app/routes";
 import Icon from "../../components/Icon";
@@ -38,6 +38,8 @@ export default function ProjectLifecycleActions({ project, onChanged, onDeleted 
   onChanged: () => void;
   onDeleted?: () => void;
 }) {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -51,8 +53,10 @@ export default function ProjectLifecycleActions({ project, onChanged, onDeleted 
       else if (archived) await api.restoreProject(project.id);
       else await api.archiveProject(project.id);
       setConfirmDelete(false);
-      onChanged();
-      if (remove) onDeleted?.();
+      if (mounted.current) {
+        if (remove && onDeleted) onDeleted();
+        else onChanged();
+      }
       window.dispatchEvent(new Event(EVT_SYNCED));
       showToast(remove ? "项目已永久删除" : archived ? "项目已恢复" : "项目已归档");
     } catch (e) {

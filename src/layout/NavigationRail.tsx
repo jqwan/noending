@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import Icon, { type IconName } from "../components/Icon";
 import type { Route } from "../app/routes";
+import { isRemovedRoute } from "../app/removedTargets";
 
 export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "settings";
 
@@ -63,7 +64,8 @@ export default function NavigationRail({ route, navigate }: {
       navigate(getSectionRootRoute(targetSection));
     } else {
       // 点击固定栏其他图标，跳转到上次离开该图标界面时的某个子界面（若无记录则跳看板）
-      navigate(lastRoutes.current[targetSection] ?? getSectionRootRoute(targetSection));
+      const remembered = lastRoutes.current[targetSection];
+      navigate(remembered && !isRemovedRoute(remembered) ? remembered : getSectionRootRoute(targetSection));
     }
   };
 

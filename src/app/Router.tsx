@@ -72,7 +72,6 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
           initialTitle={route.initialTitle ?? sessionDetailCache.get(route.sessionId)?.session.title ?? undefined}
           initialAgent={route.initialAgent ?? sessionDetailCache.get(route.sessionId)?.session.agent}
           navigate={navigate}
-          goBack={goBack}
         />
       );
     case "terminal":

@@ -11,7 +11,7 @@
 //! count as compaction; any other `<`-prefixed body is system noise and drops.
 //!
 //! One root transcript, one ROOT member. `ai-title` supplies the native title
-//! (last written wins); `function_call` / `function_call_result` are
+//! (last written wins), unless `workbuddy.db` supplies a saved/custom title; `function_call` / `function_call_result` are
 //! observations, not text. The bundle DOES embed a Node CLI
 //! (`@genie/agent-cli`, `codebuddy`), but its dist exposes no
 //! `--resume` / `--continue` / `--session-id`, so there is nothing to
@@ -25,7 +25,10 @@
 //! inside the same file, so neither identifies the session it belongs to.
 //! Children never contribute conversation — `parse_line` is root-gated.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OpenFlags};
 
 use serde_json::Value;
 
@@ -38,6 +41,78 @@ use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct WorkBuddyAdapter;
+
+/// Optional desktop metadata. The JSONL remains the conversation authority;
+/// a missing/locked/incompatible metadata database never blocks ingestion.
+struct SessionTitles(HashMap<String, String>);
+
+impl SessionTitles {
+    fn load(roots: &[PathBuf]) -> Self {
+        let mut titles = HashMap::new();
+        let mut seen = HashSet::new();
+        for root in roots {
+            let Some(path) = root
+                .ancestors()
+                .map(|dir| dir.join("workbuddy.db"))
+                .find(|path| path.is_file())
+            else {
+                continue;
+            };
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Ok(conn) = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ) else {
+                continue;
+            };
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id, COALESCE(NULLIF(TRIM(custom_title), ''), NULLIF(TRIM(title), ''))
+                 FROM sessions",
+            ) else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            }) else {
+                continue;
+            };
+            for (id, title) in rows.flatten() {
+                if let Some(title) = title {
+                    titles.insert(id, title);
+                }
+            }
+        }
+        Self(titles)
+    }
+
+    /// Refresh a saved title even when the transcript's bytes did not change.
+    /// `unchanged` proves this is an already-ingested source, so no message or
+    /// workspace facts need to be re-read from its body.
+    fn unchanged_member(&self, path: &Path) -> Option<DiscoveredMember> {
+        let id = path.file_stem()?.to_str()?;
+        if path.parent()?.file_name()? == "subagents" {
+            return None;
+        }
+        Some(DiscoveredMember {
+            agent: Agent::WorkBuddy,
+            source_member_id: id.to_string(),
+            kind: DiscoveredMemberKind::Root,
+            parent_source_member_id: None,
+            root_hint: None,
+            source_kind: "workbuddy_transcript".into(),
+            source_path: path.to_path_buf(),
+            cwd: None,
+            started_at: None,
+            last_activity_at: None,
+            native_title: Some(self.0.get(id)?.clone()),
+            first_user_text: None,
+            first_agent_text: None,
+            metadata: serde_json::json!({}),
+        })
+    }
+}
 
 /// Text of a message's content blocks: `input_text` / `output_text` only.
 fn content_text(content: &Value) -> String {
@@ -320,6 +395,7 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredMember>> {
         let mut out = Vec::new();
+        let titles = SessionTitles::load(roots);
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
             let rd = match std::fs::read_dir(&dir) {
@@ -355,6 +431,9 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                     continue;
                 }
                 if unchanged(&p) {
+                    if let Some(member) = titles.unchanged_member(&p) {
+                        out.push(member);
+                    }
                     continue;
                 }
                 if let Some(parent_id) = Self::subagent_member(&p) {
@@ -378,7 +457,12 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                     continue;
                 }
                 match Self::parse_member(&p) {
-                    Ok(Some(m)) => out.push(m),
+                    Ok(Some(mut m)) => {
+                        if let Some(title) = titles.0.get(&m.source_member_id) {
+                            m.native_title = Some(title.clone());
+                        }
+                        out.push(m);
+                    }
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
@@ -523,6 +607,54 @@ mod tests {
         ]
         .join("\n")
             + "\n"
+    }
+
+    #[test]
+    fn desktop_saved_title_refreshes_without_transcript_changes_and_falls_back_safely() {
+        let dir = unique_dir("desktop-title");
+        let projects = dir.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        let file = projects.join("s1.jsonl");
+        std::fs::write(&file, session_lines()).unwrap();
+        let db_path = dir.join("workbuddy.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT, custom_title TEXT);
+            INSERT INTO sessions VALUES('s1', '桌面标题', '自定义标题');",
+        )
+        .unwrap();
+        let discover = |unchanged: bool| {
+            WorkBuddyAdapter
+                .discover_members_in(&[projects.clone()], &|_| unchanged)
+                .unwrap()
+        };
+        assert_eq!(
+            discover(false)[0].native_title.as_deref(),
+            Some("自定义标题")
+        );
+        conn.execute(
+            "UPDATE sessions SET custom_title = '改名后的标题' WHERE id = 's1'",
+            [],
+        )
+        .unwrap();
+        let refreshed = discover(true);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].source_member_id, "s1");
+        assert_eq!(refreshed[0].native_title.as_deref(), Some("改名后的标题"));
+        conn.execute("UPDATE sessions SET custom_title = ' ' WHERE id = 's1'", [])
+            .unwrap();
+        assert_eq!(discover(true)[0].native_title.as_deref(), Some("桌面标题"));
+        drop(conn);
+        std::fs::remove_file(&db_path).unwrap();
+        assert_eq!(
+            discover(false)[0].native_title.as_deref(),
+            Some("整理会议纪要")
+        );
+        std::fs::write(&db_path, b"broken metadata database").unwrap();
+        assert_eq!(
+            discover(false)[0].native_title.as_deref(),
+            Some("整理会议纪要")
+        );
     }
 
     #[test]

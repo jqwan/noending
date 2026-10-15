@@ -545,6 +545,34 @@ impl TerminalRegistry {
     /// and publishes terminal-exit + terminals-changed.
     pub fn close(&self, terminal_id: &str) -> Option<TerminalSummary> {
         let _identity = self.identity_mutations.lock().ok()?;
+        self.close_locked(terminal_id)
+    }
+
+    /// Keep native bindings stable across deletion; only a successful commit
+    /// removes its terminals. Other sessions and their processes are untouched.
+    pub fn with_session_removal<T>(
+        &self,
+        session_id: &str,
+        remove: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, Vec<String>)> {
+        let _identity = self
+            .identity_mutations
+            .lock()
+            .map_err(|_| other("终端状态不可用"))?;
+        let result = remove()?;
+        let ids: Vec<_> = self
+            .list()
+            .into_iter()
+            .filter(|t| t.session_id.as_deref() == Some(session_id))
+            .map(|t| t.terminal_id)
+            .collect();
+        for id in &ids {
+            self.close_locked(id);
+        }
+        Ok((result, ids))
+    }
+
+    fn close_locked(&self, terminal_id: &str) -> Option<TerminalSummary> {
         let removed = {
             let Ok(mut records) = self.records.lock() else {
                 return None;
@@ -2236,6 +2264,42 @@ mod tests {
         assert!(listed[1].live);
         assert_eq!(registry.for_session("session").unwrap().terminal_id, older);
         assert!(registry.has_live("session"));
+    }
+
+    #[test]
+    fn session_deletion_removes_only_its_terminals_after_successful_commit() {
+        let db = binding_db();
+        let registry = TerminalRegistry::new(None);
+        let a = ingested_native(&db, Agent::Codex, "delete-a");
+        let b = ingested_native(&db, Agent::Codex, "keep-b");
+        let live = identity_terminal(&registry, Agent::Codex, Some("delete-a"), Some(&a.id));
+        let exited = identity_terminal(&registry, Agent::Codex, Some("delete-a"), Some(&a.id));
+        registry.records.lock().unwrap()[&exited]
+            .lock()
+            .unwrap()
+            .summary
+            .live = false;
+        let keep = identity_terminal(&registry, Agent::Codex, Some("keep-b"), Some(&b.id));
+        // Unarchived deletion fails without dropping a terminal or its output.
+        assert!(registry
+            .with_session_removal(&a.id, || crate::lifecycle::permanently_delete_session(
+                &db, &a.id
+            ))
+            .is_err());
+        assert_eq!(registry.list().len(), 3);
+        crate::lifecycle::archive_session(&db, &a.id).unwrap();
+        let (outcome, removed) = registry
+            .with_session_removal(&a.id, || {
+                crate::lifecycle::permanently_delete_session(&db, &a.id)
+            })
+            .unwrap();
+        assert!(outcome.purged);
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&live) && removed.contains(&exited));
+        assert!(db.get_session(&a.id).unwrap().is_none());
+        assert!(registry.attach(&live).is_err() && registry.attach(&exited).is_err());
+        assert!(registry.attach(&keep).unwrap().summary.live);
+        assert!(db.get_session(&b.id).unwrap().is_some());
     }
 
     #[test]

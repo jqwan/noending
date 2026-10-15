@@ -146,7 +146,7 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
 async function renderDetail(d: SessionDetail) {
   vi.mocked(api.getSessionDetail).mockResolvedValue(d);
   const navigate = vi.fn();
-  const view = render(<SessionDetailView sessionId={d.session.id} navigate={navigate} goBack={vi.fn()} />);
+  const view = render(<SessionDetailView sessionId={d.session.id} navigate={navigate} />);
   await screen.findByText("会话信息");
   return { navigate, container: document.body, rerender: view.rerender, unmount: view.unmount };
 }
@@ -426,7 +426,7 @@ it("shows and copies structured Context failure details, retains across sync, an
   expect(screen.getByText(failure)).toBeTruthy();
 
   // 3. Clears error on session navigation
-  rerender(<SessionDetailView sessionId="session-b" navigate={navigate} goBack={vi.fn()} />);
+  rerender(<SessionDetailView sessionId="session-b" navigate={navigate} />);
   await waitFor(() => expect(screen.queryByText(failure)).toBeNull());
 });
 
@@ -451,7 +451,7 @@ it("renders immediately from cache on remount without flashing 加载中", async
   let resolveDetail: (d: any) => void;
   vi.mocked(api.getSessionDetail).mockReturnValue(new Promise((r) => { resolveDetail = r; }) as any);
 
-  render(<SessionDetailView sessionId="me" navigate={vi.fn()} goBack={vi.fn()} />);
+  render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
 
   // Should render "已缓存的会话" immediately, NOT "加载中…"
   expect(screen.queryByText("加载中…")).toBeNull();
@@ -511,7 +511,7 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   let resolve!: (value: SessionDetail) => void;
   vi.mocked(api.getSessionDetail).mockReturnValueOnce(new Promise(done => { resolve = done; }));
   const navigate = vi.fn();
-  render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialAgent="codex" navigate={navigate} goBack={vi.fn()} />);
+  render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialAgent="codex" navigate={navigate} />);
   expect(screen.getByRole("heading").textContent).toBe("稳定标题");
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
@@ -545,4 +545,16 @@ it("blocks continue when working directory does not exist", async () => {
   fireEvent.click(terminalBtn);
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
   expect(api.continueSessionDesktop).not.toHaveBeenCalled();
+});
+
+it("shows the physical compressed source and uses it for copy and reveal", async () => {
+  const path = "/path/to/rollout.jsonl.zst";
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  await renderDetail(detail(session("compressed", { agent: "codex", source_path: path })));
+  expect(screen.getByText("Zstd 压缩")).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: path }));
+  await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("compressed"));
+  fireEvent.click(screen.getByRole("button", { name: "复制源会话路径" }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(path));
 });

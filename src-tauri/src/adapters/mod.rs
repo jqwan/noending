@@ -291,9 +291,12 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 /// agent — including genuinely ambiguous content, which must be left unclaimed
 /// rather than guessed at.
 pub fn detect_format(path: &Path) -> Option<Agent> {
-    const MAX_PARSE_LINES: usize = 10;
     let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
+    detect_format_reader(std::io::BufReader::new(file))
+}
+
+pub(crate) fn detect_format_reader(reader: impl BufRead) -> Option<Agent> {
+    const MAX_PARSE_LINES: usize = 10;
     let mut parsed = 0usize;
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -319,7 +322,17 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     if !v.is_object() {
         return None;
     }
-    // Codex envelope: {ordinal, payload, type} on every line.
+    // CLI rollouts have a session_meta header; desktop envelopes additionally
+    // carry ordinal. Old CLI histories need not contain that desktop field.
+    if v.get("type").and_then(|t| t.as_str()) == Some("session_meta")
+        && v.get("payload").is_some_and(|p| {
+            p.get("id").is_some_and(serde_json::Value::is_string)
+                && p.get("cwd").is_some_and(serde_json::Value::is_string)
+        })
+    {
+        return Some(Agent::Codex);
+    }
+    // Codex desktop envelope: {ordinal, payload, type} on every line.
     if v.get("ordinal").is_some()
         && v.get("payload").map(|p| p.is_object()).unwrap_or(false)
         && v.get("type").is_some()
@@ -496,8 +509,33 @@ pub fn read_jsonl_delta(
         }
     };
 
+    let (messages, complete_end, complete_snapshot) =
+        parse_jsonl_frames(&text, start_offset as usize, parse_line);
+
+    let source = crate::domain::SourceCursorUpdate {
+        file_identity: obs.identity,
+        generation,
+        byte_offset: complete_end as u64,
+        last_seen_size: if complete_snapshot { obs.size } else { 0 },
+        mtime: obs.mtime,
+        start_byte_offset: start_offset as u64,
+        prefix_hash: prefix_hash_of(complete_end),
+    };
+    Ok(MemberReadDelta {
+        messages,
+        source: Some(source),
+        complete_snapshot,
+    })
+}
+
+/// Parse JSONL in decoded coordinates, shared by plain deltas and compressed
+/// snapshots. A malformed tail never replaces the current conversation.
+fn parse_jsonl_frames(
+    text: &str,
+    start_offset: usize,
+    parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
+) -> (Vec<ParsedSessionMessage>, usize, bool) {
     let mut messages: Vec<ParsedSessionMessage> = Vec::new();
-    let start_offset = start_offset as usize;
     let mut offset = 0usize;
     let mut complete_snapshot = true;
     let mut complete_end = text.len();
@@ -549,15 +587,20 @@ pub fn read_jsonl_delta(
         }
     }
 
-    let source = crate::domain::SourceCursorUpdate {
-        file_identity: obs.identity,
-        generation,
-        byte_offset: complete_end as u64,
-        last_seen_size: if complete_snapshot { obs.size } else { 0 },
-        mtime: obs.mtime,
-        start_byte_offset: start_offset as u64,
-        prefix_hash: prefix_hash_of(complete_end),
-    };
+    (messages, complete_end, complete_snapshot)
+}
+
+/// A decoded full replay whose persisted cursor stays in the physical source's
+/// coordinates, so discovery can skip unchanged compressed files without decoding.
+pub(crate) fn read_jsonl_snapshot(
+    path: &Path,
+    cursor: &SourceCursor,
+    raw: &[u8],
+    text: &str,
+    parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
+) -> Result<MemberReadDelta> {
+    let (messages, _, complete_snapshot) = parse_jsonl_frames(text, 0, parse_line);
+    let source = replay_cursor_update(path, cursor, raw)?;
     Ok(MemberReadDelta {
         messages,
         source: Some(source),
@@ -729,6 +772,12 @@ pub trait AgentAdapter: Send + Sync {
         session: &Session,
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta>;
+
+    /// Current physical source. Some agents replace a transcript with a
+    /// compressed sibling; all source actions must resolve the same file.
+    fn session_source_path(&self, session: &Session) -> PathBuf {
+        PathBuf::from(&session.source_path)
+    }
 
     /// Strict availability verdict for the session's source. This is the
     /// permanent-delete and Resume authority: only a fresh `Missing` may ever

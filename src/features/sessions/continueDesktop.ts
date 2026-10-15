@@ -3,7 +3,7 @@ import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { capsOf } from "./sessionFormats";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
-import { disposeTerminal } from "./terminalCache";
+import { invalidateTargets } from "../../app/removedTargets";
 import type { Agent, AgentStatusEntry, TerminalResumeState, TerminalSummary } from "../../types";
 import { EVT_TERMINALS, type Route } from "../../app/routes";
 
@@ -88,10 +88,11 @@ export async function continueSessionTerminal(
   if (!state?.available) throw new Error(state?.reason ?? "无法确认终端可用性");
   const launched = existing ? await api.terminalReconnect(existing.terminal_id, session.id) : await api.launchEmbeddedResume(session.id);
   if (!launched.terminal_id) throw new Error("启动已完成，但找不到内嵌终端记录");
-  if (existing) disposeTerminal(existing.terminal_id);
-  window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
-  navigate({ view: "terminal", terminalId: launched.terminal_id, initialSessionId: session.id,
-    initialAgent: session.agent, initialTitle: session.title ?? undefined });
+  const destination: Route = { view: "terminal", terminalId: launched.terminal_id, initialSessionId: session.id,
+    initialAgent: session.agent, initialTitle: session.title ?? undefined };
+  navigate(destination);
+  if (existing) invalidateTargets({ terminalIds: [existing.terminal_id], replacement: destination });
+  else window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
 }
 
 /** Coalesce simultaneous sidebar/header clicks; errors leave exited output intact. */

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
@@ -46,6 +46,8 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
   /** 删除成功后调用（此时弹窗不再走 onClose）：父级负责收尾与刷新。 */
   onDeleted?: () => void;
 }) {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<LocalDeletePreview | null>(null);
   /** 预览读取失败 / 执行失败的错误文本；null = 无错误。 */
@@ -76,8 +78,10 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
     try {
       await api.permanentlyDeleteSession(sessionId);
       showToast(`已删除本地数据${note.toast}`);
-      onDeleted?.();
-      onClose();
+      if (mounted.current) {
+        if (onDeleted) onDeleted();
+        else onClose();
+      }
     } catch (e) {
       console.error(e);
       setBusy(false);
@@ -130,7 +134,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           </div>
 
           <p className="muted small" style={{ margin: "10px 0 0", maxWidth: "72ch" }}>
-            关联任务及其 Context 内容不受影响。
+            关联的内嵌终端将关闭并移除；关联任务及其 Context 内容不受影响。
           </p>
 
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>

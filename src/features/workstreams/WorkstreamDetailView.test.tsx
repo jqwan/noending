@@ -121,7 +121,7 @@ it("renders the returned task sessions and navigates to the selected session", a
 
   await screen.findByText("任务概览");
   // 只有跟踪此任务的会话会出现在这里。
-  screen.getByText("会话");
+  screen.getByRole("heading", { name: "关联会话（1）" });
   fireEvent.click(screen.getByText("归属于本任务的会话"));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
   expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();

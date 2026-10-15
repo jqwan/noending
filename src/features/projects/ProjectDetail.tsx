@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
@@ -49,6 +50,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
     api.getProjectDetail(projectId)
       .then((d) => {
         if (seq !== seqRef.current) return;
+        if (removedTargets.projects.has(projectId)) return;
         projectDetailCache.set(projectId, d);
         setData(d);
         setGone(false);
@@ -111,7 +113,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       const renamed = await api.renameProject(project.id, next);
       setData((cur) => {
         const nextData = cur ? { ...cur, project: renamed } : cur;
-        if (nextData) projectDetailCache.set(projectId, nextData);
+        if (nextData && !removedTargets.projects.has(projectId)) projectDetailCache.set(projectId, nextData);
         return nextData;
       });
       setRenaming(false);

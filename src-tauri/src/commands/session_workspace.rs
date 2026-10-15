@@ -141,7 +141,7 @@ pub async fn get_session_terminal_states(
 #[tauri::command]
 pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<SessionDetail> {
     with_db(&state, |db| {
-        let session = db
+        let mut session = db
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
         // 详情页预览只保留对话的骨架：用户消息 + 每轮的最终回复。
@@ -149,6 +149,10 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
         let message_stats = db.session_message_stats(&session_id)?;
         let adapter = crate::adapters::adapter_for(session.agent);
         let source_status = adapter.inspect_session_source(&session)?;
+        session.source_path = adapter
+            .session_source_path(&session)
+            .to_string_lossy()
+            .into_owned();
         // The two frontiers the detail page shows: messages ingested, and how
         // far Context processing has consumed them.
         let ingested_message_sequence = db.ingested_message_sequence(&session_id)?;
@@ -215,7 +219,8 @@ pub fn reveal_session_source(state: State<AppState>, session_id: String) -> Resu
         .db
         .get_session(&session_id)?
         .ok_or_else(|| other("源会话路径不可用"))?;
-    crate::platform::paths::reveal_file(std::path::Path::new(&session.source_path))
+    let path = crate::adapters::adapter_for(session.agent).session_source_path(&session);
+    crate::platform::paths::reveal_file(&path)
 }
 
 /// One message of a window: the message plus the projection ordinal that puts

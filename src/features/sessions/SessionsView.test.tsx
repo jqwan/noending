@@ -1,3 +1,4 @@
+import { invalidateTargets, removedTargets } from "../../app/removedTargets";
 // 会话可跟踪多个任务；任务筛选匹配跟踪 ID，无跟踪筛选匹配空列表。
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -72,6 +73,7 @@ function taskFilter(): HTMLSelectElement {
 }
 
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   navigate.mockClear();
   clearSessionsCache();
   viewState.clear(); localStorage.clear();
@@ -154,4 +156,15 @@ it("includes assistant sessions in the shared archived board and bulk deletion",
   expect(api.permanentlyDeleteSession).toHaveBeenCalledTimes(2);
   expect(api.permanentlyDeleteSession).toHaveBeenCalledWith("assistant-archived");
   expect(api.permanentlyDeleteSession).toHaveBeenCalledWith("regular-archived");
+});
+
+it("immediately removes a deleted session and ignores a stale board refresh", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([session({ id: "gone", title: "删除会话" }), session({ id: "kept", title: "保留会话" })]);
+  render(<SessionsView navigate={navigate} />);
+  await screen.findByText("删除会话");
+  act(() => invalidateTargets({ sessionIds: ["gone"] }));
+  expect(screen.queryByText("删除会话")).toBeNull();
+  await act(async () => {});
+  expect(screen.queryByText("删除会话")).toBeNull();
+  expect(screen.getByText("保留会话")).toBeTruthy();
 });

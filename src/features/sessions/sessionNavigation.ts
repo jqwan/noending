@@ -1,3 +1,4 @@
+import { isRemovedRoute } from "../../app/removedTargets";
 import type { Route } from "../../app/routes";
 import type { TerminalSummary, Agent } from "../../types";
 
@@ -5,6 +6,7 @@ import type { TerminalSummary, Agent } from "../../types";
 export const sessionPages = new Map<string, Route>();
 export const sessionTerminals = new Map<string, string>();
 export function rememberSessionPage(sessionId: string, route: Route) {
+  if (isRemovedRoute(route) || isRemovedRoute({ view: "session", sessionId })) return;
   sessionPages.set(sessionId, route);
   if (route.view === "terminal") sessionTerminals.set(sessionId, route.terminalId);
 }

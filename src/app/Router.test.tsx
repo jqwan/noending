@@ -46,7 +46,7 @@ it("dispatches session overview, conversation and terminal routes with their ide
   const props = { navigate, goBack, actionSeq: 0 };
   const sessionRoute = { view: "session" as const, sessionId: "s1", initialTitle: "T", initialAgent: "codex" as const };
   const { rerender } = render(<Router route={sessionRoute} {...props} />);
-  expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", navigate, goBack }), expect.anything());
+  expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", navigate }), expect.anything());
   expect(conversation).not.toHaveBeenCalled();
   rerender(<Router route={{ ...sessionRoute, entry: "conversation", initialTotal: 12 }} {...props} />);
   expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", initialTotal: 12, navigate }), expect.anything());

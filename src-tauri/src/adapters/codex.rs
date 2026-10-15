@@ -1,4 +1,4 @@
-//! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+//! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]`.
 //! `CODEX_HOME` overrides the root. Raw data is read-only, always — NoEnding
 //! never deletes an Agent-owned source.
 //!
@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, json_str_field, read_jsonl_delta, truncate_text, AgentCommand, DesktopResume,
-    DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute,
-    SessionMessageRole,
+    detect_format_reader, json_str_field, read_jsonl_delta, truncate_text, AgentCommand,
+    DesktopResume, DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberReadDelta,
+    ParsedLine, ResumeRoute, SessionMessageRole,
 };
 use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
@@ -47,11 +47,51 @@ fn extract_text(content: &Value) -> String {
     parts.join("\n")
 }
 
+/// Both physical forms name the same native thread, including fork filenames.
+fn rollout_stem(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    name.strip_suffix(".jsonl.zst")
+        .or_else(|| name.strip_suffix(".jsonl"))
+        .filter(|stem| stem.starts_with("rollout-"))
+}
+
+fn is_compressed(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "zst")
+}
+
+/// Prefer the writable transcript when both forms coexist. A permission error
+/// is not absence: keep that path so inspection reports it as unavailable.
+fn resolve_rollout(path: &Path) -> PathBuf {
+    let Some(stem) = rollout_stem(path) else {
+        return path.to_path_buf();
+    };
+    let plain = path.with_file_name(format!("{stem}.jsonl"));
+    match std::fs::metadata(&plain) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let compressed = path.with_file_name(format!("{stem}.jsonl.zst"));
+            match std::fs::metadata(&compressed) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+                _ => compressed,
+            }
+        }
+        _ => plain,
+    }
+}
+
+fn read_rollout(path: &Path) -> Result<String> {
+    let raw = std::fs::read(path)?;
+    let bytes = if is_compressed(path) {
+        zstd::decode_all(raw.as_slice())?
+    } else {
+        raw
+    };
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// The uuid Codex wrote into a rollout's name: the file's OWN thread id,
 /// which differs from `payload.id` only on a forked page.
 fn thread_id_from_filename(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_string_lossy().to_string();
-    let rest = stem.strip_prefix("rollout-")?;
+    let rest = rollout_stem(path)?.strip_prefix("rollout-")?;
     let own = rest.rsplit('_').next()?;
     let parts: Vec<&str> = own.rsplit('-').take(5).collect();
     if parts.len() < 5 {
@@ -70,8 +110,7 @@ fn thread_id_from_filename(path: &Path) -> Option<String> {
 /// `parent_thread_id`). Treating it as this marker would promote those subagents
 /// from `Child` to `ForkRoot` — one phantom Logical Session each.
 fn is_forked_page_name(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(|s| s.to_str())
+    rollout_stem(path)
         .and_then(|s| s.strip_prefix("rollout-"))
         .map(|rest| rest.contains('_'))
         .unwrap_or(false)
@@ -113,7 +152,11 @@ fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMember
 impl CodexAdapter {
     /// Parse one rollout into its execution member facts.
     fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
-        let lines = crate::adapters::read_jsonl_lines(path)?;
+        let text = read_rollout(path)?;
+        if detect_format_reader(std::io::Cursor::new(text.as_bytes())) != Some(Agent::Codex) {
+            return Ok(None);
+        }
+        let lines: Vec<_> = text.lines().enumerate().collect();
         let mut meta_seen = false;
         let mut meta_id = None;
         let mut legacy_session_id = None;
@@ -232,11 +275,15 @@ impl CodexAdapter {
         let kind = member_kind_of(thread_source.as_deref(), forked);
         let is_logical_root = kind.is_logical_root();
 
-        let meta = std::fs::metadata(path)?;
-        let last_activity = meta
-            .modified()
-            .ok()
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+        // Compression/touch is storage maintenance, not conversation activity.
+        let last_activity = lines
+            .iter()
+            .filter_map(|(_, line)| {
+                let v: Value = serde_json::from_str(line).ok()?;
+                chrono::DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?).ok()
+            })
+            .max()
+            .map(|t| t.to_rfc3339());
 
         Ok(Some(DiscoveredMember {
             agent: Agent::Codex,
@@ -309,26 +356,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                     stack.push(p);
                     continue;
                 }
-                let is_rollout_jsonl = p.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("rollout-"))
-                        .unwrap_or(false);
-                if !is_rollout_jsonl {
+                if rollout_stem(&p).is_none() || resolve_rollout(&p) != p {
                     continue;
                 }
-                // Fully ingested and stat-identical since the last pass: the
-                // stored cursor is the source of truth, skip the parse.
                 if unchanged(&p) {
-                    continue;
-                }
-                // The filename only pre-filters; the content decides. One
-                // bad file never aborts the whole scan.
-                if detect_format(&p) != Some(Agent::Codex) {
-                    eprintln!(
-                        "[discover] skip {} (content fingerprint is not codex)",
-                        p.display()
-                    );
                     continue;
                 }
                 match Self::parse_member(&p) {
@@ -352,15 +383,44 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         session: &Session,
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
-        let path = PathBuf::from(&session.source_path);
-        let is_root = true; // every stored session is its root source
-        read_jsonl_delta(&path, cursor, &|_idx, v| parse_line(v, is_root))
+        let path = resolve_rollout(Path::new(&session.source_path));
+        let parse = |_idx, v: &Value| parse_line(v, true);
+        if !is_compressed(&path) {
+            return read_jsonl_delta(&path, cursor, &parse);
+        }
+        let meta = std::fs::metadata(&path)?;
+        if cursor.last_seen_size == meta.len()
+            && crate::adapters::file_identity(&path) == cursor.source_file_identity
+            && matches!((cursor.mtime, crate::adapters::mtime_secs(&meta)),
+                (Some(a), Some(b)) if (a - b).abs() <= 1e-6)
+        {
+            return Ok(crate::adapters::MemberReadDelta {
+                messages: vec![],
+                source: None,
+                complete_snapshot: true,
+            });
+        }
+        let raw = std::fs::read(&path)?;
+        // Decode the whole frame before committing anything. A damaged or
+        // unfinished archive leaves the stored messages and cursor intact.
+        let decoded = zstd::decode_all(raw.as_slice())?;
+        crate::adapters::read_jsonl_snapshot(
+            &path,
+            cursor,
+            &raw,
+            &String::from_utf8_lossy(&decoded),
+            &parse,
+        )
+    }
+
+    fn session_source_path(&self, session: &Session) -> PathBuf {
+        resolve_rollout(Path::new(&session.source_path))
     }
 
     fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
-        Ok(crate::adapters::inspect_file_source(Path::new(
-            &session.source_path,
-        )))
+        Ok(crate::adapters::inspect_file_source(
+            &self.session_source_path(session),
+        ))
     }
 
     fn build_new_command(
@@ -708,6 +768,34 @@ mod rollout_tests {
             fact_generation: 0,
             latest_message_seq: 0,
         }
+    }
+
+    #[test]
+    fn compressed_fork_keeps_its_own_native_identity() {
+        let dir = temp_dir("compressed-fork");
+        let own = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
+        let body = [meta_line(), message_line(1, "user", "继续分支")].join("\n") + "\n";
+        let path = dir.join(format!(
+            "rollout-2026-09-22T21-17-07-{SESSION_ID}_{own}.jsonl.zst"
+        ));
+        std::fs::write(&path, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
+        let found = CodexAdapter
+            .discover_members_in(&[dir.clone()], &|_| false)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source_member_id, own);
+        assert_eq!(found[0].kind, DiscoveredMemberKind::ForkRoot);
+        assert_eq!(found[0].first_user_text.as_deref(), Some("继续分支"));
+        // A renamed foreign transcript is never claimed just because it is zstd.
+        std::fs::write(
+            &path,
+            zstd::encode_all(b"{\"type\":\"session\",\"id\":\"pi-id\"}\n".as_slice(), 3).unwrap(),
+        )
+        .unwrap();
+        assert!(CodexAdapter
+            .discover_members_in(&[dir], &|_| false)
+            .unwrap()
+            .is_empty());
     }
 
     /// Desktop activation follows each platform's supported route, or refuses.

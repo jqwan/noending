@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
 import { sessionTerminals } from "./sessionNavigation";
@@ -13,6 +14,7 @@ const terminal = (live: boolean): TerminalSummary => ({
   live, exit_code: live ? null : 0, cwd: "/work", created_at: "", session_title: "Session",
 });
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   vi.resetAllMocks();
   sessionTerminals.clear();
   vi.mocked(api.terminalList).mockResolvedValue([]);

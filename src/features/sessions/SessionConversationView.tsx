@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import {
   Fragment,
   useCallback,
@@ -276,7 +277,7 @@ export default function SessionConversationView({
       api.getSessionUserMessageMarks(sessionId),
     ])
       .then(([detail, page, markList]) => {
-        if (!live) return;
+        if (!live || removedTargets.sessions.has(sessionId)) return;
         sessionDetailCache.set(sessionId, detail);
         setSession(detail.session);
         setMarks(markList);

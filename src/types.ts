@@ -248,6 +248,7 @@ export interface LocalDeletePreview {
 /** outcome of permanently_delete_session. */
 export interface PermanentDeleteResult {
   purged: boolean;
+  terminal_ids: string[];
 }
 
 export interface IngestSource {

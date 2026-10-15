@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import SummaryMarkdown from "./SummaryMarkdown";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -39,13 +40,11 @@ export default function SessionDetailView({
   initialTitle,
   initialAgent,
   navigate,
-  goBack,
 }: {
   sessionId: string;
   initialTitle?: string;
   initialAgent?: Agent;
   navigate: (r: Route) => void;
-  goBack: (fallback?: Route) => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
@@ -83,6 +82,7 @@ export default function SessionDetailView({
   const refresh = useCallback(() => {
     api.getSessionDetail(sessionId)
       .then((d) => {
+        if (removedTargets.sessions.has(sessionId)) return;
         sessionDetailCache.set(sessionId, d);
         setDetail(d);
         setFailed(false);
@@ -555,6 +555,9 @@ export default function SessionDetailView({
                     {session.source_path}
                   </span>
                 )}
+                {session.agent === "codex" && session.source_path.endsWith(".jsonl.zst") && (
+                  <span className="badge muted" title="读取时自动解压，不修改源文件">Zstd 压缩</span>
+                )}
                 {sourceMissing && (
                   <div className="session-source-warning">源会话已不存在</div>
                 )}
@@ -669,7 +672,7 @@ export default function SessionDetailView({
           onDeleted={() => {
             sessionDetailCache.delete(sessionId);
             setPurgeOpen(false);
-            goBack({ view: "sessions" });
+            navigate({ view: "sessions", scope: "archived" });
           }}
         />
       )}

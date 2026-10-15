@@ -1,3 +1,4 @@
+import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import { useRefreshSignal } from "../../components/common";
@@ -20,8 +21,9 @@ export function useWorkstreamCards() {
   const refresh = useCallback(() => {
     setLoadError("");
     api.listWorkstreamCards().then((cs) => {
-      cachedCards = cs;
-      setCards(cs);
+      const current = cs.filter(w => !removedTargets.workstreams.has(w.id));
+      cachedCards = current;
+      setCards(current);
     }).catch(e => setLoadError(String(e)));
     api.getDefaultAgent().then((a) => {
       cachedDefaultAgent = a;
@@ -30,6 +32,11 @@ export function useWorkstreamCards() {
 
   }, []);
 
+  useEffect(() => {
+    const remove = () => setCards(rows => rows?.filter(w => !removedTargets.workstreams.has(w.id)) ?? null);
+    window.addEventListener(EVT_REMOVED, remove);
+    return () => window.removeEventListener(EVT_REMOVED, remove);
+  }, []);
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 

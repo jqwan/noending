@@ -1,3 +1,4 @@
+import { removedTargets } from "../../app/removedTargets";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
@@ -152,6 +153,7 @@ vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 let restoreUserAgent: () => void;
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
+  Object.values(removedTargets).forEach(ids => ids.clear());
   const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   restoreUserAgent = () => userAgent.mockRestore();
   sessionPages.clear(); sessionTerminals.clear();
