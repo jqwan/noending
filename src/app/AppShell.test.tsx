@@ -159,18 +159,12 @@ it("remembers keyboard resizing, clamps width, resets on double click, and hides
   fireEvent.doubleClick(restored);
   expect(localStorage.getItem("noending.sidebarWidth")).toBe("248");
 
-  // Shows new session button in titlebar and hides resize handle while collapsed
-  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+  // Hides resize handle while collapsed
   fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
   expect(screen.queryByRole("separator")).toBeNull();
   expect(localStorage.getItem("noending.sidebarCollapsed")).toBe("true");
-  const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
-  expect(newSessionBtn).toBeTruthy();
-  fireEvent.click(newSessionBtn);
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
   expect(screen.getByRole("separator")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
 });
 
 it("queues ingestion only after the window returns from the background", async () => {

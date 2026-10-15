@@ -395,97 +395,29 @@ export default function SessionDetailView({
               <Icon name="info" />
               <span>会话信息</span>
             </div>
-            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span className="badge" title={agentDisplayLabel(session.agent)}>{agentDisplayLabel(session.agent)}</span>
-              {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-              {archived && <span className="badge warn">已归档</span>}
-            </div>
+            {(untitled || archived) && (
+              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
+                {archived && <span className="badge warn">已归档</span>}
+              </div>
+            )}
 
             {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
             <div className="session-info-fields">
-              <Field label="开始时间">
-                {session.started_at
-                  ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
-                  : <span className="muted">未知</span>}
-              </Field>
-              <Field label="最近活动">
-                {session.last_activity_at ? (
-                  <span title={session.last_activity_at}>
-                    {timeAgo(session.last_activity_at)}
-                    <span className="muted small"> · {formatDateTime(session.last_activity_at)}</span>
-                  </span>
-                ) : <span className="muted">未知</span>}
-              </Field>
-              {archived && session.archived_at && (
-                <Field label="归档时间">
-                  <span title={session.archived_at}>{formatDateTime(session.archived_at)}</span>
-                </Field>
-              )}
-              <Field label="会话统计">
-                <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-                  <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
-                  <span>Agent 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+              <Field label="Agent">
+                <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="link"
+                    title={`打开 Agent：${agentDisplayLabel(session.agent)}`}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                    onClick={() => navigate({ view: "agents", agent: session.agent })}
+                  >
+                    <AgentIcon agent={session.agent} size={16} />
+                    <span>{agentDisplayLabel(session.agent)}</span>
+                  </button>
                 </span>
               </Field>
-            </div>
-          </section>
-
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <div className="detail-section-title">
-                <Icon name="tasks" />
-                <span>跟踪任务 ({detail.tracked_workstreams.length})</span>
-              </div>
-              <button
-                type="button"
-                className="btn ghost icon-button small"
-                title="添加跟踪任务"
-                aria-label="添加跟踪任务"
-                onClick={() => setTrackModalOpen(true)}
-              >
-                <Icon name="plus" />
-              </button>
-            </div>
-
-            {detail.tracked_workstreams.length === 0 ? (
-              <div className="l1-none">未跟踪任何任务</div>
-            ) : (
-              <div className="session-tracked-list">
-                {detail.tracked_workstreams.map((task) => (
-                  <div
-                    key={task.id}
-                    className="list-row session-tracked-task-row"
-                    role="link"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title });
-                      }
-                    }}
-                    onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
-                  >
-                    <div className="grow">
-                      <div className="title mini-title" title={task.title}>
-                        <span><Icon name="tasks" /></span>
-                        <span className="truncate">{task.title}</span>
-                      </div>
-                    </div>
-                    <div className="side">
-                      {task.visibility === "archived" && <span className="badge warn">已归档</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="card detail-section">
-            <div className="detail-section-title">
-              <Icon name="folder" />
-              <span>目录与关联</span>
-            </div>
-
-            <div className="session-info-fields">
               <Field label="项目">
                 {workspacePath ? (
                   derivedProjectName ? (
@@ -573,6 +505,30 @@ export default function SessionDetailView({
                   <span className="muted">{NO_CWD}（无目录记录）</span>
                 )}
               </Field>
+              <Field label="开始时间">
+                {session.started_at
+                  ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
+                  : <span className="muted">未知</span>}
+              </Field>
+              <Field label="最近活动">
+                {session.last_activity_at ? (
+                  <span title={session.last_activity_at}>
+                    {timeAgo(session.last_activity_at)}
+                    <span className="muted small"> · {formatDateTime(session.last_activity_at)}</span>
+                  </span>
+                ) : <span className="muted">未知</span>}
+              </Field>
+              {archived && session.archived_at && (
+                <Field label="归档时间">
+                  <span title={session.archived_at}>{formatDateTime(session.archived_at)}</span>
+                </Field>
+              )}
+              <Field label="会话统计">
+                <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
+                  <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
+                  <span>Agent 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+                </span>
+              </Field>
               {/* 源会话：会话自己的源文件。
                   状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
                   路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
@@ -651,6 +607,55 @@ export default function SessionDetailView({
                 </Field>
               )}
             </div>
+          </section>
+
+          <section className="card detail-section">
+            <div className="row between" style={{ alignItems: "center" }}>
+              <div className="detail-section-title">
+                <Icon name="tasks" />
+                <span>跟踪任务 ({detail.tracked_workstreams.length})</span>
+              </div>
+              <button
+                type="button"
+                className="btn ghost icon-button small"
+                title="添加跟踪任务"
+                aria-label="添加跟踪任务"
+                onClick={() => setTrackModalOpen(true)}
+              >
+                <Icon name="plus" />
+              </button>
+            </div>
+
+            {detail.tracked_workstreams.length === 0 ? (
+              <div className="l1-none">未跟踪任何任务</div>
+            ) : (
+              <div className="session-tracked-list">
+                {detail.tracked_workstreams.map((task) => (
+                  <div
+                    key={task.id}
+                    className="list-row session-tracked-task-row"
+                    role="link"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title });
+                      }
+                    }}
+                    onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
+                  >
+                    <div className="grow">
+                      <div className="title mini-title" title={task.title}>
+                        <span><Icon name="tasks" /></span>
+                        <span className="truncate">{task.title}</span>
+                      </div>
+                    </div>
+                    <div className="side">
+                      {task.visibility === "archived" && <span className="badge warn">已归档</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </aside>
       </div>

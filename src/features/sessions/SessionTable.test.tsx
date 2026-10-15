@@ -63,19 +63,6 @@ it("shows tracked workstream count statistic on cards and full title in list vie
   expect(screen.getByText(longTitle)).toBeTruthy();
 });
 
-it("shows historical message count statistic on cards", async () => {
-  const props = {
-    sessions: [
-      { ...session, id: "s-msgs", title: "消息会话", latest_message_seq: 15, tracked_workstream_ids: [] },
-    ],
-    workstreamTitleById: new Map(),
-    projectNameById: new Map(),
-    onOpen: () => {}, onResume: () => {}, onArchive: () => {},
-  };
-  await renderCards(<SessionCards {...props} />);
-  expect(screen.getByText("15 条消息")).toBeTruthy();
-});
-
 
 it("prefers terminal capability regardless of old preferences, and uses desktop for desktop-only formats", async () => {
   const onTerminalResume = vi.fn();

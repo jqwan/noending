@@ -2146,6 +2146,14 @@ button.icon-button.small .ui-icon {
 .session-info-fields { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
 .session-info-fields > *:nth-child(odd) { margin-top: 12px; }
 .session-info-fields > *:nth-child(odd):first-child { margin-top: 0; }
+.session-info-fields button.link .ui-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+.session-info-fields button.link .agent-icon {
+  color: var(--text-primary);
+}
 .session-field-label-row {
   display: flex;
   align-items: center;

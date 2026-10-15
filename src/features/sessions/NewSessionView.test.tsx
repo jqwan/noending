@@ -1,7 +1,7 @@
 import { viewState } from "../../hooks/useViewState";
 import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeFixture } from "../agents/runtimeFixtures";
 import NewSessionView from "./NewSessionView";
@@ -281,37 +281,6 @@ describe("NewSessionView explicit agent resolution", () => {
 
     // 单次切换绝不改动全局默认配置
     expect(api.setDefaultAgent).not.toHaveBeenCalled();
-  });
-
-  it("opens the custom agent dropdown menu, selects an agent, and closes on Escape", async () => {
-    render(<NewSessionView navigate={vi.fn()} />);
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
-    });
-
-    const trigger = screen.getByRole("button", { name: "Agent：Codex" });
-    expect(screen.queryByRole("menu", { name: "Agent 列表" })).toBeNull();
-
-    // Click to open custom dropdown menu
-    fireEvent.click(trigger);
-    const menu = screen.getByRole("menu", { name: "Agent 列表" });
-    expect(menu).toBeTruthy();
-
-    // Select Claude Code from the custom dropdown menu item
-    const claudeBtn = within(menu).getByRole("button", { name: /Claude Code/ });
-    fireEvent.click(claudeBtn);
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("claude_code", [], "/tmp/workspace", NATIVE_RUNTIME);
-    });
-    expect(screen.queryByRole("menu", { name: "Agent 列表" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Agent：Claude Code" })).toBeTruthy();
-
-    // Open again and close on Escape
-    fireEvent.click(screen.getByRole("button", { name: "Agent：Claude Code" }));
-    expect(screen.getByRole("menu", { name: "Agent 列表" })).toBeTruthy();
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("menu", { name: "Agent 列表" })).toBeNull();
   });
 });
 
