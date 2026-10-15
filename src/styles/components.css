@@ -2195,9 +2195,9 @@ button.icon-button.small .ui-icon {
 .search-result:hover { background: var(--bg-panel); }
 .project-detail-layout aside .list-row { flex-wrap: wrap; }
 .project-detail-layout aside .grow { flex-basis: 100%; }
-.project-detail-layout aside .session-tracked-task-row,
+.detail-aside .list-row.session-tracked-task-row,
 .task-detail-aside .list-row { flex-wrap: nowrap; }
-.project-detail-layout aside .session-tracked-task-row .grow,
+.detail-aside .session-tracked-task-row .grow,
 .task-detail-aside .list-row .grow { flex: 1 1 auto; min-width: 0; flex-basis: auto; }
 .task-detail-aside .side { flex-wrap: nowrap; }
 @media (max-width: 1100px) {
@@ -3385,6 +3385,7 @@ button.btn.ghost.terminal-exited,
 .session-tracked-task-row:hover {
   background: var(--bg-hover);
 }
+.session-tracked-task-row .side { white-space: nowrap; }
 .session-tracked-task-row .mini-title {
   font-size: 13px;
   line-height: 1.4;

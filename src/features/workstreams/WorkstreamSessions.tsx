@@ -21,7 +21,7 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
       <div className="row between" style={{ alignItems: "center" }}>
         <h2 className="detail-section-title">
           <Icon name="chat" />
-          <span>关联会话（{sessions.length}）</span>
+          <span>关联会话 ({sessions.length})</span>
         </h2>
         {allowActions && onNewSession && (
           <button className="btn ghost icon-button small" title="新建会话" aria-label="新建会话"

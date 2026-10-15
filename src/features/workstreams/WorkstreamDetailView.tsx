@@ -389,7 +389,7 @@ export default function WorkstreamDetailView({
           <section className="card detail-section">
             <h2 className="detail-section-title">
               <Icon name="project" />
-              <span>关联项目（{projectRows.length}）</span>
+              <span>关联项目 ({projectRows.length})</span>
             </h2>
             {projectRows.length === 0 && (
               <div className="l1-none">

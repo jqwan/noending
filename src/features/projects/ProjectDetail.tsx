@@ -10,8 +10,11 @@ import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./ProjectsView";
 import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
+import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
+import { clearWorkstreamCardsCache } from "../workstreams/useWorkstreamCards";
+import { EVT_SYNCED } from "../../app/routes";
 import { httpsRemoteUrl } from "./remoteUrl";
-import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
+import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject, isProjectAllPathsMissing } from "./projectKind";
 import {
   type ProjectDetailData,
 } from "../../types";
@@ -39,6 +42,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   const [gone, setGone] = useState(false);
   const [failure, setFailure] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [renameError, setRenameError] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
@@ -75,6 +79,11 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
 
   const detail = data;
   const project = detail?.project ?? null;
+  const allPathsMissing = !detail || isProjectAllPathsMissing({
+    path_count: detail.workspace_paths.length,
+    missing_path_count: detail.workspace_paths.filter(path => !path.exists).length,
+  });
+  useEffect(() => setNewTaskOpen(false), [projectId, allPathsMissing]);
 
   const sortedSessions = useMemo(() => {
     if (!detail) return [];
@@ -204,8 +213,9 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
                 <button
                   className="btn ghost icon-button small"
-                  title="新建会话"
+                  title={allPathsMissing ? "项目全部目录缺失，无法新建会话" : "新建会话"}
                   aria-label="新建会话"
+                  disabled={allPathsMissing}
                   onClick={() => navigate({ view: "new-session", projectId: project.id })}
                 >
                   <Icon name="plus" />
@@ -261,11 +271,16 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           </section>
 
           <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
+            <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
               <h2 className="detail-section-title">
                 <Icon name="tasks" />
                 <span>关联任务 ({detail.workstreams.length})</span>
               </h2>
+              <button type="button" className="btn ghost icon-button small"
+                title={allPathsMissing ? "项目全部目录缺失，无法新建任务" : "新建任务"}
+                aria-label="新建任务" disabled={allPathsMissing} onClick={() => setNewTaskOpen(true)}>
+                <Icon name="plus" />
+              </button>
             </div>
 
             {detail.workstreams.length === 0 ? (
@@ -292,7 +307,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
                       </div>
                     </div>
                     <div className="side">
-                      {w.visibility === "archived" && <span className="badge warn" title="已归档；项目与它只是投影关系">已归档</span>}
+                      {w.visibility === "archived" && <span className="badge warn" title="已归档">已归档</span>}
                     </div>
                   </div>
                 ))}
@@ -326,6 +341,19 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           </section>
         </aside>
       </div>
+
+      {newTaskOpen && !allPathsMissing && (
+        <WorkstreamFormModal
+          key={projectId}
+          initialProjectId={projectId}
+          onClose={() => setNewTaskOpen(false)}
+          onCreated={() => {
+            clearProjectCardsCache();
+            clearWorkstreamCardsCache();
+            window.dispatchEvent(new Event(EVT_SYNCED));
+          }}
+        />
+      )}
 
       {renaming && (
         <Modal title="重命名项目" onClose={() => setRenaming(false)}>

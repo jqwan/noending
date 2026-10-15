@@ -11,6 +11,8 @@ vi.mock("../../api", () => ({
     savePreference: vi.fn(),
     deletePreference: vi.fn(),
     getProjectDetail: vi.fn(),
+    listProjectCards: vi.fn(),
+    createWorkstream: vi.fn(),
     renameProject: vi.fn(),
     getProjectContextState: vi.fn(),
     updateProjectContext: vi.fn(),
@@ -30,6 +32,8 @@ beforeEach(() => {
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
+  vi.mocked(api.listProjectCards).mockReset();
+  vi.mocked(api.createWorkstream).mockReset();
   vi.mocked(api.getAgentStatus).mockResolvedValue({
     codex: {
       name: "codex",
@@ -122,6 +126,7 @@ describe("ProjectDetail", () => {
     const detail = mockDetail();
     detail.kind = "git";
     detail.purpose = "assistant";
+    detail.workspace_paths[0].exists = false;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
@@ -144,6 +149,53 @@ describe("ProjectDetail", () => {
 
     await screen.findByText("Codex Chat");
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+  });
+
+  it.each(["empty", "all missing"])("blocks new tasks and sessions when project directories are %s", async mode => {
+    const d = mockDetail();
+    d.workspace_paths = mode === "empty" ? [] : d.workspace_paths.map(path => ({ ...path, exists: false }));
+    vi.mocked(api.getProjectDetail).mockResolvedValue(d);
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    const button = await screen.findByRole("button", { name: "新建任务" });
+    expect(button).toHaveProperty("disabled", true);
+    fireEvent.click(button);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(api.createWorkstream).not.toHaveBeenCalled();
+    const newSession = screen.getByRole("button", { name: "新建会话" });
+    expect(newSession).toHaveProperty("disabled", true);
+    fireEvent.click(newSession);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("creates a task in this project and refreshes its associated task list", async () => {
+    const d = mockDetail();
+    // A missing directory does not block creation while another still exists.
+    d.workspace_paths[0].exists = false;
+    vi.mocked(api.listProjectCards).mockResolvedValue([{
+      id: "p1", name: "Test Project", kind: "single_directory", visibility: "normal",
+      path_count: 2, missing_path_count: 1, search_paths: ["/z/main/worktree"], representative_paths: ["/z/main/worktree"],
+      name_customized: false, workstream_count: 0, session_count: 0,
+      last_activity_at: null, updated_at: "",
+    }]);
+    vi.mocked(api.getProjectDetail).mockImplementation(async () => ({ ...d }));
+    vi.mocked(api.createWorkstream).mockImplementation(async () => {
+      const task = { id: "task-created", title: "从项目新建的任务", description: "",
+        visibility: "normal" as const, created_at: "", updated_at: "" };
+      d.workstreams = [{ workstream: task }];
+      return task;
+    });
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建任务" }));
+    expect(screen.getByRole("dialog", { name: "新建任务" })).toBeTruthy();
+    await screen.findByRole("button", { name: "移除项目 Test Project" });
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "从项目新建的任务" } });
+    fireEvent.submit(screen.getByRole("textbox", { name: "标题" }).closest("form")!);
+    await waitFor(() => expect(api.createWorkstream).toHaveBeenCalledWith("从项目新建的任务", "", ["p1"]));
+    const taskLink = await screen.findByRole("link", { name: "从项目新建的任务" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("heading", { name: "关联任务 (1)" })).toBeTruthy();
+    fireEvent.click(taskLink);
+    expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "task-created", initialTitle: "从项目新建的任务" });
   });
 
   it("orders git main worktree first in workspace paths list", async () => {
