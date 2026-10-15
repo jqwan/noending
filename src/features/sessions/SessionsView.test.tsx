@@ -10,6 +10,7 @@ import type { Session } from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     listSessions: vi.fn(),
     listProjects: vi.fn(),
     listWorkstreams: vi.fn(),

@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
     setAgentRuntimeOverrides: vi.fn(),

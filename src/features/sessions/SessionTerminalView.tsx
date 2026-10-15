@@ -81,11 +81,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const boundSessionId = identity.sessionId;
   const boundTitle = identity.title;
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [reconnecting, setReconnecting] = useState(false);
+  const [terminalBusy, setTerminalBusy] = useState(false);
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
   const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(null);
-  const reconnectingRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -104,27 +103,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     setIdentity(next);
   }, []);
 
-  /** 重新连接会按后端当前绑定身份恢复会话，并切换到新 PTY。 */
-  const reconnectTerminal = async () => {
-    if (reconnectingRef.current || !boundSessionId) return;
-    reconnectingRef.current = true;
-    setReconnecting(true);
-    try {
-      const result = await api.terminalReconnect(terminalId);
-      if (!result.terminal_id) throw new Error("找不到重新连接的终端");
-      // 旧实例已被后端替换，释放对应 xterm 与常驻监听。
-      disposeTerminal(terminalId);
-      if (mountedRef.current) navigate({ view: "terminal", terminalId: result.terminal_id, initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent, initialSessionId: boundSessionId });
-    } catch (e) {
-      if (mountedRef.current) showToast(`重新连接失败：${String(e)}`);
-    } finally {
-      reconnectingRef.current = false;
-      if (mountedRef.current) setReconnecting(false);
-    }
-  };
-
   const closeTerminal = async () => {
-    if (closingRef.current || reconnectingRef.current) return;
+    if (closingRef.current || terminalBusy) return;
     closingRef.current = true;
     setClosing(true);
     try {
@@ -350,20 +330,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         actions={
           <>
             <SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
-              agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived} navigate={navigate} />
+              agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived}
+              terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
-            <button
-              className="btn ghost icon-button"
-              aria-label={reconnecting ? "正在重新连接" : "重新连接"}
-              title={meta?.archived ? "已归档的会话不能重新连接" : boundSessionId ? "重新连接会话" : "绑定会话后可重新连接"}
-              disabled={closing || reconnecting || !boundSessionId || !!meta?.archived || state.kind === "loading"}
-              onClick={() => void reconnectTerminal()}
-            >
-              <Icon name="refresh" />
-            </button>
             <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
-              title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || reconnecting || state.kind === "loading"}
+              title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || terminalBusy || state.kind === "loading"}
               onClick={() => void closeTerminal()}><Icon name="close" /></button>
           </>
         }

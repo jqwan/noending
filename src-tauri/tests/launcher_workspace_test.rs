@@ -683,3 +683,50 @@ fn every_selected_task_is_validated_and_part_of_the_frozen_launch() {
         .prepare_new_with_runtime_in(&db, Agent::Codex, &[a, b], Some(&cwd), &workspace, None)
         .is_err());
 }
+
+/// The sidebar/header projection and real preparation agree on source, cwd and
+/// archive eligibility; checking never creates a prepared launch or a terminal.
+#[test]
+fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
+    use noending::launcher::availability::terminal_resume_states;
+    let db = open_db("availability");
+    seed_installation(&db, Agent::Codex);
+    let cwd = real_dir("availability", "working");
+    let session = session_row(&db, Some(&cwd), None);
+    let launcher = launcher_in("availability");
+    let probe = || {
+        terminal_resume_states(&db, &[session.id.clone()])
+            .unwrap()
+            .remove(&session.id)
+            .unwrap()
+    };
+    assert!(probe().available);
+    assert!(launcher
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .is_ok());
+    std::fs::remove_dir(&cwd).unwrap();
+    assert!(!probe().available);
+    assert!(launcher
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .is_err());
+    std::fs::create_dir(&cwd).unwrap();
+    assert!(probe().available);
+    std::fs::remove_file(&session.source_path).unwrap();
+    assert!(!probe().available);
+    assert!(launcher
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .is_err());
+    std::fs::write(&session.source_path, "").unwrap();
+    db.write()
+        .execute(
+            "UPDATE sessions SET archived_at=?1 WHERE id=?2",
+            rusqlite::params![now(), session.id],
+        )
+        .unwrap();
+    assert!(!probe().available);
+    assert!(launcher
+        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .is_err());
+    let desktop = support::ensure_session(&db, new_id(), Agent::WorkBuddy, "desktop-only");
+    assert!(!terminal_resume_states(&db, &[desktop.id.clone()]).unwrap()[&desktop.id].available);
+}

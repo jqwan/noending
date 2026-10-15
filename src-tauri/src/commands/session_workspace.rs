@@ -125,6 +125,19 @@ pub fn list_sessions(
     })
 }
 
+/// Filesystem and executable checks run off the UI thread, in one batch.
+#[tauri::command]
+pub async fn get_session_terminal_states(
+    state: State<'_, AppState>,
+    session_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, crate::launcher::availability::TerminalResumeState>> {
+    let db = state.db.clone();
+    super::run_on_blocking_worker(move || {
+        crate::launcher::availability::terminal_resume_states(&db, &session_ids)
+    })
+    .await?
+}
+
 #[tauri::command]
 pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<SessionDetail> {
     with_db(&state, |db| {

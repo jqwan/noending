@@ -18,6 +18,8 @@
 //! fingerprint, so Preview-Launch Identity covers the directory as well as the
 //! runtime intent.
 
+pub mod availability;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -319,35 +321,7 @@ impl SessionLauncher {
         let session = db
             .get_session(session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
-        // a trashed session is inactive and must not resume. All resume
-        // entries (command layer, Assistant, one-shot launch) funnel through
-        // here, so this is the single prepare-side gate.
-        if session.is_archived() {
-            return Err(other("会话已在已归档，无法继续；请先恢复会话"));
-        }
-        // Resume targets `sessions.root_agent_session_id` through the
-        // ROOT member's source; a source the adapter cannot confirm present is
-        // a refusal with an explicit reason, never a launch into a dead
-        // thread. Unavailable (permission, parse, store problems) is NOT
-        // missing — the refusal says so.
-        match crate::lifecycle::root_source_status(&session)? {
-            Some(crate::domain::SourceAvailability::Present) => {}
-            Some(crate::domain::SourceAvailability::Missing) => {
-                return Err(other("源会话已不存在，无法继续该会话"));
-            }
-            _ => {
-                return Err(other(
-                    "无法确认源会话当前可用（可能无权限或源不可读），已拒绝继续",
-                ));
-            }
-        }
-        if let Some(cwd) = session.cwd.as_deref().filter(|c| !c.trim().is_empty()) {
-            if !is_usable_directory(cwd) {
-                return Err(other(format!(
-                    "原工作目录不存在或当前不可用（{cwd}），无法继续该会话"
-                )));
-            }
-        }
+        availability::validate_resume_session(&session)?;
 
         self.prepare_resume_from_current(db, session_id, workspace)
     }

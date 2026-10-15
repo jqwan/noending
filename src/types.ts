@@ -360,6 +360,12 @@ export interface SessionTracking {
   available_workstreams: Workstream[];
 }
 
+/** Advisory prerequisites; launching always revalidates current backend state. */
+export interface TerminalResumeState {
+  available: boolean;
+  reason: string | null;
+}
+
 export interface SessionDetail {
   session: Session;
   /** Conversation：只含根源的 user/assistant 消息。 */

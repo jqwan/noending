@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 // 直接 attach / 失败可重试 / 身份切换与 pending / 退出横幅。
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
     getSessionDetail: vi.fn().mockResolvedValue({
@@ -160,7 +161,8 @@ beforeEach(() => {
       if (eventHandlers.get(event) === handler) eventHandlers.delete(event);
     });
   });
-  vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
+  vi.mocked(api.terminalList).mockReset().mockResolvedValue([snapshot({})]);
+  vi.mocked(api.getSessionTerminalStates).mockReset().mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalClose).mockReset();
   vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue(reconnected);
   vi.mocked(api.getSessionDetail).mockReset().mockResolvedValue(detail("会话"));
@@ -250,7 +252,7 @@ it("updates a detached cached terminal's theme without restarting or replaying i
   document.documentElement.dataset.theme = "dark";
   await waitFor(() => expect(terminal.options.theme?.background).toBe("#141413"));
   renderView();
-  await screen.findByLabelText("重新连接");
+  await screen.findByLabelText("终端 · 运行中");
   expect(FakeTerminal.last).toBe(terminal);
   expect(terminal.written).toHaveLength(1);
   expect(terminal.disposed).toBe(false);
@@ -331,18 +333,20 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
 
 it("reconnects an exited terminal and navigates to the new PTY", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false, exit_code: 0 }));
+  vi.mocked(api.terminalList).mockResolvedValue([snapshot({ live: false, exit_code: 0 })]);
   const navigate = vi.fn();
   renderView(navigate);
   await screen.findByText(/Agent 已退出/);
   const old = FakeTerminal.last!;
-  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  fireEvent.click(screen.getByRole("button", { name: "终端 · 已退出" }));
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
-  expect(api.terminalReconnect).toHaveBeenCalledWith("t-1");
+  expect(api.terminalReconnect).toHaveBeenCalledWith("t-1", "s1");
   expect(old.disposed).toBe(true);
 });
 
 it("retains an exited terminal across page changes until manual removal disposes its cache", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false, exit_code: 0 }));
+  vi.mocked(api.terminalList).mockResolvedValue([snapshot({ live: false, exit_code: 0 })]);
   const view = renderView();
   await screen.findByText(/Agent 已退出/);
   const old = FakeTerminal.last!;
@@ -361,19 +365,21 @@ it("retains an exited terminal across page changes until manual removal disposes
 
 it("handles reconnect lifecycle: prevents double clicks, recovers on failure, and navigates on success", async () => {
   const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
+  vi.mocked(api.terminalList).mockResolvedValue([snapshot({ live: false })]);
   vi.mocked(api.terminalReconnect).mockReturnValueOnce(pending.promise).mockResolvedValueOnce(reconnected);
   const navigate = vi.fn();
   renderView(navigate);
-  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
+  await screen.findByText(/Agent 已退出/);
   const old = FakeTerminal.last!;
 
   // 1. Initial click enters busy state and prevents double clicks
-  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
-  const busy = screen.getByRole("button", { name: "正在重新连接" }) as HTMLButtonElement;
+  fireEvent.click(screen.getByRole("button", { name: "终端 · 已退出" }));
+  const busy = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
   expect(busy.disabled).toBe(true);
   fireEvent.click(busy);
-  expect(api.terminalReconnect).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(api.terminalReconnect).toHaveBeenCalledTimes(1));
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "移除终端" }).disabled).toBe(true);
 
   // 2. Failure retains terminal output and keeps button retryable
   await act(async () => pending.reject(new Error("spawn failed")));
@@ -382,32 +388,34 @@ it("handles reconnect lifecycle: prevents double clicks, recovers on failure, an
   expect(old.disposed).toBe(false);
 
   // 3. Retry succeeds and navigates
-  const retryBtn = screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement;
+  const retryBtn = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
   expect(retryBtn.disabled).toBe(false);
   fireEvent.click(retryBtn);
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
 });
 
 it("disables reconnect until the terminal has a verified Session", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null }));
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_id: null, live: false }));
   renderView();
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  const reconnect = screen.getByRole("button", { name: "重新连接" }) as HTMLButtonElement;
+  const reconnect = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
   expect(reconnect.disabled).toBe(true);
   fireEvent.click(reconnect);
   expect(api.terminalReconnect).not.toHaveBeenCalled();
+  vi.mocked(api.terminalList).mockResolvedValue([snapshot({ session_id: "session-b", live: false, identity_revision: 2 })]);
   await act(async () => pushIdentity("session-b", 2));
-  expect(reconnect.disabled).toBe(false);
+  await waitFor(() => expect(reconnect.disabled).toBe(false));
 });
 
 it("does not navigate away from another page if reconnection finishes after unmount", async () => {
   const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
+  vi.mocked(api.terminalList).mockResolvedValue([snapshot({ live: false })]);
   vi.mocked(api.terminalReconnect).mockReturnValue(pending.promise);
   const navigate = vi.fn();
   const view = renderView(navigate);
-  await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
-  fireEvent.click(screen.getByRole("button", { name: "重新连接" }));
+  await screen.findByText(/Agent 已退出/);
+  fireEvent.click(screen.getByRole("button", { name: "终端 · 已退出" }));
   view.unmount();
   await act(async () => pending.resolve(reconnected));
   expect(navigate).not.toHaveBeenCalled();

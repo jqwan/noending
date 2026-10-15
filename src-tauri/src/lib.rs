@@ -210,6 +210,7 @@ pub fn run() {
             commands::open_path,
             commands::get_workstream_context,
             commands::session_workspace::list_sessions,
+            commands::session_workspace::get_session_terminal_states,
             commands::session_workspace::get_session_detail,
             commands::session_workspace::get_session_tracking,
             commands::session_workspace::reveal_session_source,

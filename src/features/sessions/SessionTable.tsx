@@ -3,13 +3,15 @@ import Icon from "../../components/Icon";
 import { useMemo, useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session, type TerminalSummary } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session, type TerminalSummary, type TerminalResumeState } from "../../types";
 import {
   continueSessionTerminalWithToast,
+  terminalContinueState,
   desktopContinueState,
   resolveSessionContinueMode,
   useAgentStatus,
 } from "./continueDesktop";
+import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
 
@@ -260,6 +262,7 @@ export default function SessionCards({
   const agentStatus = useAgentStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
+  const resumeStates = useTerminalResumeStates(sessions.map(s => s.id));
   const rows = useMemo(
     () => sessions.map((s) => {
       const wsTitle=s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)?.trim() || UNNAMED_WORKSTREAM).join("、") || null;
@@ -307,7 +310,7 @@ export default function SessionCards({
               )}
             </button>
             <div className="session-list-actions">
-              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
+              <SessionResumeButton session={s} resumeState={resumeStates[s.id]} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
               {s.archived_at ? <>
                 <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
                 <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
@@ -390,7 +393,7 @@ export default function SessionCards({
               {timeAgo(s.last_activity_at ?? s.started_at)}
             </span>
             <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-              <SessionResumeButton session={s} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
+              <SessionResumeButton session={s} resumeState={resumeStates[s.id]} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
               {s.archived_at ? <>
                 <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
                 <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
@@ -418,6 +421,7 @@ export function SessionResumeButton({
   onTerminalResume,
   navigate,
   terminals,
+  resumeState,
 }: {
   session: Session;
   agentStatus: Record<string, AgentStatusEntry> | null;
@@ -425,6 +429,7 @@ export function SessionResumeButton({
   onTerminalResume?: (session: Session) => void;
   navigate?: (r: Route) => void;
   terminals?: TerminalSummary[];
+  resumeState?: TerminalResumeState;
 }) {
   const [terminalBusy, setTerminalBusy] = useState(false);
   const mode = resolveSessionContinueMode(session);
@@ -434,10 +439,11 @@ export function SessionResumeButton({
     const terminalCount = boundTerminals.length;
     const runningCount = boundTerminals.filter(t => t.live).length;
     const hasLiveTerminal = runningCount > 0;
+    const availability = terminalContinueState(session.id, boundTerminals, resumeState, !!session.archived_at);
 
     const handleTerminal = async (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (terminalBusy || session.archived_at) return;
+      if (terminalBusy || availability.disabled) return;
       if (onTerminalResume) {
         onTerminalResume(session);
         return;
@@ -451,20 +457,15 @@ export function SessionResumeButton({
       }
     };
 
-    const terminalTitle = session.archived_at
-      ? "已归档的会话不能继续，请先取消归档"
-      : hasLiveTerminal
-        ? `切回终端 · 运行中（${runningCount} 个运行中终端）`
-        : terminalCount > 0
-          ? "唤起终端"
-          : "在终端中继续";
+    const terminalTitle = availability.disabled ? availability.title : hasLiveTerminal
+      ? `切回终端 · 运行中（${runningCount} 个运行中终端）` : availability.title;
 
     return (
       <button
         className={`btn small ghost icon-button${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}`}
         title={terminalTitle}
         aria-label={`在终端中继续${sessionDisplayTitle(session.title)}`}
-        disabled={Boolean(session.archived_at) || terminalBusy || (!onTerminalResume && !navigate)}
+        disabled={availability.disabled || terminalBusy || (!onTerminalResume && !navigate)}
         onClick={handleTerminal}
       >
         <Icon name="terminal" />

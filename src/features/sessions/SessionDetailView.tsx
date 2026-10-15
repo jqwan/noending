@@ -263,7 +263,6 @@ export default function SessionDetailView({
               agent={session.agent}
               sourceKind={session.source_kind}
               archived={archived}
-              canResume={detail.can_resume}
               navigate={navigate}
             />
             <SessionHeaderActions

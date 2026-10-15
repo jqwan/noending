@@ -6,6 +6,7 @@ import type { ProjectDetailData } from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     listPreferences: vi.fn().mockResolvedValue([]),
     savePreference: vi.fn(),
     deletePreference: vi.fn(),

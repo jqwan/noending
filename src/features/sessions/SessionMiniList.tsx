@@ -4,6 +4,7 @@ import AgentIcon from "../../components/AgentIcon";
 import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
 import { continueSessionDesktopWithToast, useAgentStatus } from "./continueDesktop";
 import { AGENT_LABELS, type Session, type TerminalSummary } from "../../types";
+import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
 
@@ -22,6 +23,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
   const agentStatus = useAgentStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
+  const resumeStates = useTerminalResumeStates(sessions.map(s => s.id));
 
   return (
     <>
@@ -39,6 +41,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
             <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex" }}>
               <SessionResumeButton
                 session={s}
+                resumeState={resumeStates[s.id]}
                 agentStatus={agentStatus}
                 onResume={continueSessionDesktopWithToast}
                 navigate={navigate}

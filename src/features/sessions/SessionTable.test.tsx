@@ -5,6 +5,7 @@ import type { Session, TerminalSummary } from "../../types";
 import { viewState } from "../../hooks/useViewState";
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { desktop_app: "ChatGPT", desktop_app_present: true } }),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
   },
@@ -169,5 +170,5 @@ it("displays running terminal state on the continue button when session has a li
 
   const exitedBtn = screen.getByRole("button", { name: "在终端中继续退出终端会话" });
   expect(exitedBtn.className).toContain("terminal-exited");
-  expect(exitedBtn.title).toBe("唤起终端");
+  expect(exitedBtn.title).toBe("重新连接会话");
 });

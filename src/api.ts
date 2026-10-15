@@ -23,6 +23,8 @@ async function invokeWithPreferences<T>(command: string, args: Record<string, un
 }
 
 export const api = {
+  getSessionTerminalStates: (sessionIds: string[]) =>
+    invoke<Record<string, import("./types").TerminalResumeState>>("get_session_terminal_states", { sessionIds }),
   // Project membership derives from paths; archive state is independent.
   listProjects: () => invoke<Project[]>("list_projects"),
   /** 一次拿完整 Board 数据，替代 1 + N 的 getProjectDetail。 */
@@ -206,8 +208,8 @@ export const api = {
   terminalList: () =>
     invoke<import("./types").TerminalSummary[]>("terminal_list"),
   /** 重启此终端当前绑定会话的 Agent，返回新终端；失败保留旧终端以便重试。 */
-  terminalReconnect: (terminalId: string) =>
-    invoke<import("./types").LaunchResult>("terminal_reconnect", { terminalId }),
+  terminalReconnect: (terminalId: string, sessionId: string) =>
+    invoke<import("./types").LaunchResult>("terminal_reconnect", { terminalId, sessionId }),
   /** 侧边栏「运行中」的显式关闭：杀进程并移除记录。 */
   terminalClose: (terminalId: string) =>
     invoke<import("./types").TerminalSummary>("terminal_close", { terminalId }),

@@ -16,6 +16,7 @@ import type {
 // 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     launchEmbeddedResume: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock("../../api", () => ({
 const originalClipboard = navigator.clipboard;
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
@@ -518,6 +520,7 @@ it("keeps the known session title throughout a delayed detail load", async () =>
 });
 
 it("blocks continue when working directory does not exist", async () => {
+  vi.mocked(api.getSessionTerminalStates).mockResolvedValue({ "missing-dir": { available: false, reason: "工作目录不存在，无法继续会话" } });
   const missingDirSession = session("missing-dir", { cwd: "/deleted/path" });
   const d = detail(missingDirSession, {
     can_resume: false,

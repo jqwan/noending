@@ -705,16 +705,20 @@ pub fn terminal_reconnect(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     terminal_id: String,
+    session_id: String,
 ) -> Result<crate::launcher::LaunchResult> {
     let expected = terminal.attach(&terminal_id)?.summary;
-    let session_id = expected
+    let bound_session_id = expected
         .session_id
         .as_deref()
         .ok_or_else(|| other("终端尚未绑定会话，暂时无法重新连接"))?;
+    if bound_session_id != session_id {
+        return Err(other("终端已切换会话，请重试"));
+    }
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let result = with_db(&state, |db| {
-        let mut prepared = launcher.prepare_resume_in(db, session_id, &workspace)?;
+        let mut prepared = launcher.prepare_resume_in(db, &session_id, &workspace)?;
         prepared.desktop_open = None;
         prepared.embedded = true;
         let embedded = crate::launcher::EmbeddedSpawn {

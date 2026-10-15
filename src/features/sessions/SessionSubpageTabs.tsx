@@ -4,12 +4,13 @@ import Icon from "../../components/Icon";
 import type { Route, SessionEntry } from "../../app/routes";
 import type { Agent } from "../../types";
 import { capsOf } from "./sessionFormats";
-import { openSessionTerminal } from "./continueDesktop";
-import { preferredTerminal, rememberSessionPage, terminalDestination } from "./sessionNavigation";
+import { openSessionTerminal, terminalContinueState, terminalForContinue } from "./continueDesktop";
+import { useTerminalResumeStates } from "./useTerminalResumeStates";
+import { rememberSessionPage, terminalDestination } from "./sessionNavigation";
 import { useSessionTerminals } from "./useSessionTerminals";
 
 /** One titlebar navigation group for history, detail and all bound terminals. */
-export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, canResume = true, navigate }: {
+export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, terminalBusy = false, onTerminalBusyChange, navigate }: {
   sessionId: string | null;
   entry?: SessionEntry;
   terminalId?: string;
@@ -18,20 +19,26 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   agent?: Agent;
   sourceKind?: string;
   archived?: boolean;
-  canResume?: boolean;
+  terminalBusy?: boolean;
+  onTerminalBusyChange?: (busy: boolean) => void;
   navigate: (r: Route) => void;
 }) {
   const { terminals, loading } = useSessionTerminals();
+  const resumeStates = useTerminalResumeStates(sessionId ? [sessionId] : []);
   const peers = terminals.filter(t => sessionId ? t.session_id === sessionId : t.terminal_id === terminalId)
     .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.terminal_id.localeCompare(b.terminal_id));
   const selected = terminalId ? peers.find(t => t.terminal_id === terminalId)
-    : sessionId ? preferredTerminal(sessionId, peers) : undefined;
+    : sessionId ? terminalForContinue(sessionId, peers) : undefined;
   const live = terminalId ? terminalLive ?? selected?.live : selected?.live;
   const [open, setOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const launchPending = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const canTerminal = !!terminalId || peers.length > 0 || !!agent && capsOf(agent, sourceKind).terminal;
+  const actionPeers = terminalId ? [{ live: live === true }] : peers;
+  const availability = terminalContinueState(sessionId, actionPeers, resumeStates[sessionId ?? ""], archived);
 
   useEffect(() => {
     setOpen(false);
@@ -49,20 +56,27 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   }, [open]);
 
   const openTerminal = async () => {
-    if (terminalId) return;
-    if (selected) { navigate({ ...terminalDestination(selected), initialTitle: title ?? selected.session_title ?? undefined }); return; }
-    if (!sessionId || !agent || archived || !canResume || launchPending.current || loading) return;
+    if (launchPending.current || terminalBusy || loading) return;
+    if (terminalId && live === true) return;
+    if (!sessionId) {
+      if (selected?.live) navigate(terminalDestination(selected));
+      return;
+    }
+    if (!agent || availability.disabled) return;
     launchPending.current = true;
     setLaunching(true);
-    try { await openSessionTerminal({ id: sessionId, title, agent, archived_at: archived ? "archived" : null }, peers, navigate); }
-    finally { launchPending.current = false; setLaunching(false); }
+    onTerminalBusyChange?.(true);
+    try { await openSessionTerminal({ id: sessionId, title, agent, archived_at: archived ? "archived" : null },
+      route => { if (mounted.current) navigate(route); }, terminalId); }
+    finally {
+      launchPending.current = false;
+      if (mounted.current) { setLaunching(false); onTerminalBusyChange?.(false); }
+    }
   };
   const terminalLabel = terminalId || selected
     ? `终端 · ${live === undefined ? "正在连接" : live ? "运行中" : "已退出"}`
     : "在终端中继续";
-  const terminalTitle = !terminalId && !selected && !canResume
-    ? "工作目录不存在，无法继续会话"
-    : terminalLabel;
+  const terminalTitle = availability.title;
 
   return <div className="session-navigation" ref={root} onKeyDown={e => {
     if (!open || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
@@ -84,14 +98,16 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
       {canTerminal && <>
         <button className={`${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
           aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalTitle}
-          disabled={launching || !terminalId && !selected && (loading || archived || !sessionId || !canResume)}
+          disabled={launching || terminalBusy || loading || availability.disabled}
           onClick={() => void openTerminal()}><Icon name="terminal" /></button>
         {peers.length > 1 && <button className="terminal-dropdown" aria-label="切换终端" title="切换终端"
           aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(value => !value)}><Icon name="chevronDown" /></button>}
       </>}
     </div>
-    <span className="session-action-divider" aria-hidden="true" />
-    <SessionTaskTracking key={sessionId} sessionId={sessionId} navigate={navigate}/>
+    {terminalId && <>
+      <span className="session-action-divider" aria-hidden="true" />
+      <SessionTaskTracking key={sessionId} sessionId={sessionId} navigate={navigate}/>
+    </>}
     {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}

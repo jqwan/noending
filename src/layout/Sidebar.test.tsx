@@ -12,8 +12,9 @@ import type { TerminalSummary, Session, ProjectCardData } from "../types";
 
 vi.mock("../api", () => ({
   api: {
+    getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn(), continueSessionDesktop: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
-    terminalList: vi.fn(),
+    terminalList: vi.fn(), terminalReconnect: vi.fn(),
     listSessions: vi.fn(),
     listWorkstreamCards: vi.fn(),
     listProjectCards: vi.fn(),
@@ -24,11 +25,13 @@ beforeEach(() => {
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
   vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
   vi.mocked(api.terminalForSession).mockReset().mockResolvedValue(null);
+  vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue({ terminal_id: "reconnected" } as never);
   vi.mocked(api.launchEmbeddedResume).mockReset().mockResolvedValue({ terminal_id: "spawned" } as never);
   viewState.clear();
   sessionPages.clear();
   sessionTerminals.clear();
   localStorage.clear();
+  vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
@@ -184,8 +187,8 @@ describe("Sidebar unified sessions", () => {
     ]);
     sessionTerminals.set("s1", "exited");
     const navigate = renderSidebar();
-    fireEvent.click(await screen.findByRole("button", { name: "终端 · 已退出：共享会话" }));
-    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "exited", initialSessionId: "s1", initialTitle: "共享会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "终端 · 运行中：共享会话" }));
+    await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "live", initialSessionId: "s1", initialTitle: "共享会话" })));
     expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "在桌面应用中继续：共享会话" })).toBeNull();
     expect(screen.getByRole("img", { name: "1 个运行中终端，1 个已退出终端" })).toBeTruthy();
@@ -193,6 +196,33 @@ describe("Sidebar unified sessions", () => {
     fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：桌面会话" }));
     await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("desktop"));
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("reconnects an exited terminal from its sidebar action instead of opening a dead input", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "已退出" })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "exited", session_id: "s1", live: false })]);
+    const navigate = renderSidebar();
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "终端 · 已退出：已退出" });
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "reconnected", initialSessionId: "s1" })));
+    expect(api.terminalReconnect).toHaveBeenCalledWith("exited", "s1");
+    expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
+  });
+
+  it("uses the same backend refusal for the terminal button and continuable filter", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "ready", title: "可以继续" }), session({ id: "blocked", title: "CLI 缺失" })]);
+    vi.mocked(api.getSessionTerminalStates).mockResolvedValue({
+      ready: { available: true, reason: null }, blocked: { available: false, reason: "未检测到 CLI" },
+    });
+    renderSidebar();
+    const button = await screen.findByRole<HTMLButtonElement>("button", { name: "在终端中继续：CLI 缺失" });
+    await waitFor(() => expect(button.title).toBe("未检测到 CLI"));
+    expect(button.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "可终端继续" }));
+    expect(screen.queryByText("CLI 缺失")).toBeNull();
+    expect(screen.getByText("可以继续")).toBeTruthy();
   });
 
   it("launches explicitly from the sidebar only when no terminal exists and respects archive/format availability", async () => {
@@ -260,6 +290,10 @@ describe("Sidebar 最近活动", () => {
     });
 
     vi.mocked(api.listSessions).mockResolvedValue([activeRecent, oldSession, archivedSession, desktopOnlySession]);
+    vi.mocked(api.getSessionTerminalStates).mockResolvedValue({
+      "s-recent": { available: true, reason: null }, "s-old": { available: true, reason: null },
+      "s-archived": { available: false, reason: "已归档" }, "s-desktop": { available: false, reason: "仅支持桌面端" },
+    });
     vi.mocked(api.listProjectCards).mockResolvedValue([
       projectCard({ id: "ws-1", name: "测试任务" }),
     ]);
@@ -300,7 +334,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("桌面 Agent 会话")).toBeNull();
   });
 
-  it("exempts sessions with started terminals from sidebar filters", async () => {
+  it.each([true, false])("retains open terminals (live=%s), filters the current history page, and reapplies filters after removal", async live => {
     const oldSessionWithTerminal = session({
       id: "s-term",
       title: "有终端启动的会话",
@@ -318,10 +352,10 @@ describe("Sidebar 最近活动", () => {
 
     vi.mocked(api.listSessions).mockResolvedValue([oldSessionWithTerminal, oldSessionWithoutTerminal]);
     vi.mocked(api.terminalList).mockResolvedValue([
-      terminal({ terminal_id: "t-1", session_id: "s-term", session_title: "有终端启动的会话", live: true }),
+      terminal({ terminal_id: "t-1", session_id: "s-term", session_title: "有终端启动的会话", live }),
     ]);
 
-    renderSidebar();
+    renderSidebar({ view: "session", sessionId: "s-plain" });
 
     expect(await screen.findByText("有终端启动的会话")).toBeTruthy();
     expect(screen.getByText("普通较旧已归档会话")).toBeTruthy();
@@ -339,8 +373,13 @@ describe("Sidebar 最近活动", () => {
     // Plain session is filtered out because it is older than 5 days and archived
     expect(screen.queryByText("普通较旧已归档会话")).toBeNull();
 
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "可终端继续" }));
+
     // Session with a started terminal bypasses filter restrictions and remains visible
     expect(screen.getByText("有终端启动的会话")).toBeTruthy();
+    vi.mocked(api.terminalList).mockResolvedValue([]);
+    act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINALS)));
+    await waitFor(() => expect(screen.queryByText("有终端启动的会话")).toBeNull());
   });
 
   it.each(["project", "agent", "none"])("filters only unpinned sessions with live terminals when grouped by %s", async (groupBy) => {
