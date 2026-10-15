@@ -599,6 +599,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
 
   const [filters, setFilters] = useViewPreference<SidebarFilterKey[]>(`${statePrefix}.recent.filters`, [], isSidebarFilters);
+  const [runningOnly, setRunningOnly] = useViewPreference<boolean>(`${statePrefix}.recent.runningOnly`, false, booleanPreference);
   const [showSessionIcons, setShowSessionIcons] = useViewPreference<boolean>(
     `${statePrefix}.recent.showSessionIcons`,
     true,
@@ -702,12 +703,12 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
         route.view === "session" ? route.sessionId : undefined,
         filters,
         sortBy,
-      ).filter((s) => !isSessionPinned(s)),
+      ).filter((s) => !isSessionPinned(s) && (!runningOnly || s.terminals.some((t) => t.live))),
       groupBy,
       sortBy,
       projectMap,
     ).filter((group) => group.sessions.length > 0);
-  }, [sessions, terminals, route, filters, groupBy, sortBy, projectMap, isSessionPinned]);
+  }, [sessions, terminals, route, filters, runningOnly, groupBy, sortBy, projectMap, isSessionPinned]);
 
   const collapseKey = (groupId: string) => `${groupBy}:${groupId}`;
   const toggleGroup = (groupId: string) => {
@@ -851,6 +852,17 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           <div className="sidebar-header-actions">
             <button
               type="button"
+              className={`sidebar-filter-trigger${runningOnly ? " active" : ""}`}
+              onClick={() => setRunningOnly((prev) => !prev)}
+              aria-label="仅显示运行中会话"
+              aria-pressed={runningOnly}
+              title={runningOnly ? "关闭运行中筛选（不影响置顶区）" : "仅显示有运行中终端的会话（不影响置顶区）"}
+            >
+              <Icon name="terminal" />
+            </button>
+
+            <button
+              type="button"
               className="sidebar-collapse-all-btn"
               onClick={toggleAllGroups}
               disabled={groupBy === "none" || sessionGroups.length === 0}
@@ -953,7 +965,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
 
         {sessionGroups.length === 0 ? (
           <div className="sidebar-recent-empty">
-            {filters.length > 0 ? "无匹配会话" : pinnedSessions.length > 0 ? "暂无未置顶会话" : "暂无会话"}
+            {runningOnly ? "暂无运行中会话" : filters.length > 0 ? "无匹配会话" : pinnedSessions.length > 0 ? "暂无未置顶会话" : "暂无会话"}
           </div>
         ) : groupBy === "none" ? (
           <div className="sidebar-flat-session-items">

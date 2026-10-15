@@ -343,6 +343,75 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("有终端启动的会话")).toBeTruthy();
   });
 
+  it.each(["project", "agent", "none"])("filters only unpinned sessions with live terminals when grouped by %s", async (groupBy) => {
+    viewState.set("sidebar.recent.groupBy.v2", groupBy);
+    localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["pinned"]));
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "live", title: "仍有终端运行" }),
+      session({ id: "exited", title: "当前已退出会话", project_id: "p-exited", agent: "pi" }),
+      session({ id: "idle", title: "未启动终端" }),
+      session({ id: "pinned", title: "置顶但未运行" }),
+    ]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard(), projectCard({ id: "p-exited", name: "已退出项目" }),
+    ]);
+    vi.mocked(api.terminalList).mockResolvedValue([
+      terminal({ terminal_id: "t-old", session_id: "live", live: false }),
+      terminal({ terminal_id: "t-live", session_id: "live" }),
+      terminal({ terminal_id: "t-exited", session_id: "exited", live: false }),
+      terminal({ terminal_id: "t-unbound", session_title: "待绑定终端" }),
+    ]);
+    renderSidebar({ view: "session", sessionId: "exited" });
+    await screen.findByText("待绑定终端");
+    await screen.findByText("置顶但未运行");
+    expect(screen.getByText("当前已退出会话")).toBeTruthy();
+    expect(screen.getByText("未启动终端")).toBeTruthy();
+
+    const toggle = screen.getByRole("button", { name: "仅显示运行中会话" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getAllByText("仍有终端运行")).toHaveLength(1);
+    expect(screen.getByText("待绑定终端")).toBeTruthy();
+    expect(screen.getByText("置顶但未运行")).toBeTruthy();
+    expect(screen.queryByText("当前已退出会话")).toBeNull();
+    expect(screen.queryByText("未启动终端")).toBeNull();
+    expect(screen.queryByTitle("已退出项目 (1)")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText("当前已退出会话")).toBeTruthy();
+    expect(screen.getByText("未启动终端")).toBeTruthy();
+  });
+
+  it("refreshes the running filter on terminal start and exit without hiding pinned sessions", async () => {
+    localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["pinned"]));
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "live", title: "运行状态变化" }),
+      session({ id: "pinned", title: "始终保留的置顶" }),
+    ]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "live" })]);
+    renderSidebar();
+    await screen.findByText("运行状态变化");
+    await screen.findByText("始终保留的置顶");
+
+    fireEvent.click(screen.getByRole("button", { name: "仅显示运行中会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "未归档" }));
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "live", live: false })]);
+    act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
+    await waitFor(() => expect(screen.queryByText("运行状态变化")).toBeNull());
+    expect(screen.getByText("暂无运行中会话")).toBeTruthy();
+    expect(screen.getByText("始终保留的置顶")).toBeTruthy();
+
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "live" })]);
+    act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
+    await screen.findByText("运行状态变化");
+    expect(screen.queryByText("暂无运行中会话")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "仅显示运行中会话" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");
+  });
+
   it("groups by project by default and navigates to session detail on click", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
@@ -1037,14 +1106,17 @@ it("shows assistant and ordinary project sessions together with their terminals"
 });
 
 
-it("restores sidebar grouping, filters, sorting and display preferences after a restart", async () => {
+it("restores sidebar grouping, filters, running-only, sorting and display preferences after a restart", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([
     session({ id: "active", title: "未归档内容" }),
+    session({ id: "idle", title: "未运行内容" }),
     session({ id: "archived", title: "归档内容", archived_at: new Date().toISOString() }),
   ]);
+  vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "active" })]);
   renderSidebar();
   await screen.findByText("归档内容");
   switchGroupBy("按 Agent 归类");
+  fireEvent.click(screen.getByRole("button", { name: "仅显示运行中会话" }));
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
   fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "未归档" }));
   fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
@@ -1055,6 +1127,8 @@ it("restores sidebar grouping, filters, sorting and display preferences after a 
   renderSidebar();
   await screen.findByText("未归档内容");
   expect(screen.queryByText("归档内容")).toBeNull();
+  expect(screen.queryByText("未运行内容")).toBeNull();
+  expect(screen.getByRole("button", { name: "仅显示运行中会话" }).getAttribute("aria-pressed")).toBe("true");
   screen.getByRole("button", { name: "会话归类：按 Agent 归类" });
   expect(screen.queryByRole("menu")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));

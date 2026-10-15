@@ -99,19 +99,29 @@ describe("Projects Board", () => {
     expect(screen.queryByText("My App")).toBeNull();
   });
 
-  it("missing_filter_only_shows_projects_with_missing_paths", async () => {
+  it.each(["卡片视图", "列表视图"])("distinguishes partial and total directory loss and filters missing projects in %s", async (view) => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       card({ id: "p-1", name: "Healthy", missing_path_count: 0 }),
       card({ id: "p-2", name: "Broken", missing_path_count: 1 }),
+      card({ id: "p-3", name: "Unavailable", missing_path_count: 2 }),
+      card({ id: "p-4", name: "Missing Single Directory", kind: "single_directory", path_count: 1, missing_path_count: 1 }),
     ]);
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("Healthy");
+    fireEvent.click(screen.getByRole("button", { name: view }));
+
+    expect(within(screen.getByText("Healthy").closest("article")!).queryByText(/目录缺失/)).toBeNull();
+    expect(within(screen.getByText("Broken").closest("article")!).getByText("部分目录缺失")).toBeTruthy();
+    expect(within(screen.getByText("Unavailable").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
+    expect(within(screen.getByText("Missing Single Directory").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
 
     fireEvent.change(screen.getByDisplayValue("全部"), {
       target: { value: "missing" },
     });
 
     expect(screen.getByText("Broken")).toBeTruthy();
+    expect(screen.getByText("Unavailable")).toBeTruthy();
+    expect(screen.getByText("Missing Single Directory")).toBeTruthy();
     expect(screen.queryByText("Healthy")).toBeNull();
   });
 
