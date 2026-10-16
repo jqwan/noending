@@ -23,9 +23,18 @@ use crate::domain::Agent;
 use crate::error::{other, Result};
 
 const HELPER_FLAG: &str = "--noending-identity-hook";
+// The bridge carries only identity/activity metadata. Native hook input also
+// contains entire assistant replies or tool results and needs a separate bound.
 const MAX_EVENT_BYTES: u64 = 128 * 1024;
+const MAX_HOOK_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PENDING_EVENTS: usize = 128;
 const IO_TIMEOUT: Duration = Duration::from_millis(400);
+// Windows PowerShell 5.1 can inherit a legacy stdin code page. Codex/Claude
+// send UTF-8 JSON: decoding it first as an OEM code page can even consume JSON
+// backslashes following Chinese text, invalidating an otherwise valid Stop.
+#[cfg(windows)]
+const POWERSHELL_HOOK_INPUT: &str = "$neHookInput = [System.IO.StreamReader]::new(\
+     [Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false)).ReadToEnd();";
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLAUDE_RECORD_SETTLE_STEPS: usize = 16;
 const CLAUDE_RECORD_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
@@ -356,7 +365,7 @@ fn hook_command(
         let executable = crate::platform::launcher::ps_quote(&executable);
         let script = format!(
             "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
-             $neHookInput = [Console]::In.ReadToEnd(); \
+             {POWERSHELL_HOOK_INPUT} \
              $neHookInput | & {executable} {HELPER_FLAG} {address} {token} {terminal_id} {agent}; \
              exit $LASTEXITCODE"
         );
@@ -651,9 +660,11 @@ fn run_hook_helper(args: Vec<String>, input: impl Read) -> Result<()> {
         return Err(other("identity listener must be on loopback"));
     }
     let mut bytes = Vec::new();
-    input.take(MAX_EVENT_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_EVENT_BYTES {
-        return Err(other("identity notification exceeds size limit"));
+    input
+        .take(MAX_HOOK_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HOOK_INPUT_BYTES {
+        return Err(other("native hook input exceeds size limit"));
     }
     let value = serde_json::from_slice(&bytes)?;
     let event = if args[3] == "antigravity" {
@@ -827,6 +838,98 @@ mod tests {
         assert!(prepare(&command(), Agent::ZCode, "terminal")
             .unwrap()
             .is_none());
+    }
+
+    // Windows PowerShell 5.1 is an OS prerequisite; missing it fails this test.
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_decodes_utf8_json_under_a_legacy_console_code_page() {
+        use base64::Engine;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let input = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name":"Stop", "session_id":"native",
+            "last_assistant_message":"完成了\"OK\"，下一行\nC:\\工作\\项目"
+        }))
+        .unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode(&input);
+        let script = format!(
+            "[Console]::SetIn([System.IO.StreamReader]::new(\
+             [Console]::OpenStandardInput(), [System.Text.Encoding]::GetEncoding(936))); \
+             {POWERSHELL_HOOK_INPUT} \
+             $actual = $neHookInput; \
+             $expected = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{expected}')); \
+             if ($actual -ceq $expected) {{ [Console]::Write('ok') }} else {{ exit 1 }}"
+        );
+        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+        let mut child = Command::new("powershell.exe")
+            .creation_flags(0x08000000) // Hooks must also work without an attached console.
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Windows PowerShell is required to check hook input encoding");
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"ok");
+    }
+
+    #[test]
+    fn helper_reports_completion_for_large_native_stop_payload_without_forwarding_the_answer() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        let event = read_envelope(&mut socket).unwrap();
+                        socket.write_all(b"ok\n").unwrap();
+                        return Some(event);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("hook listener failed: {error}"),
+                }
+            }
+        });
+        let input = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name":"Stop", "session_id":"native", "turn_id":"turn",
+            "last_assistant_message":"private-answer ".repeat(12000)
+        }))
+        .unwrap();
+        let result = run_hook_helper(
+            vec![
+                address.to_string(),
+                "token".into(),
+                "terminal".into(),
+                "codex".into(),
+            ],
+            input.as_slice(),
+        );
+        let received = worker.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        let received = received.expect("completion notification must reach the terminal");
+        assert_eq!(received.terminal_id, "terminal");
+        assert_eq!(
+            received.event.activity.as_ref().unwrap().state,
+            ActivityState::Completed
+        );
+        assert!(!serde_json::to_string(&received.event)
+            .unwrap()
+            .contains("private-answer"));
     }
 
     /// Node is a prerequisite (also used by the app frontend and installed in CI).

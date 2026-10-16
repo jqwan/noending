@@ -203,7 +203,7 @@ fn command(executable: &Path, source: &str) -> String {
         let script = format!(
             "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
              if ($env:{ENVIRONMENT} -and (Test-Path -LiteralPath {executable})) {{ \
-             $neHookInput = [Console]::In.ReadToEnd(); \
+             {POWERSHELL_HOOK_INPUT} \
              $neHookInput | & {executable} {HELPER_FLAG} {source}; exit $LASTEXITCODE \
              }} else {{ [Console]::WriteLine('{}') }}",
             response(source)
