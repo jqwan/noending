@@ -139,7 +139,7 @@ describe("Sidebar unified sessions", () => {
       terminal({ terminal_id: "t2", session_id: "s1", session_title: "共享会话", live: false }),
     ]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t2" });
-    await screen.findByRole("button", { name: "终端 · 运行中：共享会话" });
+    await screen.findByRole("button", { name: "终端 · 已连接：共享会话" });
     expect(screen.getAllByText("共享会话")).toHaveLength(1);
     expect(screen.getByText("共享会话").closest(".sidebar-recent-item")?.className).toContain("active");
     fireEvent.click(screen.getByText("共享会话"));
@@ -152,7 +152,7 @@ describe("Sidebar unified sessions", () => {
     renderSidebar();
     await screen.findByRole("button", { name: "终端 · 已退出：旧会话" });
     expect(screen.getByText("旧会话")).toBeTruthy();
-    expect(screen.getByRole("img", { name: /^0 个运行中终端，1 个已退出终端/ })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "已退出" })).toBeTruthy();
     expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "all");
   });
 
@@ -190,11 +190,11 @@ describe("Sidebar unified sessions", () => {
     ]);
     sessionTerminals.set("s1", "exited");
     const navigate = renderSidebar();
-    fireEvent.click(await screen.findByRole("button", { name: "终端 · 运行中：共享会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "终端 · 已连接：共享会话" }));
     await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "live", initialSessionId: "s1", initialTitle: "共享会话" })));
     expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "在桌面应用中继续：共享会话" })).toBeNull();
-    expect(screen.getByRole("img", { name: /^1 个运行中终端，1 个已退出终端/ })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "已退出" })).toBeTruthy();
     navigate.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：桌面会话" }));
     await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("desktop"));
@@ -1041,17 +1041,39 @@ it("immediately removes a deleted pinned session and all its terminals even whil
   expect(JSON.parse(localStorage.getItem("noending.sidebar.pinnedSessions")!)).toEqual(["kept"]);
 });
 
-it("updates Agent activity without reloading all sessions, and retains unread from a peer terminal", async () => {
+it("follows the selected terminal without aggregating peers or reloading all sessions", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "并行回答" })]);
   const a = terminal({ terminal_id: "a", session_id: "s1", activity: { state: "working", revision: 1, unread: false } });
   const b = terminal({ terminal_id: "b", session_id: "s1", activity: { state: "completed", revision: 2, unread: true } });
   vi.mocked(api.terminalList).mockResolvedValue([a, b]);
-  renderSidebar();
-  await screen.findByRole("img", { name: /正在处理.*回答完成未查看/ });
+  sessionTerminals.set("s1", "b");
+  const navigate = vi.fn();
+  const view = render(<Sidebar route={{ view: "terminal", terminalId: "a" }} navigate={navigate} />);
+  await screen.findByRole("img", { name: "正在处理" });
+  expect(screen.getAllByRole("img")).toHaveLength(1);
+  expect(screen.queryByRole("img", { name: /未查看/ })).toBeNull();
+  const button = screen.getByRole("button", { name: "终端 · 已连接：并行回答" });
+  expect(button.getAttribute("aria-busy")).toBe("false");
   const sessionQueries = vi.mocked(api.listSessions).mock.calls.length;
   vi.mocked(api.terminalList).mockResolvedValue([{ ...a, activity: { state: "waiting", revision: 3, unread: false } }, b]);
   act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
-  await screen.findByRole("img", { name: /等待输入.*回答完成未查看/ });
+  await screen.findByRole("img", { name: "等待输入" });
+  expect(screen.getByRole("button", { name: "终端 · 已连接：并行回答" })).toBe(button);
+  rememberSessionPage("s1", { view: "terminal", terminalId: "b" });
+  view.rerender(<Sidebar route={{ view: "terminal", terminalId: "b" }} navigate={navigate} />);
+  await screen.findByRole("img", { name: "回答完成未查看" });
+  view.rerender(<Sidebar route={{ view: "new-session" }} navigate={navigate} />);
+  expect(screen.getByRole("img", { name: "回答完成未查看" })).toBeTruthy();
+  // Keep the selected exited instance's status even while a peer is still live.
+  vi.mocked(api.terminalList).mockResolvedValue([a, { ...b, live: false }]);
+  act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
+  await screen.findByRole("img", { name: "已退出 · 有未查看的回答" });
+  expect(screen.getAllByRole("img")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "终端 · 已连接：并行回答" })).toBe(button);
+  // Removing the selected instance falls back to a retained peer.
+  vi.mocked(api.terminalList).mockResolvedValue([a]);
+  act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
+  await screen.findByRole("img", { name: "正在处理" });
   expect(vi.mocked(api.listSessions).mock.calls.length).toBe(sessionQueries);
 });
 

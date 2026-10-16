@@ -1,4 +1,4 @@
-import { terminalActivityLabel, terminalActivityClass } from "./terminalActivity";
+import TerminalActivityIndicator from "./TerminalActivityIndicator";
 import { useTerminalActivitySeen } from "./useTerminalActivitySeen";
 import { useEffect, useRef, useState } from "react";
 import SessionTaskTracking from "./SessionTaskTracking";
@@ -8,8 +8,20 @@ import type { Agent } from "../../types";
 import { capsOf } from "./sessionFormats";
 import { openSessionTerminal, terminalContinueState, terminalForContinue } from "./continueDesktop";
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
-import { rememberSessionPage, terminalDestination } from "./sessionNavigation";
+import { rememberSessionPage, sessionTerminals, terminalDestination } from "./sessionNavigation";
 import { useSessionTerminals } from "./useSessionTerminals";
+
+function terminalCreatedLabel(value: string) {
+  const created = new Date(value);
+  if (!Number.isFinite(created.getTime())) return "创建时间未知";
+  const now = new Date();
+  const sameYear = created.getFullYear() === now.getFullYear();
+  const today = sameYear && created.getMonth() === now.getMonth() && created.getDate() === now.getDate();
+  const date = today ? "今天" : created.toLocaleDateString(undefined, {
+    ...(sameYear ? {} : { year: "numeric" }), month: "numeric", day: "numeric",
+  });
+  return `${date} ${created.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}`;
+}
 
 /** One titlebar navigation group for history, detail and all bound terminals. */
 export default function SessionSubpageTabs({ sessionId, entry, terminalId, terminalLive, title, agent, sourceKind, archived = false, terminalBusy = false, onTerminalBusyChange, navigate }: {
@@ -44,6 +56,12 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   const actionPeers = terminalId ? [{ live: live === true }] : peers;
   const availability = terminalContinueState(sessionId, actionPeers, resumeStates[sessionId ?? ""], archived);
 
+  // Keep the sidebar's remembered instance aligned with the terminal selector,
+  // including when history/details choose a live peer after an instance exits.
+  useEffect(() => {
+    if (sessionId && selected) sessionTerminals.set(sessionId, selected.terminal_id);
+  }, [sessionId, selected?.terminal_id]);
+
   useEffect(() => {
     setOpen(false);
     if (sessionId) rememberSessionPage(sessionId, terminalId
@@ -77,11 +95,12 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
       if (mounted.current) { setLaunching(false); onTerminalBusyChange?.(false); }
     }
   };
-  const terminalLabel = terminalId || selected
-    ? `终端 · ${live === undefined ? "正在连接" : selected ? terminalActivityLabel(selected) : live ? "运行中" : "已退出"}`
+  const connecting = (launching && live !== true) || (!!terminalId && live === undefined);
+  const terminalLabel = connecting ? "终端 · 正在连接" : terminalId || selected
+    ? `终端 · ${live ? "已连接" : "已退出"}`
     : "在终端中继续";
   const terminalTitle = availability.disabled ? availability.title
-    : selected && live ? `切回终端 · ${terminalActivityLabel(selected)}` : availability.title;
+    : connecting ? "正在连接终端" : live ? "切回终端" : availability.title;
 
   return <div className="session-navigation" ref={root} onKeyDown={e => {
     if (!open || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
@@ -101,10 +120,10 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
         aria-label="会话详情" title="会话详情" disabled={!sessionId}
         onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>
       {canTerminal && <>
-        <button className={`${selected ? terminalActivityClass([selected]) : ""} ${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
+        <button className={`${terminalId ? "on " : ""}${connecting ? "terminal-connecting" : live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
           aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalTitle}
-          disabled={launching || terminalBusy || loading || availability.disabled}
-          onClick={() => void openTerminal()}><Icon name="terminal" /></button>
+          aria-busy={connecting} disabled={launching || terminalBusy || connecting || loading || availability.disabled}
+          onClick={() => void openTerminal()}><Icon name={connecting ? "refresh" : "terminal"} /></button>
         {peers.length > 1 && <button className="terminal-dropdown" aria-label="切换终端" title="切换终端"
           aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(value => !value)}><Icon name="chevronDown" /></button>}
       </>}
@@ -114,10 +133,11 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}
-        title={t.cwd ?? undefined} onClick={() => { setOpen(false); navigate({ ...terminalDestination(t), initialTitle: title ?? t.session_title ?? undefined }); }}>
-        <span className={`${t.live ? "terminal-running" : "terminal-exited"} ${terminalActivityClass([t])}`}><Icon name="terminal" /></span>
-        <span className="menu-label">{t.cwd ?? "默认工作目录"}<small>{terminalActivityLabel(t)}{Number.isFinite(Date.parse(t.created_at)) ? ` · ${new Date(t.created_at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}</small></span>
-        {t.terminal_id === (terminalId ?? selected?.terminal_id) && <Icon name="check" />}
+        onClick={() => { setOpen(false); navigate({ ...terminalDestination(t), initialTitle: title ?? t.session_title ?? undefined }); }}>
+        <span className={`terminal-menu-icon ${t.live ? "terminal-running" : "terminal-exited"}`}><Icon name="terminal" /></span>
+        <span className="menu-label">{terminalCreatedLabel(t.created_at)}</span>
+        <TerminalActivityIndicator terminal={t} />
+        <span className="menu-check" aria-hidden="true">{t.terminal_id === (terminalId ?? selected?.terminal_id) && <Icon name="check" />}</span>
       </button>)}
     </div>}
   </div>;

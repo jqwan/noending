@@ -1016,27 +1016,10 @@ button.sidebar-pinned-header,
   cursor: pointer;
   align-self: stretch;
 }
-.sidebar-session-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: none;
-  margin-left: auto;
-  margin-right: 2px;
-  pointer-events: none;
-  transition: opacity 120ms ease;
-}
-.sidebar-session-dot.running { background: var(--success); }
-.sidebar-session-dot.exited { background: var(--text-muted); }
-.sidebar-session-dot.terminal-activity-working { background: transparent; border: 1.5px solid var(--success); width: 8px; height: 8px; }
-.sidebar-session-dot.terminal-activity-waiting { background: var(--warning); }
-.sidebar-session-dot.terminal-activity-failed { background: var(--danger); }
-.sidebar-session-dot.terminal-activity-unread::after { width: 4px; height: 4px; top: -2px; right: -3px; }
-.sidebar-recent-item:hover .sidebar-session-dot,
-.sidebar-recent-item:focus-within .sidebar-session-dot {
-  opacity: 0;
-  pointer-events: none;
-}
+.sidebar-session-activity { display: inline-flex; align-self: center; width: 12px; flex: none; margin-left: auto; transition: opacity 120ms ease; }
+.sidebar-recent-item:hover .sidebar-session-activity,
+.sidebar-recent-item:focus-within .sidebar-session-activity { opacity: 0; pointer-events: none; }
+.sidebar-recent-item.terminal-session-exited .sidebar-session-title { color: var(--text-muted); }
 .sidebar-session-title {
   display: block;
   flex: 1;
@@ -1135,9 +1118,7 @@ button.sidebar-pinned-header,
   pointer-events: auto;
 }
 @media (hover: none) {
-  .sidebar-session-dot {
-    display: none;
-  }
+  .sidebar-session-activity { display: none; }
   .sidebar-session-actions {
     opacity: 1;
     pointer-events: auto;
@@ -1176,6 +1157,10 @@ button.sidebar-pinned-header,
 .sidebar-session-action.terminal-running {
   --session-action-color: var(--success);
   --session-action-hover-color: color-mix(in srgb, var(--success) 75%, var(--text-primary));
+}
+.sidebar-session-action.terminal-exited {
+  --session-action-color: var(--text-muted);
+  --session-action-hover-color: var(--text-primary);
 }
 .sidebar-session-action:hover:not(:disabled),
 .sidebar-session-action:active:not(:disabled) {

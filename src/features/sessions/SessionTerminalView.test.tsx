@@ -254,7 +254,7 @@ it("updates a detached cached terminal's theme without restarting or replaying i
   document.documentElement.dataset.theme = "dark";
   await waitFor(() => expect(terminal.options.theme?.background).toBe("#141413"));
   renderView();
-  await screen.findByLabelText("终端 · 运行中");
+  await screen.findByLabelText("终端 · 已连接");
   expect(FakeTerminal.last).toBe(terminal);
   expect(terminal.written).toHaveLength(1);
   expect(terminal.disposed).toBe(false);
@@ -377,7 +377,8 @@ it("handles reconnect lifecycle: prevents double clicks, recovers on failure, an
 
   // 1. Initial click enters busy state and prevents double clicks
   fireEvent.click(screen.getByRole("button", { name: "终端 · 已退出" }));
-  const busy = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
+  const busy = screen.getByRole("button", { name: "终端 · 正在连接" }) as HTMLButtonElement;
+  expect(busy.getAttribute("aria-busy")).toBe("true");
   expect(busy.disabled).toBe(true);
   fireEvent.click(busy);
   await waitFor(() => expect(api.terminalReconnect).toHaveBeenCalledTimes(1));

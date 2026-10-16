@@ -1,4 +1,4 @@
-import { terminalActivitiesLabel, terminalActivityClass, terminalActivityLabel } from "../features/sessions/terminalActivity";
+import TerminalActivityIndicator from "../features/sessions/TerminalActivityIndicator";
 import { EVT_REMOVED, removedTargets, type RemovedTargets } from "../app/removedTargets";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
@@ -12,7 +12,7 @@ import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions
 import { openSessionTerminal, terminalContinueState, terminalForContinue, useAgentStatus } from "../features/sessions/continueDesktop";
 import { useViewPreference, preferenceValues, booleanPreference, booleanRecordPreference } from "../hooks/useViewState";
 import { useTerminalResumeStates } from "../features/sessions/useTerminalResumeStates";
-import { sessionDestination, terminalDestination } from "../features/sessions/sessionNavigation";
+import { preferredTerminal, sessionDestination, terminalDestination } from "../features/sessions/sessionNavigation";
 
 export type SidebarFilterKey = "recent5Days" | "unarchived" | "canContinue";
 
@@ -364,14 +364,19 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
   const active = route.view === "session" && route.sessionId === s.sessionId || route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
   const title = sessionDisplayTitle(s.title);
   const selected = s.sessionId ? terminalForContinue(s.sessionId, s.terminals) : s.terminals[0];
+  const statusPeers = [...s.terminals].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.terminal_id.localeCompare(b.terminal_id));
+  const statusTerminal = (route.view === "terminal" ? s.terminals.find(t => t.terminal_id === route.terminalId) : undefined)
+    ?? (s.sessionId ? route.view === "session" && route.sessionId === s.sessionId
+      ? terminalForContinue(s.sessionId, statusPeers) : preferredTerminal(s.sessionId, statusPeers) : selected);
   const caps = capsOf(s.agent, s.source_kind);
   const availability = terminalContinueState(s.sessionId, s.terminals, resumeState, !!s.archived_at);
-  const terminalLabel = selected ? `终端 · ${terminalActivityLabel(selected)}` : "在终端中继续";
+  const connecting = busy && !selected?.live;
+  const terminalLabel = connecting ? "终端 · 正在连接" : selected ? `终端 · ${selected.live ? "已连接" : "已退出"}` : "在终端中继续";
   const terminalCount = s.terminals.length;
   const runningCount = s.terminals.filter(t => t.live).length;
   const hasLiveTerminal = runningCount > 0;
   const isTerminalActive = route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
-  const counts = `${runningCount} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端；${terminalActivitiesLabel(s.terminals)}`;
+  const counts = `${runningCount} 个已连接终端，${s.terminals.filter(t => !t.live).length} 个已退出终端`;
   const openTerminal = async () => {
     if (pending.current) return;
     if (!s.sessionId) { if (selected) navigate(terminalDestination(selected)); return; }
@@ -411,7 +416,7 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
   const isScrolling = hovered && overflow > 0;
   const duration = Math.max(2.5, overflow / 30);
 
-  return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}
+  return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}${terminalCount > 0 && !hasLiveTerminal ? " terminal-session-exited" : ""}`}
     onMouseEnter={onMouseEnter}
     onMouseLeave={onMouseLeave}
     onClick={(e) => {
@@ -434,9 +439,10 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
       >
         <span ref={textRef} className="sidebar-session-title-text">{title}</span>
       </span>
-      {s.terminals.length > 0 && <span role="img" aria-label={counts} title={counts}
-        className={`sidebar-session-dot ${hasLiveTerminal ? "running" : "exited"} ${terminalActivityClass(s.terminals)}`} />}
     </button>
+    {statusTerminal && <span className="sidebar-session-activity">
+      <TerminalActivityIndicator terminal={statusTerminal} />
+    </span>}
     <span className="sidebar-session-actions">
       {onTogglePin && (
         <button
@@ -453,15 +459,15 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
         </button>
       )}
       {(selected || caps.terminal) ? <button
-        className={`sidebar-session-action terminal-action ${terminalActivityClass(s.terminals)}${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}${isTerminalActive ? " active" : ""}`}
+        className={`sidebar-session-action terminal-action${connecting ? " terminal-connecting" : hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}${isTerminalActive ? " active" : ""}`}
         aria-label={`${terminalLabel}：${title}`}
-        title={availability.disabled ? availability.title : selected?.live ? `${terminalLabel} · ${counts}` : availability.title}
-        disabled={busy || loading || availability.disabled}
+        title={connecting ? "正在连接终端" : availability.disabled ? availability.title : selected?.live ? `${terminalLabel} · ${counts}` : availability.title}
+        aria-busy={connecting} disabled={busy || loading || availability.disabled}
         onClick={(e) => {
           e.stopPropagation();
           void openTerminal();
         }}>
-        <Icon name="terminal" />
+        <Icon name={connecting ? "refresh" : "terminal"} />
       </button> : s.sessionId && <DesktopContinueButton sessionId={s.sessionId} agent={s.agent} sourceKind={s.source_kind}
         archived={!!s.archived_at} agentStatus={agentStatus} className="sidebar-session-action" label={`在桌面应用中继续：${title}`} />}
     </span>

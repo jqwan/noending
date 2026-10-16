@@ -37,22 +37,26 @@ it("switches between history and detail without launching an Agent", async () =>
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
 });
 it("switches among this session's live and exited terminals and remembers the selected instance", async () => {
-  vi.mocked(api.terminalList).mockResolvedValue([terminal("t1"), terminal("t2", false), terminal("other", true, "s2")]);
+  vi.mocked(api.terminalList).mockResolvedValue([{ ...terminal("t1"), activity: { state: "working", revision: 1, unread: false } }, terminal("t2", false), terminal("other", true, "s2")]);
   const navigate = vi.fn();
   const view = render(<SessionSubpageTabs sessionId="s1" terminalId="t1" agent="codex" navigate={navigate} />);
   expect(screen.getByRole("button", { name: "跟踪任务" })).toBeTruthy();
   fireEvent.click(await screen.findByRole("button", { name: "切换终端" }));
   expect(screen.getAllByRole("menuitemradio")).toHaveLength(2);
+  expect(screen.getByRole("img", { name: "正在处理" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: "已退出" })).toBeTruthy();
   fireEvent.keyDown(screen.getByRole("button", { name: "切换终端" }), { key: "End" });
   expect(document.activeElement).toBe(screen.getAllByRole("menuitemradio")[1]);
   fireEvent.keyDown(document.activeElement!, { key: "Escape" });
   expect(screen.queryByRole("menu")).toBeNull();
+  expect(screen.queryByRole("img")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "切换终端" }));
   fireEvent.click(screen.getByRole("menuitemradio", { name: /已退出/ }));
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t2" }));
   view.rerender(<SessionSubpageTabs sessionId="s1" terminalId="t2" agent="codex" terminalLive={false} navigate={navigate} />);
   view.rerender(<SessionSubpageTabs sessionId="s1" agent="codex" entry="conversation" navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: "终端 · 运行中" }));
+  expect(sessionTerminals.get("s1")).toBe("t1");
+  fireEvent.click(screen.getByRole("button", { name: "终端 · 已连接" }));
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
   vi.mocked(api.terminalList).mockResolvedValue([terminal("t2", false)]);
@@ -63,7 +67,7 @@ it("switches among this session's live and exited terminals and remembers the se
   vi.mocked(api.terminalList).mockResolvedValue([terminal("t1"), terminal("t2", true, "s2")]);
   act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
   await waitFor(() => expect(screen.queryByRole("button", { name: "切换终端" })).toBeNull());
-  fireEvent.click(screen.getByRole("button", { name: "终端 · 运行中" }));
+  fireEvent.click(screen.getByRole("button", { name: "终端 · 已连接" }));
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
 });
 it("starts resume only on explicit terminal continue and blocks archived launches", async () => {
@@ -86,7 +90,8 @@ it("only marks the displayed, attached terminal read in a focused window", async
   vi.mocked(api.terminalList).mockResolvedValue(rows);
   const props = { sessionId: "s1", agent: "codex" as const, navigate: vi.fn() };
   const view = render(<SessionSubpageTabs {...props} terminalId="t1" terminalLive />);
-  await screen.findByRole("button", { name: /终端.*未查看/ });
+  await screen.findByRole("button", { name: "终端 · 已连接" });
+  expect(screen.queryByRole("img", { name: /回答完成未查看/ })).toBeNull();
   expect(api.terminalActivitySeen).not.toHaveBeenCalled();
   view.rerender(<SessionSubpageTabs {...props} entry="conversation" />);
   focus.mockReturnValue(true);

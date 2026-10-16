@@ -2999,23 +2999,44 @@ button.btn.ghost.terminal-exited,
 .page-head .session-navigation .terminal-dropdown { width: 18px; }
 .terminal-dropdown .ui-icon { width: 12px; height: 12px; }
 .terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }
-.terminal-menu .menu-label { min-width: 0; }
-.terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* Lifecycle markers are independent of the green/grey PTY liveness icon. */
-.terminal-activity-unread { position: relative; }
-.terminal-activity-unread::after {
-  content: ""; position: absolute; top: 1px; right: 1px;
-  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
-  box-shadow: 0 0 0 1px var(--bg-app); pointer-events: none;
+.terminal-menu .continue-menu-item {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px 14px;
+  min-height: 32px; line-height: 20px;
 }
-.terminal-menu .terminal-activity-unread::after { top: -2px; right: -3px; }
-.terminal-activity-working > .ui-icon { animation: terminal-working-pulse 1.2s ease-in-out infinite; }
-.terminal-activity-waiting > .ui-icon { color: var(--warning); }
-.terminal-activity-failed > .ui-icon { color: var(--danger); }
-@keyframes terminal-working-pulse { 50% { opacity: .35; } }
+.terminal-menu-icon { display: flex; align-items: center; justify-content: center; line-height: 0; }
+.terminal-menu-icon > .ui-icon { display: block; width: 16px; height: 16px; }
+.terminal-menu .menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.terminal-menu .menu-check { width: 14px; height: 18px; margin-left: 0; justify-content: center; }
+
+/* Agent activity never changes the terminal connection/action icon. */
+.terminal-activity-indicator {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 14px; flex: none; vertical-align: middle;
+}
+.terminal-activity-marker {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  box-sizing: border-box; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-muted);
+}
+.terminal-activity-marker.is-working {
+  width: 10px; height: 10px; background: none;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent); animation: terminal-status-spin 1s linear infinite;
+}
+.terminal-activity-marker.is-waiting,
+.terminal-activity-marker.is-failed {
+  width: 11px; height: 11px; background: none; border: 1px solid currentColor;
+  font-size: 9px; line-height: 1; font-weight: 700; font-family: sans-serif;
+}
+.terminal-activity-marker.is-waiting { color: var(--warning); }
+.terminal-activity-marker.is-failed { color: var(--danger); }
+.terminal-activity-marker.is-exited { width: 7px; height: 2px; border-radius: 1px; }
+.terminal-activity-marker.is-unread { background: var(--success); }
+.terminal-connecting > .ui-icon { animation: terminal-status-spin 1s linear infinite; }
+@keyframes terminal-status-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .terminal-activity-working > .ui-icon { animation: none; }
+  .terminal-activity-marker.is-working,
+  .terminal-connecting > .ui-icon { animation: none; }
 }
 
 /* ---------- Summary prompt template editor & preview modal ---------- */

@@ -91,7 +91,7 @@ it("prefers terminal capability regardless of old preferences, and uses desktop 
   // Terminal-only formats follow the same rule.
   localStorage.setItem("noending.continue_mode", "desktop");
   const claudeSession = { ...session, id: "claude-1", agent: "claude_code" } as unknown as Session;
-  rerender(
+  await act(async () => rerender(
     <SessionCards
       sessions={[claudeSession]}
       workstreamTitleById={new Map()}
@@ -101,11 +101,11 @@ it("prefers terminal capability regardless of old preferences, and uses desktop 
       onArchive={() => {}}
       onTerminalResume={onTerminalResume}
     />
-  );
+  ));
   expect(screen.getByLabelText("在终端中继续修复布局")).toBeTruthy();
   const desktopSession = { ...session, id: "desktop", agent: "workbuddy" } as unknown as Session;
-  rerender(<SessionCards sessions={[desktopSession]} workstreamTitleById={new Map()} projectNameById={new Map()}
-    onOpen={() => {}} onResume={onResume} onArchive={() => {}} onTerminalResume={onTerminalResume} />);
+  await act(async () => rerender(<SessionCards sessions={[desktopSession]} workstreamTitleById={new Map()} projectNameById={new Map()}
+    onOpen={() => {}} onResume={onResume} onArchive={() => {}} onTerminalResume={onTerminalResume} />));
   fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续修复布局" }));
   expect(onResume).toHaveBeenCalledWith("desktop");
   expect(screen.queryByRole("button", { name: "在终端中继续修复布局" })).toBeNull();
@@ -136,28 +136,37 @@ it("disables archived session continuation in both card and list terminal modes"
   localStorage.removeItem("noending.continue_mode");
 });
 
-it("displays running terminal state on the continue button when session has a live terminal", async () => {
+it("separates Agent activity from the terminal continue action and keeps exited terminals reconnectable", async () => {
   const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
   const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
   const terminals: TerminalSummary[] = [
-    { terminal_id: "t1", session_id: "s-live", live: true, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_ids: [], identity_revision: 0 },
+    { terminal_id: "t1", session_id: "s-live", live: true, activity: { state: "working", revision: 1, unread: false }, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_ids: [], identity_revision: 0 },
     { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", initial_workstream_ids: [], identity_revision: 0 },
   ];
+  const onOpen = vi.fn();
+  const onTerminalResume = vi.fn();
   await renderCards(
     <SessionCards
       sessions={[sLive, sExited]}
       terminals={terminals}
       workstreamTitleById={new Map()}
       projectNameById={new Map()}
-      onOpen={vi.fn()}
+      onOpen={onOpen}
       onResume={vi.fn()}
       onArchive={vi.fn()}
-      onTerminalResume={vi.fn()}
+      onTerminalResume={onTerminalResume}
     />
   );
   const liveBtn = screen.getByRole("button", { name: "在终端中继续活跃终端会话" });
-  expect(liveBtn.title).toContain("切回终端 · 运行中");
+  expect(liveBtn.title).toContain("切回终端");
+  expect(screen.queryByRole("img", { name: "正在处理" })).toBeNull();
+  expect(liveBtn.getAttribute("aria-busy")).toBe("false");
+  fireEvent.click(liveBtn);
+  expect(onTerminalResume).toHaveBeenCalledWith(sLive);
+  expect(onOpen).not.toHaveBeenCalled();
 
   const exitedBtn = screen.getByRole("button", { name: "在终端中继续退出终端会话" });
   expect(exitedBtn.title).toBe("重新连接会话");
+  fireEvent.click(exitedBtn);
+  expect(onTerminalResume).toHaveBeenLastCalledWith(sExited);
 });

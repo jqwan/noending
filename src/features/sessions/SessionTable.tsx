@@ -1,4 +1,3 @@
-import { terminalActivitiesLabel, terminalActivityClass } from "./terminalActivity";
 import { useViewState } from "../../hooks/useViewState";
 import Icon from "../../components/Icon";
 import { useMemo, useState } from "react";
@@ -441,6 +440,7 @@ export function SessionResumeButton({
     const terminalCount = boundTerminals.length;
     const runningCount = boundTerminals.filter(t => t.live).length;
     const hasLiveTerminal = runningCount > 0;
+    const connecting = terminalBusy && !hasLiveTerminal;
     const availability = terminalContinueState(session.id, boundTerminals, resumeState, !!session.archived_at);
 
     const handleTerminal = async (e: React.MouseEvent) => {
@@ -459,18 +459,18 @@ export function SessionResumeButton({
       }
     };
 
-    const terminalTitle = availability.disabled ? availability.title : hasLiveTerminal
-      ? `切回终端 · ${terminalActivitiesLabel(boundTerminals)}（${runningCount} 个运行中终端）` : availability.title;
+    const terminalTitle = connecting ? "正在连接终端" : availability.disabled ? availability.title : hasLiveTerminal
+      ? `切回终端（${runningCount} 个已连接终端）` : availability.title;
 
     return (
       <button
-        className={`btn small ghost icon-button ${terminalActivityClass(boundTerminals)}${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}`}
+        className={`btn small ghost icon-button${connecting ? " terminal-connecting" : hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}`}
         title={terminalTitle}
         aria-label={`在终端中继续${sessionDisplayTitle(session.title)}`}
-        disabled={availability.disabled || terminalBusy || (!onTerminalResume && !navigate)}
+        aria-busy={connecting} disabled={availability.disabled || terminalBusy || (!onTerminalResume && !navigate)}
         onClick={handleTerminal}
       >
-        <Icon name="terminal" />
+        <Icon name={connecting ? "refresh" : "terminal"} />
       </button>
     );
   }
