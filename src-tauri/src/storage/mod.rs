@@ -19,6 +19,7 @@ pub mod project_context_repo;
 pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
+mod session_queries;
 pub mod workspace;
 pub mod workstream_projects;
 
@@ -160,7 +161,12 @@ fn upsert_logical_session_conn(
                started_at = COALESCE(started_at, ?7),
                last_activity_at = ?8,
                source_kind = ?9, source_path = ?10, metadata = ?11
-             WHERE id = ?1",
+             WHERE id = ?1 AND
+               (title, cwd, workspace_path_id, forked_from_session_id, started_at,
+                last_activity_at, source_kind, source_path, metadata)
+               IS NOT
+               (COALESCE(?2, title, ?3), COALESCE(?4, cwd), COALESCE(?5, workspace_path_id),
+                COALESCE(forked_from_session_id, ?6), COALESCE(started_at, ?7), ?8, ?9, ?10, ?11)",
             params![
                 id,
                 native_title,
@@ -295,11 +301,8 @@ impl Db {
     }
 
     pub fn upsert_project(&self, p: &Project) -> Result<()> {
-        {
-            let conn = self.write();
-            upsert_project_conn(&conn, p)?;
-        }
-        self.index_project(p)
+        let conn = self.write();
+        upsert_project_conn(&conn, p)
     }
 
     // Workstreams
@@ -377,11 +380,8 @@ impl Db {
     }
 
     pub fn upsert_workstream(&self, w: &Workstream) -> Result<()> {
-        {
-            let conn = self.write();
-            upsert_workstream_conn(&conn, w)?;
-        }
-        self.index_workstream(w)
+        let conn = self.write();
+        upsert_workstream_conn(&conn, w)
     }
 
     /// Delete a Workstream and everything it owns — in full FK order, which a
@@ -394,7 +394,6 @@ impl Db {
     /// requires `visibility = archived` and preserves Sessions.
     pub fn delete_workstream(&self, id: &str) -> Result<()> {
         self.tx(|tx| workstream_projects::purge_workstream_data_conn(tx, id))?;
-        self.unindex("workstream", id);
         Ok(())
     }
 
@@ -504,55 +503,15 @@ impl Db {
     /// Project membership and the returned `project_id` both follow WorkspacePath.
     pub fn list_sessions(&self, filter: SessionFilter) -> Result<Vec<Session>> {
         let conn = self.read();
-        // Dynamic SQL: placeholders are appended together with the bind
-        // values, so the numbering can never drift out of sync.
-        let mut sql = format!("{SESSION_SELECT} WHERE 1=1");
-        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if let Some(p) = &filter.project_id {
-            values.push(Box::new(p.clone()));
-            sql.push_str(&format!(
-                " AND EXISTS (SELECT 1 FROM workspace_paths wp \
-                                WHERE wp.id = sessions.workspace_path_id \
-                                  AND wp.project_id = ?{})",
-                values.len()
-            ));
-        }
-        if let Some(a) = &filter.agent {
-            values.push(Box::new(a.as_str().to_string()));
-            sql.push_str(&format!(" AND agent = ?{}", values.len()));
-        }
-        match filter.scope {
-            SessionListScope::Unarchived => sql.push_str(" AND archived_at IS NULL"),
-            SessionListScope::Archived => sql.push_str(" AND archived_at IS NOT NULL"),
-            SessionListScope::All => {}
-        }
-        sql.push_str(
-            " ORDER BY COALESCE(last_conversation_at, last_activity_at, started_at) DESC LIMIT 500",
-        );
-        let mut st = conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        let rows = st
-            .query_map(refs.as_slice(), row_session)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        session_queries::query_sessions(&conn, SESSION_SELECT, &filter, None, row_session)
     }
 
-    // Session source cursor
-
-    /// Rewind the session's source cursor so the next ingest re-scans from
-    /// the start. MESSAGES ARE NOT TOUCHED: their ids and every provenance ref
-    /// stay valid, because unchanged content dedups by identity on the re-scan.
-    /// The Context frontier is preserved.
-    pub fn rewind_source_cursor(&self, session_id: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE sessions
-             SET source_byte_offset = 0, source_last_seen_size = 0,
-                 source_prefix_hash = '', source_tail_hash = ''
-             WHERE id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
+    /// Ingestion needs complete source entities, independently of UI queries.
+    pub fn sessions_for_ingestion(&self, agent: Agent) -> Result<Vec<Session>> {
+        let conn = self.read();
+        let mut st = conn.prepare(&format!("{SESSION_SELECT} WHERE agent = ?1 ORDER BY id"))?;
+        let rows = st.query_map([agent.as_str()], row_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     // Conversation Messages
@@ -586,44 +545,91 @@ impl Db {
         source: &SourceCursorUpdate,
         complete_snapshot: bool,
     ) -> Result<Vec<SessionMessage>> {
-        self.tx(|tx| {
-            // A session purged mid-parse takes NOTHING.
-            if !session_lifecycle::session_exists_conn(tx, session_id)? {
-                return Ok(Vec::new());
-            }
+        self.commit_ingest_guarded(session_id, messages, source, complete_snapshot, None)
+    }
 
-            let old_cursor: Option<(String, i64, i64, i64, Option<f64>)> = tx
+    pub fn commit_ingest_guarded(
+        &self,
+        session_id: &str,
+        messages: &[ParsedSessionMessage],
+        source: &SourceCursorUpdate,
+        complete_snapshot: bool,
+        expected: Option<&SourceCursor>,
+    ) -> Result<Vec<SessionMessage>> {
+        // A partial full scan cannot establish what was removed. Do not even
+        // insert its prefix: failed reads leave all persisted facts untouched.
+        if source.start_byte_offset == 0 && !complete_snapshot {
+            return Ok(Vec::new());
+        }
+        // Hash potentially large prose before taking the writer lock. A full
+        // read starts at genesis; an incremental read is checked against the
+        // exact source cursor that supplied its chain tail when the tx starts.
+        let hash_base = if source.start_byte_offset == 0 {
+            Some(IDENTITY_GENESIS)
+        } else {
+            expected
+                .map(|cursor| cursor.identity_tail_hash.as_str())
+                .filter(|tail| !tail.is_empty())
+        };
+        let hashes = hash_base.map(|base| {
+            let mut previous = base.to_string();
+            messages
+                .iter()
+                .map(|message| {
+                    let hash = message_identity_hash(
+                        &previous,
+                        message.source_message_id.as_deref(),
+                        message.role.as_str(),
+                        message.ts.as_deref(),
+                        &message.content,
+                    );
+                    previous = hash.clone();
+                    hash
+                })
+                .collect::<Vec<_>>()
+        });
+        self.tx(|tx| {
+            let previous: Option<(SourceCursor, i64)> = tx
                 .query_row(
                     "SELECT source_file_identity, source_generation, source_byte_offset,
-                            source_last_seen_size, source_mtime
-                     FROM sessions WHERE id = ?1",
-                    params![session_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                        source_last_seen_size, source_mtime, source_prefix_hash, source_tail_hash,
+                        latest_message_seq FROM sessions WHERE id=?1",
+                    [session_id],
+                    |r| {
+                        Ok((
+                            SourceCursor {
+                                source_file_identity: r.get(0)?,
+                                generation: r.get(1)?,
+                                byte_offset: r.get(2)?,
+                                last_seen_size: r.get(3)?,
+                                mtime: r.get(4)?,
+                                prefix_hash: r.get(5)?,
+                                identity_tail_hash: r.get(6)?,
+                            },
+                            r.get(7)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let source_changed = old_cursor
-                .as_ref()
-                .map(|(identity, generation, offset, size, mtime)| {
-                    identity != &source.file_identity
-                        || *generation != source.generation
-                        || *offset != source.byte_offset as i64
-                        || *size != source.last_seen_size as i64
-                        || match (mtime, source.mtime) {
-                            (Some(a), Some(b)) => (a - b).abs() > 1e-6,
-                            (None, None) => false,
-                            _ => true,
-                        }
-                })
-                .unwrap_or(true);
-
-            let stored_tail: Option<String> = tx
-                .query_row(
-                    "SELECT source_tail_hash FROM sessions WHERE id = ?1",
-                    params![session_id],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?
-                .filter(|h| !h.is_empty());
+            // A session purged mid-parse takes nothing.
+            let Some((old_cursor, previous_end)) = previous else {
+                return Ok(Vec::new());
+            };
+            if expected.is_some_and(|expected| *expected != old_cursor) {
+                return Err(other("来源游标已被其他同步更新，请重试"));
+            }
+            let source_changed = old_cursor.source_file_identity != source.file_identity
+                || old_cursor.generation != source.generation
+                || old_cursor.byte_offset != source.byte_offset
+                || old_cursor.last_seen_size != source.last_seen_size
+                || old_cursor.prefix_hash != source.prefix_hash
+                || match (old_cursor.mtime, source.mtime) {
+                    (Some(a), Some(b)) => (a - b).abs() > 1e-6,
+                    (None, None) => false,
+                    _ => true,
+                };
+            let stored_tail = (!old_cursor.identity_tail_hash.is_empty())
+                .then(|| old_cursor.identity_tail_hash.clone());
             let mut prev_hash: String = if source.start_byte_offset == 0 {
                 IDENTITY_GENESIS.to_string()
             } else {
@@ -634,8 +640,9 @@ impl Db {
                     // the session has no message at all.
                     None => tx
                         .query_row(
-                            "SELECT source_identity_hash FROM session_messages
-                             WHERE session_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                            "SELECT m.source_identity_hash FROM session_message_projection p
+                             JOIN session_messages m ON m.id = p.session_message_id
+                             WHERE p.session_id = ?1 ORDER BY p.ordinal DESC LIMIT 1",
                             params![session_id],
                             |r| r.get::<_, String>(0),
                         )
@@ -651,8 +658,20 @@ impl Db {
             )?;
             next_seq += 1;
 
+            let mut known = if source.start_byte_offset == 0 {
+                let mut st = tx.prepare(
+                    "SELECT source_identity_hash, id FROM session_messages WHERE session_id = ?1",
+                )?;
+                let rows = st.query_map([session_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                rows.collect::<std::result::Result<HashMap<_, _>, _>>()?
+            } else {
+                HashMap::new()
+            };
             let mut stored = Vec::with_capacity(messages.len());
             let mut current_ids: Vec<String> = Vec::with_capacity(messages.len());
+            let mut seen = std::collections::HashSet::new();
             {
                 let mut ins = tx.prepare(
                     "INSERT INTO session_messages
@@ -661,18 +680,27 @@ impl Db {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
                 )?;
-                for m in messages {
+                for (index, m) in messages.iter().enumerate() {
                     // On conflict the computed hash IS the stored one (the
                     // unique index matches on it), so the chain stays
                     // continuous whether or not the row is new.
-                    let hash = message_identity_hash(
-                        &prev_hash,
-                        m.source_message_id.as_deref(),
-                        m.role.as_str(),
-                        m.ts.as_deref(),
-                        &m.content,
-                    );
+                    let hash = match &hashes {
+                        Some(hashes) => hashes[index].clone(),
+                        None => message_identity_hash(
+                            &prev_hash,
+                            m.source_message_id.as_deref(),
+                            m.role.as_str(),
+                            m.ts.as_deref(),
+                            &m.content,
+                        ),
+                    };
                     prev_hash = hash.clone();
+                    if let Some(id) = known.get(&hash) {
+                        if seen.insert(id.clone()) {
+                            current_ids.push(id.clone());
+                        }
+                        continue;
+                    }
                     let id = new_id();
                     let n = ins.execute(params![
                         id,
@@ -687,6 +715,8 @@ impl Db {
                         m.content,
                     ])?;
                     if n > 0 {
+                        known.insert(hash.clone(), id.clone());
+                        seen.insert(id.clone());
                         current_ids.push(id.clone());
                         stored.push(SessionMessage {
                             id: id.clone(),
@@ -717,34 +747,41 @@ impl Db {
                             )
                             .optional()?
                         {
-                            current_ids.push(existing);
+                            if seen.insert(existing.clone()) {
+                                current_ids.push(existing);
+                            }
                         }
                     }
                 }
             }
 
-            // The current-message projection: this is what makes a rewritten
-            // source's retired messages stop being the conversation, while their
-            // `session_messages` rows survive for provenance.
-            let projection = apply_projection_conn(
-                tx,
-                session_id,
-                &current_ids,
-                source.start_byte_offset == 0,
-                complete_snapshot,
-            )?;
-            if projection == ProjectionOutcome::Incomplete {
-                // An unfinished frame means we cannot prove the whole
-                // conversation: keep the projection, the fact generation AND
-                // the cursor — the retry re-reads the same bytes.
-                eprintln!("[ingest] 完整重扫不完整，保留原投影与游标，等待重试");
+            // The projection is the authoritative current conversation.
+            let projection =
+                apply_projection_conn(tx, session_id, &current_ids, source.start_byte_offset == 0)?;
+
+            if source.start_byte_offset == 0 && complete_snapshot {
+                sync_projected_message_search_conn(tx, session_id, &seen)?;
+                // Also collects leftovers from earlier builds on an unchanged
+                // full scan. Nothing outside this session is affected.
+                tx.execute(
+                    "DELETE FROM session_messages WHERE session_id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM session_message_projection p
+                         WHERE p.session_id = ?1 AND p.session_message_id = session_messages.id)",
+                    [session_id],
+                )?;
+            } else if projection == ProjectionOutcome::Appended {
+                append_projected_message_search_conn(tx, session_id, previous_end)?;
+            }
+            if !source_changed && projection == ProjectionOutcome::Unchanged && stored.is_empty() {
                 return Ok(stored);
             }
 
-            sync_projected_message_search_conn(tx, session_id)?;
-
             let new_tail = if messages.is_empty() {
-                stored_tail.unwrap_or_default()
+                if source.start_byte_offset == 0 {
+                    IDENTITY_GENESIS.to_string()
+                } else {
+                    stored_tail.unwrap_or_else(|| IDENTITY_GENESIS.to_string())
+                }
             } else {
                 prev_hash
             };
@@ -931,10 +968,10 @@ impl Db {
         after_ordinal: i64,
         before_ordinal: i64,
         limit: i64,
-    ) -> Result<(Vec<SessionMessage>, bool)> {
+    ) -> Result<(Vec<WindowedMessage>, bool)> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT m.*
+            "SELECT p.ordinal, m.*
              FROM session_message_projection p
              JOIN session_messages m ON m.id = p.session_message_id
              WHERE p.session_id = ?1 AND p.ordinal > ?2 AND p.ordinal < ?3
@@ -943,7 +980,13 @@ impl Db {
         let mut rows = st
             .query_map(
                 params![session_id, after_ordinal, before_ordinal, limit + 1],
-                row_message,
+                |r| {
+                    Ok(WindowedMessage {
+                        ordinal: r.get("ordinal")?,
+                        message: row_message(r)?,
+                        turn: None,
+                    })
+                },
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let truncated = rows.len() as i64 > limit;
@@ -1019,27 +1062,6 @@ impl Db {
                 "user" => stats.user_messages = count,
                 "assistant" => stats.assistant_messages = count,
                 _ => {}
-            }
-        }
-        if stats.user_messages == 0 && stats.assistant_messages == 0 {
-            let mut st = conn.prepare(
-                "SELECT role, COUNT(*)
-                 FROM session_messages
-                 WHERE session_id = ?1
-                 GROUP BY role",
-            )?;
-            let rows = st.query_map(params![session_id], |r| {
-                let role: String = r.get(0)?;
-                let count: i64 = r.get(1)?;
-                Ok((role, count))
-            })?;
-            for row in rows {
-                let (role, count) = row?;
-                match role.as_str() {
-                    "user" => stats.user_messages = count,
-                    "assistant" => stats.assistant_messages = count,
-                    _ => {}
-                }
             }
         }
         Ok(stats)
@@ -1274,49 +1296,81 @@ impl Db {
         )?;
         Ok(())
     }
-
-    // FTS
-
-    pub fn unindex(&self, kind: &str, ref_id: &str) {
-        let conn = self.write();
-        unindex_conn(&conn, kind, ref_id);
-    }
-
-    pub fn index_project(&self, p: &Project) -> Result<()> {
-        let conn = self.write();
-        project_context_repo::reindex(&conn, &p.id)
-    }
-
-    /// A task can belong to several projects, so it has no single search parent.
-    pub fn index_workstream(&self, w: &Workstream) -> Result<()> {
-        let conn = self.write();
-        workstream_projects::reindex_workstream_search_conn(&conn, &w.id)
-    }
 }
 
-pub fn unindex_conn(conn: &Connection, kind: &str, ref_id: &str) {
-    let _ = conn.execute(
-        "DELETE FROM search_index WHERE kind = ?1 AND ref_id = ?2",
-        params![kind, ref_id],
-    );
+pub(crate) fn upsert_search_document_conn(
+    conn: &Connection,
+    kind: &str,
+    ref_id: &str,
+    parent_id: &str,
+    title: &str,
+    body: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO search_documents(kind, ref_id, parent_id, title, body)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(kind, ref_id) DO UPDATE SET
+           parent_id=excluded.parent_id, title=excluded.title, body=excluded.body
+         WHERE (search_documents.parent_id, search_documents.title, search_documents.body)
+           IS NOT (excluded.parent_id, excluded.title, excluded.body)",
+        params![kind, ref_id, parent_id, title, body],
+    )?;
+    Ok(())
 }
 
-/// Rebuild a Session's message search rows from the authoritative current
-/// conversation projection. Called in the same transaction as projection
-/// replacement so retired messages can never remain searchable after commit.
-fn sync_projected_message_search_conn(conn: &Connection, session_id: &str) -> Result<()> {
+/// Index only the newly appended projection range in the ingest transaction.
+fn append_projected_message_search_conn(
+    conn: &Connection,
+    session_id: &str,
+    after: i64,
+) -> Result<()> {
     conn.execute(
-        "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
-        params![session_id],
+        "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
+         SELECT 'message', m.id, m.session_id, '', ''
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id = p.session_message_id
+         WHERE p.session_id = ?1 AND p.ordinal > ?2
+         ON CONFLICT(kind, ref_id) DO NOTHING",
+        params![session_id, after],
     )?;
-    conn.execute(
-        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-         SELECT 'message', m.id, m.session_id, '', m.content
-           FROM session_message_projection p
-           JOIN session_messages m ON m.id = p.session_message_id
-          WHERE p.session_id = ?1",
-        params![session_id],
+    Ok(())
+}
+
+/// Reconcile a complete snapshot's search documents inside the ingest
+/// transaction. Message identities include content, so a retained id's document
+/// needs no rewrite. The routing table's ordinary index scopes this read to
+/// the session, independently of how many other documents are indexed.
+fn sync_projected_message_search_conn(
+    conn: &Connection,
+    session_id: &str,
+    current_ids: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let indexed = {
+        let mut st = conn.prepare(
+            "SELECT id, ref_id FROM search_documents WHERE kind = 'message' AND parent_id = ?1",
+        )?;
+        let rows = st.query_map([session_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let mut retained = std::collections::HashSet::new();
+    let mut delete = conn.prepare("DELETE FROM search_documents WHERE id = ?1")?;
+    for (rowid, id) in indexed {
+        if current_ids.contains(&id) {
+            retained.insert(id);
+        } else {
+            delete.execute([rowid])?;
+        }
+    }
+    let mut insert = conn.prepare(
+        "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
+         SELECT 'message', id, session_id, '', '' FROM session_messages
+         WHERE session_id = ?1 AND id = ?2",
     )?;
+    for id in current_ids.difference(&retained) {
+        insert.execute(params![session_id, id])?;
+    }
     Ok(())
 }
 
@@ -1328,55 +1382,48 @@ impl Db {
     /// findability.
     pub fn index_new_messages(&self, messages: &[SessionMessage]) -> Result<()> {
         let conn = self.write();
-        for m in messages {
-            unindex_conn(&conn, "message", &m.id);
-        }
         let mut st = conn.prepare(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             SELECT 'message', ?1, ?2, '', ?3
+            "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
+             SELECT 'message', ?1, ?2, '', ''
              WHERE EXISTS (
                SELECT 1 FROM session_message_projection p
                JOIN sessions s ON s.id = p.session_id
                WHERE p.session_id = ?2 AND p.session_message_id = ?1
-             )",
+             ) ON CONFLICT(kind, ref_id) DO NOTHING",
         )?;
         for m in messages {
-            st.execute(params![m.id, m.session_id, m.content])?;
+            st.execute(params![m.id, m.session_id])?;
         }
         Ok(())
     }
 
-    /// Fill in the index rows no incremental write produced: messages whose
-    /// ingestion-time indexing was skipped, and Session documents no write has
-    /// touched yet. Idempotent.
+    /// Explicit, idempotent repair of missing/stale search routing documents.
+    /// Normal writes maintain these atomically; startup must not scan the
+    /// entire conversation store. Full source sync also reconciles each
+    /// session's message documents.
     ///
     /// Archived and unarchived sessions are indexed identically.
     pub fn backfill_search_index(&self) -> Result<()> {
         let conn = self.write();
-        // Tasks are roots in search; their multiple projects are read through paths.
         conn.execute(
-            "UPDATE search_index SET parent_id = '' WHERE kind = 'workstream'",
-            [],
-        )?;
-        conn.execute(
-            "DELETE FROM search_index
+            "DELETE FROM search_documents
              WHERE kind = 'message'
                AND NOT EXISTS (
                  SELECT 1 FROM session_message_projection p
                  JOIN sessions s ON s.id = p.session_id
-                 WHERE p.session_id = search_index.parent_id
-                   AND p.session_message_id = search_index.ref_id
+                 WHERE p.session_id = search_documents.parent_id
+                   AND p.session_message_id = search_documents.ref_id
                )",
             [],
         )?;
         conn.execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             SELECT 'message', m.id, m.session_id, '', m.content
+            "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
+             SELECT 'message', m.id, m.session_id, '', ''
              FROM session_message_projection p
              JOIN session_messages m ON m.id = p.session_message_id
              WHERE p.session_id IN (SELECT id FROM sessions)
                AND m.id NOT IN (
-                   SELECT ref_id FROM search_index WHERE kind = 'message')",
+                   SELECT ref_id FROM search_documents WHERE kind = 'message')",
             [],
         )?;
         // A document whose body can change (title, Project, tracked tasks)
@@ -1385,7 +1432,7 @@ impl Db {
         let ids: Vec<String> = {
             let mut st = conn.prepare(
                 "SELECT id FROM sessions
-                  WHERE id NOT IN (SELECT ref_id FROM search_index WHERE kind = 'session')",
+                  WHERE id NOT IN (SELECT ref_id FROM search_documents WHERE kind = 'session')",
             )?;
             let mapped = st.query_map([], |r| r.get::<_, String>(0))?;
             mapped.collect::<std::result::Result<Vec<_>, _>>()?
@@ -1568,18 +1615,13 @@ pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Resu
     let Some((title, project_name, owner_title, cwd)) = row else {
         return Ok(());
     };
-    unindex_conn(conn, "session", session_id);
     let body = format!(
         "{}\n{}\n{}",
         project_name,
         owner_title.unwrap_or_default(),
         cwd.unwrap_or_default()
     );
-    conn.execute(
-        "INSERT INTO search_index (kind, ref_id, parent_id, title, body) VALUES ('session', ?1, '', ?2, ?3)",
-        params![session_id, title, body],
-    )?;
-    Ok(())
+    upsert_search_document_conn(conn, "session", session_id, "", &title, &body)
 }
 
 /// The CURRENT conversation, joined through the projection. `after_ordinal`

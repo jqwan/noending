@@ -32,12 +32,5 @@ pub fn commit(
         conn.execute("INSERT INTO project_session_frontiers(project_id,session_id,session_context_revision) VALUES (?1,?2,?3) ON CONFLICT(project_id,session_id) DO UPDATE SET session_context_revision=?3", params![id,sid,revision])?;
     }
     conn.execute("DELETE FROM project_session_frontiers WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id=project_session_frontiers.session_id AND wp.project_id=?1)", [id])?;
-    reindex(conn, id)?;
     Ok(state(conn, id)?.revision)
-}
-/// A rename or registry refresh must retain the current summary in search too.
-pub fn reindex(conn: &Connection, id: &str) -> Result<()> {
-    super::unindex_conn(conn, "project", id);
-    conn.execute("INSERT INTO search_index(kind,ref_id,parent_id,title,body) SELECT 'project',p.id,'',p.name,COALESCE(c.summary,'') FROM projects p LEFT JOIN project_context_state c ON c.project_id=p.id WHERE p.id=?1", [id])?;
-    Ok(())
 }

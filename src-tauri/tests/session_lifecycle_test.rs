@@ -5,7 +5,6 @@
 
 use noending::domain::{Agent, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
-use noending::search;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
 use std::path::{Path, PathBuf};
@@ -564,13 +563,12 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     );
 }
 
-// Search stays lifecycle-authoritative across restarts
+// Search repair stays lifecycle-authoritative
 
-/// Trash never removes index rows, so the startup backfill must fill in only
-/// what is missing: archived and active sessions are indexed identically, and
-/// a restart can never drop an archived conversation out of search.
+/// Explicit repair fills missing documents for archived and active sessions
+/// alike; archiving never excludes a conversation from search.
 #[test]
-fn startup_backfill_includes_archived_sessions() {
+fn search_repair_includes_archived_sessions() {
     let db = open_db("backfill-trashed");
     let dir_a = TempDir::new("backfill-a-src");
     let dir_b = TempDir::new("backfill-b-src");
@@ -580,10 +578,18 @@ fn startup_backfill_includes_archived_sessions() {
     let trashed_stored = commit_message(&db, &trashed.id, "unique trashed marker goals", 100);
 
     lifecycle::archive_session(&db, &trashed.id).unwrap();
-    // 模拟重启：backfill 补齐索引，对归档会话与活跃会话一视同仁。
+    db.write()
+        .execute(
+            "DELETE FROM search_documents WHERE kind='message' AND ref_id IN (?1,?2)",
+            rusqlite::params![active_stored[0].id, trashed_stored[0].id],
+        )
+        .unwrap();
+    assert!(support::search_messages(&db, "goals", 20)
+        .unwrap()
+        .is_empty());
     db.backfill_search_index().unwrap();
 
-    let hits = search::search(&db, "goals", 20).unwrap();
+    let hits = support::search_messages(&db, "goals", 20).unwrap();
     assert!(
         hits.iter()
             .any(|h| h.kind == "message" && h.ref_id == active_stored[0].id),
@@ -592,6 +598,6 @@ fn startup_backfill_includes_archived_sessions() {
     assert!(
         hits.iter()
             .any(|h| h.kind == "message" && h.ref_id == trashed_stored[0].id),
-        "the archived session remains searchable after startup backfill"
+        "repair restores the archived conversation too"
     );
 }

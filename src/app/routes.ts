@@ -44,8 +44,7 @@ export type Route =
   | { view: "agents"; agent?: Agent }
   | { view: "projects"; scope?: "unarchived" | "archived" }
   | { view: "project"; projectId: string; initialTitle?: string }
-  | { view: "settings"; section?: SettingsSection | LegacySettingsSection }
-  | { view: "search"; query: string };
+  | { view: "settings"; section?: SettingsSection | LegacySettingsSection };
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";

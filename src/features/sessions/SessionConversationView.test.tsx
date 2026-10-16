@@ -187,8 +187,9 @@ it("collapses each turn's intermediates into a block that expands and collapses 
   // 另一轮没有中间回复：默认收起，展开就地插入提问与最终回复之间，收起即丢。
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({
     messages: [
-      message(4, "user", "第四问", { ts: "2026-10-05T10:00:00+08:00" }),
+      message(4, "user", "第四问", { sequence: 104, ts: "2026-10-05T10:00:00+08:00" }),
       message(7, "assistant", "最终回答", {
+        sequence: 107,
         ts: "2026-10-05T10:03:04+08:00",
         turn: { boundary_ordinal: 4, boundary_ts: "2026-10-05T10:00:00+08:00", count: 2 },
       }),
@@ -202,8 +203,8 @@ it("collapses each turn's intermediates into a block that expands and collapses 
   }));
   vi.mocked(api.getSessionTurnIntermediates).mockResolvedValue({
     messages: [
-      message(5, "assistant", "中间一", { turn_final: false }),
-      message(6, "assistant", "中间二", { turn_final: false }),
+      message(5, "assistant", "中间一", { sequence: 105, turn_final: false }),
+      message(6, "assistant", "中间二", { sequence: 106, turn_final: false }),
     ],
     truncated: false,
   });
@@ -212,6 +213,8 @@ it("collapses each turn's intermediates into a block that expands and collapses 
 
   // 默认收起：只有摘要一行，中间回复不出现；没有中间回复的轮没有块。
   await screen.findByText("第四问");
+  expect(screen.getByText(/^#4\s/)).toBeTruthy();
+  expect(screen.getByText(/^#7\s/)).toBeTruthy();
   screen.getByRole("button", { name: "已工作 3 分 4 秒 · 2 条中间回复" });
   expect(screen.queryByText("中间一")).toBeNull();
   expect(document.querySelectorAll(".turn-toggle")).toHaveLength(1);
@@ -223,7 +226,10 @@ it("collapses each turn's intermediates into a block that expands and collapses 
   expect(api.getSessionTurnIntermediates).toHaveBeenCalledWith("me", 4, 7);
   const rendered = [...document.querySelectorAll(".conversation-scroll .event")]
     .map((el) => el.getAttribute("data-seq"));
-  expect(rendered).toEqual(["4", "5", "6", "7", "8", "9"]);
+  expect(rendered).toEqual(["104", "105", "106", "107", "8", "9"]);
+  expect(screen.getByText("#5")).toBeTruthy();
+  expect(screen.getByText("#6")).toBeTruthy();
+  expect(screen.queryByText(/^#10[4-7](\s|$)/)).toBeNull();
 
   // 收起即丢：中间消息消失，摘要还在；再展开是再取一次。
   fireEvent.click(screen.getByRole("button", { name: /已工作 3 分 4 秒/ }));

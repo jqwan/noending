@@ -26,15 +26,18 @@ function renderMessage(content: string, role: SessionMessageData["role"] = "assi
 }
 
 it("列表里截断，点开弹窗才给全文", () => {
-  renderMessage(LONG);
+  render(<SessionMessage msg={msg(LONG)} ordinal={3} />);
 
   // 列表只显示截断内容，点击气泡后才展示全文。
   expect(screen.queryByText("结尾标记")).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText("#3")).toBeTruthy();
+  expect(screen.queryByText("#7")).toBeNull();
 
   fireEvent.click(screen.getByText(/^第一段说明/));
 
   const dialog = screen.getByRole("dialog");
+  expect(within(dialog).getByRole("heading", { name: "Codex · #3" })).toBeTruthy();
   expect(within(dialog).getByText(/结尾标记/)).toBeTruthy();
 });
 

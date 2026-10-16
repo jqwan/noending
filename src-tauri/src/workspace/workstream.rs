@@ -9,9 +9,7 @@ use serde::Serialize;
 
 use crate::domain::*;
 use crate::error::{other, Result};
-use crate::storage::workstream_projects::{
-    project_ids_for_workstream, purge_workstream_data_conn, reindex_workstream_search_conn,
-};
+use crate::storage::workstream_projects::{project_ids_for_workstream, purge_workstream_data_conn};
 use crate::storage::{new_id, now, Db};
 
 use super::WorkspaceAttaching;
@@ -53,7 +51,7 @@ pub fn create_workstream(
     db.tx(|tx| {
         crate::storage::upsert_workstream_conn(tx, &task)?;
         crate::storage::workstream_projects::set_projects_conn(tx, &task.id, project_ids)?;
-        reindex_workstream_search_conn(tx, &task.id)
+        Ok(())
     })?;
     Ok(task)
 }
@@ -64,7 +62,7 @@ pub fn set_workstream_projects(db: &Db, id: &str, projects: &[String]) -> Result
             "UPDATE workstreams SET updated_at=?2 WHERE id=?1",
             rusqlite::params![id, now()],
         )?;
-        reindex_workstream_search_conn(tx, id)
+        Ok(())
     })
 }
 
@@ -126,7 +124,7 @@ fn edit_fields(
         }
         w.updated_at = now();
         crate::storage::upsert_workstream_conn(tx, &w)?;
-        reindex_workstream_search_conn(tx, id)?;
+
         Ok(w)
     })
 }
@@ -164,9 +162,6 @@ pub fn delete_workstream_permanently(db: &Db, workstream_id: &str) -> Result<()>
         return Err(other("只能永久删除已归档任务"));
     }
     db.tx(|tx| purge_workstream_data_conn(tx, workstream_id))?;
-    // The FTS rows are gone with the transaction; `unindex` is the same write
-    // through the door every other caller uses, and harmless twice.
-    db.unindex("workstream", workstream_id);
     Ok(())
 }
 

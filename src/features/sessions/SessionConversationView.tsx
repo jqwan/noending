@@ -591,7 +591,7 @@ export default function SessionConversationView({
                     onToggle={() => toggleTurn(m)}
                   />
                 )}
-                <SessionMessage msg={messageData(m, session?.agent ?? null)} />
+                <SessionMessage msg={messageData(m, session?.agent ?? null)} ordinal={m.ordinal} />
               </Fragment>
             ))
           )}
@@ -657,7 +657,7 @@ function TurnBlock({ turn, finalTs, expansion, agent, onToggle }: {
       {expansion?.status === "loaded" && (
         <div className="turn-body">
           {expansion.messages.map((m) => (
-            <SessionMessage key={m.sequence} msg={messageData(m, agent)} />
+            <SessionMessage key={m.sequence} msg={messageData(m, agent)} ordinal={m.ordinal} />
           ))}
           {expansion.truncated && (
             <div className="turn-truncated muted small">

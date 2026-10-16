@@ -195,3 +195,29 @@ pub fn associate_path_project(
     conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT ?1,project_id FROM workspace_paths WHERE id=?2",rusqlite::params![task,path])?;
     Ok(())
 }
+
+/// Content search through the same scoped engine used by `ne search`.
+pub fn search_messages(
+    db: &noending::storage::Db,
+    query: &str,
+    limit: i64,
+) -> noending::error::Result<Vec<noending::search::SearchHit>> {
+    if query.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(noending::search::sessions::page(
+        db,
+        query.trim(),
+        &noending::search::sessions::SessionFilter {
+            scope: "all".into(),
+            ..Default::default()
+        },
+        limit as usize,
+        0,
+        None,
+    )?
+    .0
+    .into_iter()
+    .map(|r| r.hit)
+    .collect())
+}

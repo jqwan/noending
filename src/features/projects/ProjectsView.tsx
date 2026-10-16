@@ -1,3 +1,4 @@
+import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import Icon from "../../components/Icon";
 import CustomSelect from "../../components/CustomSelect";
@@ -38,17 +39,6 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
   name: (a, b) => a.name.localeCompare(b.name, "zh-Hans"),
   paths: (a, b) => b.path_count - a.path_count || a.name.localeCompare(b.name, "zh-Hans"),
 };
-
-/** 搜索面：Project name + WorkspacePath canonical path（搜 search_paths 全部路径，
- *  不限于展示用的前两条）。 */
-function cardMatches(c: ProjectCardData, q: string): boolean {
-  const needle = q.trim().toLowerCase();
-  if (needle === "") return true;
-  return (
-    c.name.toLowerCase().includes(needle) ||
-    c.search_paths.some((p) => p.toLowerCase().includes(needle))
-  );
-}
 
 let cachedProjectCards: ProjectCardData[] | null = null;
 
@@ -119,15 +109,17 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
     }
   };
 
-  const list = useMemo(() => {
-    if (cards === null) return null;
-    return cards
-      .filter((c) => c.visibility === (archivedMode ? "archived" : "normal"))
+  const candidates = useMemo(() => cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal"))
       .filter(FILTERS[filter])
-      .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter)
-      .filter((c) => cardMatches(c, query))
+      .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter) ?? null, [cards, filter, effectiveKindFilter, archivedMode]);
+  const candidateIds = useMemo(() => candidates?.map(item => item.id) ?? [], [candidates]);
+  const search = useObjectMatches("project", query, cards, candidateIds);
+  const list = useMemo(() => {
+    if (!candidates || search.pending || search.error) return null;
+    return candidates
+      .filter((c) => !search.ids || search.ids.has(c.id))
       .sort(SORTERS[sort]);
-  }, [cards, query, filter, effectiveKindFilter, sort, archivedMode]);
+  }, [candidates, search, sort]);
 
   const deletableProjects = cards?.filter(canDeleteProject) ?? [];
   const bulkDelete = async () => {
@@ -274,7 +266,8 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
 
       </div>
 
-      {list === null && listError === "" && (
+      <ObjectSearchFeedback search={search} />
+      {cards === null && listError === "" && (
         viewMode === "cards" ? (
           <div className="board-grid" role="status">
             <div className="skeleton card" style={{ minHeight: 140 }} />

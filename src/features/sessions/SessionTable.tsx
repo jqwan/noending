@@ -4,7 +4,7 @@ import Icon from "../../components/Icon";
 import { useMemo, useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type Session, type TerminalSummary, type TerminalResumeState } from "../../types";
+import { AGENT_LABELS, type Agent, type AgentStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
 import {
   continueSessionTerminalWithToast,
   terminalContinueState,
@@ -62,7 +62,7 @@ export interface ProjectCell {
 }
 
 export function projectCellFor(
-  session: Pick<Session, "project_id" | "workspace_path_id" | "cwd">,
+  session: Pick<SessionListItem, "project_id" | "workspace_path_id" | "cwd">,
   projectNameById: Map<string, string>,
 ): ProjectCell {
   if (session.workspace_path_id) {
@@ -243,7 +243,7 @@ export default function SessionCards({
   navigate,
   terminals: externalTerminals,
 }: {
-  sessions: Session[];
+  sessions: SessionListItem[];
   /** Workstream id → 标题；用于解析跟踪任务的标题。 */
   workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
@@ -254,7 +254,7 @@ export default function SessionCards({
   onRestore?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
   busy?: boolean;
-  onTerminalResume?: (session: Session) => void;
+  onTerminalResume?: (session: SessionListItem) => void;
   navigate?: (r: Route) => void;
   terminals?: TerminalSummary[];
 }) {
@@ -263,9 +263,10 @@ export default function SessionCards({
   const agentStatus = useAgentStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
-  const resumeStates = useTerminalResumeStates(sessions.map(s => s.id));
+  const resumeStates = useTerminalResumeStates(sessions.slice(0, visibleCount)
+    .filter(s => !s.archived_at && resolveSessionContinueMode(s) === "terminal").map(s => s.id));
   const rows = useMemo(
-    () => sessions.map((s) => {
+    () => sessions.slice(0, visibleCount).map((s) => {
       const wsTitle=s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)?.trim() || UNNAMED_WORKSTREAM).join("、") || null;
       return {
         session: s,
@@ -274,7 +275,7 @@ export default function SessionCards({
         project: projectCellFor(s, projectNameById),
       };
     }),
-    [sessions, workstreamTitleById, projectNameById],
+    [sessions, visibleCount, workstreamTitleById, projectNameById],
   );
 
   if (viewMode === "list") {
@@ -319,10 +320,10 @@ export default function SessionCards({
             </div>
           </article>
         ))}
-        {rows.length > visibleCount && (
+        {sessions.length > visibleCount && (
           <div style={{ marginTop: 14, textAlign: "center" }}>
             <button className="btn small ghost" onClick={() => setVisibleCount((count) => count + 100)}>
-              显示更多（剩余 {rows.length - visibleCount}）
+              显示更多（剩余 {sessions.length - visibleCount}）
             </button>
           </div>
         )}
@@ -403,10 +404,10 @@ export default function SessionCards({
           </footer>
         </article>
       ))}
-      {rows.length > visibleCount && (
+      {sessions.length > visibleCount && (
         <div style={{ gridColumn: "1 / -1", textAlign: "center", marginTop: 8 }}>
           <button className="btn small ghost" onClick={() => setVisibleCount((count) => count + 100)}>
-            显示更多（剩余 {rows.length - visibleCount}）
+            显示更多（剩余 {sessions.length - visibleCount}）
           </button>
         </div>
       )}
@@ -424,10 +425,10 @@ export function SessionResumeButton({
   terminals,
   resumeState,
 }: {
-  session: Session;
+  session: SessionListItem;
   agentStatus: Record<string, AgentStatusEntry> | null;
   onResume: (sessionId: string) => void;
-  onTerminalResume?: (session: Session) => void;
+  onTerminalResume?: (session: SessionListItem) => void;
   navigate?: (r: Route) => void;
   terminals?: TerminalSummary[];
   resumeState?: TerminalResumeState;

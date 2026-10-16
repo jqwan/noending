@@ -57,7 +57,9 @@ export function TemplateEditor({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (!previewing || !drafts || !settings) return;
     let cancelled = false;
-    setPreviewLoading(true);
+    if (!previews[kind]) {
+      setPreviewLoading(true);
+    }
     setError("");
     api.previewSummaryPrompt(kind, { ...settings.templates, [kind]: drafts[kind] }).then(text => {
       if (!cancelled) {
@@ -70,14 +72,22 @@ export function TemplateEditor({ onClose }: { onClose: () => void }) {
         setPreviewLoading(false);
       }
     });
+
+    // 后台预加载其余类型预览，消除切 Tab 时的白屏与尺寸跳动
+    const otherKinds = (Object.keys(labels) as SummaryPromptKind[]).filter(k => k !== kind);
+    for (const other of otherKinds) {
+      if (!previews[other]) {
+        const otherTemplates = { ...settings.templates, [other]: drafts[other] };
+        api.previewSummaryPrompt(other, otherTemplates).then(text => {
+          if (!cancelled) {
+            setPreviews(prev => ({ ...prev, [other]: text }));
+          }
+        }).catch(() => {});
+      }
+    }
+
     return () => { cancelled = true; };
   }, [previewing, kind, drafts, settings]);
-
-  useEffect(() => {
-    if (previewRef.current) {
-      previewRef.current.scrollTop = 0;
-    }
-  }, [kind]);
 
   const save = async () => {
     if (!drafts || busyRef.current) return;
@@ -107,28 +117,42 @@ export function TemplateEditor({ onClose }: { onClose: () => void }) {
       <div className="row" role="tablist" aria-label="摘要类型" style={{ gap: 8 }}>
         {(Object.keys(labels) as SummaryPromptKind[]).map(type => <button key={type} role="tab" aria-selected={kind === type} className={`btn small ${kind === type ? "primary" : "ghost"}`} disabled={busy} onClick={() => { setKind(type); setError(""); }}>{labels[type]}{type === "preferences" ? "提取" : "摘要"}</button>)}
       </div>
-      <p className="muted small">
+      <p className="muted small" style={{ margin: "4px 0 12px" }}>
         编辑摘要写作或偏好提取要求。偏好模板用于所有摘要提取；会话模板同时用于任务、项目提取中的会话摘要步骤。完整提示词中的查询流程、回复协议和结果格式由系统提供。
       </p>
-      <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+      <div className="row" style={{ gap: 8, marginBottom: 10, alignItems: "center" }}>
         <button className={`btn small ${!previewing ? "primary" : "ghost"}`} aria-pressed={!previewing} onClick={() => setPreviewing(false)}>编辑模板</button>
         <button className={`btn small ${previewing ? "primary" : "ghost"}`} aria-pressed={previewing} onClick={() => setPreviewing(true)}>预览完整提示词</button>
-        <span className="muted small">{changed ? "有未保存修改" : settings.templates[kind] === settings.defaults[kind] ? "默认模板" : "自定义模板"}</span>
+        <span className="muted small" style={{ marginLeft: "auto" }}>{changed ? "有未保存修改" : settings.templates[kind] === settings.defaults[kind] ? "默认模板" : "自定义模板"}</span>
       </div>
-      {previewing ? <>
-        <p className="muted small">预览使用当前类型的编辑内容，其他要求使用已保存模板；文件路径以占位符展示。</p>
-        <pre
-          ref={previewRef}
-          className={`summary-prompt-preview${previewLoading && !currentPreview ? " loading" : ""}`}
-          aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}完整提示词`}
-        >
-          {currentPreview || (error ? "预览失败" : "正在生成预览…")}
-        </pre>
-      </> : <label className="field">
-        <span>{labels[kind]}{kind === "preferences" ? "提取" : "摘要"}要求模板</span>
-        <textarea className="summary-prompt-editor" value={drafts[kind]} disabled={busy} onChange={e => { setDrafts({ ...drafts, [kind]: e.target.value }); setError(""); }} />
-      </label>}
-      {error && <p role="alert" className="danger">{error}</p>}
+      <div className="summary-prompt-content-box">
+        {previewing ? <>
+          <div className="summary-prompt-content-header">
+            <span>预览使用当前类型的编辑内容，其他要求使用已保存模板；文件路径以占位符展示。</span>
+          </div>
+          <pre
+            key={kind}
+            ref={previewRef}
+            className={`summary-prompt-preview${previewLoading && !currentPreview ? " loading" : ""}`}
+            aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}完整提示词`}
+          >
+            {currentPreview || (error ? "预览失败" : "正在生成预览…")}
+          </pre>
+        </> : <>
+          <div className="summary-prompt-content-header">
+            <span>{labels[kind]}{kind === "preferences" ? "提取" : "摘要"}要求模板</span>
+          </div>
+          <textarea
+            key={kind}
+            aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}要求模板`}
+            className="summary-prompt-editor"
+            value={drafts[kind]}
+            disabled={busy}
+            onChange={e => { setDrafts({ ...drafts, [kind]: e.target.value }); setError(""); }}
+          />
+        </>}
+      </div>
+      {error && <p role="alert" className="danger" style={{ margin: "8px 0 0" }}>{error}</p>}
       <div className="row summary-prompt-actions" style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)" }}>
         <button className="btn small ghost" disabled={busy || drafts[kind] === settings.defaults[kind]} onClick={() => { setDrafts({ ...drafts, [kind]: settings.defaults[kind] }); setError(""); }}>恢复默认</button>
         <button className="btn small ghost" disabled={busy || !changed} onClick={() => { setDrafts({ ...drafts, [kind]: settings.templates[kind] }); setError(""); }}>撤销修改</button>

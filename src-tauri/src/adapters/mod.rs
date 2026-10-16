@@ -209,6 +209,30 @@ pub struct MemberReadDelta {
     pub complete_snapshot: bool,
 }
 
+/// Source-local parsed snapshots may be passed from discovery to ingestion;
+/// they are consumed within this scan and never retained in a global cache.
+#[derive(Default)]
+pub struct DiscoveryBatch {
+    pub members: Vec<DiscoveredMember>,
+    pub(crate) prepared: std::collections::HashMap<PathBuf, PreparedRead>,
+}
+
+pub(crate) struct PreparedRead {
+    pub delta: MemberReadDelta,
+    /// Full snapshots are independent of the database's previous cursor.
+    /// Incremental reads can only be reused against the cursor they read from.
+    pub base: Option<SourceCursor>,
+}
+
+impl DiscoveryBatch {
+    pub fn from_members(members: Vec<DiscoveredMember>) -> Self {
+        Self {
+            members,
+            ..Self::default()
+        }
+    }
+}
+
 impl MemberReadDelta {
     /// A read that could not establish a whole-snapshot verdict (an error
     /// mid-read, a source that never re-scans): the storage layer treats it as
@@ -225,35 +249,38 @@ impl MemberReadDelta {
 /// unix, canonical path + creation time elsewhere. A change of identity
 /// means the file at this path was replaced — never an append.
 pub fn file_identity(path: &Path) -> String {
-    match std::fs::metadata(path) {
-        Ok(meta) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                format!("unix:dev:{}:ino:{}", meta.dev(), meta.ino())
-            }
-            #[cfg(windows)]
-            {
-                let canon = std::fs::canonicalize(path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                let created = meta
-                    .created()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                format!("win:path:{}:created:{}", canon, created)
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                let canon = std::fs::canonicalize(path)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                format!("path:{}", canon)
-            }
-        }
-        Err(_) => String::new(),
+    std::fs::metadata(path)
+        .map(|meta| file_identity_for(path, &meta))
+        .unwrap_or_default()
+}
+
+fn file_identity_for(path: &Path, meta: &std::fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = path;
+        format!("unix:dev:{}:ino:{}", meta.dev(), meta.ino())
+    }
+    #[cfg(windows)]
+    {
+        let canon = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        let created = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("win:path:{}:created:{}", canon, created)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = meta;
+        let canon = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        format!("path:{}", canon)
     }
 }
 
@@ -401,23 +428,107 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
     None
 }
 
-struct FileObservation {
-    identity: String,
-    size: u64,
-    mtime: Option<f64>,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FileObservation {
+    pub identity: String,
+    pub size: u64,
+    pub mtime: Option<f64>,
 }
 
-fn observe(path: &Path) -> Result<(FileObservation, String)> {
-    let data = std::fs::read(path).map_err(|e| other(format!("读取 session 文件失败: {}", e)))?;
-    let meta = std::fs::metadata(path)?;
-    Ok((
-        FileObservation {
-            identity: file_identity(path),
-            size: data.len() as u64,
-            mtime: mtime_secs(&meta),
-        },
-        String::from_utf8_lossy(&data).to_string(),
-    ))
+fn observe_metadata(path: &Path) -> Result<FileObservation> {
+    Ok(observation_for(path, &std::fs::metadata(path)?))
+}
+
+fn observation_for(path: &Path, meta: &std::fs::Metadata) -> FileObservation {
+    FileObservation {
+        identity: file_identity_for(path, meta),
+        size: meta.len(),
+        mtime: mtime_secs(meta),
+    }
+}
+
+pub(crate) struct StableFile {
+    pub file: std::fs::File,
+    pub observed: FileObservation,
+    path: PathBuf,
+}
+
+impl StableFile {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let observed = observation_for(path, &file.metadata()?);
+        Ok(Self {
+            file,
+            observed,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if observation_for(&self.path, &self.file.metadata()?) != self.observed
+            || observe_metadata(&self.path)? != self.observed
+        {
+            return Err(other(format!(
+                "来源在读取期间发生变化，请重试：{}",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn file_matches_cursor(path: &Path, cursor: &SourceCursor) -> Result<bool> {
+    let observed = observe_metadata(path)?;
+    Ok(!cursor.prefix_hash.is_empty()
+        && observed.identity == cursor.source_file_identity
+        && observed.size == cursor.last_seen_size
+        && matches!((observed.mtime, cursor.mtime), (Some(a), Some(b)) if (a - b).abs() <= 1e-6))
+}
+
+/// A changing file cannot authorize replacement or deletion of stored facts.
+pub(crate) fn read_stable_file(path: &Path) -> Result<(FileObservation, Vec<u8>)> {
+    use std::io::Read;
+    let source = StableFile::open(path)?;
+    let mut data = Vec::new();
+    (&source.file)
+        .take(source.observed.size)
+        .read_to_end(&mut data)?;
+    source.validate()?;
+    if data.len() as u64 != source.observed.size {
+        return Err(other("来源读取长度不一致，请重试"));
+    }
+    Ok((source.observed, data))
+}
+
+pub(crate) struct FingerprintingReader<R> {
+    inner: R,
+    hasher: sha2::Sha256,
+    pub bytes: u64,
+}
+
+impl<R> FingerprintingReader<R> {
+    pub fn new(inner: R) -> Self {
+        use sha2::Digest;
+        Self {
+            inner,
+            hasher: sha2::Sha256::new(),
+            bytes: 0,
+        }
+    }
+    pub fn fingerprint(&self) -> String {
+        use sha2::Digest;
+        format!("{:x}", self.hasher.clone().finalize())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for FingerprintingReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        use sha2::Digest;
+        let n = self.inner.read(buffer)?;
+        self.hasher.update(&buffer[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
 }
 
 /// Hex SHA-256 of a byte slice — the prefix fingerprint stored on cursors.
@@ -447,8 +558,8 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// - replacement: different file identity       → new generation, full rescan
 ///
 /// Rescans are safe because storage dedups messages by identity: unchanged
-/// messages are skipped, changed/new ones are added, and previously ingested
-/// history is never touched. A cursor without
+/// messages are reused and changed/new ones are added. Only a complete full
+/// snapshot may retire messages absent from the source. A cursor without
 /// a usable prefix fingerprint cannot prove append-only continuity, so the
 /// source is conservatively treated as a rewrite and fully re-scanned.
 pub fn read_jsonl_delta(
@@ -456,173 +567,142 @@ pub fn read_jsonl_delta(
     cursor: &SourceCursor,
     parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
 ) -> Result<MemberReadDelta> {
-    let (obs, text) = observe(path)?;
-    // Prefix fingerprint over the (deterministic) lossy-decoded bytes; the
-    // reader's offsets live in these coordinates too.
-    let prefix_hash_of = |upto: usize| -> String {
-        let upto = upto.min(text.len());
-        sha256_hex(&text.as_bytes()[..upto])
-    };
-
-    let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
-
-    let (generation, start_offset): (i64, u64) = if first_ever {
-        (0, 0)
-    } else if obs.identity != cursor.source_file_identity {
-        (cursor.generation + 1, 0) // file replacement
-    } else if (obs.size as i64) < (cursor.last_seen_size as i64) {
-        (cursor.generation + 1, 0) // truncate / compact
-    } else if obs.size == cursor.last_seen_size {
-        let mtime_changed = match (cursor.mtime, obs.mtime) {
-            (Some(a), Some(b)) => (a - b).abs() > 1e-6,
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
-        };
-        if !mtime_changed {
-            // nothing new at all — the frontier stays exactly as seeded
-            return Ok(MemberReadDelta {
-                messages: vec![],
-                source: Some(crate::domain::SourceCursorUpdate {
-                    file_identity: obs.identity,
-                    generation: cursor.generation,
-                    byte_offset: cursor.byte_offset,
-                    last_seen_size: obs.size,
-                    mtime: obs.mtime,
-                    start_byte_offset: cursor.byte_offset,
-                    prefix_hash: cursor.prefix_hash.clone(),
-                }),
-                complete_snapshot: true,
-            });
+    use sha2::Digest;
+    use std::io::{Read, Seek, SeekFrom};
+    if file_matches_cursor(path, cursor)? {
+        return Ok(MemberReadDelta {
+            source: None,
+            messages: vec![],
+            complete_snapshot: true,
+        });
+    }
+    let source = StableFile::open(path)?;
+    let obs = &source.observed;
+    let mut reader = std::io::BufReader::new((&source.file).take(obs.size));
+    let first = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
+    let mut generation = if first { 0 } else { cursor.generation + 1 };
+    let mut hasher = sha2::Sha256::new();
+    let mut start = 0;
+    let mut line_index = 0;
+    if obs.identity == cursor.source_file_identity
+        && obs.size > cursor.last_seen_size
+        && cursor.byte_offset <= obs.size
+        && !cursor.prefix_hash.is_empty()
+    {
+        // Stream the consumed prefix once. Keep its hash state so appending
+        // new complete frames computes the next fingerprint without rehashing it.
+        let mut prefix = (&mut reader).take(cursor.byte_offset);
+        let mut buffer = [0u8; 64 * 1024];
+        let mut consumed = 0u64;
+        loop {
+            let n = prefix.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            consumed += n as u64;
+            line_index += buffer[..n].iter().filter(|b| **b == b'\n').count();
+            hasher.update(&buffer[..n]);
         }
-        (cursor.generation + 1, 0) // same-size rewrite / touch
-    } else {
-        // size grew: accept as append ONLY if the previously consumed prefix
-        // is still the file's prefix; otherwise the old head was rewritten.
-        let prefix_end = (cursor.byte_offset as usize).min(text.len());
-        let prefix_ok = !cursor.prefix_hash.is_empty()
-            && (cursor.byte_offset as u64) <= obs.size
-            && prefix_hash_of(prefix_end) == cursor.prefix_hash;
-        if prefix_ok {
-            (cursor.generation, cursor.byte_offset.min(obs.size)) // append
+        if consumed == cursor.byte_offset
+            && format!("{:x}", hasher.clone().finalize()) == cursor.prefix_hash
+        {
+            start = cursor.byte_offset;
+            generation = cursor.generation;
         } else {
-            (cursor.generation + 1, 0) // rewrite-grow: continuity unprovable
+            reader.get_mut().get_mut().seek(SeekFrom::Start(0))?;
+            reader = std::io::BufReader::new((&source.file).take(obs.size));
+            hasher = sha2::Sha256::new();
+            line_index = 0;
         }
-    };
-
-    let (messages, complete_end, complete_snapshot) =
-        parse_jsonl_frames(&text, start_offset as usize, parse_line);
-
-    let source = crate::domain::SourceCursorUpdate {
-        file_identity: obs.identity,
-        generation,
-        byte_offset: complete_end as u64,
-        last_seen_size: if complete_snapshot { obs.size } else { 0 },
-        mtime: obs.mtime,
-        start_byte_offset: start_offset as u64,
-        prefix_hash: prefix_hash_of(complete_end),
-    };
+    }
+    let (messages, end, complete_snapshot) =
+        read_jsonl_frames(&mut reader, start, line_index, &mut hasher, &mut |i, v| {
+            parse_line(i, v)
+        })?;
+    source.validate()?;
     Ok(MemberReadDelta {
         messages,
-        source: Some(source),
+        source: Some(crate::domain::SourceCursorUpdate {
+            file_identity: obs.identity.clone(),
+            generation,
+            byte_offset: end,
+            last_seen_size: if complete_snapshot { obs.size } else { 0 },
+            mtime: obs.mtime,
+            start_byte_offset: start,
+            prefix_hash: format!("{:x}", hasher.finalize()),
+        }),
         complete_snapshot,
     })
 }
 
-/// Parse JSONL in decoded coordinates, shared by plain deltas and compressed
-/// snapshots. A malformed tail never replaces the current conversation.
-fn parse_jsonl_frames(
-    text: &str,
-    start_offset: usize,
-    parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
-) -> (Vec<ParsedSessionMessage>, usize, bool) {
-    let mut messages: Vec<ParsedSessionMessage> = Vec::new();
-    let mut offset = 0usize;
-    let mut complete_snapshot = true;
-    let mut complete_end = text.len();
-    for (idx, frame) in text.split_inclusive('\n').enumerate() {
-        let line_start = offset;
-        offset += frame.len();
-        let line = frame
-            .strip_suffix('\n')
-            .unwrap_or(frame)
-            .strip_suffix('\r')
-            .unwrap_or_else(|| frame.strip_suffix('\n').unwrap_or(frame));
-        if line_start < start_offset {
-            continue;
+/// One decoded line at a time: no retained raw or decoded full-file buffer.
+/// The hash and frontier include only frames safe to commit.
+pub(crate) fn read_jsonl_frames(
+    reader: &mut impl BufRead,
+    start: u64,
+    mut line_index: usize,
+    hasher: &mut sha2::Sha256,
+    parse_line: &mut impl FnMut(usize, &serde_json::Value) -> Option<ParsedLine>,
+) -> Result<(Vec<ParsedSessionMessage>, u64, bool)> {
+    use sha2::Digest;
+    let mut messages = Vec::new();
+    let mut frame = Vec::new();
+    let mut end = start;
+    loop {
+        frame.clear();
+        if reader.read_until(b'\n', &mut frame)? == 0 {
+            break;
         }
-        if line.trim().is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => {
-                // Stop at the first damaged frame. The cursor remains before
-                // it so an append or repair will retry this line and the tail.
-                complete_snapshot = false;
-                complete_end = line_start;
-                break;
+        let line = transcript_text(&frame)?.trim();
+        if !line.is_empty() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                return Ok((messages, end, false));
+            };
+            if let Some(message) = parsed_jsonl_message(line_index, &value, parse_line) {
+                messages.push(message);
             }
-        };
-        // Timestamps are RFC3339 strings in every format but WorkBuddy's,
-        // which writes epoch millis as a number. Both are normalized here so
-        // downstream (display, ordering) sees one spelling.
-        let ts = match v.get("timestamp") {
+        }
+        hasher.update(&frame);
+        end += frame.len() as u64;
+        line_index += 1;
+    }
+    Ok((messages, end, true))
+}
+
+fn parsed_jsonl_message(
+    index: usize,
+    value: &serde_json::Value,
+    parse_line: &mut impl FnMut(usize, &serde_json::Value) -> Option<ParsedLine>,
+) -> Option<ParsedSessionMessage> {
+    let mut message = parse_line(index, value)?.message?;
+    if message.content.trim().is_empty() {
+        return None;
+    }
+    if message.source_position.is_empty() {
+        message.source_position = format!("line:{}", index + 1);
+    }
+    if message.ts.is_none() {
+        message.ts = match value.get("timestamp") {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
             Some(serde_json::Value::Number(n)) => n.as_i64().and_then(ms_epoch_to_rfc3339),
             _ => None,
         };
-        if let Some(p) = parse_line(idx, &v) {
-            if let Some(mut m) = p.message {
-                if m.content.trim().is_empty() {
-                    continue;
-                }
-                if m.source_position.is_empty() {
-                    m.source_position = format!("line:{}", idx + 1);
-                }
-                if m.ts.is_none() {
-                    m.ts = ts;
-                }
-                messages.push(m);
-            }
-        }
     }
-
-    (messages, complete_end, complete_snapshot)
+    Some(message)
 }
 
-/// A decoded full replay whose persisted cursor stays in the physical source's
-/// coordinates, so discovery can skip unchanged compressed files without decoding.
-pub(crate) fn read_jsonl_snapshot(
-    path: &Path,
-    cursor: &SourceCursor,
-    raw: &[u8],
-    text: &str,
-    parse_line: &dyn Fn(usize, &serde_json::Value) -> Option<ParsedLine>,
-) -> Result<MemberReadDelta> {
-    let (messages, _, complete_snapshot) = parse_jsonl_frames(text, 0, parse_line);
-    let source = replay_cursor_update(path, cursor, raw)?;
-    Ok(MemberReadDelta {
-        messages,
-        source: Some(source),
-        complete_snapshot,
-    })
+pub(crate) fn transcript_text(raw: &[u8]) -> Result<&str> {
+    std::str::from_utf8(raw).map_err(|e| other(format!("来源文本不是完整的 UTF-8，请重试：{e}")))
 }
 
-/// Cursor update for readers that replay the whole source on every read (dsh's
-/// zstd frames; ZCode's live store).
-///
-/// Offsets stay in the source's OWN coordinates — that is what the reconcile
-/// pre-filter sees, and it is all that is known without decoding. A replay
-/// always starts at genesis and message identity (the writer's own ids) absorbs
-/// it, so re-reading stores nothing. A new generation is a change of shape
-/// (file replaced or truncated), never a mere append.
-pub fn replay_cursor_update(
-    path: &Path,
+/// Cursor for a physical full replay (for example DSH's framed transcript).
+/// New file identities or truncation advance the source generation.
+pub(crate) fn replay_cursor_update(
+    observation: &FileObservation,
     cursor: &SourceCursor,
     raw: &[u8],
-) -> Result<crate::domain::SourceCursorUpdate> {
-    let meta = std::fs::metadata(path)?;
-    let identity = file_identity(path);
+) -> crate::domain::SourceCursorUpdate {
+    let identity = observation.identity.clone();
     let len = raw.len() as u64;
     let first_ever = cursor.source_file_identity.is_empty() && cursor.last_seen_size == 0;
     let generation = if first_ever {
@@ -634,15 +714,15 @@ pub fn replay_cursor_update(
     } else {
         cursor.generation
     };
-    Ok(crate::domain::SourceCursorUpdate {
+    crate::domain::SourceCursorUpdate {
         file_identity: identity,
         generation,
         byte_offset: len,
         last_seen_size: len,
-        mtime: mtime_secs(&meta),
+        mtime: observation.mtime,
         start_byte_offset: 0,
         prefix_hash: sha256_hex(raw),
-    })
+    }
 }
 
 /// Per-member content facts for a member of a live SQLite store. A store may
@@ -764,6 +844,24 @@ pub trait AgentAdapter: Send + Sync {
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredMember>>;
+
+    fn discover_batch(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<DiscoveryBatch> {
+        self.discover_members_in(roots, unchanged)
+            .map(DiscoveryBatch::from_members)
+    }
+
+    fn discover_batch_for_sessions(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+        _sessions: &[Session],
+    ) -> Result<DiscoveryBatch> {
+        self.discover_batch(roots, unchanged)
+    }
 
     /// Read only the delta since the session's cursor for THIS session,
     /// detecting append / truncate / rewrite / replacement.
@@ -1089,6 +1187,113 @@ mod jsonl_integrity_tests {
             source.last_seen_size, 0,
             "discovery must retry the damaged tail"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_fingerprint_requires_a_full_read_even_when_metadata_matches() {
+        let path = temp_file("{\"value\":1}\n");
+        let first = read_jsonl_delta(&path, &SourceCursor::default(), &|_, _| None).unwrap();
+        let source = first.source.unwrap();
+        let cursor = SourceCursor {
+            source_file_identity: source.file_identity,
+            byte_offset: source.byte_offset,
+            last_seen_size: source.last_seen_size,
+            mtime: source.mtime,
+            ..Default::default()
+        };
+        let replay = read_jsonl_delta(&path, &cursor, &|_, _| None).unwrap();
+        let source = replay.source.expect("missing proof cannot skip the read");
+        assert_eq!(source.start_byte_offset, 0);
+        assert_eq!(source.prefix_hash, sha256_hex(b"{\"value\":1}\n"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn invalid_utf8_cannot_become_a_lossy_complete_snapshot() {
+        let path = temp_file("");
+        std::fs::write(&path, b"{\"text\":\"\xff\"}\n").unwrap();
+        assert!(read_jsonl_delta(&path, &SourceCursor::default(), &|_, _| None).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn streaming_append_keeps_byte_hashes_line_positions_and_retries_a_partial_tail() {
+        use std::cell::Cell;
+        let line = |text: &str| serde_json::json!({"text":text}).to_string() + "\n";
+        // A Unicode prefix larger than the streaming chunk, with a blank line.
+        let old = line(&"界".repeat(24000)) + "\n";
+        let path = temp_file(&old);
+        let calls = Cell::new(0);
+        let parse = |_: usize, value: &serde_json::Value| {
+            calls.set(calls.get() + 1);
+            Some(ParsedLine::message_only(parsed_message(
+                None,
+                SessionMessageRole::User,
+                value["text"].as_str().unwrap().into(),
+            )))
+        };
+        let cursor_of = |source: crate::domain::SourceCursorUpdate| SourceCursor {
+            source_file_identity: source.file_identity,
+            generation: source.generation,
+            byte_offset: source.byte_offset,
+            last_seen_size: source.last_seen_size,
+            mtime: source.mtime,
+            prefix_hash: source.prefix_hash,
+            identity_tail_hash: String::new(),
+        };
+        let first = read_jsonl_delta(&path, &SourceCursor::default(), &parse).unwrap();
+        let cursor = cursor_of(first.source.unwrap());
+        assert_eq!(cursor.prefix_hash, sha256_hex(old.as_bytes()));
+        let next = old.clone() + &line("new turn");
+        std::fs::write(&path, next.clone() + "{broken\n").unwrap();
+        calls.set(0);
+        let partial = read_jsonl_delta(&path, &cursor, &parse).unwrap();
+        assert!(!partial.complete_snapshot);
+        assert_eq!(
+            calls.get(),
+            1,
+            "the old prefix is validated without parsing old JSON"
+        );
+        assert_eq!(partial.messages[0].source_position, "line:3");
+        let source = partial.source.unwrap();
+        assert_eq!(source.byte_offset, next.len() as u64);
+        assert_eq!(source.prefix_hash, sha256_hex(next.as_bytes()));
+        std::fs::write(&path, next.clone() + &line("repaired tail")).unwrap();
+        calls.set(0);
+        let repaired = read_jsonl_delta(&path, &cursor_of(source), &parse).unwrap();
+        assert!(repaired.complete_snapshot);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(repaired.messages[0].content, "repaired tail");
+        assert_eq!(repaired.messages[0].source_position, "line:4");
+        assert_eq!(
+            repaired.source.unwrap().prefix_hash,
+            sha256_hex((next + &line("repaired tail")).as_bytes())
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_open_source_rejects_changes_to_its_file() {
+        let path = temp_file("original\n");
+        let source = StableFile::open(&path).unwrap();
+        source.validate().unwrap();
+        std::fs::write(&path, "longer replacement\n").unwrap();
+        assert!(source.validate().is_err());
+        drop(source);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_source_rejects_replacement_of_its_path() {
+        let path = temp_file("original\n");
+        let source = StableFile::open(&path).unwrap();
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "original\n").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(source.validate().is_err());
+        drop(source);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

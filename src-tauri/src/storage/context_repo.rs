@@ -33,8 +33,6 @@ pub enum ProjectionOutcome {
     Appended,
     /// The whole conversation was replaced and the generation was raised.
     NewGeneration,
-    /// An incomplete full re-scan: projection, generation and cursor are kept.
-    Incomplete,
 }
 
 /// The session's fact frontier: `(fact_generation, latest_message_seq)`, read
@@ -80,16 +78,18 @@ fn set_ingest_state_conn(
 /// message is its turn's final reply exactly when the next projected message
 /// is not another assistant message (nothing follows, or the user spoke
 /// again). An append that continues a turn demotes the formerly-final reply,
-/// so the flag is re-derived over the whole session whenever the projection
-/// moves — cheap (one indexed pass) and it cannot drift from the projection.
+/// so appends recheck the previous tail and the newly projected messages.
+/// Replacements recompute the whole current conversation.
 ///
 /// Projection ordinals are consecutive by construction (appends extend the
 /// sequence; a replacement restarts it), so "next" is ordinal + 1.
-fn recompute_turn_finals_conn(conn: &Connection, session_id: &str) -> Result<()> {
+fn recompute_turn_finals_conn(conn: &Connection, session_id: &str, from: i64) -> Result<()> {
     conn.execute(
         "UPDATE session_messages SET turn_final = 0
-         WHERE session_id = ?1 AND turn_final != 0",
-        params![session_id],
+         WHERE session_id = ?1 AND turn_final != 0
+           AND id IN (SELECT session_message_id FROM session_message_projection
+                      WHERE session_id = ?1 AND ordinal >= ?2)",
+        params![session_id, from],
     )?;
     conn.execute(
         "UPDATE session_messages SET turn_final = 1
@@ -101,10 +101,11 @@ fn recompute_turn_finals_conn(conn: &Connection, session_id: &str) -> Result<()>
              ON n.session_id = p.session_id AND n.ordinal = p.ordinal + 1
            LEFT JOIN session_messages nm ON nm.id = n.session_message_id
            WHERE p.session_id = ?1
+             AND p.ordinal >= ?2
              AND m.role = 'assistant'
              AND (n.session_message_id IS NULL OR nm.role != 'assistant')
          )",
-        params![session_id],
+        params![session_id, from],
     )?;
     Ok(())
 }
@@ -116,14 +117,25 @@ fn append_projection_conn(
     start_ordinal: i64,
 ) -> Result<i64> {
     let mut ordinal = start_ordinal;
+    let mut part_end = if start_ordinal == 0 {
+        0
+    } else {
+        conn.query_row(
+            "SELECT part_end FROM session_message_projection WHERE session_id=?1 AND ordinal=?2",
+            params![session_id, start_ordinal],
+            |r| r.get::<_, i64>(0),
+        )?
+    };
     {
         let mut ins = conn.prepare(
-            "INSERT OR IGNORE INTO session_message_projection (session_id, ordinal, session_message_id)
-             VALUES (?1, ?2, ?3)",
+            "INSERT INTO session_message_projection (session_id, ordinal, session_message_id, part_end)
+             VALUES (?1, ?2, ?3, ?4 + (SELECT MAX(1,(LENGTH(content)+1999)/2000)
+                                     FROM session_messages WHERE id=?3 AND session_id=?1))
+             RETURNING part_end",
         )?;
         for id in ids {
             ordinal += 1;
-            ins.execute(params![session_id, ordinal, id])?;
+            part_end = ins.query_row(params![session_id, ordinal, id, part_end], |r| r.get(0))?;
         }
     }
     Ok(ordinal)
@@ -134,13 +146,12 @@ fn append_projection_conn(
 /// * `current_ids` — the ordered message ids of THIS read, including messages
 ///   that deduped onto existing rows (they are still part of the conversation).
 /// * `full_rescan` — the read started at byte 0.
-/// * `complete_snapshot` — every frame of that read was whole.
+/// The caller rejects incomplete full reads before inserting any facts.
 pub fn apply_projection_conn(
     conn: &Connection,
     session_id: &str,
     current_ids: &[String],
     full_rescan: bool,
-    complete_snapshot: bool,
 ) -> Result<ProjectionOutcome> {
     let state = get_ingest_state_conn(conn, session_id)?;
 
@@ -149,27 +160,26 @@ pub fn apply_projection_conn(
         if current_ids.is_empty() {
             return Ok(ProjectionOutcome::Unchanged);
         }
-        let existing: std::collections::HashSet<String> =
-            projection_ids_conn(conn, session_id)?.into_iter().collect();
-        let fresh: Vec<String> = current_ids
-            .iter()
-            .filter(|id| !existing.contains(*id))
-            .cloned()
-            .collect();
+        let mut contains = conn.prepare(
+            "SELECT EXISTS(SELECT 1 FROM session_message_projection
+             WHERE session_id = ?1 AND session_message_id = ?2)",
+        )?;
+        let mut fresh = Vec::new();
+        for id in current_ids {
+            if !contains.query_row(params![session_id, id], |r| r.get::<_, bool>(0))? {
+                fresh.push(id.clone());
+            }
+        }
         if fresh.is_empty() {
             return Ok(ProjectionOutcome::Unchanged);
         }
         let end = append_projection_conn(conn, session_id, &fresh, state.1)?;
         set_ingest_state_conn(conn, session_id, state.0, end)?;
-        recompute_turn_finals_conn(conn, session_id)?;
+        recompute_turn_finals_conn(conn, session_id, state.1.max(1))?;
         return Ok(ProjectionOutcome::Appended);
     }
 
-    // A full re-scan. An incomplete one must not touch the current generation.
-    if !complete_snapshot {
-        return Ok(ProjectionOutcome::Incomplete);
-    }
-
+    // A complete full re-scan.
     let existing = projection_ids_conn(conn, session_id)?;
     if existing == current_ids {
         return Ok(ProjectionOutcome::Unchanged);
@@ -178,13 +188,13 @@ pub fn apply_projection_conn(
         let fresh: Vec<String> = current_ids[existing.len()..].to_vec();
         let end = append_projection_conn(conn, session_id, &fresh, state.1)?;
         set_ingest_state_conn(conn, session_id, state.0, end)?;
-        recompute_turn_finals_conn(conn, session_id)?;
+        recompute_turn_finals_conn(conn, session_id, state.1.max(1))?;
         return Ok(ProjectionOutcome::Appended);
     }
 
     // The conversation itself changed (rewrite / truncate / reorder): raise the
-    // fact generation and atomically replace the whole projection. The old
-    // `session_messages` rows stay for provenance audit.
+    // fact generation and atomically replace the whole projection. The commit
+    // then removes messages that are no longer part of this conversation.
     conn.execute(
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
@@ -192,7 +202,7 @@ pub fn apply_projection_conn(
     let generation = state.0 + 1;
     let end = append_projection_conn(conn, session_id, current_ids, 0)?;
     set_ingest_state_conn(conn, session_id, generation, end)?;
-    recompute_turn_finals_conn(conn, session_id)?;
+    recompute_turn_finals_conn(conn, session_id, 1)?;
     Ok(ProjectionOutcome::NewGeneration)
 }
 
@@ -273,7 +283,7 @@ pub fn commit_workstream_summary_conn(
     conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3,
         context_revision = context_revision + 1, consumed_input_revision = input_revision WHERE workstream_id = ?1",
         params![workstream_id, summary, now()])?;
-    crate::storage::workstream_projects::reindex_workstream_search_conn(conn, workstream_id)?;
+
     Ok(get_workstream_context_state_conn(conn, workstream_id)?.context_revision)
 }
 

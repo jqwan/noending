@@ -169,7 +169,7 @@ fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstall
 }
 
 #[test]
-fn replacing_summary_updates_card_and_search_without_retaining_old_text() {
+fn replacing_summary_updates_the_current_card() {
     let database = db("replacement");
     let w = workstream(&database, "Initial UI Redesign");
     database
@@ -192,11 +192,4 @@ fn replacing_summary_updates_card_and_search_without_retaining_old_text() {
         .unwrap();
     let cards = noending::commands::workstream_cards(&database).unwrap();
     assert_eq!(cards[0].summary.as_deref(), Some("current_fact"));
-    assert!(noending::search::search(&database, "obsolete_fact", 10)
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        noending::search::search(&database, "current_fact", 10).unwrap()[0].ref_id,
-        w.id
-    );
 }

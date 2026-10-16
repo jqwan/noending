@@ -3,7 +3,7 @@ import { api } from "../../api";
 import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SummaryMarkdown from "../sessions/SummaryMarkdown";
-import type { ProjectContextView, Session } from "../../types";
+import type { ProjectContextView, SessionListItem } from "../../types";
 
 import Icon from "../../components/Icon";
 
@@ -11,7 +11,7 @@ const cache = new Map<string, ProjectContextView>();
 export function clearProjectSummaryCache() { cache.clear(); }
 
 /** Pure reads on navigation; extraction requires an explicit user action. */
-export default function ProjectSummary({ projectId, sessions }: { projectId: string; sessions: Session[] }) {
+export default function ProjectSummary({ projectId, sessions }: { projectId: string; sessions: SessionListItem[] }) {
   const [view, setView] = useState<ProjectContextView | null>(() => cache.get(projectId) ?? null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);

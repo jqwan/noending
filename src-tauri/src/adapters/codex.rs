@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format_reader, json_str_field, read_jsonl_delta, truncate_text, AgentCommand,
-    DesktopResume, DiscoveredMember, DiscoveredMemberKind, ExecOptions, MemberReadDelta,
-    ParsedLine, ResumeRoute, SessionMessageRole,
+    json_str_field, read_jsonl_delta, truncate_text, AgentCommand, DesktopResume, DiscoveredMember,
+    DiscoveredMemberKind, DiscoveryBatch, ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute,
+    SessionMessageRole,
 };
 use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
@@ -76,16 +76,6 @@ fn resolve_rollout(path: &Path) -> PathBuf {
         }
         _ => plain,
     }
-}
-
-fn read_rollout(path: &Path) -> Result<String> {
-    let raw = std::fs::read(path)?;
-    let bytes = if is_compressed(path) {
-        zstd::decode_all(raw.as_slice())?
-    } else {
-        raw
-    };
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The uuid Codex wrote into a rollout's name: the file's OWN thread id,
@@ -149,110 +139,126 @@ fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMember
     }
 }
 
-impl CodexAdapter {
-    /// Parse one rollout into its execution member facts.
-    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
-        let text = read_rollout(path)?;
-        if detect_format_reader(std::io::Cursor::new(text.as_bytes())) != Some(Agent::Codex) {
+#[derive(Default)]
+struct RolloutFacts {
+    format: Option<Agent>,
+    format_lines: usize,
+    meta_seen: bool,
+    meta_id: Option<String>,
+    legacy_session_id: Option<String>,
+    cwd: Option<String>,
+    started_at: Option<String>,
+    parent: Option<String>,
+    fork_base: Option<String>,
+    thread_source: Option<String>,
+    first_user_text: Option<String>,
+    first_agent_text: Option<String>,
+    last_activity: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
+
+impl RolloutFacts {
+    fn observe(&mut self, v: &Value) {
+        if self.format.is_none() && self.format_lines < 10 {
+            self.format = crate::adapters::fingerprint_line(v);
+            self.format_lines += 1;
+        }
+        if let Some(ts) = v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            self.last_activity = Some(self.last_activity.map_or(ts, |old| old.max(ts)));
+        }
+        let internal = is_internal_source(self.thread_source.as_deref());
+        if self.meta_seen
+            && (self.first_user_text.is_some() || (internal && self.first_agent_text.is_some()))
+        {
+            return;
+        }
+        let vtype = v.get("type").and_then(|t| t.as_str());
+        if vtype == Some("session_meta") {
+            // The FIRST meta is this rollout's OWN declaration (codex
+            // writes it at file creation). A continuation file embeds the
+            // RESUMED thread's meta inside its replayed history — letting
+            // a later meta override identity re-keys the file to a session
+            // whose usage lives in a different rollout, and two rollouts
+            // then fight over one member: source_path flips per discovery
+            // pass and the member row is replaced with each flip (a
+            // real store showed generation 21). First meta wins, always.
+            if !self.meta_seen {
+                self.meta_seen = true;
+                let p = v.get("payload").unwrap_or(&v);
+                self.meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
+                // Legacy last resort only: `session_id` is the conversation
+                // the writer was joined to, not this thread, so it never
+                // decides identity while a real thread id is available.
+                self.legacy_session_id = p
+                    .get("session_id")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                self.cwd = p.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
+                self.started_at = p
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string());
+                self.parent = p
+                    .get("parent_thread_id")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string());
+                self.thread_source = p
+                    .get("thread_source")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string());
+                // A forked page records where the prefix it inherited lives.
+                self.fork_base = p
+                    .get("history_base")
+                    .and_then(|h| h.get("thread_id"))
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.to_string());
+            }
+        } else if vtype == Some("response_item") {
+            let p = v.get("payload").unwrap_or(&v);
+            if p.get("type").and_then(|t| t.as_str()) == Some("message") {
+                let role = p.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let text = extract_text(p.get("content").unwrap_or(&Value::Null));
+                // `<…>` environment_context wrappers and `#`-prefixed
+                // injections (AGENTS.md, attached-file headers) are not
+                // user text; an envelope that wraps the real request
+                // under `## My request:` contributes the wrapped words.
+                let internal = is_internal_source(self.thread_source.as_deref());
+                if role == "user" && self.first_user_text.is_none() && !internal && !text.is_empty()
+                {
+                    if let Some(user_text) = crate::adapters::user_request_text(&text) {
+                        self.first_user_text = Some(truncate_text(&user_text, 400));
+                    }
+                }
+                // The last resort for a title: what the thread itself said
+                // first. Only consulted when there is no user text, so it
+                // costs nothing on the common path.
+                if role == "assistant" && self.first_agent_text.is_none() && !text.is_empty() {
+                    self.first_agent_text = Some(truncate_text(&text, 400));
+                }
+            }
+        }
+    }
+
+    fn finish(self, path: &Path) -> Result<Option<DiscoveredMember>> {
+        if self.format != Some(Agent::Codex) {
             return Ok(None);
         }
-        let lines: Vec<_> = text.lines().enumerate().collect();
-        let mut meta_seen = false;
-        let mut meta_id = None;
-        let mut legacy_session_id = None;
-        let mut cwd = None;
-        let mut started_at = None;
-        let mut parent = None;
-        let mut fork_base = None;
-        let mut thread_source: Option<String> = None;
-        // Codex's own review subagents: their user turns are prompts Codex wrote
-        // (the parent transcript re-embedded) and their developer turns are its
-        // instructions, so there is no user text to name them after.
-        let mut first_user_text = None;
-        let mut first_agent_text = None;
-
-        for (_, line) in &lines {
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let vtype = v.get("type").and_then(|t| t.as_str());
-            if vtype == Some("session_meta") {
-                // The FIRST meta is this rollout's OWN declaration (codex
-                // writes it at file creation). A continuation file embeds the
-                // RESUMED thread's meta inside its replayed history — letting
-                // a later meta override identity re-keys the file to a session
-                // whose usage lives in a different rollout, and two rollouts
-                // then fight over one member: source_path flips per discovery
-                // pass and the member row is replaced with each flip (a
-                // real store showed generation 21). First meta wins, always.
-                if !meta_seen {
-                    meta_seen = true;
-                    let p = v.get("payload").unwrap_or(&v);
-                    meta_id = p.get("id").and_then(|s| s.as_str()).map(|s| s.to_string());
-                    // Legacy last resort only: `session_id` is the conversation
-                    // the writer was joined to, not this thread, so it never
-                    // decides identity while a real thread id is available.
-                    legacy_session_id = p
-                        .get("session_id")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string());
-                    cwd = p.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string());
-                    started_at = p
-                        .get("timestamp")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t.to_string());
-                    parent = p
-                        .get("parent_thread_id")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t.to_string());
-                    thread_source = p
-                        .get("thread_source")
-                        .and_then(|t| t.as_str())
-                        .map(|t| t.to_string());
-                    // A forked page records where the prefix it inherited lives.
-                    fork_base = p
-                        .get("history_base")
-                        .and_then(|h| h.get("thread_id"))
-                        .and_then(|t| t.as_str())
-                        .map(|t| t.to_string());
-                }
-            } else if vtype == Some("response_item") {
-                let p = v.get("payload").unwrap_or(&v);
-                if p.get("type").and_then(|t| t.as_str()) == Some("message") {
-                    let role = p.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                    let text = extract_text(p.get("content").unwrap_or(&Value::Null));
-                    // `<…>` environment_context wrappers and `#`-prefixed
-                    // injections (AGENTS.md, attached-file headers) are not
-                    // user text; an envelope that wraps the real request
-                    // under `## My request:` contributes the wrapped words.
-                    let internal = is_internal_source(thread_source.as_deref());
-                    if role == "user" && first_user_text.is_none() && !internal && !text.is_empty()
-                    {
-                        if let Some(user_text) = crate::adapters::user_request_text(&text) {
-                            first_user_text = Some(truncate_text(&user_text, 400));
-                        }
-                    }
-                    // The last resort for a title: what the thread itself said
-                    // first. Only consulted when there is no user text, so it
-                    // costs nothing on the common path.
-                    if role == "assistant" && first_agent_text.is_none() && !text.is_empty() {
-                        first_agent_text = Some(text);
-                    }
-                }
-            }
-            // session_meta opens a rollout file, so stopping at the meta line
-            // itself would leave every title unset. Stop once the meta is parsed
-            // and there is a user text to name the session after; a thread Codex
-            // wrote itself has no user text, so it scans on to its own first
-            // reply (or EOF, for a meta-only session).
-            let internal = is_internal_source(thread_source.as_deref());
-            if meta_seen && (first_user_text.is_some() || (internal && first_agent_text.is_some()))
-            {
-                break;
-            }
-        }
-
+        let Self {
+            meta_id,
+            legacy_session_id,
+            cwd,
+            started_at,
+            parent,
+            fork_base,
+            thread_source,
+            first_user_text,
+            first_agent_text,
+            last_activity,
+            ..
+        } = self;
         // Identity is the file's OWN thread id. A forked page's meta still
         // names the thread it forked FROM, so there the name has to decide;
         // everywhere else the meta leads. Keying on `session_id` instead would
@@ -275,16 +281,7 @@ impl CodexAdapter {
         let kind = member_kind_of(thread_source.as_deref(), forked);
         let is_logical_root = kind.is_logical_root();
 
-        // Compression/touch is storage maintenance, not conversation activity.
-        let last_activity = lines
-            .iter()
-            .filter_map(|(_, line)| {
-                let v: Value = serde_json::from_str(line).ok()?;
-                chrono::DateTime::parse_from_rfc3339(v.get("timestamp")?.as_str()?).ok()
-            })
-            .max()
-            .map(|t| t.to_rfc3339());
-
+        let last_activity = last_activity.map(|t| t.to_rfc3339());
         Ok(Some(DiscoveredMember {
             agent: Agent::Codex,
             source_member_id: session_id,
@@ -307,6 +304,143 @@ impl CodexAdapter {
                 .flatten(),
             metadata: serde_json::json!({ "thread_source": thread_source }),
         }))
+    }
+}
+
+impl CodexAdapter {
+    fn read_known(
+        path: &Path,
+        session: &Session,
+        cursor: &SourceCursor,
+    ) -> Result<(Option<DiscoveredMember>, MemberReadDelta)> {
+        let facts = std::cell::RefCell::new(RolloutFacts::default());
+        let delta = read_jsonl_delta(path, cursor, &|_, value| {
+            facts.borrow_mut().observe(value);
+            parse_line(value, true)
+        })?;
+        let facts = facts.into_inner();
+        let member = if delta
+            .source
+            .as_ref()
+            .is_some_and(|s| s.start_byte_offset == 0)
+        {
+            facts.finish(path)?
+        } else {
+            Some(DiscoveredMember {
+                agent: Agent::Codex,
+                source_member_id: session.root_agent_session_id.clone(),
+                kind: DiscoveredMemberKind::Root,
+                parent_source_member_id: None,
+                root_hint: None,
+                source_kind: session.source_kind.clone(),
+                source_path: path.to_path_buf(),
+                cwd: session.cwd.clone(),
+                started_at: session.started_at.clone(),
+                last_activity_at: facts.last_activity.map(|t| t.to_rfc3339()),
+                native_title: None,
+                first_user_text: None,
+                first_agent_text: None,
+                metadata: session.metadata.clone(),
+            })
+        };
+        Ok((member, delta))
+    }
+
+    #[cfg(test)]
+    fn parse_member(path: &Path) -> Result<Option<DiscoveredMember>> {
+        Self::read_snapshot(path, &SourceCursor::default()).map(|(member, _)| member)
+    }
+
+    /// Discovery and ingestion share one parsed snapshot for both physical
+    /// forms. Only normalized messages survive this read, never a raw/decoded
+    /// full-file copy. Source coordinates and hashes always describe raw bytes.
+    fn read_snapshot(
+        path: &Path,
+        cursor: &SourceCursor,
+    ) -> Result<(Option<DiscoveredMember>, MemberReadDelta)> {
+        use sha2::Digest;
+        use std::io::Read;
+        let source = crate::adapters::StableFile::open(path)?;
+        let mut facts = RolloutFacts::default();
+        let mut parse = |_: usize, value: &Value| {
+            facts.observe(value);
+            if is_internal_source(facts.thread_source.as_deref()) && !is_forked_page_name(path) {
+                None
+            } else {
+                parse_line(value, true)
+            }
+        };
+        let mut decoded_hash = sha2::Sha256::new();
+        let (messages, end, complete_snapshot, prefix_hash) = if is_compressed(path) {
+            let mut raw = crate::adapters::FingerprintingReader::new(
+                (&source.file).take(source.observed.size),
+            );
+            let (messages, _, complete) = {
+                let decoder = zstd::stream::read::Decoder::new(&mut raw)?;
+                let mut reader = std::io::BufReader::new(decoder);
+                let parsed = crate::adapters::read_jsonl_frames(
+                    &mut reader,
+                    0,
+                    0,
+                    &mut decoded_hash,
+                    &mut parse,
+                )?;
+                // A malformed JSON row must not hide a damaged archive tail.
+                std::io::copy(&mut reader, &mut std::io::sink())?;
+                parsed
+            };
+            if raw.bytes != source.observed.size {
+                return Err(crate::error::other("Codex 压缩来源读取不完整"));
+            }
+            (messages, source.observed.size, complete, raw.fingerprint())
+        } else {
+            let mut reader = std::io::BufReader::new((&source.file).take(source.observed.size));
+            let (messages, end, complete) = crate::adapters::read_jsonl_frames(
+                &mut reader,
+                0,
+                0,
+                &mut decoded_hash,
+                &mut parse,
+            )?;
+            (
+                messages,
+                end,
+                complete,
+                format!("{:x}", decoded_hash.finalize()),
+            )
+        };
+        source.validate()?;
+        let first = cursor.source_file_identity.is_empty();
+        let generation = if first {
+            0
+        } else if source.observed.identity != cursor.source_file_identity
+            || source.observed.size < cursor.last_seen_size
+        {
+            cursor.generation + 1
+        } else {
+            cursor.generation
+        };
+        let member = facts.finish(path)?;
+        Ok((
+            member,
+            MemberReadDelta {
+                messages,
+                source: Some(crate::domain::SourceCursorUpdate {
+                    file_identity: source.observed.identity,
+                    generation,
+                    byte_offset: end,
+                    last_seen_size: if complete_snapshot {
+                        source.observed.size
+                    } else {
+                        0
+                    },
+                    mtime: source.observed.mtime,
+                    start_byte_offset: 0,
+                    prefix_hash,
+                }),
+                complete_snapshot,
+            },
+        ))
     }
 }
 
@@ -342,7 +476,32 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         roots: &[PathBuf],
         unchanged: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<DiscoveredMember>> {
-        let mut out = Vec::new();
+        Ok(self.discover_batch(roots, unchanged)?.members)
+    }
+
+    fn discover_batch(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<DiscoveryBatch> {
+        self.discover_batch_for_sessions(roots, unchanged, &[])
+    }
+
+    fn discover_batch_for_sessions(
+        &self,
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+        sessions: &[Session],
+    ) -> Result<DiscoveryBatch> {
+        let mut batch = DiscoveryBatch::default();
+        let known: HashMap<PathBuf, &Session> = sessions
+            .iter()
+            .filter(|s| s.title.is_some() && !s.source_prefix_hash.is_empty())
+            .map(|s| (resolve_rollout(Path::new(&s.source_path)), s))
+            .collect();
+        // Bound retained prose, even when importing many cold rollouts at once.
+        const PREPARED_BUDGET: usize = 16 * 1024 * 1024;
+        let mut prepared_bytes = 0usize;
         let names = ThreadNames::load(roots);
         let mut stack: Vec<PathBuf> = roots.to_vec();
         while let Some(dir) = stack.pop() {
@@ -362,20 +521,39 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
                 if unchanged(&p) {
                     continue;
                 }
-                match Self::parse_member(&p) {
-                    Ok(Some(mut m)) => {
+                let base = known
+                    .get(&p)
+                    .filter(|_| !is_compressed(&p))
+                    .map(|s| s.source_cursor());
+                let discovered =
+                    if let (Some(session), Some(cursor)) = (known.get(&p), base.as_ref()) {
+                        Self::read_known(&p, session, cursor)
+                    } else {
+                        Self::read_snapshot(&p, &SourceCursor::default())
+                    };
+                match discovered {
+                    Ok((Some(mut m), delta)) => {
                         if m.kind.is_logical_root() {
                             m.native_title =
                                 names.title_for(&m.source_member_id, m.first_user_text.as_deref());
                         }
-                        out.push(m)
+                        if m.kind.is_logical_root() && delta.complete_snapshot {
+                            let size: usize = delta.messages.iter().map(|m| m.content.len()).sum();
+                            if size <= PREPARED_BUDGET.saturating_sub(prepared_bytes) {
+                                prepared_bytes += size;
+                                batch
+                                    .prepared
+                                    .insert(p, crate::adapters::PreparedRead { delta, base });
+                            }
+                        }
+                        batch.members.push(m)
                     }
-                    Ok(None) => {}
+                    Ok((None, _)) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
                 }
             }
         }
-        Ok(out)
+        Ok(batch)
     }
 
     fn read_session_delta(
@@ -388,29 +566,14 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         if !is_compressed(&path) {
             return read_jsonl_delta(&path, cursor, &parse);
         }
-        let meta = std::fs::metadata(&path)?;
-        if cursor.last_seen_size == meta.len()
-            && crate::adapters::file_identity(&path) == cursor.source_file_identity
-            && matches!((cursor.mtime, crate::adapters::mtime_secs(&meta)),
-                (Some(a), Some(b)) if (a - b).abs() <= 1e-6)
-        {
+        if crate::adapters::file_matches_cursor(&path, cursor)? {
             return Ok(crate::adapters::MemberReadDelta {
                 messages: vec![],
                 source: None,
                 complete_snapshot: true,
             });
         }
-        let raw = std::fs::read(&path)?;
-        // Decode the whole frame before committing anything. A damaged or
-        // unfinished archive leaves the stored messages and cursor intact.
-        let decoded = zstd::decode_all(raw.as_slice())?;
-        crate::adapters::read_jsonl_snapshot(
-            &path,
-            cursor,
-            &raw,
-            &String::from_utf8_lossy(&decoded),
-            &parse,
-        )
+        Self::read_snapshot(&path, cursor).map(|(_, delta)| delta)
     }
 
     fn session_source_path(&self, session: &Session) -> PathBuf {

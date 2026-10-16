@@ -9,7 +9,6 @@ import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail, { projectDetailCache } from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
 import AgentsView from "../features/agents/AgentsView";
-import SearchView from "../features/search/SearchView";
 import type { Route } from "./routes";
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
@@ -93,8 +92,6 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
       return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
-    case "search":
-      return <SearchView query={route.query} navigate={navigate} />;
     default:
       return <div className="main">Unknown view</div>;
   }

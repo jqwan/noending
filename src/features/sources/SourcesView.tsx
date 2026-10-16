@@ -214,7 +214,7 @@ export default function SourcesView() {
         </label>
         {/* 按钮名不随排队状态改：名字是动作，状态由旁边的徽标说。 */}
         <button className="btn primary" disabled={queued} onClick={scanAll}
-          title="只读取新增内容：从每个会话上次停下的位置继续">
+          title="同步有变化的会话文件；通常从上次位置继续，文件改写时自动重新对账">
           增量同步全部来源
         </button>
         {queued && <span className="badge accent">已排队，后台处理中…</span>}
@@ -269,11 +269,11 @@ export default function SourcesView() {
                   </div>
                   <div className="row" style={{ gap: 8, flex: "none" }}>
                     <button className="btn small" disabled={queued} onClick={() => queue(src, "scan")}
-                      title="只读取新增内容：从每个会话上次停下的位置继续">
+                      title="同步有变化的会话文件；通常从上次位置继续，文件改写时自动重新对账">
                       增量同步
                     </button>
                     <button className="btn small ghost" disabled={queued} onClick={() => setReingestTarget(src)}
-                      title="从头重新同步这个来源的全部文件；已同步的事件及其引用保持不变">
+                      title="从头重新同步全部文件；保留未变化的消息，清理已失效的旧消息">
                       全量同步
                     </button>
                     {src.origin === "user" && (
@@ -344,8 +344,8 @@ export default function SourcesView() {
         <Modal title="全量同步" onClose={() => setReingestTarget(null)}>
           <p className="small" style={{ marginTop: 0 }}>
             将从头重新同步 <span className="mono">{reingestTarget.path}</span> 的全部会话文件。
-            已同步的事件及其引用保持不变，只有真正新增或变化的内容会被追加；会话归属、
-            Context 条目与审计历史都保留。
+            未变化的消息、会话、任务关联和已有 Context 将保留。完整读取成功后，将清理已失效的旧消息；
+            读取或解析失败时保留上次可靠的消息结果。
           </p>
           <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
             <button className="btn" onClick={() => setReingestTarget(null)}>取消</button>

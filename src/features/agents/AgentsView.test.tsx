@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../../api", () => ({
-  api: {
+  api: { matchObjects: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
@@ -39,6 +39,7 @@ vi.mock("../../api", () => ({
     setResumeOpenMethod: vi.fn(),
     listWorkstreamCards: vi.fn(),
     listSessions: vi.fn(),
+    getSessionCountsByAgent: vi.fn(),
     prepareNewSession: vi.fn(),
     cancelPrepared: vi.fn(),
   },
@@ -140,6 +141,7 @@ beforeEach(() => {
   vi.mocked(api.removeIngestSource).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
+  vi.mocked(api.getSessionCountsByAgent).mockReset().mockResolvedValue({});
 });
 
 afterEach(cleanup);
@@ -165,7 +167,7 @@ describe("AgentsView", () => {
     const reingestButtons = await screen.findAllByRole("button", { name: "全量同步" });
     fireEvent.click(reingestButtons[0]);
 
-    expect(await screen.findByText(/绝不会清库重建或删除已有记录/)).toBeTruthy();
+    expect(await screen.findByText(/将清理已失效的旧消息/)).toBeTruthy();
     expect(api.reingestSource).not.toHaveBeenCalled();
     const confirmBtn = screen.getAllByRole("button", { name: "全量同步" });
     // 弹窗内的确认按钮
@@ -327,15 +329,13 @@ describe("AgentsView", () => {
   });
 
   it("displays normalized CLI status, session count and toggles between card and list view", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      { id: "s1", agent: "codex" } as any,
-      { id: "s2", agent: "codex" } as any,
-    ]);
+    vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({ codex: 602 });
     const { container } = render(<AgentsView navigate={vi.fn()} />);
     await screen.findByText("Claude Code");
     expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
     expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
-    expect(screen.getByText("2 个会话")).toBeTruthy();
+    expect(screen.getByText("602 个会话")).toBeTruthy();
+    expect(api.listSessions).not.toHaveBeenCalled();
     expect(screen.queryByText(/仅同步历史/)).toBeNull();
 
     // Toggle to list view and back
@@ -365,4 +365,16 @@ describe("AgentsView", () => {
     expect(screen.getByText("未检测到CLI")).toBeTruthy();
     expect(screen.queryByTitle("来源目录")).toBeNull();
   });
+});
+
+it("uses lookup aliases while keeping the selected capability filter", async () => {
+  vi.mocked(api.matchObjects).mockResolvedValue(["claude_code"]);
+  render(<AgentsView navigate={vi.fn()} />);
+  await screen.findByRole("button", { name: "查看 Claude Code Agent 详情" });
+  fireEvent.change(screen.getByRole("textbox", {name:"搜索 Agent"}), {target:{value:"claude"}});
+  await screen.findByRole("button", { name: "查看 Claude Code Agent 详情" });
+  expect(screen.queryByRole("button", {name:"查看 Codex Agent 详情"})).toBeNull();
+  expect(api.matchObjects).toHaveBeenCalledWith("agent","claude", expect.any(Array));
+  fireEvent.click(screen.getByRole("tab", {name:/桌面/}));
+  expect(screen.queryByRole("button", { name: "查看 Claude Code Agent 详情" })).toBeNull();
 });

@@ -105,24 +105,41 @@ pub struct SessionWorkspacePath {
 
 // Board scope: unarchived (default) | archived | all.
 #[tauri::command]
-pub fn list_sessions(
-    state: State<AppState>,
+pub async fn list_sessions(
+    state: State<'_, AppState>,
     project_id: Option<String>,
     agent: Option<String>,
     scope: Option<String>,
-) -> Result<Vec<Session>> {
+    limit: Option<usize>,
+) -> Result<Vec<SessionListItem>> {
+    if limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
+        return Err(other("会话预览数量必须在 1～500 之间"));
+    }
     let agent = agent.and_then(|a| Agent::parse(&a));
     let scope = scope
         .as_deref()
         .map(SessionListScope::parse)
         .unwrap_or_default();
-    with_db(&state, |db| {
-        db.list_sessions(crate::storage::SessionFilter {
-            project_id,
-            agent,
-            scope,
-        })
+    let db = state.db.clone();
+    super::run_on_blocking_worker(move || {
+        db.list_session_items(
+            crate::storage::SessionFilter {
+                project_id,
+                agent,
+                scope,
+            },
+            limit,
+        )
     })
+    .await?
+}
+
+#[tauri::command]
+pub async fn get_session_counts_by_agent(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let db = state.db.clone();
+    super::run_on_blocking_worker(move || db.session_counts_by_agent()).await?
 }
 
 /// Filesystem and executable checks run off the UI thread, in one batch.
@@ -237,6 +254,20 @@ pub struct SessionWindowMessage {
     pub turn: Option<SessionTurnSummary>,
 }
 
+impl From<crate::storage::WindowedMessage> for SessionWindowMessage {
+    fn from(row: crate::storage::WindowedMessage) -> Self {
+        Self {
+            ordinal: row.ordinal,
+            message: row.message,
+            turn: row.turn.map(|turn| SessionTurnSummary {
+                boundary_ordinal: turn.boundary_ordinal,
+                boundary_ts: turn.boundary_ts,
+                count: turn.count,
+            }),
+        }
+    }
+}
+
 /// The turn a final reply closes, as its reader-facing summary.
 #[derive(Serialize)]
 pub struct SessionTurnSummary {
@@ -271,7 +302,7 @@ pub struct SessionMessageWindow {
 /// One turn's expanded intermediates.
 #[derive(Serialize)]
 pub struct TurnIntermediates {
-    pub messages: Vec<SessionMessage>,
+    pub messages: Vec<SessionWindowMessage>,
     /// The range exceeded the cap and was cut short.
     pub truncated: bool,
 }
@@ -309,15 +340,7 @@ pub fn get_session_messages(
             messages: window
                 .messages
                 .into_iter()
-                .map(|row| SessionWindowMessage {
-                    ordinal: row.ordinal,
-                    message: row.message,
-                    turn: row.turn.map(|turn| SessionTurnSummary {
-                        boundary_ordinal: turn.boundary_ordinal,
-                        boundary_ts: turn.boundary_ts,
-                        count: turn.count,
-                    }),
-                })
+                .map(SessionWindowMessage::from)
                 .collect(),
             generation: window.generation,
             total: window.total,
@@ -345,7 +368,10 @@ pub fn get_turn_intermediates(
             TURN_INTERMEDIATES_MAX,
         )?;
         Ok(TurnIntermediates {
-            messages,
+            messages: messages
+                .into_iter()
+                .map(SessionWindowMessage::from)
+                .collect(),
             truncated,
         })
     })

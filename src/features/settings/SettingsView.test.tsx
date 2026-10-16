@@ -195,5 +195,5 @@ it("saves extraction settings immediately on selection and handles disable extra
   fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });
   await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(noneExpected));
   expect(screen.queryByRole("button", { name: "模型与推理设置" })).toBeNull();
-  expect(screen.getByText(/已停用自动提取/)).toBeTruthy();
+  expect(screen.getByText(/已停用提取/)).toBeTruthy();
 });

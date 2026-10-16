@@ -542,11 +542,12 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&session.source_path);
+        let identity = crate::adapters::file_identity(&path);
         let conn = open_read_only(&path)?;
+        let tx = conn.unchecked_transaction()?;
         let is_root = true; // every stored session is its root source
 
-        let mut stmt =
-            conn.prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")?;
+        let mut stmt = tx.prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -578,8 +579,6 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         }
         drop(stmt);
 
-        drop(conn);
-
         let source = crate::adapters::sqlite_replay_cursor_update(
             &path,
             cursor,
@@ -588,6 +587,10 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
                 activity_epoch_secs: max_step_secs,
             },
         )?;
+        if source.file_identity != identity {
+            return Err(other("Antigravity 来源在读取期间被替换，请重试"));
+        }
+        tx.commit()?;
         Ok(MemberReadDelta {
             messages,
             source: Some(source),

@@ -2,8 +2,8 @@ import { useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
-import { continueSessionDesktopWithToast, useAgentStatus } from "./continueDesktop";
-import { AGENT_LABELS, type Session, type TerminalSummary } from "../../types";
+import { continueSessionDesktopWithToast, resolveSessionContinueMode, useAgentStatus } from "./continueDesktop";
+import { AGENT_LABELS, type SessionListItem, type TerminalSummary } from "../../types";
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
@@ -14,7 +14,7 @@ import type { Route } from "../../app/routes";
  * 默认 12 条，「查看全部 / 收起」展开。
  */
 export default function SessionMiniList({ sessions, emptyText, navigate, terminals: externalTerminals }: {
-  sessions: Session[];
+  sessions: SessionListItem[];
   emptyText: string;
   navigate: (r: Route) => void;
   terminals?: TerminalSummary[];
@@ -23,12 +23,14 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
   const agentStatus = useAgentStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
-  const resumeStates = useTerminalResumeStates(sessions.map(s => s.id));
+  const visibleSessions = sessions.slice(0, showAll ? undefined : 12);
+  const resumeStates = useTerminalResumeStates(visibleSessions
+    .filter(s => !s.archived_at && resolveSessionContinueMode(s) === "terminal").map(s => s.id));
 
   return (
     <>
       {sessions.length === 0 && <div className="l1-none">{emptyText}</div>}
-      {sessions.slice(0, showAll ? undefined : 12).map((s) => (
+      {visibleSessions.map((s) => (
         <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}>
           <div className="grow">
             <div className="title mini-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>

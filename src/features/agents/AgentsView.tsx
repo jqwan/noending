@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useViewPreference, preferenceValues, useViewScroll } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
@@ -229,12 +230,7 @@ export default function AgentsView({
 
   const reloadSessions = useCallback(async () => {
     try {
-      const list = await api.listSessions();
-      const counts: Record<string, number> = {};
-      for (const s of list) {
-        counts[s.agent] = (counts[s.agent] ?? 0) + 1;
-      }
-      setSessionCounts(counts);
+      setSessionCounts(await api.getSessionCountsByAgent());
     } catch (e) {
       console.error(e);
     }
@@ -375,16 +371,9 @@ export default function AgentsView({
     ? ALL_AGENTS.filter((a) => Boolean(agentStatus[a]?.desktop_app)).length
     : 0;
 
-  // 过滤展示的 Agent 列表
-  const visibleAgents = ALL_AGENTS.filter((agent) => {
+  const candidates = useMemo(() => ALL_AGENTS.filter((agent) => {
     const entry = agentStatus?.[agent];
     if (initialAgent) return agent === initialAgent;
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase();
-      const matchName = AGENT_LABELS[agent].toLowerCase().includes(q);
-      const matchKey = agent.toLowerCase().includes(q);
-      if (!matchName && !matchKey) return false;
-    }
 
     if (filterTab === "tui") {
       return Boolean(entry?.terminal_cli);
@@ -393,7 +382,9 @@ export default function AgentsView({
       return Boolean(entry?.desktop_app);
     }
     return true;
-  });
+  }), [agentStatus, initialAgent, filterTab]);
+  const search = useObjectMatches("agent", initialAgent ? "" : searchQuery, candidates, candidates);
+  const visibleAgents = search.pending || search.error ? [] : candidates.filter(agent => !search.ids || search.ids.has(agent));
 
   if (initialAgent) {
     const entry = agentStatus?.[initialAgent];
@@ -518,8 +509,8 @@ export default function AgentsView({
               将从头重新同步 <span className="mono">{reingestTarget.path}</span> 的全部会话文件。
             </p>
             <p className="small" style={{ color: "var(--text-secondary)" }}>
-              已同步的事件身份标识（UUID）、会话归属、历史引用与 Context 衍生记录均完整保留，
-              只有真正新增或变化的内容会被追加，<strong>绝不会清库重建或删除已有记录</strong>。
+              未变化的消息、会话、任务关联和已有 Context 将保留。
+              <strong>完整读取成功后，将清理已失效的旧消息</strong>；读取或解析失败时保留上次可靠的消息结果。
             </p>
             <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
               <button className="btn" onClick={() => setReingestTarget(null)}>
@@ -798,7 +789,8 @@ export default function AgentsView({
           })}
         </div>
 
-        {visibleAgents.length === 0 && (
+        <ObjectSearchFeedback search={search} />
+        {visibleAgents.length === 0 && !search.pending && !search.error && (
           <div className="card muted small" style={{ textAlign: "center", padding: "36px 20px" }}>
             未找到匹配「{searchQuery}」的 Agent。
           </div>
@@ -812,8 +804,8 @@ export default function AgentsView({
             将从头重新同步 <span className="mono">{reingestTarget.path}</span> 的全部会话文件。
           </p>
           <p className="small" style={{ color: "var(--text-secondary)" }}>
-            已同步的事件身份标识（UUID）、会话归属、历史引用与 Context 衍生记录均完整保留，
-            只有真正新增或变化的内容会被追加，<strong>绝不会清库重建或删除已有记录</strong>。
+            未变化的消息、会话、任务关联和已有 Context 将保留。
+            <strong>完整读取成功后，将清理已失效的旧消息</strong>；读取或解析失败时保留上次可靠的消息结果。
           </p>
           <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
             <button className="btn" onClick={() => setReingestTarget(null)}>

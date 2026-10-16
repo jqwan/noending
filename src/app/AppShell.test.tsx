@@ -39,8 +39,8 @@ vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navi
   </>;
 } }));
 vi.mock("../components/Toast", () => ({ default: () => null }));
-vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }: { navigate: (route: Route) => void; onClose: () => void }) => <div role="dialog" aria-label="全局搜索">
-  <button onClick={() => { navigate({ view: "search", query: "test" }); onClose(); }}>查看搜索结果</button>
+vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }: { navigate: (route: Route) => void; onClose: () => void }) => <div role="dialog" aria-label="查找">
+  <button onClick={() => { navigate({ view: "agents", agent: "codex" }); onClose(); }}>进入 Agent 详情</button>
 </div> }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
@@ -106,14 +106,14 @@ it("keeps icon navigation fixed and allows toggling the session sidebar in any s
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
 });
 
-it("preserves the session page's unsent state while switching sections or viewing global search", () => {
+it("preserves the session page's unsent state while opening Agent details from lookup", () => {
   render(<AppShell />);
   fireEvent.change(screen.getByRole("textbox", { name: "会话草稿" }), { target: { value: "未发送的消息" } });
   fireEvent.click(screen.getByRole("button", { name: "任务" }));
-  fireEvent.click(screen.getByRole("button", { name: "搜索" }));
-  expect(screen.getByRole("dialog", { name: "全局搜索" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "查看搜索结果" }));
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("search");
+  fireEvent.click(screen.getByRole("button", { name: "查找" }));
+  expect(screen.getByRole("dialog", { name: "查找" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "进入 Agent 详情" }));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
   fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
   fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");

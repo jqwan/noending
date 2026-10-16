@@ -130,9 +130,8 @@ fn conversation(conn: &Connection, session_id: &str) -> Result<Vec<(Value, Vec<V
     for row in part_rows {
         let (message_id, id, data, sequence) =
             row.map_err(|e| other(format!("读取 ZCode part 失败: {e}")))?;
-        let Some(parsed) = serde_json::from_str::<Value>(&data).ok() else {
-            continue;
-        };
+        let parsed = serde_json::from_str::<Value>(&data)
+            .map_err(|e| other(format!("ZCode part {id} 数据不完整：{e}")))?;
         parts_by_message.entry(message_id).or_default().push(
             serde_json::json!({ "id": id, "data": parsed, "sequence": sequence.unwrap_or(0) }),
         );
@@ -152,9 +151,8 @@ fn conversation(conn: &Connection, session_id: &str) -> Result<Vec<(Value, Vec<V
     let mut out = Vec::new();
     for row in msg_rows {
         let (id, data) = row.map_err(|e| other(format!("读取 ZCode message 失败: {e}")))?;
-        let Ok(data) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
+        let data = serde_json::from_str::<Value>(&data)
+            .map_err(|e| other(format!("ZCode message {id} 数据不完整：{e}")))?;
         let parts = parts_by_message.remove(&id).unwrap_or_default();
         out.push((serde_json::json!({ "id": id, "data": data }), parts));
     }
@@ -350,16 +348,18 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&session.source_path);
+        let identity = crate::adapters::file_identity(&path);
         let conn = open_read_only(&path)?;
+        let tx = conn.unchecked_transaction()?;
         let is_root = true; // every stored session is its root source
         let mut messages = Vec::new();
-        for (message, parts) in conversation(&conn, &session.root_agent_session_id)? {
+        for (message, parts) in conversation(&tx, &session.root_agent_session_id)? {
             if let Some(m) = message_of(&message, &parts, is_root) {
                 messages.push(m);
             }
         }
 
-        let (count, time_updated): (i64, Option<i64>) = conn
+        let (count, time_updated): (i64, Option<i64>) = tx
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM message WHERE session_id = ?1),
                         (SELECT time_updated FROM session WHERE id = ?1)",
@@ -375,6 +375,10 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
                 activity_epoch_secs: time_updated.map(|ms| ms as f64 / 1000.0),
             },
         )?;
+        if source.file_identity != identity {
+            return Err(other("ZCode 来源在读取期间被替换，请重试"));
+        }
+        tx.commit()?;
         Ok(MemberReadDelta {
             messages,
             source: Some(source),
@@ -875,6 +879,28 @@ mod tests {
             first.source.unwrap().generation,
             "settling a reply is not a change of source shape"
         );
+    }
+
+    #[test]
+    fn malformed_message_or_part_cannot_authorize_a_complete_snapshot() {
+        for table in ["message", "part"] {
+            let root = unique_dir("invalid-json");
+            let db = store(&root);
+            let conn = open(&db);
+            session_row(&conn, "s", None, "/repo", 100);
+            message_row(&conn, "m1", "s", 0, prompt());
+            part_row(&conn, "p1", "m1", "s", 0, text_part("reliable question"));
+            let session = session_of(&db, "s");
+            let first = ZCodeAdapter
+                .read_session_delta(&session, &SourceCursor::default())
+                .unwrap();
+            assert_eq!(first.messages[0].content, "reliable question");
+            conn.execute(&format!("UPDATE {table} SET data = '{{broken'"), [])
+                .unwrap();
+            assert!(ZCodeAdapter
+                .read_session_delta(&session, &SourceCursor::default())
+                .is_err());
+        }
     }
 
     /// `task_type` decides the member kind: fork, subagent_child,

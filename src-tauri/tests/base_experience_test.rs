@@ -11,7 +11,7 @@ use noending::domain::{
     Agent, Session, SessionContextFields, SessionMessageRole, SourceCursorUpdate, Workstream,
 };
 use noending::storage::{new_id, now, Db};
-use noending::{ingestion, lifecycle, search};
+use noending::{ingestion, lifecycle};
 use noending_lib as noending;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -234,7 +234,7 @@ fn ingestion_writes_facts_and_zero_context() {
 
     // Search indexing is part of ingestion and stays on.
     assert!(
-        search::search(&db, "postgres-primary-store", 10)
+        support::search_messages(&db, "postgres-primary-store", 10)
             .unwrap()
             .iter()
             .any(|h| h.kind == "message" && h.parent_id == s.id),
@@ -511,6 +511,16 @@ fn the_conversation_reads_backward_from_the_newest_message() {
 #[test]
 fn a_final_reply_carries_its_turn_and_the_range_fetch_returns_its_intermediates() {
     let db = open_db("turn-blocks");
+    support::seed_conversation(
+        &db,
+        Agent::ClaudeCode,
+        "turn-blocks",
+        &[support::parsed_message(
+            "retired",
+            SessionMessageRole::User,
+            "旧版本提问",
+        )],
+    );
     let mut first_ask = support::parsed_message("m1", SessionMessageRole::User, "第一问");
     first_ask.ts = Some("2026-10-05T10:00:00+08:00".into());
     let (session, _) = support::seed_conversation(
@@ -564,18 +574,27 @@ fn a_final_reply_carries_its_turn_and_the_range_fetch_returns_its_intermediates(
     assert_eq!(
         intermediates
             .iter()
-            .map(|m| m.content.as_str())
+            .map(|m| (m.ordinal, m.message.sequence, m.message.content.as_str()))
             .collect::<Vec<_>>(),
-        vec!["中间一", "中间二"]
+        vec![(2, 3, "中间一"), (3, 4, "中间二")]
     );
     assert!(!truncated);
+    let response = noending::commands::session_workspace::TurnIntermediates {
+        messages: intermediates.into_iter().map(Into::into).collect(),
+        truncated,
+    };
+    let json = serde_json::to_value(response).unwrap();
+    assert_eq!(json["messages"][0]["ordinal"], 2);
+    assert_eq!(json["messages"][0]["sequence"], 3);
+    assert_eq!(json["messages"][1]["ordinal"], 3);
+    assert_eq!(json["messages"][1]["sequence"], 4);
     let (capped, truncated) = db.turn_intermediates(&session.id, 1, 4, 1).unwrap();
     assert_eq!(
         capped
             .iter()
-            .map(|m| m.content.as_str())
+            .map(|m| (m.ordinal, m.message.content.as_str()))
             .collect::<Vec<_>>(),
-        vec!["中间一"]
+        vec![(2, "中间一")]
     );
     assert!(truncated);
 }

@@ -123,7 +123,7 @@ export interface ProjectDetailData {
   purpose?: ProjectPurpose | null;
   workspace_paths: WorkspacePath[];
   workstreams: ProjectWorkstreamRow[];
-  sessions: Session[];
+  sessions: SessionListItem[];
   /** 链接仓库的远程 URL（origin 优先），随 git 身份的最近一次观察刷新；
    *  目录项目或无 remote 的仓库为 `null`。URL 已剥除内嵌凭据。 */
   remote_url: string | null;
@@ -168,6 +168,21 @@ export interface WorkstreamCardData {
   latest_session: LatestSessionInfo | null;
 }
 
+/** Global lookup opens existing objects; it never returns message/summary content. */
+export interface NavigationItem {
+  kind: "project" | "workstream" | "session" | "agent";
+  ref_id: string;
+  title: string;
+  hint: string;
+  agent: Agent | null;
+  archived: boolean;
+}
+
+export interface NavigationResults {
+  items: NavigationItem[];
+  has_more: boolean;
+}
+
 /** 逻辑会话：用户可感知、可 Resume 的主会话。身份是 `(agent, root_agent_session_id)`；
  *  一个会话就是它的根源：来源、游标和事实前沿都在这一行上。 */
 export interface Session {
@@ -208,6 +223,14 @@ export interface Session {
   fact_generation: number;
   latest_message_seq: number;
 }
+
+/** 列表、筛选和导航需要的轻量投影；同步游标及来源元数据仅由详情接口读取。 */
+export type SessionListItem = Pick<Session,
+  "id" | "agent" | "root_agent_session_id" | "title" | "cwd" |
+  "project_id" | "workspace_path_id" | "tracked_workstream_ids" |
+  "started_at" | "last_activity_at" | "last_conversation_at" | "archived_at" |
+  "source_kind" | "latest_message_seq"
+>;
 
 /** `role` 只有 user | assistant——Conversation 的全部形状。 */
 export type SessionMessageRole = "user" | "assistant";
@@ -264,7 +287,7 @@ export interface IngestSource {
 export interface WorkstreamContext {
   workstream: Workstream;
   projects: WorkstreamProject[];
-  sessions: Session[];
+  sessions: SessionListItem[];
 }
 
 // Explicit Context update (read + one-click update)
@@ -428,15 +451,6 @@ export interface SessionMessageWindow {
   /** 上方还有多少条骨架消息没加载（「加载更早」的计数）。 */
   remaining: number;
   next_before_ordinal: number | null;
-}
-
-export interface SearchHit {
-  kind: string;
-  ref_id: string;
-  parent_id: string;
-  title: string;
-  snippet: string;
-  rank: number;
 }
 
 /**

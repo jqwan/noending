@@ -8,16 +8,6 @@ export function cardSummaryLine(card: WorkstreamCardData): string {
   return card.description || "";
 }
 
-/** 检索字段必须与 placeholder 声明的一致：命中一个页面上看不见的字段，
- *  等于给用户一个无法解释的结果。 */
-export function cardSearchFields(card: WorkstreamCardData): (string | null | undefined)[] {
-  return [card.title, card.description, ...card.projects.map((p) => p.name)];
-}
-
-export function searchFieldHint(): string {
-  return "搜索任务…（标题、描述、项目）";
-}
-
 /**
  * Workstream 卡片：卡片体 → Detail；新建进入预选当前任务的新会话页面。
  * 卡片提供归档、取消归档和永久删除；未归档任务可新建会话。

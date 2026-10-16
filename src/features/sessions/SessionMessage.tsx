@@ -41,7 +41,11 @@ export function messageData(m: SessionMessage, agent: Agent | null): SessionMess
 const TRUNCATE_AT = 240;
 
 /** 两种气泡：用户右、Agent 左。 */
-export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
+export default function SessionMessage({ msg, ordinal }: {
+  msg: SessionMessageData;
+  /** 历史消息显示当前对话位置；sequence 仍用于滚动锚点。 */
+  ordinal?: number;
+}) {
   const [open, setOpen] = useState(false);
   const [clamped, setClamped] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -61,7 +65,7 @@ export default function SessionMessage({ msg }: { msg: SessionMessageData }) {
     setClamped(el !== null && el.scrollHeight > el.clientHeight + 1);
   }, [text, md]);
 
-  const stamp = `#${msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
+  const stamp = `#${ordinal ?? msg.sequence}${msg.ts ? `  ${formatDateTime(msg.ts)}` : ""}`;
 
   // 整行可点会变成一条与内容无关的宽条，所以热区和悬浮效果都只落在气泡上；
   // 键盘可达靠 role + tabIndex，焦点环由全局的 :focus-visible 给。

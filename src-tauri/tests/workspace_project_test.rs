@@ -19,10 +19,9 @@ use noending::domain::{
 use noending::storage::workspace::{insert_workspace_path_conn, rename_project_conn};
 use noending::storage::Db;
 use noending::workspace::project::{
-    apply_projection_effect, delete_project_permanently, ensure_workspace_path,
-    ensure_workspace_path_conn, merge_projects_conn, project_detail, reconcile_workspace_paths,
-    registry_is_consistent, set_project_archived, ProjectProjection, ProjectionEffect,
-    UnrestrictedWorkspace, WorkspacePolicy,
+    delete_project_permanently, ensure_workspace_path, ensure_workspace_path_conn,
+    merge_projects_conn, project_detail, reconcile_workspace_paths, registry_is_consistent,
+    set_project_archived, ProjectProjection, UnrestrictedWorkspace, WorkspacePolicy,
 };
 use noending::workspace::resolver::WorkspaceObserving;
 use noending::workspace::{is_within, normalize_path, path_identity, WorkspaceAttaching};
@@ -1723,6 +1722,12 @@ fn project_detail_has_the_frozen_shape() {
     // (`serde_json::Value` orders map keys, so this asserts the SET: the wire
     // object's field order is not part of the contract.)
     let value = serde_json::to_value(&detail).unwrap();
+    for field in ["metadata", "source_path", "source_prefix_hash", "summary"] {
+        assert!(
+            value["sessions"][0].get(field).is_none(),
+            "project session lists must omit {field}"
+        );
+    }
     let mut keys: Vec<&str> = value
         .as_object()
         .unwrap()
@@ -1789,45 +1794,6 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
         .map(|p| p.id)
         .collect();
     assert_eq!(rest, vec![a.project_id.clone()]);
-}
-
-#[test]
-fn the_core_writes_no_index_rows_and_the_wrapper_does() {
-    // the transaction-scoped core never touches `search_index`, so a
-    // rolled-back transaction cannot leave search describing a Project that was
-    // never committed. The effect list is the whole handover.
-    let (_d, db) = temp_db();
-    let observation = repo("/work/repo", "/work/repo/.git", GitWorktreeKind::Main, &[]);
-    let outcome = db
-        .tx(|tx| ensure_workspace_path_conn(tx, &observation, &UnrestrictedWorkspace))
-        .unwrap();
-    assert!(!outcome.effect.projects_touched.is_empty());
-    assert!(outcome.effect.projects_deleted.is_empty());
-    let project_id = outcome.path.project_id.clone();
-
-    let indexed = |db: &Db| -> i64 {
-        db.read()
-            .query_row(
-                "SELECT COUNT(*) FROM search_index WHERE kind = 'project' AND ref_id = ?1",
-                [project_id.as_str()],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-    };
-    assert_eq!(indexed(&db), 0, "in-transaction: still nothing indexed");
-
-    apply_projection_effect(&db, &outcome.effect);
-    assert_eq!(indexed(&db), 1, "after commit: exactly one row");
-
-    // A deleted id is never also "touched": the wrapper must not re-create the row
-    // it was told to drop.
-    let mut effect = ProjectionEffect::default();
-    effect.touch(&project_id);
-    effect.delete(&project_id);
-    assert!(effect.projects_touched.is_empty());
-    assert_eq!(effect.projects_deleted, vec![project_id.clone()]);
-    apply_projection_effect(&db, &effect);
-    assert_eq!(indexed(&db), 0);
 }
 
 // The Windows case-alias claim can only be proven where the host's own rule

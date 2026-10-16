@@ -1,4 +1,4 @@
-//! Scoped conversation search using the same FTS and current-message rules as UI search.
+//! Scoped conversation search for CLI, restricted to current messages and session metadata.
 use super::{to_fts_query, SearchHit, CURRENT_MESSAGE_GUARD};
 use crate::{error::Result, storage::Db};
 use rusqlite::params;
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionFilter {
+pub struct SessionFilter {
     pub project: Option<String>,
     pub task: Option<String>,
     pub agent: Option<String>,
@@ -23,14 +23,14 @@ const FILTER: &str = "search_index.kind IN ('session','message')
       AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL)
         OR (?5='unarchived' AND s.archived_at IS NULL)))";
 
-pub(crate) struct SessionHit {
+pub struct SessionHit {
     pub hit: SearchHit,
     pub sequence: Option<i64>,
 }
 
 /// Keep the search mode across pages: an exhausted FTS page must not restart
 /// the LIKE fallback. Results are live, with deterministic ordering per query.
-pub(crate) fn page(
+pub fn page(
     db: &Db,
     query: &str,
     filter: &SessionFilter,

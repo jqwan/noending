@@ -5,7 +5,7 @@ import { api } from "../api";
 import { onEvent, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import AgentIcon from "../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type ProjectCardData, type AgentStatusEntry, type TerminalResumeState } from "../types";
+import { AGENT_LABELS, type Agent, type TerminalSummary, type SessionListItem, type ProjectCardData, type AgentStatusEntry, type TerminalResumeState } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/SessionTable";
 import { capsOf, FORMAT_CAPS } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
@@ -131,7 +131,7 @@ export function isSessionWithinFiveDays(
   return diff >= -60000 && diff <= FIVE_DAYS_MS;
 }
 
-export function isSessionWithinSevenDays(session: Session, now = Date.now()): boolean {
+export function isSessionWithinSevenDays(session: SessionListItem, now = Date.now()): boolean {
   if (session.archived_at) return false;
   const time = sessionConversationTime(session);
   if (time === null) return false;
@@ -146,7 +146,7 @@ export function isSessionTerminalContinuable(
   return !terminalContinueState(session.id, session.terminals ?? [], resume, !!session.archived_at).disabled;
 }
 
-export type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "project_id" | "last_conversation_at" | "archived_at"> & {
+export type SidebarSession = Pick<SessionListItem, "id" | "agent" | "title" | "cwd" | "project_id" | "last_conversation_at" | "archived_at"> & {
   source_kind?: string;
   sessionId: string | null;
   terminals: TerminalSummary[];
@@ -156,7 +156,7 @@ export type SidebarSession = Pick<Session, "id" | "agent" | "title" | "cwd" | "p
 };
 
 export function mergeSidebarSessions(
-  sessions: Session[],
+  sessions: SessionListItem[],
   terminals: TerminalSummary[],
   filters: SidebarFilterKey[] = [],
   sortBy: SidebarSortKey = "createdAt",
@@ -557,12 +557,12 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
   const agentStatus = useAgentStatus();
   const [terminalsLoading, setTerminalsLoading] = useState(true);
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const resumeStates = useTerminalResumeStates(sessions.map(s => s.id));
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
   const [groupBy, setGroupBy] = useViewPreference<SidebarGroupBy>(`${statePrefix}.recent.groupBy.v2`, "project", preferenceValues("project", "agent", "none"));
   const [collapsedGroups, setCollapsedGroups] = useViewPreference<Record<string, boolean>>(`${statePrefix}.recent.collapsedGroups`, {}, booleanRecordPreference);
   const [expandedGroupSessions, setExpandedGroupSessions] = useState<Record<string, boolean>>({});
+  const [flatVisibleCount, setFlatVisibleCount] = useState(100);
 
   useEffect(() => {
     setExpandedGroupSessions({});
@@ -713,6 +713,32 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
       .filter((s) => isSessionPinned(s))
       .sort((a, b) => compareSidebarSessions(a, b, sortBy));
   }, [allMergedSessions, pinnedSessionIds, isSessionPinned, sortBy]);
+
+  // Only visible actions need filesystem/CLI prerequisites. The explicit
+  // "can continue" filter needs all candidates checked to classify them.
+  const resumeCheckIds = useMemo(() => {
+    if (collapsed || hidden) return [];
+    let candidates: SidebarSession[];
+    if (filters.includes("canContinue")) {
+      candidates = allMergedSessions;
+    } else {
+      const groups = groupSidebarSessions(
+        mergeSidebarSessions(sessions, terminals, filters, sortBy)
+          .filter(s => !isSessionPinned(s) && (!runningOnly || s.terminals.some(t => t.live))),
+        groupBy, sortBy, projectMap,
+      );
+      candidates = groups.flatMap(group => {
+        if (groupBy === "none") return group.sessions.slice(0, flatVisibleCount);
+        if (collapsedGroups[`${groupBy}:${group.id}`]) return [];
+        return expandedGroupSessions[group.id] ? group.sessions : group.sessions.slice(0, MAX_GROUP_SESSIONS_DEFAULT);
+      });
+    }
+    if (!pinnedCollapsed) candidates = [...candidates, ...pinnedSessions];
+    return candidates.filter(s => s.sessionId && !s.archived_at && capsOf(s.agent, s.source_kind).terminal)
+      .map(s => s.sessionId!);
+  }, [collapsed, hidden, filters, allMergedSessions, sessions, terminals, sortBy, isSessionPinned,
+    runningOnly, groupBy, projectMap, flatVisibleCount, collapsedGroups, expandedGroupSessions, pinnedCollapsed, pinnedSessions]);
+  const resumeStates = useTerminalResumeStates(resumeCheckIds);
 
   const sessionGroups = useMemo(() => {
     return groupSidebarSessions(
@@ -988,7 +1014,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           </div>
         ) : groupBy === "none" ? (
           <div className="sidebar-flat-session-items">
-            {sessionGroups[0].sessions.map((s) => (
+            {sessionGroups[0].sessions.slice(0, flatVisibleCount).map((s) => (
               <SidebarSessionRow
                 key={s.id}
                 session={s} resumeState={resumeStates[s.sessionId ?? ""]}
@@ -1001,6 +1027,11 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
                 showIcon={showSessionIcons}
               />
             ))}
+            {sessionGroups[0].sessions.length > flatVisibleCount && (
+              <button className="btn small ghost" onClick={() => setFlatVisibleCount(count => count + 100)}>
+                显示更多（剩余 {sessionGroups[0].sessions.length - flatVisibleCount}）
+              </button>
+            )}
           </div>
         ) : (
           sessionGroups.map((group) => {

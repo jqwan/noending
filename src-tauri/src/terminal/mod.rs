@@ -1625,10 +1625,21 @@ mod tests {
                     .initial_workstream_ids,
                 Vec::<String>::new()
             );
-            assert!(crate::search::search(&db, "Initialtask", 50)
-                .unwrap()
-                .iter()
-                .any(|hit| hit.kind == "session" && hit.ref_id == a.id));
+            assert!(crate::search::sessions::page(
+                &db,
+                "Initialtask",
+                &crate::search::sessions::SessionFilter {
+                    scope: "all".into(),
+                    ..Default::default()
+                },
+                50,
+                0,
+                None
+            )
+            .unwrap()
+            .0
+            .iter()
+            .any(|row| row.hit.kind == "session" && row.hit.ref_id == a.id));
             // Clearing ownership explicitly cannot be undone by another lifecycle notice.
             crate::storage::seed_tracking(&db, &a.id, None).unwrap();
             registry.report_native_identity(&db, &terminal, &native_event("native-a"));
@@ -1855,10 +1866,21 @@ mod tests {
             .session_id
             .is_none());
         assert_eq!(owner(&db, &session), None);
-        assert!(!crate::search::search(&db, "Retrytask", 50)
-            .unwrap()
-            .iter()
-            .any(|hit| hit.kind == "session" && hit.ref_id == session.id));
+        assert!(!crate::search::sessions::page(
+            &db,
+            "Retrytask",
+            &crate::search::sessions::SessionFilter {
+                scope: "all".into(),
+                ..Default::default()
+            },
+            50,
+            0,
+            None
+        )
+        .unwrap()
+        .0
+        .iter()
+        .any(|row| row.hit.kind == "session" && row.hit.ref_id == session.id));
         db.write()
             .execute_batch("DROP TRIGGER reject_owner;")
             .unwrap();

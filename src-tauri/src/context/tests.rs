@@ -282,6 +282,36 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     let ctx = f.db().get_session_context(&id).unwrap().unwrap();
     assert_eq!(ctx.revision, 3);
     assert_eq!(ctx.fields.summary, "重新整理");
+    append(&f, &id, "改写后唯一保留的对话", true);
+    assert_eq!(
+        f.db()
+            .get_session_context(&id)
+            .unwrap()
+            .unwrap()
+            .fields
+            .summary,
+        "重新整理"
+    );
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let input = records(&dir.join(format!("session-{id}.jsonl")));
+        assert_eq!(input[0]["current_summary"], Value::Null);
+        assert_eq!(input[0]["from_sequence"], 1);
+        assert_eq!(input[0]["message_count"], 1);
+        assert!(input.iter().any(|r| r["content"] == "改写后唯一保留的对话"));
+        result(dir, "session", &id, "仅根据当前对话生成的新摘要");
+        empty_preferences(dir);
+        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+    };
+    extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
+    assert_eq!(
+        f.db()
+            .get_session_context(&id)
+            .unwrap()
+            .unwrap()
+            .fields
+            .summary,
+        "仅根据当前对话生成的新摘要"
+    );
     assert_eq!(
         f.db()
             .read()
@@ -433,7 +463,7 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
 }
 
 #[test]
-fn task_changes_retain_current_summaries_until_explicit_regeneration() {
+fn task_changes_keep_summaries_until_update_and_rebuild_rewritten_sessions() {
     let f = ServiceFixture::new();
     let home = f.home();
     let a = f.add_session(1, 10);
@@ -462,8 +492,9 @@ fn task_changes_retain_current_summaries_until_explicit_regeneration() {
         assert_eq!(input[0]["current_summary"], "旧任务摘要");
         assert!(!input.iter().any(|r| r["session_id"] == b));
         let session = records(&dir.join(format!("session-{a}.jsonl")));
-        assert_eq!(session[0]["current_summary"], "A");
+        assert_eq!(session[0]["current_summary"], Value::Null);
         assert_eq!(session[0]["message_count"], 1);
+        assert_eq!(session[1]["content"], "改写后的历史");
         result(dir, "session", &a, "改写结果");
         result(dir, "task", &ws.id, "新任务摘要");
         empty_preferences(dir);
@@ -914,17 +945,12 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
             .status,
         ContextUpdateStatus::NoChange
     );
-    f.db().index_project(&p).unwrap();
     assert_eq!(
-        f.db()
-            .read()
-            .query_row(
-                "SELECT body FROM search_index WHERE kind='project' AND ref_id=?1",
-                [&p.id],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-        "project searchable conclusion"
+        project_context_view(f.db(), &p.id)
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("project searchable conclusion")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));

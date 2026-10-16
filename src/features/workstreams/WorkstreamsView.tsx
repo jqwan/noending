@@ -1,3 +1,4 @@
+import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
@@ -7,7 +8,7 @@ import Icon from "../../components/Icon";
 import CustomSelect from "../../components/CustomSelect";
 import { Modal, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import WorkstreamCard, { cardSearchFields, cardSummaryLine, searchFieldHint } from "./WorkstreamCard";
+import WorkstreamCard, { cardSummaryLine } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
 import { AGENT_LABELS, type WorkstreamCardData } from "../../types";
@@ -58,21 +59,16 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const filtersActive =
     query.trim() !== "" || projectId !== "all";
 
+  const candidates = useMemo(() => cards?.filter((c) => archivedMode ? c.visibility === "archived" : c.visibility === "normal")
+      .filter((c) => projectId === "all" || (projectId === "none" ? c.projects.length === 0 : c.projects.some((p) => p.id === projectId))) ?? null, [cards, projectId, archivedMode]);
+  const candidateIds = useMemo(() => candidates?.map(item => item.id) ?? [], [candidates]);
+  const search = useObjectMatches("workstream", query, cards, candidateIds);
   const list = useMemo(() => {
-    if (!cards) return null;
-    const q = query.trim().toLowerCase();
-    return cards
-      .filter((c) => archivedMode ? c.visibility === "archived" : c.visibility === "normal")
-      .filter((c) => projectId === "all" || (projectId === "none" ? c.projects.length === 0 : c.projects.some((p) => p.id === projectId)))
-      .filter((c) =>
-        q === ""
-          ? true
-          : cardSearchFields(c)
-              .filter(Boolean)
-              .some((s) => s!.toLowerCase().includes(q)),
-      )
+    if (!candidates || search.pending || search.error) return null;
+    return candidates
+      .filter((c) => !search.ids || search.ids.has(c.id))
       .sort(SORTERS[sort]);
-  }, [cards, query, sort, projectId, archivedMode]);
+  }, [candidates, search, sort]);
 
   const archivedTasks = cards?.filter((c) => c.visibility === "archived") ?? [];
 
@@ -206,7 +202,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             type="text"
             className="ws-search"
             aria-label="搜索任务"
-            placeholder={searchFieldHint()}
+            placeholder="搜索任务…（标题）"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -278,7 +274,8 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           </div>
 
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
-          {list === null && !loadError && (
+          <ObjectSearchFeedback search={search} />
+          {cards === null && !loadError && (
             viewMode === "cards" ? (
               <div className="ws-grid board-grid" role="status">
                 <div className="skeleton card" style={{ minHeight: 140 }} />

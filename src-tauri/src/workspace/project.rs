@@ -39,7 +39,7 @@
 //! * `git_identities.id` is app-assigned (uuid), unlike `workspace_paths.id`
 //!   which is derived from the path.
 //! * WorkspacePath / Project mutations must re-index the affected search rows
-//!   (`index_project` / `unindex` and Session projections).
+//!   (Session metadata and message projections).
 //!
 //! A merge only ever moves a *path-backed* Project's paths (one with no family
 //! identity of its own); a *git-backed* Project keeps its other paths when one of
@@ -50,8 +50,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::domain::{
-    git_state, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose, Session,
-    WorkspaceObservation, WorkspacePath, Workstream,
+    git_state, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose,
+    SessionListItem, WorkspaceObservation, WorkspacePath, Workstream,
 };
 use crate::error::{other, Result};
 use crate::storage::workspace::{
@@ -191,47 +191,6 @@ impl<'a> ProjectProjection<'a> {
     }
 }
 
-/// Everything one application did beyond the path row itself.
-///
-/// The two lists exist because FTS rows may only be dropped or rewritten once
-/// the domain write has COMMITTED, so the transaction-scoped core records what
-/// happened and the `Db`-scoped wrapper performs the index work afterwards. A
-/// caller that runs the core inside its own transaction must do the same,
-/// otherwise a rolled-back write leaves search describing a Project that never
-/// came to be.
-#[derive(Debug, Default, Clone)]
-pub struct ProjectionEffect {
-    /// Created, Git-upgraded or renamed: refresh `index_project` after commit.
-    pub projects_touched: Vec<String>,
-    /// Absorbed by a merge: `unindex("project", id)` after commit.
-    pub projects_deleted: Vec<String>,
-}
-
-impl ProjectionEffect {
-    /// Record a Project row whose indexed content (name, or existence) changed.
-    pub fn touch(&mut self, id: &str) {
-        push_unique(&mut self.projects_touched, id);
-    }
-
-    /// Record a Project row that was deleted. Mutually exclusive with `touch` for
-    /// the same id, so a wrapper can never un-index and then re-index one row.
-    pub fn delete(&mut self, id: &str) {
-        push_unique(&mut self.projects_deleted, id);
-        self.projects_touched.retain(|p| p != id);
-    }
-
-    /// Fold a nested decision's bookkeeping into this one (a merge inside an
-    /// `ensure`, a fold inside a sweep).
-    pub fn merge(&mut self, other: &ProjectionEffect) {
-        for id in &other.projects_touched {
-            self.touch(id);
-        }
-        for id in &other.projects_deleted {
-            self.delete(id);
-        }
-    }
-}
-
 fn push_unique(list: &mut Vec<String>, id: &str) {
     if !list.iter().any(|known| known == id) {
         list.push(id.to_string());
@@ -247,7 +206,6 @@ pub struct EnsureOutcome {
     /// Sibling worktrees pulled in as new WorkspacePaths. They join the same
     /// Project; they are never added to any Workstream's path list.
     pub discovered: Vec<WorkspacePath>,
-    pub effect: ProjectionEffect,
 }
 
 /// A Project fold. `survivor` / `loser` are the outcome of
@@ -282,8 +240,7 @@ pub struct ReconcileReport {
 /// The single door for "this path exists and belongs somewhere".
 ///
 /// Runs inside the CALLER's transaction, so path registration commits together
-/// with everything derived from it. Post-commit work (FTS) is described by
-/// [`ProjectionEffect`].
+/// with everything derived from it, including session search metadata.
 pub fn ensure_workspace_path_conn(
     conn: &Connection,
     observation: &WorkspaceObservation,
@@ -317,7 +274,6 @@ pub fn ensure_workspace_path_conn(
     let family = git_family(conn, &observation.git)?;
     let known = get_workspace_path_conn(conn, &id)?;
     let (mut state, kind) = next_git_observation(known.as_ref(), &observation.git, &family);
-    let mut effect = ProjectionEffect::default();
     let mut discovered = Vec::new();
 
     match known {
@@ -329,41 +285,17 @@ pub fn ensure_workspace_path_conn(
             let project_id = match &family {
                 Some(f) => match project_by_git_id_conn(conn, &f.git_id)? {
                     Some(owner) => owner.id,
-                    None => {
-                        create_project_row(
-                            conn,
-                            &canonical,
-                            Some(&f.git_id),
-                            "normal",
-                            &mut effect,
-                        )?
-                        .id
-                    }
+                    None => create_project_row(conn, &canonical, Some(&f.git_id), "normal")?.id,
                 },
                 None => {
                     // A chat scratch directory joins its Agent's ONE bucket;
                     // everything else becomes its own path-backed Project.
                     match directory_group_label(&canonical, policy) {
                         Some(label) => {
-                            directory_group_project(
-                                conn,
-                                label,
-                                &canonical,
-                                policy,
-                                "normal",
-                                &mut effect,
-                            )?
-                            .id
+                            directory_group_project(conn, label, &canonical, policy, "normal")?.id
                         }
                         None => {
-                            create_single_directory_project(
-                                conn,
-                                &canonical,
-                                policy,
-                                "normal",
-                                &mut effect,
-                            )?
-                            .id
+                            create_single_directory_project(conn, &canonical, policy, "normal")?.id
                         }
                     }
                 }
@@ -391,11 +323,9 @@ pub fn ensure_workspace_path_conn(
                             // Preserve this project's name, summary and preferences. If
                             // its directory group exists, fold the two non-Git projects.
                             clear_git_identity_conn(conn, &mine.id)?;
-                            effect.touch(&mine.id);
+
                             if let Some(existing) = existing {
-                                let merged = merge_projects_conn(conn, &mine.id, &existing.id)?;
-                                effect.delete(&merged.loser);
-                                effect.touch(&merged.survivor);
+                                merge_projects_conn(conn, &mine.id, &existing.id)?;
                             }
                         } else {
                             // Other worktrees remain in their family; only this plain
@@ -407,19 +337,15 @@ pub fn ensure_workspace_path_conn(
                                     &canonical,
                                     policy,
                                     &mine.visibility,
-                                    &mut effect,
                                 )?,
                                 None => create_single_directory_project(
                                     conn,
                                     &canonical,
                                     policy,
                                     &mine.visibility,
-                                    &mut effect,
                                 )?,
                             };
                             reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
-                            effect.touch(&mine.id);
-                            effect.touch(&destination.id);
                         }
                         state = git_state::NONE.to_string();
                     } else if mine.git_id.is_none() && !assistant {
@@ -434,10 +360,8 @@ pub fn ensure_workspace_path_conn(
                                 &canonical,
                                 policy,
                                 &mine.visibility,
-                                &mut effect,
                             )?;
                             reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
-                            effect.touch(&mine.id);
                         }
                     }
                 }
@@ -464,10 +388,8 @@ pub fn ensure_workspace_path_conn(
                         Some(owner) if owner.id == mine.id => {
                             // Already the family's Project; an upgrade may still be
                             // owed.
-                            if mine.git_id.is_none()
-                                && adopt_git_identity_conn(conn, &mine.id, &f.git_id)?
-                            {
-                                effect.touch(&mine.id);
+                            if mine.git_id.is_none() {
+                                adopt_git_identity_conn(conn, &mine.id, &f.git_id)?;
                             }
                         }
                         Some(owner) => {
@@ -477,9 +399,7 @@ pub fn ensure_workspace_path_conn(
                                 // already has a Project: the two are one thing, so
                                 // merge. `pick_canonical` makes the git-backed side
                                 // the survivor and carries a user's name across.
-                                let merged = merge_projects_conn(conn, &mine.id, &owner.id)?;
-                                effect.delete(&merged.loser);
-                                effect.touch(&merged.survivor);
+                                merge_projects_conn(conn, &mine.id, &owner.id)?;
                             } else {
                                 // A different Git family or a shared chat bucket:
                                 // only this path moves; its siblings keep their
@@ -487,7 +407,6 @@ pub fn ensure_workspace_path_conn(
                                 if owner.id != row.project_id {
                                     reassign_workspace_path_project_conn(conn, &id, &owner.id)?;
                                 }
-                                effect.touch(&mine.id);
                             }
                         }
                         None => {
@@ -495,9 +414,7 @@ pub fn ensure_workspace_path_conn(
                                 // First branch: adopt in place. `Project.id`
                                 // does not move, so no Session or audit
                                 // reference has to be repaired.
-                                if adopt_git_identity_conn(conn, &mine.id, &f.git_id)? {
-                                    effect.touch(&mine.id);
-                                }
+                                adopt_git_identity_conn(conn, &mine.id, &f.git_id)?;
                             } else {
                                 // A known path meets an unseen family: the new
                                 // Project is created git-backed, this path moves
@@ -507,10 +424,8 @@ pub fn ensure_workspace_path_conn(
                                     &canonical,
                                     Some(&f.git_id),
                                     &mine.visibility,
-                                    &mut effect,
                                 )?;
                                 reassign_workspace_path_project_conn(conn, &id, &fresh.id)?;
-                                effect.touch(&mine.id);
                             }
                         }
                     }
@@ -527,25 +442,17 @@ pub fn ensure_workspace_path_conn(
         touch_git_identity_conn(conn, &f.git_id)?;
         let path =
             get_workspace_path_conn(conn, &id)?.ok_or_else(|| other("WorkspacePath 写入后消失"))?;
-        discovered = adopt_sibling_worktrees(conn, &path, f, policy, &mut effect)?;
+        discovered = adopt_sibling_worktrees(conn, &path, f, policy)?;
     }
 
     let path =
         get_workspace_path_conn(conn, &id)?.ok_or_else(|| other("WorkspacePath 写入后消失"))?;
-    Ok(EnsureOutcome {
-        path,
-        discovered,
-        effect,
-    })
+    Ok(EnsureOutcome { path, discovered })
 }
 
 /// Rename the editable display name and refresh project/session search in one transaction.
 pub fn rename_project(db: &Db, id: &str, name: &str) -> Result<Project> {
-    db.tx(|tx| {
-        let project = crate::storage::workspace::rename_project_conn(tx, id, name)?;
-        crate::storage::project_context_repo::reindex(tx, id)?;
-        Ok(project)
-    })
+    db.tx(|tx| crate::storage::workspace::rename_project_conn(tx, id, name))
 }
 
 /// Project archive state is independent of its tasks and sessions.
@@ -599,11 +506,10 @@ pub fn delete_project_permanently(db: &Db, id: &str, policy: &dyn WorkspacePolic
         for task in tasks {
             crate::storage::bump_input_revision_conn(tx,&task)?;
             tx.execute("UPDATE workstreams SET updated_at=?2 WHERE id=?1", rusqlite::params![task, now()])?;
-            crate::storage::workstream_projects::reindex_workstream_search_conn(tx, &task)?;
+
         }
         tx.execute("DELETE FROM workspace_paths WHERE project_id=?1", [id])?;
         tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
-        tx.execute("DELETE FROM search_index WHERE kind='project' AND ref_id=?1", [id])?;
         Ok(())
     })
 }
@@ -624,29 +530,7 @@ pub fn ensure_workspace_path_outcome(
     observation: &WorkspaceObservation,
     policy: &dyn WorkspacePolicy,
 ) -> Result<EnsureOutcome> {
-    let outcome = db.tx(|tx| ensure_workspace_path_conn(tx, observation, policy))?;
-    apply_projection_effect(db, &outcome.effect);
-    Ok(outcome)
-}
-
-/// The post-commit half of the effect: Project search rows follow the domain
-/// write, never lead it. Index failures are logged, not propagated: a stale
-/// search row must not roll back a committed physical fact.
-pub fn apply_projection_effect(db: &Db, effect: &ProjectionEffect) {
-    for id in &effect.projects_deleted {
-        db.unindex("project", id);
-    }
-    for id in &effect.projects_touched {
-        match db.get_project(id) {
-            Ok(Some(project)) => {
-                if let Err(e) = db.index_project(&project) {
-                    eprintln!("[workspace] 索引 Project {} 失败: {e}", project.id);
-                }
-            }
-            Ok(None) => db.unindex("project", id),
-            Err(e) => eprintln!("[workspace] 读取 Project {id} 以索引失败: {e}"),
-        }
-    }
+    db.tx(|tx| ensure_workspace_path_conn(tx, observation, policy))
 }
 
 /// The string door every caller shares: a Session cwd, a chosen working
@@ -671,11 +555,7 @@ impl WorkspaceAttaching for ProjectProjection<'_> {
 }
 
 impl ProjectProjection<'_> {
-    /// The same door, for a caller that owns the transaction and therefore also
-    /// owns the post-commit half of the work: collect the returned
-    /// [`ProjectionEffect`] and hand it to [`apply_projection_effect`] once the
-    /// transaction commits. Without that, a Project created inside someone else's
-    /// write is correct but un-indexed until the next reconcile pass.
+    /// Register a path inside the caller's transaction.
     pub fn ensure_path_outcome(
         &self,
         conn: &Connection,
@@ -798,7 +678,6 @@ fn create_project_row(
     canonical_path: &str,
     git_id: Option<&str>,
     visibility: &str,
-    effect: &mut ProjectionEffect,
 ) -> Result<Project> {
     let ts = now();
     let project = Project {
@@ -813,7 +692,7 @@ fn create_project_row(
         updated_at: ts,
     };
     upsert_project_conn(conn, &project)?;
-    effect.touch(&project.id);
+
     Ok(project)
 }
 
@@ -825,12 +704,11 @@ fn directory_group_project(
     seed_path: &str,
     policy: &dyn WorkspacePolicy,
     visibility: &str,
-    effect: &mut ProjectionEffect,
 ) -> Result<Project> {
     if let Some(existing) = find_directory_group_project_conn(conn, label, policy)? {
         return Ok(existing);
     }
-    let fresh = create_project_row(conn, seed_path, None, visibility, effect)?;
+    let fresh = create_project_row(conn, seed_path, None, visibility)?;
     set_project_name_conn(conn, &fresh.id, label, false)?;
     Ok(fresh)
 }
@@ -860,9 +738,8 @@ fn create_single_directory_project(
     path: &str,
     policy: &dyn WorkspacePolicy,
     visibility: &str,
-    effect: &mut ProjectionEffect,
 ) -> Result<Project> {
-    let project = create_project_row(conn, path, None, visibility, effect)?;
+    let project = create_project_row(conn, path, None, visibility)?;
     if is_assistant_directory(path, policy) {
         set_project_name_conn(conn, &project.id, "NoEnding Assistant", false)?;
     }
@@ -882,7 +759,6 @@ fn adopt_sibling_worktrees(
     path: &WorkspacePath,
     family: &GitFamily,
     policy: &dyn WorkspacePolicy,
-    effect: &mut ProjectionEffect,
 ) -> Result<Vec<WorkspacePath>> {
     let mut created = Vec::new();
     for worktree in &family.worktrees {
@@ -926,7 +802,6 @@ fn adopt_sibling_worktrees(
         if let Some(row) = get_workspace_path_conn(conn, &sibling_id)? {
             created.push(row);
         }
-        effect.touch(&path.project_id);
     }
     Ok(created)
 }
@@ -1041,16 +916,9 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
     })
 }
 
-/// The `Db`-scoped merge: same decision, plus the post-commit index work.
+/// Apply a merge atomically.
 pub fn merge_projects(db: &Db, a: &str, b: &str) -> Result<MergeOutcome> {
-    let outcome = db.tx(|tx| merge_projects_conn(tx, a, b))?;
-    let mut effect = ProjectionEffect::default();
-    effect.touch(&outcome.survivor);
-    if !outcome.loser.is_empty() {
-        effect.delete(&outcome.loser);
-    }
-    apply_projection_effect(db, &effect);
-    Ok(outcome)
+    db.tx(|tx| merge_projects_conn(tx, a, b))
 }
 
 // Reconcile
@@ -1160,15 +1028,10 @@ fn reconcile_workspace_path_targets(
         if !observation.exists {
             report.missing_paths += 1;
         }
-        // One short transaction, and the index work in the same lock step: the
-        // commit already happened inside `tx`, so this is post-commit, not
-        // in-transaction.
+        // Registry changes and affected session search metadata commit together.
         let committed =
             match db.tx(|tx| ensure_workspace_path_conn(tx, &observation, projection.policy())) {
-                Ok(outcome) => {
-                    apply_projection_effect(db, &outcome.effect);
-                    Ok(outcome)
-                }
+                Ok(outcome) => Ok(outcome),
                 Err(e) => Err(e.to_string()),
             };
         match committed {
@@ -1212,7 +1075,7 @@ pub struct ProjectDetail {
     pub purpose: Option<ProjectPurpose>,
     pub workspace_paths: Vec<WorkspacePath>,
     pub workstreams: Vec<ProjectWorkstream>,
-    pub sessions: Vec<Session>,
+    pub sessions: Vec<SessionListItem>,
     /// The linked repository's remote URL (origin preferred), read from the
     /// git identity the Project anchors on. `None` for a directory project or
     /// a repository without remotes.
@@ -1247,10 +1110,14 @@ pub fn project_detail(
             .into_iter()
             .map(|workstream| ProjectWorkstream { workstream })
             .collect();
-    let mut sessions = Vec::new();
-    for path in &workspace_paths {
-        sessions.extend(db.list_sessions_for_workspace_path(&path.id)?);
-    }
+    let sessions = db.list_session_items(
+        crate::storage::SessionFilter {
+            project_id: Some(project_id.to_string()),
+            scope: crate::domain::SessionListScope::All,
+            ..Default::default()
+        },
+        None,
+    )?;
     let remote_url = match project.git_id.as_deref() {
         Some(git_id) => {
             crate::storage::workspace::git_identity_remote_url_conn(&db.read(), git_id)?

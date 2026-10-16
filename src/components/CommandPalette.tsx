@@ -1,136 +1,109 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { submitsOnEnter } from "./common";
 import type { Route } from "../app/routes";
-import type { SearchHit, Session, Workstream } from "../types";
+import type { NavigationItem, NavigationResults } from "../types";
 
-interface PaletteItem {
-  key: string;
-  kind: string;
-  label: string;
-  hint?: string;
-  route: Route;
+const KIND_LABELS = { project: "项目", workstream: "任务", session: "会话", agent: "Agent" };
+
+function destination(item: NavigationItem): Route | null {
+  switch (item.kind) {
+    case "project": return { view: "project", projectId: item.ref_id, initialTitle: item.title };
+    case "workstream": return { view: "workstream", workstreamId: item.ref_id, initialTitle: item.title };
+    case "session": return { view: "session", sessionId: item.ref_id, initialTitle: item.title, initialAgent: item.agent ?? undefined };
+    case "agent": return item.agent ? { view: "agents", agent: item.agent } : null;
+  }
 }
 
-/** 固定命令：导航 + New 动作，不与实体搜索混淆。
- *  新建会话进入输入页面；新建任务以 route.action 打开任务表单。 */
-const FIXED_COMMANDS: PaletteItem[] = [
-  { key: "cmd-new-session", kind: "命令", label: "新建会话", route: { view: "new-session" }, hint: "输入消息开始" },
-  { key: "cmd-workstreams", kind: "命令", label: "前往任务", route: { view: "workstreams" } },
-  { key: "cmd-sessions", kind: "命令", label: "前往会话", route: { view: "sessions" } },
-  { key: "cmd-agents", kind: "命令", label: "前往 Agent", hint: "管理 Agent 与会话来源", route: { view: "agents" } },
-  { key: "cmd-projects", kind: "命令", label: "前往项目", route: { view: "projects" } },
-  { key: "cmd-settings", kind: "命令", label: "前往设置", route: { view: "settings" } },
-  { key: "cmd-new-ws", kind: "命令", label: "新建任务", route: { view: "workstreams", action: "new" }, hint: "创建" },
-];
-
+/** Find an existing object and open its detail. Content search is a separate surface. */
 export default function CommandPalette({ onClose, navigate }: {
   onClose: () => void;
   navigate: (r: Route) => void;
 }) {
   const [q, setQ] = useState("");
-  const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [hits, setHits] = useState<SearchHit[]>([]);
+  const query = q.trim();
+  const [snapshot, setSnapshot] = useState<{ query: string; result?: NavigationResults; failed?: boolean }>({ query: "" });
   const [selected, setSelected] = useState(0);
+  const [attempt, setAttempt] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const result = snapshot.query === query ? snapshot.result : undefined;
+  const failed = snapshot.query === query && snapshot.failed;
+  const items = result?.items ?? [];
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [selected, result]);
 
   useEffect(() => {
-    inputRef.current?.focus();
-    api.listWorkstreams().then((ws) => setWorkstreams(ws)).catch(() => {});
-    api.listSessions(undefined, undefined, "all").then((s) => setSessions(s.slice(0, 25))).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    if (q.trim().length < 2) { setHits([]); return; }
-    const t = setTimeout(() => {
-      api.search(q, 8).then(setHits).catch(() => {});
-    }, 180);
-    return () => clearTimeout(t);
-  }, [q]);
-
-  const items = useMemo<PaletteItem[]>(() => {
-    const out: PaletteItem[] = [];
-    const ql = q.trim().toLowerCase();
-    // 固定命令：输入为空时全部可见；输入后按子串过滤
-    for (const c of FIXED_COMMANDS) {
-      if (!ql || c.label.toLowerCase().includes(ql)) out.push(c);
-    }
-    if (!ql || "workstreams".includes(ql)) {
-      out.push({ key: "nav-workstreams", kind: "页面", label: "任务", hint: "看板", route: { view: "workstreams" } });
-    }
-    for (const w of workstreams) {
-      if (!ql || w.title.toLowerCase().includes(ql)) {
-        out.push({ key: `w-${w.id}`, kind: "任务", label: w.title, hint: "打开", route: { view: "workstream", workstreamId: w.id, initialTitle: w.title } });
-      }
-    }
-    for (const s of sessions) {
-      if (!ql || (s.title ?? "").toLowerCase().includes(ql) || (s.cwd ?? "").toLowerCase().includes(ql)) {
-        out.push({ key: `s-${s.id}`, kind: "会话", label: s.title ?? s.root_agent_session_id, hint: s.cwd ?? undefined, route: { view: "session", sessionId: s.id, initialTitle: s.title ?? "未命名会话", initialAgent: s.agent } });
-      }
-    }
-    for (const h of hits) {
-      const route: Route =
-        h.kind === "workstream" ? { view: "workstream", workstreamId: h.ref_id, initialTitle: h.title }
-        // 消息命中：打开它所在的会话，ref_id 是消息 id，parent_id 才是会话 id。
-        : h.kind === "message" ? { view: "session", sessionId: h.parent_id }
-        : h.kind === "session" ? { view: "session", sessionId: h.ref_id, initialTitle: h.title }
-        : h.kind === "project" ? { view: "project", projectId: h.ref_id, initialTitle: h.title }
-        : { view: "sessions" };
-      out.push({
-        key: `h-${h.kind}-${h.ref_id}`,
-        kind: h.kind === "message" ? "消息" : h.kind,
-        label: h.title.slice(0, 80),
-        hint: h.kind === "message" ? "定位到所在会话" : "全文匹配",
-        route,
+    let active = true;
+    setSelected(0);
+    setSnapshot({ query });
+    const timer = setTimeout(() => {
+      api.lookupNavigation(query).then(result => {
+        if (active) setSnapshot({ query, result });
+      }).catch(() => {
+        if (active) setSnapshot({ query, failed: true });
       });
-    }
-    // dedupe by key, cap
-    const seen = new Set<string>();
-    return out.filter((i) => !seen.has(i.key) && seen.add(i.key)).slice(0, 12);
-  }, [q, workstreams, sessions, hits]);
+    }, query ? 180 : 0);
+    return () => { active = false; clearTimeout(timer); };
+  }, [query, attempt]);
 
-  useEffect(() => { setSelected(0); }, [q]);
-
-  const go = (item: PaletteItem | undefined) => {
+  const go = (item: NavigationItem | undefined) => {
     if (!item) return;
-    navigate(item.route);
+    const route = destination(item);
+    if (!route) return;
+    navigate(route);
     onClose();
   };
 
   return (
     <div className="palette-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="palette" role="dialog" aria-label="搜索与跳转">
+      <div className="palette" role="dialog" aria-label="查找" aria-modal="true">
         <input
           ref={inputRef}
           type="text"
-          placeholder="搜索任务、会话、消息…"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-controls="navigation-results"
+          aria-expanded="true"
+          aria-activedescendant={items[selected] ? `navigation-result-${selected}` : undefined}
+          aria-label="查找项目、任务、会话或 Agent"
+          placeholder="查找项目、任务、会话或 Agent…"
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => { setQ(e.target.value); setSelected(0); }}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") { e.preventDefault(); setSelected((s) => Math.min(s + 1, items.length - 1)); }
-            else if (e.key === "ArrowUp") { e.preventDefault(); setSelected((s) => Math.max(s - 1, 0)); }
-            else if (submitsOnEnter(e)) { go(items[selected]); }
+            if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+            if (e.key === "ArrowDown") { e.preventDefault(); setSelected(s => Math.max(0, Math.min(s + 1, items.length - 1))); }
+            else if (e.key === "ArrowUp") { e.preventDefault(); setSelected(s => Math.max(s - 1, 0)); }
+            else if (submitsOnEnter(e)) { e.preventDefault(); go(items[selected]); }
             else if (e.key === "Escape") { onClose(); }
           }}
         />
-        <div className="palette-list">
+        <div ref={listRef} id="navigation-results" className="palette-list" role="listbox" aria-label="查找结果" aria-busy={!result && !failed}>
           {items.map((item, i) => (
             <div
-              key={item.key}
+              key={`${item.kind}:${item.ref_id}`}
               className={`palette-item ${i === selected ? "selected" : ""}`}
+              role="option"
+              id={`navigation-result-${i}`}
+              aria-selected={i === selected}
               onMouseEnter={() => setSelected(i)}
               onClick={() => go(item)}
             >
-              <span className="badge kind">{item.kind}</span>
-              <span className="label">{item.label}</span>
-              {item.hint && <span className="hint">{item.hint}</span>}
+              <span className="badge kind">{KIND_LABELS[item.kind]}</span>
+              <span className="label" title={item.title}>{item.title}</span>
+              {item.archived && <span className="badge warn">已归档</span>}
+              {item.hint && <span className="hint" title={item.hint}>{item.hint}</span>}
             </div>
           ))}
-          {items.length === 0 && (
-            <div className="palette-empty">没有匹配结果。输入至少两个字符以全文检索任务摘要与消息。</div>
-          )}
         </div>
+        {!result && !failed && <div className="palette-empty" role="status">正在查找…</div>}
+        {failed && <div className="palette-empty" role="alert">查找失败。<button className="btn small ghost" onClick={() => setAttempt(a => a + 1)}>重试</button></div>}
+        {result && items.length === 0 && <div className="palette-empty">没有匹配的项目、任务、会话或 Agent。</div>}
+        {result && items.length > 0 && !query && <div className="palette-empty">最近会话与 Agent；输入名称或目录查找其他对象。</div>}
+        {result?.has_more && <div className="palette-empty">结果较多，请补充名称或目录缩小范围。</div>}
       </div>
     </div>
   );

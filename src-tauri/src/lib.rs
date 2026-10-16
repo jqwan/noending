@@ -113,14 +113,6 @@ pub fn run() {
                 }
             }
 
-            // make pre-existing messages searchable (idempotent)
-            {
-                let state: tauri::State<commands::AppState> = app.state();
-                if let Err(e) = state.db.backfill_search_index() {
-                    eprintln!("[noending] search backfill failed: {}", e);
-                }
-            }
-
             // Application Reconcile: at every startup, queue a background
             // ingestion pass (`ReconcileAll`). Ingestion never calls AI; the
             // UI is notified on completion. Runs on the coordinator's worker
@@ -210,6 +202,7 @@ pub fn run() {
             commands::open_path,
             commands::get_workstream_context,
             commands::session_workspace::list_sessions,
+            commands::session_workspace::get_session_counts_by_agent,
             commands::session_workspace::get_session_terminal_states,
             commands::session_workspace::get_session_detail,
             commands::session_workspace::get_session_tracking,
@@ -254,7 +247,8 @@ pub fn run() {
             commands::terminal_acknowledge_output,
             commands::terminal_release_output,
             commands::terminal_resize,
-            commands::search,
+            commands::lookup_navigation,
+            commands::match_objects,
             commands::get_agent_status,
             commands::set_agent_launch_enabled,
             commands::redetect_agent,

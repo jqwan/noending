@@ -1,10 +1,9 @@
 //! Message Identity & Source mutation tests — Logical Session model.
 //!
 //! Fixture-driven real JSONL per adapter: append / no-change / truncate+rewrite
-//! / same-size rewrite / file replacement. The RAW `session_messages` store is
-//! append-only, while the conversation projection `get_messages` reads is
-//! replaced to match; sequences are app-assigned and never reused; a rewritten
-//! file is a new generation.
+//! / same-size rewrite / file replacement. Complete snapshots keep only the
+//! current conversation, reusing unchanged message ids and removing retired
+//! rows; a rewritten conversation is a new fact generation.
 //!
 //! Identity lives on the SESSION: `commit_ingest` chains
 //! `message_identity_hash` from IDENTITY_GENESIS on a full re-scan, else from
@@ -39,9 +38,8 @@ fn open_db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-/// The RAW append-only message store — provenance — independent of the
-/// current-message projection that `get_messages` reads. Rows survive a source
-/// rewrite; the projection does not.
+/// Inspect persisted rows independently of the current-message query so tests
+/// detect obsolete messages that would otherwise remain invisible.
 fn raw_rows(db: &Db, session_id: &str) -> Vec<(i64, String, i64)> {
     let conn = db.read();
     let mut stmt = conn
@@ -214,15 +212,33 @@ fn dsh_line(role: &str, text: &str) -> String {
 /// One ingest round-trip exactly as production does it: read the session's
 /// delta from its own source, commit atomically through the one ingest path.
 fn ingest(db: &Db, adapter: &dyn AgentAdapter, session: &Session) -> usize {
-    let cursor = db
+    ingest_mode(db, adapter, session, false)
+}
+
+fn ingest_mode(db: &Db, adapter: &dyn AgentAdapter, session: &Session, full: bool) -> usize {
+    let mut cursor = db
         .get_session(&session.id)
         .unwrap()
         .expect("session row")
         .source_cursor();
+    if full {
+        cursor.byte_offset = 0;
+        cursor.last_seen_size = 0;
+        cursor.prefix_hash.clear();
+    }
     let delta = adapter.read_session_delta(session, &cursor).unwrap();
-    let source = delta.source.clone().expect("source state");
+    let Some(source) = delta.source else {
+        assert!(delta.messages.is_empty());
+        assert!(delta.complete_snapshot);
+        return 0;
+    };
     let stored = db
-        .commit_ingest(&session.id, &delta.messages, &source)
+        .commit_ingest_snapshot(
+            &session.id,
+            &delta.messages,
+            &source,
+            delta.complete_snapshot,
+        )
         .unwrap();
     stored.len()
 }
@@ -323,14 +339,17 @@ macro_rules! identity_suite {
                 2,
                 "compacted content is new messages"
             );
-            // The RAW store keeps the retired history for provenance: seven
-            // rows now, sequences still dense and never reused.
+            // Only the complete replacement remains in the persisted store.
             let raw = raw_rows(&db, &s.id);
-            assert_eq!(raw.len(), 7, "old history is preserved, never overwritten");
+            assert_eq!(
+                raw.len(),
+                2,
+                "retired history is removed after a complete snapshot"
+            );
             assert_eq!(
                 raw.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5, 6, 7],
-                "sequences keep increasing after truncate; no reuse"
+                vec![6, 7],
+                "new messages keep the storage sequence assigned before retirement"
             );
             assert_eq!(raw.iter().filter(|(_, _, g)| *g == 1).count(), 2);
             // The CURRENT conversation is the rewritten source only.
@@ -364,8 +383,8 @@ macro_rules! identity_suite {
             assert_eq!(c.generation, 2, "file replacement bumps the generation");
             assert_eq!(
                 raw_rows(&db, &s.id).len(),
-                8,
-                "the raw store keeps every row it ever stored"
+                1,
+                "only the current replacement is retained"
             );
             assert_eq!(
                 db.get_messages(&s.id, None, 100).unwrap().len(),
@@ -435,7 +454,7 @@ identity_suite!(
 // identity behaviour is covered by the adapter's unit tests instead.
 
 /// Same-size rewrite (size unchanged, mtime changed) must be detected as a
-/// rewrite: generation bump + rescan, old history intact, new text stored.
+/// rewrite: generation bump + rescan, retired text removed, new text stored.
 #[test]
 fn same_size_rewrite_is_detected() {
     let db = open_db("same-size");
@@ -472,8 +491,8 @@ fn same_size_rewrite_is_detected() {
     assert_eq!(conv[0].source_generation, 1);
     assert_eq!(
         raw_rows(&db, &s.id).len(),
-        2,
-        "the raw store keeps the retired row too"
+        1,
+        "the raw store agrees with the current conversation"
     );
     let c = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(c.generation, 1);
@@ -623,13 +642,11 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
     );
 }
 
-/// A source rewrite (compaction / truncate) REPLACES the current-message
-/// projection while the raw `session_messages` rows survive for provenance:
-/// the effective conversation becomes the rewritten source, retired ids stay
-/// addressable, sequences keep increasing (never reused), and the fact
-/// generation is raised so any stale Context is rebuilt from scratch.
+/// A complete rewrite replaces the current-message projection and deletes
+/// retired rows and their search entries in the same transaction. Old message
+/// references expire; current messages and Context ownership remain intact.
 #[test]
-fn truncate_replaces_the_projection_and_preserves_raw_history() {
+fn truncate_replaces_the_projection_and_removes_retired_history() {
     let db = open_db("truncate-frontier");
     let dir = unique_dir("truncate-frontier");
     let s = fixture_session(
@@ -658,8 +675,7 @@ fn truncate_replaces_the_projection_and_preserves_raw_history() {
     );
 
     // the source truncates to a compaction summary: a full re-scan at a new
-    // generation atomically replaces the projection — dedups nothing, deletes
-    // no raw row.
+    // generation atomically replaces the projection and retires the old rows.
     let compacted = db
         .commit_ingest(
             &s.id,
@@ -676,36 +692,132 @@ fn truncate_replaces_the_projection_and_preserves_raw_history() {
     // Retired messages drop out of search the moment the projection is
     // replaced; the replacement conversation is what stays indexed.
     assert!(
-        noending::search::search(&db, "decision", 10)
+        support::search_messages(&db, "decision", 10)
             .unwrap()
             .iter()
             .all(|hit| hit.kind != "message" || hit.parent_id != s.id),
         "messages retired from the current projection must not remain searchable"
     );
     assert!(
-        noending::search::search(&db, "compacted", 10)
+        support::search_messages(&db, "compacted", 10)
             .unwrap()
             .iter()
             .any(|hit| hit.kind == "message" && hit.parent_id == s.id),
         "the replacement conversation must be indexed"
     );
 
-    // the pre-truncation ids survive addressable — provenance is intact.
+    // Retired references expire, and the persisted store has no hidden history.
+    assert_eq!(raw_rows(&db, &s.id).len(), 1);
     for m in &first {
         assert!(
             db.get_message_by_ref(&format!("session-message:{}", m.id))
                 .unwrap()
-                .is_some(),
-            "retired message {} must stay addressable",
+                .is_none(),
+            "retired message {} must no longer be addressable",
             m.id
         );
     }
 }
 
+#[test]
+fn full_scan_updates_search_without_rewriting_retained_documents() {
+    let db = open_db("search-diff");
+    let dir = unique_dir("search-diff");
+    let s = fixture_session(&db, Agent::Codex, "search-diff", &dir.join("s.jsonl"));
+    let keep = msg("keep", SessionMessageRole::User, "retainedlexeme");
+    let edit = msg("edit", SessionMessageRole::Assistant, "retiredlexeme");
+    let first = db
+        .commit_ingest(
+            &s.id,
+            &[
+                keep.clone(),
+                edit,
+                msg("delete", SessionMessageRole::User, "deletedlexeme"),
+            ],
+            &rescan(0),
+        )
+        .unwrap();
+    // Another session holds a later FTS rowid. Deleting and reinserting the
+    // retained document cannot accidentally reuse its original rowid.
+    let other = fixture_session(&db, Agent::Codex, "search-other", &dir.join("other.jsonl"));
+    let foreign = db
+        .commit_ingest(
+            &other.id,
+            &[msg("foreign", SessionMessageRole::User, "foreignlexeme")],
+            &rescan(0),
+        )
+        .unwrap();
+    let index_rows = |id: &str| -> Vec<(i64, String, String)> {
+        let conn = db.read();
+        let mut st = conn
+            .prepare(
+                "SELECT rowid, ref_id, body FROM search_index
+                 WHERE kind = 'message' AND parent_id = ?1 ORDER BY ref_id",
+            )
+            .unwrap();
+        st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let retained_row = index_rows(&s.id)
+        .into_iter()
+        .find(|(_, id, _)| id == &first[0].id)
+        .unwrap();
+    let foreign_rows = index_rows(&other.id);
+    let updated = msg("edit", SessionMessageRole::Assistant, "updatedlexeme");
+    let added = msg("new", SessionMessageRole::Assistant, "addedlexeme");
+    db.commit_ingest(
+        &s.id,
+        &[added.clone(), keep.clone(), updated.clone()],
+        &rescan(1),
+    )
+    .unwrap();
+    let current = db.get_messages(&s.id, None, 10).unwrap();
+    assert_eq!(current[1].id, first[0].id);
+    let rows = index_rows(&s.id);
+    assert_eq!(rows.len(), 3, "exactly one document per current message");
+    assert_eq!(
+        rows.iter().find(|(_, id, _)| id == &first[0].id),
+        Some(&retained_row),
+        "unchanged documents retain their FTS row instead of being reindexed"
+    );
+    assert_eq!(index_rows(&other.id), foreign_rows);
+    for query in ["retiredlexeme", "deletedlexeme"] {
+        let count: i64 = db
+            .read()
+            .query_row(
+                "SELECT COUNT(*) FROM search_index WHERE search_index MATCH ?1",
+                [query],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "retired text is removed from FTS itself");
+        assert!(support::search_messages(&db, query, 10).unwrap().is_empty());
+    }
+    for (query, expected_id) in [
+        ("addedlexeme", &current[0].id),
+        ("retainedlexeme", &first[0].id),
+        ("updatedlexeme", &current[2].id),
+        ("foreignlexeme", &foreign[0].id),
+    ] {
+        let hits = support::search_messages(&db, query, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&hits[0].ref_id, expected_id);
+    }
+
+    // Reordering changes the projection but none of the search documents.
+    db.commit_ingest(&s.id, &[updated, keep, added], &rescan(2))
+        .unwrap();
+    assert_eq!(index_rows(&s.id), rows);
+    db.commit_ingest(&s.id, &[], &rescan(3)).unwrap();
+    assert!(index_rows(&s.id).is_empty());
+    assert_eq!(index_rows(&other.id), foreign_rows);
+}
+
 /// After a compact + dedup re-scan, the identity chain must continue from
 /// the CURRENT source tail (tracked on the session row), not from the
-/// message store's last row: the store keeps newer history the source no
-/// longer has (append-only), and chaining an append from the store tail would
+/// message store's last row. Chaining an append from a stale tail would
 /// make that append invisible to the next full re-scan (duplicated as "new").
 #[test]
 fn append_after_compact_chains_from_source_tail_not_store_tail() {
@@ -781,7 +893,7 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
     assert_eq!(
         tail,
         hash_of(&text('B')),
-        "tail == B's chain hash, though the store still ends at D"
+        "tail follows the retained B message"
     );
 
     // append E: must chain from B (the source tail), not from D
@@ -798,16 +910,15 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
 
     // full re-scan of A,B,E: E must dedup — it did NOT chain from the
     // stale store tail (the bug would duplicate it here)
-    db.rewind_source_cursor(&s.id).unwrap();
     assert_eq!(
-        ingest(&db, adapter, &s),
+        ingest_mode(&db, adapter, &s, true),
         0,
         "E survives a full re-scan without duplication"
     );
     assert_eq!(
         raw_rows(&db, &s.id).len(),
-        5,
-        "no duplicate row was ever stored"
+        3,
+        "only the current A,B,E messages are retained"
     );
     assert_eq!(
         db.get_messages(&s.id, None, 100).unwrap().len(),
@@ -824,9 +935,7 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
     );
 }
 
-/// Re-ingest must NEVER delete the message store: ids survive,
-/// SourceReferences in context revisions stay valid, and a full re-scan
-/// dedups to zero new rows.
+/// Re-ingest reuses unchanged message ids and dedups to zero new rows.
 #[test]
 fn reingest_preserves_message_ids_and_dedups() {
     let db = open_db("reingest-keep");
@@ -852,10 +961,9 @@ fn reingest_preserves_message_ids_and_dedups() {
         .map(|e| e.id)
         .collect();
 
-    // simulate 重新入库: rewind the source cursor, keep the message store
-    db.rewind_source_cursor(&s.id).unwrap();
+    // Force a full read without changing the persisted cursor first.
     assert_eq!(
-        ingest(&db, adapter, &s),
+        ingest_mode(&db, adapter, &s, true),
         0,
         "re-scan of unchanged source adds nothing"
     );
@@ -891,4 +999,285 @@ fn reingest_preserves_message_ids_and_dedups() {
         "new content appends after the re-scan"
     );
     assert_eq!(db.get_messages(&s.id, None, 100).unwrap().len(), 3);
+}
+
+#[test]
+fn incomplete_replacement_preserves_all_facts_and_complete_replacement_retires_them() {
+    let db = open_db("incomplete-replacement");
+    let file = unique_dir("incomplete-replacement").join("s.jsonl");
+    let s = fixture_session(&db, Agent::Pi, "incomplete", &file);
+    let original = db
+        .commit_ingest(
+            &s.id,
+            &[msg("old", SessionMessageRole::User, "reliable history")],
+            &rescan(0),
+        )
+        .unwrap();
+    let before = db.get_session(&s.id).unwrap().unwrap();
+    let search_document = || -> (i64, String, String) {
+        db.read()
+            .query_row(
+                "SELECT rowid, ref_id, body FROM search_index
+                 WHERE kind = 'message' AND parent_id = ?1",
+                [&s.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    let original_document = search_document();
+    let replacement = [msg("new", SessionMessageRole::User, "replacement history")];
+    assert!(db
+        .commit_ingest_snapshot(&s.id, &replacement, &rescan(1), false)
+        .unwrap()
+        .is_empty());
+    assert_eq!(raw_rows(&db, &s.id).len(), 1);
+    assert_eq!(
+        db.get_messages(&s.id, None, 10).unwrap()[0].id,
+        original[0].id
+    );
+    let after = db.get_session(&s.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            after.fact_generation,
+            after.source_byte_offset,
+            after.source_prefix_hash
+        ),
+        (
+            before.fact_generation,
+            before.source_byte_offset,
+            before.source_prefix_hash
+        )
+    );
+
+    // A storage failure while retiring the old row rolls back the new row,
+    // projection, search index and frontier as one transaction.
+    db.write().execute_batch("CREATE TEMP TRIGGER refuse_retirement BEFORE DELETE ON session_messages BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;").unwrap();
+    assert!(db.commit_ingest(&s.id, &replacement, &rescan(1)).is_err());
+    assert_eq!(raw_rows(&db, &s.id).len(), 1);
+    assert_eq!(search_document(), original_document);
+    assert_eq!(
+        db.get_messages(&s.id, None, 10).unwrap()[0].id,
+        original[0].id
+    );
+    assert!(support::search_messages(&db, "replacement", 10)
+        .unwrap()
+        .iter()
+        .all(|h| h.kind != "message"));
+    db.write()
+        .execute_batch("DROP TRIGGER refuse_retirement")
+        .unwrap();
+    db.commit_ingest(&s.id, &replacement, &rescan(1)).unwrap();
+    assert_eq!(raw_rows(&db, &s.id).len(), 1);
+    assert_eq!(
+        db.get_messages(&s.id, None, 10).unwrap()[0].content,
+        "replacement history"
+    );
+    assert!(db
+        .get_message_by_ref(&format!("session-message:{}", original[0].id))
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn full_scan_collects_unmapped_rows_without_rewriting_unchanged_messages() {
+    let db = open_db("collect-unmapped");
+    let file = unique_dir("collect-unmapped").join("s.jsonl");
+    let s = fixture_session(&db, Agent::Pi, "collect-unmapped", &file);
+    let messages = [msg("current", SessionMessageRole::User, "current history")];
+    let current = db.commit_ingest(&s.id, &messages, &rescan(0)).unwrap();
+    db.write().execute(
+        "INSERT INTO session_messages(id, session_id, sequence, source_identity_hash, role, content) VALUES('unmapped', ?1, 99, 'unmapped', 'assistant', 'old orphan')", [&s.id],
+    ).unwrap();
+    db.write().execute("INSERT INTO search_documents(kind, ref_id, parent_id, title, body) VALUES('message', 'unmapped', ?1, '', 'old orphan')", [&s.id]).unwrap();
+    let generation = db.get_session(&s.id).unwrap().unwrap().fact_generation;
+    assert!(db
+        .commit_ingest(&s.id, &messages, &rescan(0))
+        .unwrap()
+        .is_empty());
+    assert_eq!(raw_rows(&db, &s.id).len(), 1);
+    assert_eq!(
+        db.get_messages(&s.id, None, 10).unwrap()[0].id,
+        current[0].id
+    );
+    assert_eq!(
+        db.get_session(&s.id).unwrap().unwrap().fact_generation,
+        generation
+    );
+    let orphan_index: i64 = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM search_index WHERE ref_id='unmapped'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_index, 0);
+
+    // An existing message without its search document is repaired once, even
+    // when the full read reuses its message id and leaves the projection alone.
+    db.write()
+        .execute(
+            "DELETE FROM search_documents WHERE kind='message' AND ref_id=?1",
+            [&current[0].id],
+        )
+        .unwrap();
+    db.commit_ingest(&s.id, &messages, &rescan(0)).unwrap();
+    let hits = support::search_messages(&db, "current", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].ref_id, current[0].id);
+
+    let changes = || {
+        db.write()
+            .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = changes();
+    db.commit_ingest(&s.id, &messages, &rescan(0)).unwrap();
+    assert_eq!(
+        changes(),
+        before,
+        "unchanged full scans do not rebuild search or rewrite messages"
+    );
+
+    // An empty current projection must not count unmapped stored history.
+    db.write()
+        .execute(
+            "DELETE FROM session_message_projection WHERE session_id=?1",
+            [&s.id],
+        )
+        .unwrap();
+    let stats = db.session_message_stats(&s.id).unwrap();
+    assert_eq!((stats.user_messages, stats.assistant_messages), (0, 0));
+}
+
+#[test]
+fn a_stale_read_cannot_overwrite_a_newer_cursor_messages_or_search() {
+    let db = open_db("stale-read");
+    let file = unique_dir("stale-read").join("s.jsonl");
+    let s = fixture_session(&db, Agent::Codex, "stale-read", &file);
+    let old = msg("old", SessionMessageRole::User, "originalhistory");
+    db.commit_ingest(&s.id, &[old.clone()], &rescan(0)).unwrap();
+    let stale = db.get_session(&s.id).unwrap().unwrap().source_cursor();
+    let fresh = db
+        .commit_ingest(
+            &s.id,
+            &[msg("new", SessionMessageRole::Assistant, "freshhistory")],
+            &append(0),
+        )
+        .unwrap();
+    let current = db.get_session(&s.id).unwrap().unwrap();
+    for (messages, source) in [
+        (vec![old], rescan(1)),
+        (
+            vec![msg("stale", SessionMessageRole::Assistant, "stalehistory")],
+            append(0),
+        ),
+    ] {
+        assert!(db
+            .commit_ingest_guarded(&s.id, &messages, &source, true, Some(&stale))
+            .is_err());
+        assert_eq!(
+            db.get_session(&s.id).unwrap().unwrap().source_cursor(),
+            current.source_cursor()
+        );
+        assert_eq!(db.get_messages(&s.id, None, 10).unwrap().len(), 2);
+        assert_eq!(
+            support::search_messages(&db, "freshhistory", 10).unwrap()[0].ref_id,
+            fresh[0].id
+        );
+        assert!(support::search_messages(&db, "stalehistory", 10)
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[test]
+fn message_parts_preserve_unicode_ranges_and_offsets_across_append_and_reorder() {
+    use noending::storage::message_query::{part_count, parts};
+    let db = open_db("message-parts");
+    let first_chunk = format!("{}😀", "甲".repeat(1999));
+    let first = msg(
+        "parts-first",
+        SessionMessageRole::User,
+        format!("{first_chunk}乙"),
+    );
+    let empty = msg("parts-empty", SessionMessageRole::Assistant, "");
+    let exact = msg("parts-exact", SessionMessageRole::User, "é".repeat(4000));
+    let (session, _) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "message-parts",
+        &[first.clone(), empty.clone(), exact.clone()],
+    );
+    {
+        let conn = db.read();
+        assert_eq!(part_count(&conn, &session.id, 0, 3).unwrap(), 5);
+        assert_eq!(part_count(&conn, &session.id, 1, 99).unwrap(), 3);
+        assert_eq!(part_count(&conn, &session.id, 99, 100).unwrap(), 0);
+        let page = parts(&conn, &session.id, 0, 3, 0, 4, None).unwrap();
+        assert_eq!(page.len(), 4);
+        assert_eq!(page[0]["record"]["content"], first_chunk);
+        assert_eq!(page[1]["record"]["content"], "乙");
+        assert_eq!(page[2]["record"]["content"], "");
+        assert_eq!(page[3]["record"]["content"], "é".repeat(2000));
+        assert_eq!(page[3]["record"]["last_part"], false);
+        let page = parts(&conn, &session.id, 1, 3, 3, 10, None).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0]["cursor"], 3);
+        assert_eq!(page[0]["record"]["sequence"], 3);
+        assert_eq!(page[0]["record"]["part"], 2);
+        assert_eq!(page[0]["record"]["last_part"], true);
+        assert_eq!(page[0]["record"]["content"], "é".repeat(2000));
+        assert!(parts(&conn, &session.id, 0, 3, 6, 10, None)
+            .unwrap()
+            .is_empty());
+        let search = parts(&conn, &session.id, 0, 3, 1, 10, Some("😀乙")).unwrap();
+        assert_eq!(
+            search.len(),
+            2,
+            "search matches the whole message, including across chunks"
+        );
+        assert_eq!(search[1]["record"]["content"], "乙");
+    }
+    let appended = msg("parts-appended", SessionMessageRole::Assistant, "追加");
+    db.commit_ingest(
+        &session.id,
+        std::slice::from_ref(&appended),
+        &SourceCursorUpdate {
+            start_byte_offset: 100,
+            byte_offset: 200,
+            last_seen_size: 200,
+            ..support::seed_source(0)
+        },
+    )
+    .unwrap();
+    {
+        let conn = db.read();
+        assert_eq!(part_count(&conn, &session.id, 0, 4).unwrap(), 6);
+        assert_eq!(
+            part_count(&conn, &session.id, 0, 3).unwrap(),
+            5,
+            "existing cutoffs remain stable"
+        );
+        let page = parts(&conn, &session.id, 3, 4, 1, 2, None).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0]["record"]["content"], "追加");
+    }
+    // Reorder retained messages, retire one and append a new message. Offsets
+    // must follow current ordinals rather than retained storage sequences.
+    let tail = msg("parts-tail", SessionMessageRole::User, "新的末尾");
+    db.commit_ingest(
+        &session.id,
+        &[exact, empty, first, tail],
+        &support::seed_source(1),
+    )
+    .unwrap();
+    let conn = db.read();
+    assert_eq!(part_count(&conn, &session.id, 0, 4).unwrap(), 6);
+    let page = parts(&conn, &session.id, 2, 4, 2, 10, None).unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0]["record"]["sequence"], 3);
+    assert_eq!(page[0]["record"]["content"], "乙");
+    assert_eq!(page[1]["record"]["sequence"], 4);
+    assert_eq!(page[1]["record"]["content"], "新的末尾");
 }

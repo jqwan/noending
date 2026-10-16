@@ -34,6 +34,7 @@ beforeEach(() => {
   sessionTerminals.clear();
   localStorage.clear();
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
+  vi.mocked(api.getSessionTerminalStates).mockClear();
   vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
@@ -851,6 +852,8 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("会话 3")).toBeTruthy();
     expect(screen.queryByText("会话 2")).toBeNull();
     expect(screen.queryByText("会话 1")).toBeNull();
+    await waitFor(() => expect(new Set(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]))
+      .toEqual(new Set(["s-3", "s-4", "s-5", "s-6", "s-7"])));
 
     // 展开显示 button is shown
     const expandBtn = screen.getByRole("button", { name: "展开显示" });
@@ -861,6 +864,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("会话 2")).toBeTruthy();
     expect(screen.getByText("会话 1")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "展开显示" })).toBeNull();
+    await waitFor(() => expect(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]).toHaveLength(7));
 
     // Collapse the group
     const groupHeader = screen.getByRole("button", { name: /测试任务/ });
@@ -1049,4 +1053,20 @@ it("updates Agent activity without reloading all sessions, and retains unread fr
   act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
   await screen.findByRole("img", { name: /等待输入.*回答完成未查看/ });
   expect(vi.mocked(api.listSessions).mock.calls.length).toBe(sessionQueries);
+});
+
+it("keeps an old pinned conversation available beyond 500 summaries without checking every hidden row", async () => {
+  const rows = Array.from({ length: 601 }, (_, i) => session({
+    id: `many-${i}`, title: `历史会话 ${i}`, project_id: "many-project",
+    started_at: new Date(2020, 0, 1, 0, i).toISOString(),
+  }));
+  localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["many-0"]));
+  vi.mocked(api.listSessions).mockResolvedValue(rows);
+  vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ id: "many-project", name: "历史项目" })]);
+  renderSidebar();
+  await screen.findByText("历史会话 0");
+  expect(screen.getByText("历史会话 600")).toBeTruthy();
+  expect(screen.queryByText("历史会话 400")).toBeNull();
+  await waitFor(() => expect(new Set(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]))
+    .toEqual(new Set(["many-0", "many-596", "many-597", "many-598", "many-599", "many-600"])));
 });

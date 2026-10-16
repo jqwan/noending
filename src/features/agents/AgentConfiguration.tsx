@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, EVT_TERMINALS, type Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import type { Agent, AgentStatusEntry, Session, TerminalSummary } from "../../types";
+import type { Agent, AgentStatusEntry, SessionListItem, TerminalSummary } from "../../types";
 import { AGENT_LABELS } from "../../types";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { CatalogStatus, NATIVE_RUNTIME } from "./RuntimeFields";
@@ -26,7 +26,7 @@ export default function AgentConfiguration({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessions, setSessions] = useState<SessionListItem[]>([]);
 
   useEffect(() => {
     let cancelled = false;

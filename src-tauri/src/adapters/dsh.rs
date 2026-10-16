@@ -154,8 +154,10 @@ fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) -> bool {
             if is_last && line.is_empty() {
                 continue; // the final newline's terminator, not a partial line
             }
-            let text = String::from_utf8_lossy(line);
-            if !keep_going(&text) {
+            let Ok(text) = std::str::from_utf8(line) else {
+                return false;
+            };
+            if !keep_going(text) {
                 return false;
             }
             if is_last {
@@ -180,14 +182,18 @@ fn scan_lines(raw: &[u8], mut keep_going: impl FnMut(&str) -> bool) -> bool {
         pending.extend_from_slice(&chunk[..n]);
         while let Some(end) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=end).collect();
-            let text = String::from_utf8_lossy(&line[..line.len() - 1]);
-            if !keep_going(&text) {
+            let Ok(text) = std::str::from_utf8(&line[..line.len() - 1]) else {
+                return false;
+            };
+            if !keep_going(text) {
                 return false;
             }
         }
     }
     if !pending.is_empty() {
-        keep_going(&String::from_utf8_lossy(&pending));
+        if let Ok(text) = std::str::from_utf8(&pending) {
+            keep_going(text);
+        }
         // A trailing partial line: the last frame is not finished.
         return false;
     }
@@ -492,7 +498,14 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
         let path = PathBuf::from(&session.source_path);
-        let raw = std::fs::read(&path)?;
+        if crate::adapters::file_matches_cursor(&path, cursor)? {
+            return Ok(MemberReadDelta {
+                messages: vec![],
+                source: None,
+                complete_snapshot: true,
+            });
+        }
+        let (observation, raw) = crate::adapters::read_stable_file(&path)?;
 
         // Decoded text cannot be seeked into, so every read replays the whole
         // body and leans on message identity: each record carries the writer's
@@ -509,7 +522,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
                 return true;
             }
             let Ok(v) = serde_json::from_str::<Value>(line) else {
-                return true;
+                return line.trim().is_empty();
             };
             let Some(p) = parsed_line(&v, is_root, seed_length) else {
                 return true;
@@ -533,7 +546,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
             true
         });
 
-        let source = replay_cursor_update(&path, cursor, &raw)?;
+        let source = replay_cursor_update(&observation, cursor, &raw);
         Ok(MemberReadDelta {
             messages,
             source: Some(source),
@@ -1045,6 +1058,22 @@ mod tests {
             .unwrap();
         let texts: Vec<&str> = delta.messages.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(texts, vec!["plain question", "plain answer"]);
+        assert!(delta.complete_snapshot);
+
+        // Valid prose before a malformed row is not a complete replacement.
+        std::fs::write(
+            &found[0].source_path,
+            format!("{}\n{}\n{{broken\n", header(id, ""), user(3, "partial")),
+        )
+        .unwrap();
+        let partial = DshAdapter
+            .read_session_delta(
+                &session_at(&found[0].source_path),
+                &crate::domain::SourceCursor::default(),
+            )
+            .unwrap();
+        assert!(!partial.complete_snapshot);
+        assert_eq!(partial.messages.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 

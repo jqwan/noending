@@ -719,17 +719,19 @@ fn turn_final_flags_track_the_projection() {
     db.commit_ingest(
         &session.id,
         &[msg("a4", SessionMessageRole::Assistant, "补充")],
-        &seed_update(2, 700),
+        &noending::domain::SourceCursorUpdate {
+            start_byte_offset: 500,
+            ..seed_update(1, 700)
+        },
     )
     .unwrap();
     assert!(!flags_of(&db, "a3"), "the continuation demoted it");
     assert!(flags_of(&db, "a4"));
 }
 
-/// A source rewrite (new generation, full rescan): the old conversation is
-/// retained, identical messages dedup, genuinely new ones append.
+/// A full rescan keeps identical messages and replaces a changed reply.
 #[test]
-fn a_full_rescan_keeps_history_and_replaces_the_projection() {
+fn a_full_rescan_reuses_unchanged_messages_and_replaces_the_projection() {
     let db = open_db("rescan");
     let (session, _) = seed_root(&db);
 
@@ -1236,4 +1238,232 @@ fn compressed_codex_discovery_append_and_damage_preserve_current_history() {
             .unwrap(),
         noending::domain::SourceAvailability::Missing
     );
+}
+
+#[test]
+fn full_sync_rechecks_plain_and_compressed_content_even_when_metadata_is_unchanged() {
+    for compressed in [false, true] {
+        let root = temp_root("force-full-content");
+        let db = open_db("force-full-content");
+        let source = db
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .unwrap();
+        let path = root.join(format!(
+            "{}{}",
+            rollout_name(ROOT_ID),
+            if compressed { ".zst" } else { "" }
+        ));
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&meta_line(ROOT_ID, serde_json::json!({}))).unwrap();
+        // Stable input keeps the compressed-size fixture independent of the clock.
+        meta["timestamp"] = serde_json::json!("2026-09-20T13:01:48.000Z");
+        meta["payload"]["timestamp"] = meta["timestamp"].clone();
+        let meta = meta.to_string();
+        let body =
+            |text: &str| [meta.clone(), message_line(1, "m1", "user", text)].join("\n") + "\n";
+        let encode = |text: &str| {
+            if compressed {
+                zstd::encode_all(text.as_bytes(), 3).unwrap()
+            } else {
+                text.as_bytes().to_vec()
+            }
+        };
+        let before = encode(&body("AAAAAA"));
+        let replacement = encode(&body("BBBBBB"));
+        assert_eq!(
+            before.len(),
+            replacement.len(),
+            "the fixture changes content without changing file size"
+        );
+        std::fs::write(&path, before).unwrap();
+        reconcile(&db);
+        let session = db
+            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap()
+            .unwrap();
+        let old = db.get_messages(&session.id, None, 10).unwrap()[0].clone();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, replacement).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            ingestion::reconcile_source(&db, &source, &|_| {})
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            db.get_messages(&session.id, None, 10).unwrap()[0].content,
+            "AAAAAA"
+        );
+
+        assert_eq!(
+            ingestion::reingest_source(&db, &source, &|_| {}).unwrap().1,
+            1
+        );
+        let current = db.get_messages(&session.id, None, 10).unwrap();
+        assert_eq!(current[0].content, "BBBBBB");
+        assert!(db
+            .get_message_by_ref(&format!("session-message:{}", old.id))
+            .unwrap()
+            .is_none());
+        let stored: i64 = db
+            .read()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE session_id=?1",
+                [&session.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 1);
+        let before_repeat = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            ingestion::reingest_source(&db, &source, &|_| {}).unwrap().1,
+            0
+        );
+        assert_eq!(
+            db.get_messages(&session.id, None, 10).unwrap()[0].id,
+            current[0].id
+        );
+        let after_repeat = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(after_repeat.fact_generation, before_repeat.fact_generation);
+        assert_eq!(
+            after_repeat.source_generation,
+            before_repeat.source_generation
+        );
+    }
+}
+
+#[test]
+fn source_retries_cover_old_sessions_outside_a_bounded_preview() {
+    let root = temp_root("retry-old-session");
+    let db = open_db("retry-old-session");
+    let source = db
+        .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+        .unwrap();
+    let path = write_rollout(
+        &root,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({})),
+            message_line(1, "m1", "user", "last reliable conversation"),
+        ],
+    );
+    reconcile(&db);
+    let session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    let old_message = db.get_messages(&session.id, None, 10).unwrap()[0].clone();
+    db.tx(|tx| {
+        for i in 0..501 {
+            tx.execute(
+                "INSERT INTO sessions (id, agent, root_agent_session_id, title,
+                    started_at, source_kind, source_path)
+                 VALUES (?1, 'codex', ?1, 'newer conversation', '2099-01-01T00:00:00Z',
+                    'codex_rollout', '/outside-configured-source')",
+                [format!("newer-{i}")],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let all = db.list_session_items(Default::default(), None).unwrap();
+    assert_eq!(all.len(), 502);
+    assert!(all.iter().any(|s| s.id == session.id));
+    let preview = db.list_session_items(Default::default(), Some(25)).unwrap();
+    assert_eq!(preview.len(), 25);
+    assert!(preview.iter().all(|s| s.id != session.id));
+
+    // Discovery cannot identify a broken header, but the persisted source
+    // still needs a retry and must report failure in both synchronization modes.
+    std::fs::write(&path, "{broken\n").unwrap();
+    assert!(ingestion::reconcile_source(&db, &source, &|_| {}).is_err());
+    assert!(ingestion::reingest_source(&db, &source, &|_| {}).is_err());
+    assert_eq!(
+        db.get_messages(&session.id, None, 10).unwrap()[0].id,
+        old_message.id
+    );
+    let after = db.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(after.source_prefix_hash, session.source_prefix_hash);
+    assert_eq!(after.source_byte_offset, session.source_byte_offset);
+}
+
+#[test]
+fn a_failed_full_sync_preserves_messages_and_cursor_after_discovery() {
+    for compressed in [false, true] {
+        let root = temp_root("failed-full-after-discovery");
+        let db = open_db("failed-full-after-discovery");
+        let source = db
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .unwrap();
+        let path = root.join(format!(
+            "{}{}",
+            rollout_name(ROOT_ID),
+            if compressed { ".zst" } else { "" }
+        ));
+        let meta = meta_line(ROOT_ID, serde_json::json!({}));
+        let valid = [
+            meta.clone(),
+            message_line(1, "m1", "user", "reliable history"),
+        ]
+        .join("\n")
+            + "\n";
+        let write = |body: &str| {
+            let bytes = if compressed {
+                zstd::encode_all(body.as_bytes(), 3).unwrap()
+            } else {
+                body.as_bytes().to_vec()
+            };
+            std::fs::write(&path, bytes).unwrap();
+        };
+        write(&valid);
+        reconcile(&db);
+        let before = db
+            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap()
+            .unwrap();
+        let old = db.get_messages(&before.id, None, 10).unwrap()[0].clone();
+        let broken = [
+            meta,
+            message_line(1, "m2", "user", "unconfirmed replacement"),
+            "{broken}".into(),
+        ]
+        .join("\n")
+            + "\n";
+        // Runs after discovery has decoded a valid snapshot, before ingestion
+        // consumes it: cached content must be revalidated against the source.
+        assert!(ingestion::reingest_source(&db, &source, &|_| write(&broken)).is_err());
+        let after = db.get_session(&before.id).unwrap().unwrap();
+        assert_eq!(db.get_messages(&before.id, None, 10).unwrap()[0].id, old.id);
+        assert_eq!(
+            (
+                after.fact_generation,
+                after.source_byte_offset,
+                after.source_last_seen_size,
+                after.source_prefix_hash,
+                after.source_tail_hash
+            ),
+            (
+                before.fact_generation,
+                before.source_byte_offset,
+                before.source_last_seen_size,
+                before.source_prefix_hash,
+                before.source_tail_hash
+            )
+        );
+        let stored: i64 = db
+            .read()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE session_id=?1",
+                [&before.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, 1, "a failed full scan cannot leave orphan rows");
+    }
 }

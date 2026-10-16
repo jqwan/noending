@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionCards from "./SessionTable";
 import type { Session, TerminalSummary } from "../../types";
+import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 vi.mock("../../api", () => ({
   api: {
@@ -10,7 +11,7 @@ vi.mock("../../api", () => ({
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
   },
 }));
-beforeEach(() => viewState.clear());
+beforeEach(() => { viewState.clear(); vi.mocked(api.getSessionTerminalStates).mockClear(); });
 afterEach(() => {
   cleanup();
   localStorage.removeItem("noending.continue_mode");
@@ -39,8 +40,11 @@ it("opens details separately from resume and trash actions", async () => {
 it("limits initial rows and reveals more without losing sessions", async () => {
   await renderCards(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
   expect(screen.queryByText("会话100")).toBeNull();
-  fireEvent.click(screen.getByText("显示更多（剩余 1）"));
+  expect(new Set(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]))
+    .toEqual(new Set(Array.from({ length: 100 }, (_, i) => String(i))));
+  await act(async () => { fireEvent.click(screen.getByText("显示更多（剩余 1）")); });
   expect(screen.getByText("会话100")).toBeTruthy();
+  expect(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]).toContain("100");
 });
 it("shows tracked workstream count statistic on cards and full title in list view", async () => {
   const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";

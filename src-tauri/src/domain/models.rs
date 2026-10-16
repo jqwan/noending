@@ -341,7 +341,27 @@ pub struct Session {
     /// Fact generation of the CURRENT conversation: raised only when a source
     /// rewrite / truncate / reorder changes the effective conversation.
     pub fact_generation: i64,
-    /// How many messages the store holds (the store's own append counter).
+    /// Tail ordinal of the current conversation, also its message count.
+    pub latest_message_seq: i64,
+}
+
+/// Lightweight list projection. Source metadata, paths and ingestion cursors
+/// belong to detail/runtime reads and are never fetched for list rendering.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionListItem {
+    pub id: Id,
+    pub agent: Agent,
+    pub root_agent_session_id: String,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub workspace_path_id: Option<Id>,
+    pub project_id: Option<Id>,
+    pub tracked_workstream_ids: Vec<Id>,
+    pub started_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub last_conversation_at: Option<String>,
+    pub archived_at: Option<String>,
+    pub source_kind: String,
     pub latest_message_seq: i64,
 }
 
@@ -368,7 +388,7 @@ impl Session {
 
 /// Where reading of a session's source stopped — the read-side view of the
 /// session's cursor columns.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceCursor {
     pub source_file_identity: String,
     pub generation: i64,
@@ -414,8 +434,9 @@ pub struct SessionMessageStats {
 pub struct SessionMessage {
     pub id: Id,
     pub session_id: Id,
-    /// NoEnding's own per-session monotonic sequence. Never a source line
-    /// number; never reused or rolled back.
+    /// Storage order assigned within the session; retained messages keep it.
+    /// Current display order is the projection ordinal. This is not a source
+    /// line number or a permanent counter across retirement of old messages.
     pub sequence: i64,
     pub role: SessionMessageRole,
     pub content: String,

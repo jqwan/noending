@@ -349,7 +349,11 @@ fn extract_session(
         let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
         let projects: Vec<_> = snapshot.session.project_id.clone().into_iter().collect();
         files.add_preferences(&projects);
-        files.add_session(&snapshot, !regenerate, false);
+        files.add_session(
+            &snapshot,
+            !regenerate && snapshot.summary_generation == Some(snapshot.generation),
+            false,
+        );
         let mut cli = require_cli(launch, operation)?;
         cli.timeout_secs = 300;
         let raw = run_context_once(
@@ -617,7 +621,11 @@ fn run_batch(
     for s in &ordered {
         if s.latest > s.from {
             targets.insert(s.session.id.clone());
-            files.add_session(s, true, false);
+            files.add_session(
+                s,
+                !regenerate && s.summary_generation == Some(s.generation),
+                false,
+            );
         }
         if regenerate {
             files.add_session(s, false, true);

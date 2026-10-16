@@ -46,21 +46,10 @@ pub fn workstreams_for_project(conn: &Connection, id: &str) -> Result<Vec<Workst
     let rows = st.query_map([id], super::row_workstream)?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
-pub fn reindex_workstream_search_conn(conn: &Connection, id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM search_index WHERE kind='workstream' AND ref_id=?1",
-        [id],
-    )?;
-    conn.execute("INSERT INTO search_index(kind,ref_id,parent_id,title,body) SELECT 'workstream',w.id,'',w.title,w.description || char(10) || COALESCE(c.summary,'') FROM workstreams w LEFT JOIN workstream_context_state c ON c.workstream_id=w.id WHERE w.id=?1",[id])?;
-    Ok(())
-}
+
 pub fn purge_workstream_data_conn(conn: &Connection, id: &str) -> Result<()> {
     let sessions = tracked_session_ids(conn, id)?;
     conn.execute("DELETE FROM workstreams WHERE id=?1", [id])?;
-    conn.execute(
-        "DELETE FROM search_index WHERE kind='workstream' AND ref_id=?1",
-        [id],
-    )?;
     for sid in sessions {
         super::index_session_conn(conn, &sid)?;
     }

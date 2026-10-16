@@ -220,7 +220,7 @@ export default function AppShell() {
     return () => window.removeEventListener("keydown", h);
   }, [goBack, goForward]);
 
-  // ⌘K / Ctrl+K opens the command palette
+  // ⌘K / Ctrl+K opens object lookup.
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -287,8 +287,8 @@ export default function AppShell() {
           </button>
           <button
             className="history-button"
-            aria-label="搜索"
-            title={isMac ? "搜索 (⌘K)" : "搜索 (Ctrl+K)"}
+            aria-label="查找"
+            title={isMac ? "查找 (⌘K)" : "查找 (Ctrl+K)"}
             onClick={() => setPaletteOpen(true)}
           >
             <Icon name="search" />

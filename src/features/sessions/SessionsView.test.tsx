@@ -10,7 +10,7 @@ import { viewState } from "../../hooks/useViewState";
 import type { Session } from "../../types";
 
 vi.mock("../../api", () => ({
-  api: {
+  api: { matchObjects: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     listSessions: vi.fn(),
     listProjects: vi.fn(),
@@ -75,6 +75,7 @@ function taskFilter(): HTMLSelectElement {
 beforeEach(() => {
   Object.values(removedTargets).forEach(ids => ids.clear());
   navigate.mockClear();
+  vi.mocked(api.matchObjects).mockReset().mockResolvedValue([]);
   clearSessionsCache();
   viewState.clear(); localStorage.clear();
   vi.mocked(api.listSessions).mockReset();
@@ -133,6 +134,7 @@ it("shows archived sessions in the same cards and filters, with continue disable
   screen.getByRole("button", { name: "永久删除归档会话" });
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   fireEvent.change(screen.getByRole("textbox", { name: "搜索会话" }), { target: { value: "不匹配" } });
+  await screen.findByText("没有符合当前筛选条件的会话");
   expect(screen.queryByText("归档会话")).toBeNull();
 });
 
@@ -163,4 +165,18 @@ it("immediately removes a deleted session and ignores a stale board refresh", as
   await act(async () => {});
   expect(screen.queryByText("删除会话")).toBeNull();
   expect(screen.getByText("保留会话")).toBeTruthy();
+});
+
+it("matches all session identities before the visible card limit and intersects task filters", async () => {
+  const sessions = Array.from({length:125}, (_,n)=>session({id:`s-${n}`, title:`Session ${n}`, tracked_workstream_ids:n===124?["w1"]:[]}));
+  vi.mocked(api.listSessions).mockResolvedValue(sessions);
+  vi.mocked(api.matchObjects).mockResolvedValue(["s-0","s-124"]);
+  render(<SessionsView navigate={navigate} />);
+  await screen.findByText("Session 0");
+  expect(screen.queryByText("Session 124")).toBeNull();
+  fireEvent.change(taskFilter(), {target:{value:"w1"}});
+  fireEvent.change(screen.getByRole("textbox",{name:"搜索会话"}),{target:{value:"native-id"}});
+  await screen.findByText("Session 124");
+  expect(screen.queryByText("Session 0")).toBeNull();
+  expect(api.matchObjects).toHaveBeenCalledWith("session","native-id", ["s-124"]);
 });

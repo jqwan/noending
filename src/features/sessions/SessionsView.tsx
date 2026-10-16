@@ -1,3 +1,4 @@
+import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -9,20 +10,19 @@ import CustomSelect from "../../components/CustomSelect";
 import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionCards, {
-  agentDisplayLabel,
   sessionDisplayTitle,
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
-import { AGENT_LABELS, type Agent, type IngestSource, type Project, type Session } from "../../types";
+import { AGENT_LABELS, type Agent, type IngestSource, type Project, type SessionListItem } from "../../types";
 import type { Route, SessionScope } from "../../app/routes";
 
 /**
  * Sessions = 执行记录页：第二天回来还能一眼找到并继续任意一次 Agent 会话，不承担
- * Workstream 浏览。搜索与筛选在前端做，规模大了再转后端。
+ * Workstream 浏览。列表加载完整轻量列表项以保留筛选语义，详情与消息按需读取。
  * 未归档和已归档使用相同的筛选与展示，归档只改变继续和删除动作。
  */
-let cachedNormalSessions: Session[] | null = null;
-let cachedArchivedSessions: Session[] | null = null;
+let cachedNormalSessions: SessionListItem[] | null = null;
+let cachedArchivedSessions: SessionListItem[] | null = null;
 let cachedProjects: Project[] = [];
 let cachedSources: IngestSource[] | null = null;
 let cachedWorkstreamTitleById = new Map<string, string>();
@@ -41,7 +41,7 @@ export default function SessionsView({ navigate, scope }: {
 }) {
   const statePrefix = "sessions";
   const [archivedMode, setArchivedMode] = useState(scope === "archived");
-  const [sessions, setSessions] = useState<Session[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
+  const [sessions, setSessions] = useState<SessionListItem[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
   const [projects, setProjects] = useState<Project[]>(cachedProjects);
   /** Workstream id → 标题：跟踪任务 ID 的标题在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
@@ -146,11 +146,7 @@ export default function SessionsView({ navigate, scope }: {
     query.trim() !== "" || agent !== "all" || projectId !== "all"
     || wsFilter !== "all";
 
-  const shown = useMemo(() => {
-    if (!sessions) return null;
-    const q = query.trim().toLowerCase();
-    return sessions
-      .filter((s) => (agent === "all" ? true : s.agent === agent))
+  const candidates = useMemo(() => sessions?.filter((s) => (agent === "all" ? true : s.agent === agent))
       // 和 Project 徽章同一个判据：只有存在物理锚点的行才算这个 Project 的成员。
       // 徽章说"历史标签，已不决定任何事"的行不能一边显示成无归属、一边又被筛进来
       // （M34 / M29：一个视图不能两个真相）。
@@ -165,30 +161,19 @@ export default function SessionsView({ navigate, scope }: {
         return wsFilter === "unassigned"
           ? s.tracked_workstream_ids.length === 0
           : s.tracked_workstream_ids.includes(wsFilter);
-      })
-      .filter((s) => {
-        if (q === "") return true;
-        // 无标题 Session 也要被找到：占位文案与 root_agent_session_id / id 都进
-        // 搜索面，用户照着报障里的 Session ID 能直接定位（AGENTS.md: provenance 可解析）。
-        return [
-          s.title,
-          sessionDisplayTitle(s.title),
-          s.cwd,
-          s.root_agent_session_id,
-          s.id,
-          agentDisplayLabel(s.agent),
-          s.project_id ? projectNameById.get(s.project_id) : null,
-          s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)).join("、"),
-        ]
-          .filter(Boolean)
-          .some((t) => (t as string).toLowerCase().includes(q));
-      })
+      }) ?? null, [sessions, agent, projectId, wsFilter]);
+  const candidateIds = useMemo(() => candidates?.map(item => item.id) ?? [], [candidates]);
+  const search = useObjectMatches("session", query, sessions, candidateIds);
+  const shown = useMemo(() => {
+    if (!candidates || search.pending || search.error) return null;
+    return candidates
+      .filter((s) => !search.ids || search.ids.has(s.id))
       .sort((a, b) =>
         (b.last_activity_at ?? b.started_at ?? "").localeCompare(
           a.last_activity_at ?? a.started_at ?? "",
         ),
       );
-  }, [sessions, workstreamTitleById, query, agent, projectId, wsFilter, projectNameById]);
+  }, [candidates, search]);
 
   /** 行内「继续」：直接在会话格式对应的桌面应用里打开（无预览）；格式没有
    *  桌面路由时按钮本来就是灰的，这里的报错是兜底。 */
@@ -246,7 +231,7 @@ export default function SessionsView({ navigate, scope }: {
   };
 
   /** 恢复失败要把后端的拒绝原因原样给出。 */
-  const unarchive = async (s: Session) => {
+  const unarchive = async (s: SessionListItem) => {
     if (unarchiveBusy || bulkPurgeBusy) return;
     setUnarchiveBusy(true);
     try {
@@ -343,7 +328,7 @@ export default function SessionsView({ navigate, scope }: {
             type="text"
             className="ws-search"
             aria-label="搜索会话"
-            placeholder="搜索会话…"
+            placeholder="搜索会话…（标题、目录或完整 ID）"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -435,7 +420,8 @@ export default function SessionsView({ navigate, scope }: {
 
           </div>
 
-          {shown === null && !loadFailed && (
+          <ObjectSearchFeedback search={search} />
+          {sessions === null && !loadFailed && (
             viewMode === "cards" ? (
               <div className="board-grid" role="status" aria-busy="true">
                 {Array.from({ length: 6 }).map((_, i) => (

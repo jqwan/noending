@@ -31,11 +31,11 @@ pub fn edit_summary(
             "task"=> {
                 repo::ensure_workstream_state_conn(tx,id)?;
                 tx.execute("UPDATE workstream_context_state SET summary=?2,context_revision=context_revision+1,updated_at=?3 WHERE workstream_id=?1",params![id,text.trim(),crate::storage::now()])?;
-                crate::storage::workstream_projects::reindex_workstream_search_conn(tx,id)?;
+
             },
             _=> {
                 tx.execute("INSERT INTO project_context_state(project_id,summary,context_revision,updated_at) VALUES (?1,?2,1,?3) ON CONFLICT(project_id) DO UPDATE SET summary=?2,context_revision=context_revision+1,updated_at=?3",params![id,text.trim(),crate::storage::now()])?;
-                project_context_repo::reindex(tx,id)?;
+
             },
         }
         Ok(revision+1)

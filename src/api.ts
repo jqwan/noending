@@ -9,7 +9,7 @@ import type {
   AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
 
-  SearchHit, Session, SessionContextView, SessionDetail, SessionTracking,
+  Session, SessionListItem, SessionContextView, SessionDetail, SessionTracking,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
   SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
@@ -82,12 +82,14 @@ export const api = {
 
   getWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamContext>("get_workstream_context", { workstreamId }),
-  listSessions: (projectId?: string, agent?: Agent, scope?: "unarchived" | "archived" | "all") =>
-    invoke<Session[]>("list_sessions", {
+  listSessions: (projectId?: string, agent?: Agent, scope?: "unarchived" | "archived" | "all", limit?: number) =>
+    invoke<SessionListItem[]>("list_sessions", {
       projectId: projectId ?? null,
       agent: agent ?? null,
       scope: scope ?? null,
+      limit: limit ?? null,
     }),
+  getSessionCountsByAgent: () => invoke<Partial<Record<Agent, number>>>("get_session_counts_by_agent"),
   // Session Lifecycle: UI 只提交 session id。没有删除 job，也不删来源：
   // NoEnding 不删 Agent 自有的源；permanent delete 是本地清除。
   archiveSession: (sessionId: string) => invoke<Session>("archive_session", { sessionId }),
@@ -260,7 +262,8 @@ export const api = {
   removeIngestSource: (sourceId: string) =>
     invoke<void>("remove_ingest_source", { sourceId }),
 
-  search: (query: string, limit?: number) => invoke<SearchHit[]>("search", { query, limit: limit ?? 30 }),
+  lookupNavigation: (query: string) => invoke<import("./types").NavigationResults>("lookup_navigation", { query }),
+  matchObjects: (kind: import("./types").NavigationItem["kind"], query: string, candidateIds: readonly string[]) => invoke<string[]>("match_objects", { kind, query, candidateIds }),
   getAgentStatus: () =>
     invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
 

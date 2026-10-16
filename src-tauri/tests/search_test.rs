@@ -7,10 +7,10 @@
 
 use noending::domain::{Agent, SessionMessageRole};
 use noending::lifecycle;
-use noending::search::search;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
 use std::ops::Deref;
+use support::search_messages as search;
 
 mod support;
 
@@ -40,64 +40,44 @@ fn open_db(tag: &str) -> TestDb {
     TestDb { db: Some(db), dir }
 }
 
-/// A query inside a token ("Foob" in "NoEndingFoobar") is invisible to FTS5's
-/// MATCH, which compares whole tokens. The LIKE pass is what makes such a query
-/// find anything at all — and it must run whenever MATCH came back empty, not
-/// only when the index happens to be empty.
+/// Object lookup matches literal substrings, including punctuation.
 #[test]
-fn a_query_inside_a_token_still_finds_the_document() {
-    let db = open_db("fallback");
-    let p = support::project("p1".into(), "NoEndingFoobar");
-    db.upsert_project(&p).unwrap();
-    db.index_project(&p).unwrap();
-
-    let whole = search(&db, "NoEndingFoobar", 10).unwrap();
-    assert_eq!(whole.len(), 1, "a whole token is the FTS pass");
-
-    let substring = search(&db, "Foob", 10).unwrap();
-    assert_eq!(
-        substring.len(),
-        1,
-        "an in-token query must fall back to LIKE: {substring:?}"
-    );
-    assert_eq!(substring[0].ref_id, "p1");
-
-    assert!(
-        search(&db, "nothing-here", 10).unwrap().is_empty(),
-        "no match anywhere is an empty result, not an error"
-    );
-}
-
-/// The LIKE pass treats the query as text, not as a pattern: `_` and `%` are
-/// ordinary characters in a file name or a percentage, and a query that is
-/// nothing but one of them must not turn into "match everything".
-#[test]
-fn like_wildcards_are_matched_literally() {
-    let db = open_db("wildcards");
+fn object_lookup_matches_substrings_and_literal_wildcards() {
+    use noending::search::{
+        navigation::lookup,
+        objects::{matching_ids, ObjectKind},
+    };
+    let db = open_db("object-literals");
     for (id, name) in [
-        ("a", "hello_world"),
-        ("b", "helloworld"),
+        ("a", "NoEndingFoobar"),
+        ("b", "hello_world"),
         ("c", "progress 100%"),
-        ("d", "progress complete"),
+        ("d", "ordinary title"),
     ] {
-        let p = support::project(id.into(), name);
-        db.upsert_project(&p).unwrap();
-        db.index_project(&p).unwrap();
+        db.upsert_project(&support::project(id.into(), name))
+            .unwrap();
     }
-
-    let underscore = search(&db, "_", 10).unwrap();
-    assert_eq!(
-        underscore.iter().map(|h| &h.ref_id).collect::<Vec<_>>(),
-        vec!["a"],
-        "`_` is a literal underscore, not a single-character wildcard"
-    );
-
-    let percent = search(&db, "%", 10).unwrap();
-    assert_eq!(
-        percent.iter().map(|h| &h.ref_id).collect::<Vec<_>>(),
-        vec!["c"],
-        "`%` is a literal percent sign, not a wildcard"
-    );
+    for (query, id) in [("Foob", "a"), ("_", "b"), ("%", "c")] {
+        assert_eq!(
+            matching_ids(
+                &db,
+                ObjectKind::Project,
+                query,
+                &["a", "b", "c", "d"].map(str::to_owned)
+            )
+            .unwrap(),
+            vec![id]
+        );
+        let hits: Vec<_> = lookup(&db, query)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|h| h.kind == ObjectKind::Project)
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ref_id, id);
+    }
+    assert!(lookup(&db, "nothing-here").unwrap().items.is_empty());
 }
 
 /// A ROOT conversation message is searchable by its content, with
@@ -106,7 +86,7 @@ fn like_wildcards_are_matched_literally() {
 /// stored message IS the curated conversation.
 #[test]
 fn a_root_message_is_searchable_regardless_of_length() {
-    let db = open_db("message");
+    let mut db = open_db("message");
     let long = "决定使用 SQLite 作为本地存储，因为它是单文件、零配置且可嵌入的。";
     let short = "先做迁移";
     let (_session, stored) = support::seed_conversation(
@@ -118,7 +98,10 @@ fn a_root_message_is_searchable_regardless_of_length() {
             support::parsed_message("m2", SessionMessageRole::User, short),
         ],
     );
-    db.index_new_messages(&stored).unwrap();
+    // Search must survive a restart using only the ingestion transaction;
+    // startup performs no global document backfill.
+    drop(db.db.take());
+    db.db = Some(Db::open(&db.dir.join("test.db")).unwrap());
 
     let hits = search(&db, "SQLite", 20).unwrap();
     let message_hits: Vec<_> = hits.iter().filter(|h| h.kind == "message").collect();
@@ -263,15 +246,16 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
     lifecycle::archive_session(&db, &session.id).unwrap();
     db.write()
         .execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+            "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
              VALUES ('message', 'stale-msg', ?1, '', 'unique stale marker text')",
             rusqlite::params![session.id],
         )
         .unwrap();
     db.write()
         .execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-             VALUES ('session', ?1, '', 'unique stale marker title', '')",
+            "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
+             VALUES ('session', ?1, '', 'unique stale marker title', '')
+             ON CONFLICT(kind,ref_id) DO UPDATE SET title=excluded.title, body=excluded.body",
             rusqlite::params![session.id],
         )
         .unwrap();
@@ -291,7 +275,7 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
     // equally invisible.
     db.write()
         .execute(
-            "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
+            "INSERT INTO search_documents (kind, ref_id, parent_id, title, body)
              VALUES ('message', 'stale-gone', 'sess-gone', '', 'unique stale marker text')",
             [],
         )
@@ -313,40 +297,386 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
     );
 }
 
-#[test]
-fn task_search_backfill_does_not_assign_a_single_project_parent() {
-    let db = open_db("task-search-parent");
-    let task = support::workstream("multi-project-task".into(), "多项目任务");
-    db.upsert_workstream(&task).unwrap();
-    db.index_workstream(&task).unwrap();
-    db.write()
-        .execute(
-            "UPDATE search_index SET parent_id = 'some-project' WHERE kind = 'workstream'",
-            [],
-        )
-        .unwrap();
-    db.backfill_search_index().unwrap();
-    let results = noending::search::search(&db, "多项目任务", 10).unwrap();
-    let hit = results.iter().find(|hit| hit.ref_id == task.id).unwrap();
-    assert!(hit.parent_id.is_empty());
-}
-
 /// Routing ids remain available on hits, but only title/body are searchable.
 #[test]
 fn search_indexes_content_without_tokenizing_routing_metadata() {
     let db = open_db("metadata-unindexed");
-    db.write().execute(
-        "INSERT INTO search_index (kind, ref_id, parent_id, title, body)
-         VALUES ('routingkindonly', 'routingrefonly', 'routingparentonly', 'Visible heading', 'Searchable prose')",
-        [],
-    ).unwrap();
-    for metadata in ["routingkindonly", "routingrefonly", "routingparentonly"] {
-        assert!(search(&db, metadata, 10).unwrap().is_empty());
+    let (session, messages) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "routingnativeonly",
+        &[support::parsed_message(
+            "routingmessageonly",
+            SessionMessageRole::User,
+            "Searchable prose",
+        )],
+    );
+    for metadata in [
+        "message",
+        messages[0].id.as_str(),
+        session.id.as_str(),
+        "routingmessageonly",
+        "routingnativeonly",
+    ] {
+        let hits = search(&db, metadata, 10).unwrap();
+        assert!(
+            !hits.iter().any(|h| h.kind == "message"),
+            "message routing metadata must not be tokenized: {hits:?}"
+        );
     }
-    for content in ["heading", "prose", "archable"] {
+    for content in ["prose", "archable"] {
         let hits = search(&db, content, 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].ref_id, "routingrefonly");
-        assert_eq!(hits[0].parent_id, "routingparentonly");
+        assert_eq!(hits[0].ref_id, messages[0].id);
+        assert_eq!(hits[0].parent_id, session.id);
     }
+}
+
+#[test]
+fn message_search_uses_external_prose_and_keeps_fts_consistent_after_retirement() {
+    use noending::domain::SourceCursorUpdate;
+    let db = open_db("external-prose");
+    let prose = format!("uniqueposting {}", "正文只保留一份。".repeat(4000));
+    let (session, stored) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "external-prose",
+        &[support::parsed_message(
+            "m1",
+            SessionMessageRole::User,
+            &prose,
+        )],
+    );
+    let route: (String, String) = db
+        .read()
+        .query_row(
+            "SELECT title,body FROM search_documents WHERE kind='message' AND ref_id=?1",
+            [&stored[0].id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        route,
+        (String::new(), String::new()),
+        "message routing stores no prose copy"
+    );
+    let hits = search(&db, "uniqueposting", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].ref_id, stored[0].id);
+    assert!(hits[0].snippet.contains("uniqueposting"));
+    assert_eq!(search(&db, "只保留", 10).unwrap()[0].ref_id, stored[0].id);
+    db.write()
+        .execute(
+            "INSERT INTO search_index(search_index,rank) VALUES('integrity-check',1)",
+            [],
+        )
+        .unwrap();
+    db.commit_ingest(
+        &session.id,
+        &[],
+        &SourceCursorUpdate {
+            file_identity: "replacement".into(),
+            generation: 1,
+            byte_offset: 0,
+            last_seen_size: 0,
+            mtime: None,
+            start_byte_offset: 0,
+            prefix_hash: String::new(),
+        },
+    )
+    .unwrap();
+    assert!(search(&db, "uniqueposting", 10).unwrap().is_empty());
+    db.write()
+        .execute(
+            "INSERT INTO search_index(search_index,rank) VALUES('integrity-check',1)",
+            [],
+        )
+        .unwrap();
+    // Cascading removal also retires postings before their source prose goes.
+    let (cascade, _) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "external-cascade",
+        &[support::parsed_message(
+            "cascade",
+            SessionMessageRole::User,
+            "cascadeposting",
+        )],
+    );
+    db.write()
+        .execute("DELETE FROM sessions WHERE id=?1", [&cascade.id])
+        .unwrap();
+    let remaining: i64 = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM search_documents WHERE kind='message' AND parent_id=?1",
+            [&cascade.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+    db.write()
+        .execute(
+            "INSERT INTO search_index(search_index,rank) VALUES('integrity-check',1)",
+            [],
+        )
+        .unwrap();
+}
+
+#[test]
+fn unchanged_search_documents_do_not_rewrite_the_fts_index() {
+    let db = open_db("unchanged-documents");
+    let project = support::project("unchanged-project".into(), "Stable project");
+    let task = support::workstream("unchanged-task".into(), "Stable task");
+    db.upsert_project(&project).unwrap();
+    db.upsert_workstream(&task).unwrap();
+    let session = || {
+        db.upsert_logical_session(
+            Agent::Codex,
+            "unchanged-session",
+            Some("Stable session"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "fixture",
+            "/fixture",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+    };
+    let first = session();
+    let changes = || {
+        db.write()
+            .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = changes();
+
+    assert_eq!(session(), (first.0, false));
+    db.backfill_search_index().unwrap();
+    assert_eq!(changes(), before);
+    assert_eq!(search(&db, "Stable", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn navigation_lookup_matches_objects_and_paths_but_excludes_content() {
+    use noending::search::navigation::lookup;
+    use noending::search::objects::ObjectKind;
+    let db = open_db("navigation-scope");
+    let project = support::project("nav-project".into(), "Needle Project");
+    db.upsert_project(&project).unwrap();
+    let mut task = support::workstream("nav-task".into(), "Needle Task");
+    task.description = "contentonly".into();
+    db.upsert_workstream(&task).unwrap();
+    let (session, _) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "nav-session",
+        &[support::parsed_message(
+            "m",
+            SessionMessageRole::User,
+            "contentonly",
+        )],
+    );
+    db.tx(|tx| {
+        noending::storage::workspace::insert_workspace_path_conn(tx,"/work/100%_done",&project.id)?;
+        tx.execute("UPDATE sessions SET title='Needle Session',cwd='/work/100%_done',archived_at='now' WHERE id=?1",[&session.id])?;
+        tx.execute("UPDATE workstreams SET visibility='archived' WHERE id=?1",[&task.id])?;
+        tx.execute("INSERT INTO project_context_state(project_id,summary) VALUES(?1,'contentonly')",[&project.id])?;
+        tx.execute("UPDATE workstream_context_state SET summary='contentonly' WHERE workstream_id=?1",[&task.id])?;
+        tx.execute("INSERT INTO session_contexts(session_id,summary,updated_at) VALUES(?1,'contentonly','now')",[&session.id])?;
+
+
+        Ok(())
+    }).unwrap();
+    let document_kinds: Vec<String> = {
+        let conn = db.read();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT kind FROM search_documents ORDER BY kind")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+        rows.collect::<std::result::Result<_, _>>().unwrap()
+    };
+    assert_eq!(document_kinds, vec!["message", "session"]);
+    for retired_kind in ["project", "workstream"] {
+        assert!(db
+            .write()
+            .execute(
+                "INSERT INTO search_documents(kind,ref_id) VALUES(?1,'retired')",
+                [retired_kind]
+            )
+            .is_err());
+    }
+    assert!(
+        !search(&db, "contentonly", 20).unwrap().is_empty(),
+        "content remains available to the separate search service"
+    );
+    assert!(
+        lookup(&db, "contentonly").unwrap().items.is_empty(),
+        "lookup must not match summaries, descriptions or message text"
+    );
+    let result = lookup(&db, "nEeDlE").unwrap();
+    assert!(!result.has_more);
+    let ids: std::collections::BTreeSet<_> =
+        result.items.iter().map(|h| h.ref_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from([
+            project.id.as_str(),
+            task.id.as_str(),
+            session.id.as_str()
+        ])
+    );
+    assert!(
+        result
+            .items
+            .iter()
+            .find(|h| h.kind == ObjectKind::Session)
+            .unwrap()
+            .archived
+    );
+    assert!(
+        result
+            .items
+            .iter()
+            .find(|h| h.kind == ObjectKind::Workstream)
+            .unwrap()
+            .archived
+    );
+    let paths = lookup(&db, "100%_").unwrap();
+    assert_eq!(paths.items.len(), 2);
+    assert!(paths.items.iter().all(|h| h.hint == "/work/100%_done"));
+    assert!(
+        lookup(&db, "100xx").unwrap().items.is_empty(),
+        "percent and underscore must match literally"
+    );
+}
+
+#[test]
+fn navigation_lookup_includes_agents_without_detection_and_reports_truncation() {
+    use noending::search::navigation::lookup;
+    use noending::search::objects::ObjectKind;
+    let db = open_db("navigation-agents");
+    let initial = lookup(&db, "").unwrap();
+    assert!(initial.items.iter().all(|h| h.kind == ObjectKind::Agent));
+    let qoder = lookup(&db, "qcoder").unwrap();
+    assert_eq!(qoder.items.len(), 1);
+    assert_eq!(qoder.items[0].agent, Some(Agent::Qoder));
+    assert_eq!(qoder.items[0].kind, ObjectKind::Agent);
+    for i in 0..30 {
+        let task = support::workstream(format!("nav-{i:02}"), format!("Codex task {i}"));
+        db.upsert_workstream(&task).unwrap();
+    }
+    let result = lookup(&db, "codex").unwrap();
+    assert!(result.has_more);
+    assert!(result.items.len() < 31);
+    assert_eq!(
+        result.items[0].kind,
+        ObjectKind::Agent,
+        "exact Agent names remain ahead of broad prefix matches"
+    );
+    assert_eq!(result.items[0].agent, Some(Agent::Codex));
+    let narrow = lookup(&db, "Codex task 29").unwrap();
+    assert!(!narrow.has_more);
+    assert_eq!(narrow.items.len(), 1);
+    assert_eq!(narrow.items[0].ref_id, "nav-29");
+    assert!(
+        lookup(&db, "")
+            .unwrap()
+            .items
+            .iter()
+            .all(|h| h.kind == ObjectKind::Agent),
+        "default suggestions must not preload task records"
+    );
+}
+
+#[test]
+fn board_matches_are_complete_and_exclude_non_identity_fields() {
+    use noending::search::{
+        navigation::lookup,
+        objects::{matching_ids, ObjectKind},
+    };
+    let db = open_db("board-match-range");
+    let mut expected = Vec::new();
+    for n in 0..35 {
+        let id = format!("task-{n:02}");
+        let mut task = support::workstream(id.clone(), format!("Shared title {n}"));
+        if n == 34 {
+            task.visibility = "archived".into();
+        }
+        db.upsert_workstream(&task).unwrap();
+        expected.push(id);
+    }
+    assert_eq!(
+        matching_ids(&db, ObjectKind::Workstream, " Shared title ", &expected).unwrap(),
+        expected
+    );
+    // Scope is a query constraint: matching objects outside it never return.
+    let scope = vec![
+        "task-34".into(),
+        "task-02".into(),
+        "task-34".into(),
+        "missing".into(),
+    ];
+    assert_eq!(
+        matching_ids(&db, ObjectKind::Workstream, "Shared", &scope).unwrap(),
+        vec!["task-02", "task-34"]
+    );
+    assert_eq!(
+        matching_ids(&db, ObjectKind::Workstream, "", &scope).unwrap(),
+        vec!["task-02", "task-34"]
+    );
+    assert!(matching_ids(&db, ObjectKind::Workstream, "Shared", &[])
+        .unwrap()
+        .is_empty());
+    assert!(
+        matching_ids(&db, ObjectKind::Agent, "claude", &["codex".into()])
+            .unwrap()
+            .is_empty()
+    );
+    let preview = lookup(&db, "Shared title").unwrap();
+    assert_eq!(preview.items.len(), 20);
+    assert!(preview.has_more);
+    let mut content = support::workstream("other".into(), "Unrelated");
+    content.description = "descriptiononly".into();
+    db.upsert_workstream(&content).unwrap();
+    assert!(matching_ids(
+        &db,
+        ObjectKind::Workstream,
+        "descriptiononly",
+        &[content.id.clone()]
+    )
+    .unwrap()
+    .is_empty());
+    assert_eq!(
+        matching_ids(
+            &db,
+            ObjectKind::Agent,
+            "claude",
+            &["claude_code".into(), "codex".into()]
+        )
+        .unwrap(),
+        vec!["claude_code"]
+    );
+    let (session, _) = support::seed_conversation(&db, Agent::Codex, "native-exact-id", &[]);
+    for query in [session.id.as_str(), "native-exact-id"] {
+        assert_eq!(
+            matching_ids(&db, ObjectKind::Session, query, &[session.id.clone()]).unwrap(),
+            vec![session.id.as_str()]
+        );
+        assert_eq!(lookup(&db, query).unwrap().items[0].ref_id, session.id);
+    }
+    assert!(
+        matching_ids(&db, ObjectKind::Session, "exact-id", &[session.id.clone()])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        matching_ids(&db, ObjectKind::Session, "Codex", &[session.id.clone()])
+            .unwrap()
+            .is_empty()
+    );
 }

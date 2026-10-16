@@ -8,13 +8,14 @@ import type { WorkstreamCardData } from "../../types";
 
 const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi.fn() }));
 vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
-vi.mock("../../api", () => ({ api: { listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
+vi.mock("../../api", () => ({ api: { matchObjects: vi.fn().mockResolvedValue([]), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
 const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "", summary: null, last_activity_at: null, latest_session: null });
 beforeEach(() => { Object.values(removedTargets).forEach(ids => ids.clear()); vi.clearAllMocks(); viewState.clear(); localStorage.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 
-it("uses the same searchable cards for both scopes with the correct toolbar actions", () => {
+it("uses the same searchable cards for both scopes with the correct toolbar actions", async () => {
+  vi.mocked(api.matchObjects).mockResolvedValue(["归档甲"]);
   const navigate = vi.fn();
   const { rerender } = render(<WorkstreamsView navigate={navigate} actionSeq={0} />);
   screen.getByRole("button", { name: "新建任务" });
@@ -24,8 +25,8 @@ it("uses the same searchable cards for both scopes with the correct toolbar acti
   expect(screen.queryByRole("button", { name: "新建任务" })).toBeNull();
   expect(document.querySelectorAll(".task-card")).toHaveLength(2);
   fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });
+  await screen.findByRole("button", { name: "永久删除归档甲" });
   expect(document.querySelectorAll(".task-card")).toHaveLength(1);
-  screen.getByRole("button", { name: "永久删除归档甲" });
 });
 
 it("delete all covers archived tasks even when the board is filtered", async () => {

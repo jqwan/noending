@@ -2,7 +2,7 @@ import { invalidateTargets, removedTargets } from "../../app/removedTargets";
 import { viewState } from "../../hooks/useViewState";
 // Projects Board 契约：一次卡片查询、名称/路径搜索、缺失筛选。
 
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectsView, { clearProjectCardsCache } from "./ProjectsView";
 import { api } from "../../api";
@@ -10,7 +10,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { ProjectCardData } from "../../types";
 
 vi.mock("../../api", () => ({
-  api: {
+  api: { matchObjects: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn(),
     getProjectDetail: vi.fn(),
     addProjectPath: vi.fn(),
@@ -34,6 +34,7 @@ beforeEach(() => {
   vi.mocked(api.archiveProject).mockReset();
   vi.mocked(api.restoreProject).mockReset();
   vi.mocked(api.deleteProjectPermanently).mockReset();
+  vi.mocked(api.matchObjects).mockReset().mockResolvedValue([]);
   clearProjectCardsCache();
   viewState.clear(); localStorage.clear();
   vi.mocked(api.listProjectCards).mockReset();
@@ -88,17 +89,21 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("My App");
 
+    vi.mocked(api.matchObjects).mockResolvedValue(["p-1"]);
     const searchInput = screen.getByPlaceholderText(/搜索项目/);
 
     // Matches by name
     fireEvent.change(searchInput, { target: { value: "noending" } });
-    expect(screen.getByText("NoEnding")).toBeTruthy();
+    expect(await screen.findByText("NoEnding")).toBeTruthy();
     expect(screen.queryByText("My App")).toBeNull();
+
+    expect(api.matchObjects).toHaveBeenLastCalledWith("project", "noending", ["p-1", "p-2"]);
 
     // Matches by hidden search path
     fireEvent.change(searchInput, { target: { value: "worktrees/noending-ui" } });
-    expect(screen.getByText("NoEnding")).toBeTruthy();
+    expect(await screen.findByText("NoEnding")).toBeTruthy();
     expect(screen.queryByText("My App")).toBeNull();
+    expect(api.matchObjects).toHaveBeenLastCalledWith("project", "worktrees/noending-ui", ["p-1", "p-2"]);
   });
 
   it.each(["卡片视图", "列表视图"])("distinguishes partial and total directory loss and filters missing projects in %s", async (view) => {
@@ -308,4 +313,21 @@ it("immediately removes a deleted project and ignores its stale list response", 
   await act(async () => {});
   expect(screen.queryByText("删除项目")).toBeNull();
   expect(screen.getByText("保留项目")).toBeTruthy();
+});
+
+it("intersects complete lookup matches with project filters and preserves sorting", async () => {
+  vi.mocked(api.listProjectCards).mockResolvedValue([
+    card({ id: "late", name: "Late result", missing_path_count: 1 }),
+    card({ id: "healthy", name: "Healthy result" }),
+    card({ id: "archived", name: "Archived result", visibility: "archived", missing_path_count: 1 }),
+  ]);
+  vi.mocked(api.matchObjects).mockResolvedValue([...Array.from({length:30},(_,n)=>`outside-${n}`),"late","healthy","archived"]);
+  render(<ProjectsView navigate={navigate} />);
+  await screen.findByText("Healthy result");
+  fireEvent.change(screen.getByRole("combobox", {name:"筛选"}), {target:{value:"missing"}});
+  fireEvent.change(screen.getByRole("textbox", {name:"搜索项目"}), {target:{value:"result"}});
+  await screen.findByText("Late result");
+  expect(screen.queryByText("Healthy result")).toBeNull();
+  expect(screen.queryByText("Archived result")).toBeNull();
+  await waitFor(()=>expect(api.matchObjects).toHaveBeenCalledWith("project","result", ["late"]));
 });

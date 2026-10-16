@@ -1,19 +1,12 @@
-//! Search — FTS5, with a LIKE fallback for queries its tokenizer cannot match.
-//! Prioritizes current context (task summaries), then the conversation
-//!: only Logical Session documents and ROOT SessionMessages are
-//! indexed — never child/side transcripts, tool traffic, thinking bodies,
-//! MemberStats or IngestionDiagnostics.
-
-use rusqlite::params;
+//! Object navigation and scoped conversation content search.
 use serde::Serialize;
-
-use crate::error::Result;
-use crate::storage::Db;
-pub(crate) mod sessions;
+pub mod navigation;
+pub mod objects;
+pub mod sessions;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
-    pub kind: String, // workstream | project | session | message
+    pub kind: String, // session | message
     pub ref_id: String,
     pub parent_id: String,
     pub title: String,
@@ -21,104 +14,15 @@ pub struct SearchHit {
     pub rank: f64,
 }
 
-/// Archived sessions remain searchable. Only deleted sessions are excluded.
-const EXISTING_SESSION_GUARD: &str = "(
-    search_index.kind NOT IN ('message', 'session')
-    OR EXISTS (
-        SELECT 1 FROM sessions s WHERE s.id = CASE search_index.kind
-          WHEN 'message' THEN search_index.parent_id ELSE search_index.ref_id END))";
-
-/// Only the current conversation projection is searchable. Message rows stay
-/// append-only for provenance, so this predicate excludes facts retired by a
-/// source rewrite even if an old FTS row survives an interrupted transaction.
+/// Only the current conversation projection is searchable. Keep the read-side
+/// guard even though ingestion retires obsolete message rows and search documents
+/// atomically, so an unmapped document can never become a search hit.
 const CURRENT_MESSAGE_GUARD: &str = "(
     search_index.kind != 'message'
     OR EXISTS (
         SELECT 1 FROM session_message_projection p
          WHERE p.session_id = search_index.parent_id
            AND p.session_message_id = search_index.ref_id))";
-
-pub fn search(db: &Db, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    let q = query.trim();
-    if q.is_empty() {
-        return Ok(vec![]);
-    }
-    let hits = fts_search(db, q, limit)?;
-    if hits.is_empty() {
-        // FTS5 MATCH compares whole tokens, so a query that sits *inside* a
-        // token — a substring of an identifier, or CJK without spaces — is only
-        // answerable by LIKE. A query with no token at all (`%`, `_`) lands here
-        // too, which is why the LIKE pass matches literally.
-        return like_search(db, q, limit);
-    }
-    Ok(hits)
-}
-
-/// The FTS5 pass. A failing statement is a real error and must not be hidden
-/// behind the LIKE pass.
-fn fts_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    let sql = format!(
-        "SELECT kind, ref_id, parent_id, title,
-               snippet(search_index, 4, '「', '」', '…', 12),
-               bm25(search_index)
-               FROM search_index WHERE search_index MATCH ?1
-               AND {EXISTING_SESSION_GUARD}
-               AND {CURRENT_MESSAGE_GUARD}
-               ORDER BY bm25(search_index) LIMIT ?2"
-    );
-    let conn = db.read();
-    let mut st = conn.prepare(&sql)?;
-    let rows = st.query_map(params![to_fts_query(q), limit], |r| {
-        Ok(SearchHit {
-            kind: r.get(0)?,
-            ref_id: r.get(1)?,
-            // FTS columns admit NULL; roots do not have a parent.
-            parent_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            snippet: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            rank: r.get::<_, f64>(5)?,
-        })
-    })?;
-    let mut hits = Vec::new();
-    for row in rows {
-        hits.push(row?);
-    }
-    Ok(hits)
-}
-
-fn like_search(db: &Db, q: &str, limit: i64) -> Result<Vec<SearchHit>> {
-    // A literal, not a pattern: `_` and `%` are ordinary characters in a file
-    // name or a percentage, and only `!` has to be escaped for itself.
-    let escaped = q.replace('!', "!!").replace('%', "!%").replace('_', "!_");
-    let pattern = format!("%{escaped}%");
-    let sql = format!(
-        "SELECT kind, ref_id, parent_id, title, body FROM search_index
-               WHERE (title LIKE ?1 ESCAPE '!' OR body LIKE ?1 ESCAPE '!')
-               AND {EXISTING_SESSION_GUARD}
-               AND {CURRENT_MESSAGE_GUARD}
-               LIMIT ?2"
-    );
-    let conn = db.read();
-    let mut st = conn.prepare(&sql)?;
-    let rows = st.query_map(params![pattern, limit], |r| {
-        Ok(SearchHit {
-            kind: r.get(0)?,
-            ref_id: r.get(1)?,
-            parent_id: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            title: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            snippet: crate::adapters::truncate_text(
-                &r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                160,
-            ),
-            rank: 0.0,
-        })
-    })?;
-    let mut hits = Vec::new();
-    for row in rows {
-        hits.push(row?);
-    }
-    Ok(hits)
-}
 
 /// Build an FTS query: quote each term, AND them; tolerate CJK bigrams
 /// by also trying the raw phrase.

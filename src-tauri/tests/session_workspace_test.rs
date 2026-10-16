@@ -387,14 +387,14 @@ fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
     // Only the Sessions behind that path moved; the third still reads p1 through
     // its own path. A refresh is a projection, not a rename-everything.
     assert_eq!(stored(&db, &c).project_id.as_deref(), Some("p1"));
-    let moved_hits = noending::search::search(&db, "two", 10).unwrap();
+    let moved_hits = support::search_messages(&db, "two", 10).unwrap();
     let moved_ids: std::collections::BTreeSet<_> = moved_hits
         .iter()
         .filter(|h| h.kind == "session")
         .map(|h| h.ref_id.as_str())
         .collect();
     assert_eq!(moved_ids, [a.as_str(), b.as_str()].into_iter().collect());
-    let unchanged_hits = noending::search::search(&db, "one", 10).unwrap();
+    let unchanged_hits = support::search_messages(&db, "one", 10).unwrap();
     assert_eq!(
         unchanged_hits
             .iter()

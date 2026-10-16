@@ -356,7 +356,7 @@ pub fn open_path(path: String) -> Result<()> {
 pub struct WorkstreamContext {
     pub workstream: Workstream,
     pub projects: Vec<crate::workspace::workstream::WorkstreamProject>,
-    pub sessions: Vec<Session>,
+    pub sessions: Vec<SessionListItem>,
 }
 
 #[tauri::command]
@@ -370,7 +370,7 @@ pub fn get_workstream_context(
                 .get_workstream(&workstream_id)?
                 .ok_or_else(|| other("任务不存在"))?,
             projects: crate::workspace::workstream::projects_for_workstream(db, &workstream_id)?,
-            sessions: db.sessions_for_workstream(&workstream_id)?,
+            sessions: db.workstream_session_list_items(&workstream_id)?,
         })
     })
 }
@@ -897,14 +897,26 @@ pub fn remove_ingest_source(state: State<AppState>, source_id: String) -> Result
 // ---------------- Search / misc ----------------
 
 #[tauri::command]
-pub fn search(
-    state: State<AppState>,
+pub async fn match_objects(
+    state: State<'_, AppState>,
+    kind: crate::search::objects::ObjectKind,
     query: String,
-    limit: Option<i64>,
-) -> Result<Vec<crate::search::SearchHit>> {
-    with_db(&state, |db| {
-        crate::search::search(db, &query, limit.unwrap_or(30))
+    candidate_ids: Vec<String>,
+) -> Result<Vec<String>> {
+    let db = state.db.clone();
+    run_on_blocking_worker(move || {
+        crate::search::objects::matching_ids(&db, kind, &query, &candidate_ids)
     })
+    .await?
+}
+
+#[tauri::command]
+pub async fn lookup_navigation(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<crate::search::navigation::NavigationResults> {
+    let db = state.db.clone();
+    run_on_blocking_worker(move || crate::search::navigation::lookup(&db, &query)).await?
 }
 
 /// Presence-aware surface label for Settings: what this Agent's Continue can

@@ -26,7 +26,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 ///
 /// No migrations and no backwards compatibility: a database whose generation
 /// differs must be discarded and rebuilt from Agent source data.
-pub const DATABASE_FORMAT_VERSION: i64 = 8;
+pub const DATABASE_FORMAT_VERSION: i64 = 11;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -133,7 +133,10 @@ fn validate_search_index(conn: &Connection) -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    if !normalized.contains("using fts5") {
+    if !normalized.contains("using fts5")
+        || !normalized.contains("content='search_content'")
+        || !normalized.contains("content_rowid='id'")
+    {
         return Err(structure_mismatch("search_index 不是 FTS5 索引表".into()));
     }
     Ok(())
@@ -164,6 +167,7 @@ fn required_objects() -> Vec<RequiredObject> {
         ("CREATE UNIQUE INDEX IF NOT EXISTS ", "index"),
         ("CREATE INDEX IF NOT EXISTS ", "index"),
         ("CREATE VIEW IF NOT EXISTS ", "view"),
+        ("CREATE TRIGGER IF NOT EXISTS ", "trigger"),
     ] {
         for tail in CURRENT_SCHEMA.split(marker).skip(1) {
             if let Some(name) = tail.split(|c: char| c.is_whitespace() || c == '(').next() {
@@ -251,9 +255,9 @@ const CURRENT_SCHEMA: &str = r#"
     );
     -- The ONLY conversation store: user/assistant turns of the root source.
     -- Identity dedup is (session_id, source_identity_hash); sequence is
-    -- NoEnding's own per-session append counter. Rows are AUDIT history and
-    -- are never deleted by a re-scan — the CURRENT conversation is the
-    -- projection below.
+    -- NoEnding's own per-session storage order, independent of the current
+    -- conversation ordinal. Complete snapshots remove rows no longer
+    -- referenced by the projection below.
     CREATE TABLE IF NOT EXISTS session_messages (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
@@ -278,18 +282,23 @@ const CURRENT_SCHEMA: &str = r#"
     -- session_messages holding exactly one generation. A normal append adds
     -- to the tail; a source rewrite / truncate / reorder that changes the
     -- conversation raises the session fact generation and atomically
-    -- replaces the whole projection, while the old session_messages rows stay
-    -- for provenance audit. Conversation, search and Context read HERE.
+    -- replaces the whole projection and retires obsolete session_messages.
+    -- Conversation, search and Context read HERE.
     CREATE TABLE IF NOT EXISTS session_message_projection (
       session_id TEXT NOT NULL
         REFERENCES sessions(id) ON DELETE CASCADE,
       ordinal INTEGER NOT NULL,
       session_message_id TEXT NOT NULL
         REFERENCES session_messages(id) ON DELETE CASCADE,
+      -- Cumulative 2000-character chunks through this ordinal. Maintained
+      -- with the projection, so paging never rescans old message bodies.
+      part_end INTEGER NOT NULL CHECK (part_end > 0),
       PRIMARY KEY (session_id, ordinal)
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_message
-      ON session_message_projection(session_id, session_message_id);
+      ON session_message_projection(session_message_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_parts
+      ON session_message_projection(session_id, part_end);
     -- The Logical Session's Context: system-derived, read-only, one current
     -- row per Session. No row means "never generated". Summary is Markdown;
     -- revision is the CAS guard, and
@@ -373,23 +382,17 @@ const CURRENT_SCHEMA: &str = r#"
       UNIQUE(agent, path)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_activity
+      ON sessions(COALESCE(last_conversation_at, last_activity_at, started_at) DESC, id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_unarchived_activity
+      ON sessions(COALESCE(last_conversation_at, last_activity_at, started_at) DESC, id)
+      WHERE archived_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_sessions_fork_parent ON sessions(forked_from_session_id);
     CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
       ON workstream_session_frontiers(session_id);
+    CREATE INDEX IF NOT EXISTS idx_project_frontiers_session
+      ON project_session_frontiers(session_id);
 
-    CREATE TABLE IF NOT EXISTS assistant_sessions (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL DEFAULT 'Assistant',
-      created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS assistant_messages (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL REFERENCES assistant_sessions(id),
-      role TEXT NOT NULL,              -- user | assistant
-      content TEXT NOT NULL DEFAULT '',
-      action_json TEXT,                -- proposed action (needs user confirm)
-      runtime TEXT,
-      created_at TEXT NOT NULL
-    );
     CREATE TABLE IF NOT EXISTS git_identities (
       id TEXT PRIMARY KEY,
       common_dir TEXT NOT NULL UNIQUE,
@@ -429,14 +432,51 @@ const CURRENT_SCHEMA: &str = r#"
       ON projects(git_id)
       WHERE git_id IS NOT NULL;
 
-    -- The search projection: one row per searchable document, written by the
-    -- app itself rather than indexed from another table. FTS5 is part of this
-    -- format, not an option — this dependency graph bundles SQLite with
-    -- `-DSQLITE_ENABLE_FTS5` (libsqlite3-sys `bundled`), so a build that cannot
-    -- create this table is a build whose search would silently return nothing.
-    CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-      kind UNINDEXED, ref_id UNINDEXED, parent_id UNINDEXED, title, body, tokenize = 'unicode61'
+    -- Routing has ordinary indexes. Message documents contain no prose copy;
+    -- their immutable content is resolved through search_content. Other kinds
+    -- store their compact, assembled search document here.
+    CREATE TABLE IF NOT EXISTS search_documents (
+      id INTEGER PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('session','message')),
+      ref_id TEXT NOT NULL,
+      parent_id TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL DEFAULT '',
+      UNIQUE(kind, ref_id)
     );
+    CREATE INDEX IF NOT EXISTS idx_search_documents_parent
+      ON search_documents(kind, parent_id);
+    CREATE VIEW IF NOT EXISTS search_content AS
+      SELECT d.id, d.kind, d.ref_id, d.parent_id, d.title,
+             CASE WHEN d.kind = 'message' THEN COALESCE(m.content, d.body) ELSE d.body END AS body
+      FROM search_documents d LEFT JOIN session_messages m
+        ON d.kind = 'message' AND m.id = d.ref_id AND m.session_id = d.parent_id;
+    -- External content avoids FTS5's second stored copy of every document.
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+      kind UNINDEXED, ref_id UNINDEXED, parent_id UNINDEXED, title, body,
+      content='search_content', content_rowid='id', tokenize = 'unicode61'
+    );
+    CREATE TRIGGER IF NOT EXISTS search_documents_insert AFTER INSERT ON search_documents BEGIN
+      INSERT INTO search_index(rowid, kind, ref_id, parent_id, title, body)
+        SELECT id, kind, ref_id, parent_id, title, body FROM search_content WHERE id = new.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS search_documents_delete BEFORE DELETE ON search_documents BEGIN
+      INSERT INTO search_index(search_index, rowid, kind, ref_id, parent_id, title, body)
+        SELECT 'delete', id, kind, ref_id, parent_id, title, body FROM search_content WHERE id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS search_documents_before_update BEFORE UPDATE ON search_documents BEGIN
+      INSERT INTO search_index(search_index, rowid, kind, ref_id, parent_id, title, body)
+        SELECT 'delete', id, kind, ref_id, parent_id, title, body FROM search_content WHERE id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS search_documents_update AFTER UPDATE ON search_documents BEGIN
+      INSERT INTO search_index(rowid, kind, ref_id, parent_id, title, body)
+        SELECT id, kind, ref_id, parent_id, title, body FROM search_content WHERE id = new.id;
+    END;
+    -- Keep the external content available until its postings are retired,
+    -- including a message removed by a session foreign-key cascade.
+    CREATE TRIGGER IF NOT EXISTS session_messages_search_delete BEFORE DELETE ON session_messages BEGIN
+      DELETE FROM search_documents WHERE kind = 'message' AND ref_id = old.id;
+    END;
 "#;
 
 /// Create the current format. Only ever called for a completely empty file, so
@@ -464,7 +504,7 @@ mod tests {
         let actual = conn
             .prepare(
                 "SELECT type, name FROM sqlite_master
-             WHERE type IN ('table', 'index') AND sql IS NOT NULL
+             WHERE type IN ('table', 'index', 'view', 'trigger') AND sql IS NOT NULL
                AND name NOT LIKE 'sqlite_%'
                AND name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow')",
             )

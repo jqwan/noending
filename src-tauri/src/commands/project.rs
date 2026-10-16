@@ -46,9 +46,8 @@ pub struct ProjectCardData {
     pub session_count: i64,
     /// Up to two representative paths for display.
     pub representative_paths: Vec<String>,
-    /// Every canonical path of the project, canonical order. Review P2-1:
-    /// the board's path search covers ALL paths, while
-    /// `representative_paths` stays a display-only truncation.
+    /// All canonical paths for directory selection. Representative paths are
+    /// only a display preview; object search reads authoritative workspace paths.
     pub search_paths: Vec<String>,
     /// max(session activity, workstream update) — the Board's default sort.
     pub last_activity_at: Option<String>,
@@ -85,7 +84,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
         }
     }
 
-    // Representative paths (first two, display) + the full search list
+    // Representative paths (first two, display) + all selectable directories
     // from one ordered scan.
     let mut representative: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut search_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();

@@ -1,11 +1,11 @@
 import Icon from "../../components/Icon";
 import SessionMiniList from "../sessions/SessionMiniList";
-import type { Session } from "../../types";
+import type { SessionListItem } from "../../types";
 import type { Route } from "../../app/routes";
 
 /** 显式跟踪该任务的会话；一个会话可以同时出现在多个任务中。 */
 export default function WorkstreamSessions({ sessions, navigate, onNewSession, allowActions = true }: {
-  sessions: Session[];
+  sessions: SessionListItem[];
   navigate: (r: Route) => void;
   onNewSession?: () => void;
   allowActions?: boolean;

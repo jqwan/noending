@@ -53,12 +53,12 @@ pub fn session_exists_conn(conn: &Connection, session_id: &str) -> Result<bool> 
 /// Errors propagate so permanent deletion and search cleanup commit atomically.
 pub fn unindex_session_conn(conn: &Connection, session_id: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM search_index WHERE kind = 'message' AND parent_id = ?1",
+        "DELETE FROM search_documents WHERE kind = 'message' AND parent_id = ?1",
         params![session_id],
     )?;
     // Permanent deletion removes the Session document too.
     conn.execute(
-        "DELETE FROM search_index WHERE kind = 'session' AND ref_id = ?1",
+        "DELETE FROM search_documents WHERE kind = 'session' AND ref_id = ?1",
         params![session_id],
     )?;
     Ok(())
@@ -120,6 +120,9 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         "DELETE FROM session_message_projection WHERE session_id = ?1",
         params![session_id],
     )?;
+    // External FTS content must still exist when its postings are removed.
+    // A search failure rolls back the entire purge.
+    unindex_session_conn(tx, session_id)?;
     // The conversation store goes with the session.
     tx.execute(
         "DELETE FROM session_messages WHERE session_id = ?1",
@@ -127,9 +130,5 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
     )?;
     // The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
-    // FTS rows of this session's messages go with the data — a failure here
-    // rolls the whole purge back, never a half-deleted session in search.
-    unindex_session_conn(tx, session_id)?;
-
     Ok(())
 }

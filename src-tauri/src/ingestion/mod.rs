@@ -8,10 +8,8 @@
 //!
 //! Invariants:
 //! - raw agent sources are never modified;
-//! - already-ingested conversation is never auto-deleted or overwritten, even
-//!   when the source is truncated / compacted / replaced: the session cursor
-//!   tracks source identity + generation + offset, and re-scans dedup by
-//!   message identity;
+//! - complete snapshots remove retired messages; unavailable or incomplete
+//!   sources preserve the last reliable conversation and cursor;
 //! - messages, the cursor and the activity stamps advance only in the ONE
 //!   transaction inside `Db::commit_ingest`, which re-checks the session's
 //!   lifecycle first.
@@ -26,7 +24,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::adapters::{AgentAdapter, DiscoveredMember, DiscoveredMemberKind};
+use crate::adapters::{
+    AgentAdapter, DiscoveredMember, DiscoveredMemberKind, DiscoveryBatch, PreparedRead,
+};
 use crate::domain::{Agent, Session, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
@@ -155,18 +155,19 @@ fn unchanged_since_cursor(db: &Db) -> Result<impl Fn(&std::path::Path) -> bool> 
 /// batch is still found, and scan order never decides identity.
 struct ResolvedBatch {
     touched_session_ids: BTreeSet<String>,
+    prepared: std::collections::HashMap<PathBuf, PreparedRead>,
 }
 
 fn resolve_batch(
     db: &Db,
     adapter: &dyn AgentAdapter,
-    discovered: &[DiscoveredMember],
+    discovered: DiscoveryBatch,
 ) -> Result<ResolvedBatch> {
     let agent = adapter.agent();
     let attacher = crate::workspace::session::workspace_attacher();
     let mut touched_session_ids = BTreeSet::new();
 
-    for d in discovered {
+    for d in &discovered.members {
         if !d.kind.is_logical_root() {
             continue;
         }
@@ -180,7 +181,7 @@ fn resolve_batch(
         }
     }
 
-    for d in discovered {
+    for d in &discovered.members {
         if d.kind != DiscoveredMemberKind::ForkRoot {
             continue;
         }
@@ -208,6 +209,7 @@ fn resolve_batch(
 
     Ok(ResolvedBatch {
         touched_session_ids,
+        prepared: discovered.prepared,
     })
 }
 
@@ -220,12 +222,31 @@ fn resolve_batch(
 /// projection and the fact generation, and NOTHING else. No Context, no AI.
 /// Returns the number of newly stored messages.
 pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
+    ingest_session_mode(db, session, false, None)
+}
+
+fn ingest_session_mode(
+    db: &Db,
+    session: &Session,
+    force_full: bool,
+    prepared: Option<PreparedRead>,
+) -> Result<i64> {
     // A purge that raced this pass leaves nothing to attach the facts to.
-    if db.get_session(&session.id)?.is_none() {
+    let Some(current) = db.get_session(&session.id)? else {
         return Ok(0);
-    }
+    };
+    // Public refresh callers may hold an older Session value. Capture the
+    // current cursor immediately before reading; the commit guards this value.
+    let session = &current;
     let adapter = crate::adapters::adapter_for(session.agent);
-    let cursor = session.source_cursor();
+    let original_cursor = session.source_cursor();
+    let mut cursor = original_cursor.clone();
+    if force_full {
+        cursor.byte_offset = 0;
+        cursor.last_seen_size = 0;
+        cursor.prefix_hash.clear();
+        cursor.identity_tail_hash.clear();
+    }
     // The source may have vanished since discovery; keep the facts and cursor
     // intact so a later discovery can resume it if the file returns.
     if matches!(
@@ -234,7 +255,39 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
     ) {
         return Ok(0);
     }
-    let delta = match adapter.read_session_delta(session, &cursor) {
+    let read = (|| {
+        if let Some(prepared) =
+            prepared.filter(|p| p.base.as_ref().is_none_or(|base| base == &original_cursor))
+        {
+            let mut prepared = prepared.delta;
+            if let Some(source) = prepared.source.as_mut() {
+                let expected = crate::domain::SourceCursor {
+                    source_file_identity: source.file_identity.clone(),
+                    last_seen_size: source.last_seen_size,
+                    mtime: source.mtime,
+                    prefix_hash: source.prefix_hash.clone(),
+                    ..Default::default()
+                };
+                if crate::adapters::file_matches_cursor(
+                    &adapter.session_source_path(session),
+                    &expected,
+                )? {
+                    source.generation = if original_cursor.source_file_identity.is_empty() {
+                        0
+                    } else if source.file_identity != original_cursor.source_file_identity
+                        || source.last_seen_size < original_cursor.last_seen_size
+                    {
+                        original_cursor.generation + 1
+                    } else {
+                        original_cursor.generation
+                    };
+                    return Ok(prepared);
+                }
+            }
+        }
+        adapter.read_session_delta(session, &cursor)
+    })();
+    let delta = match read {
         Ok(d) => d,
         Err(e) => {
             // The source can disappear between inspection and reading;
@@ -252,9 +305,18 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
             )));
         }
     };
-    let Some(source) = delta.source else {
+    let Some(mut source) = delta.source else {
         return Ok(0);
     };
+    // Forcing the reader past its metadata fast path is not a source rewrite.
+    if force_full
+        && source.file_identity == original_cursor.source_file_identity
+        && source.byte_offset == original_cursor.byte_offset
+        && source.last_seen_size == original_cursor.last_seen_size
+        && source.prefix_hash == original_cursor.prefix_hash
+    {
+        source.generation = original_cursor.generation;
+    }
     let mut failures = Vec::new();
     if !delta.complete_snapshot {
         failures.push("source contains an incomplete or invalid frame".to_string());
@@ -262,11 +324,12 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
     // The bytes frontier travels with the commit: same transaction, same
     // lifetime as the messages it covers. `complete_snapshot` tells the
     // projection maintenance whether a full re-scan is whole.
-    let stored = db.commit_ingest_snapshot(
+    let stored = db.commit_ingest_guarded(
         &session.id,
         &delta.messages,
         &source,
         delta.complete_snapshot,
+        Some(&original_cursor),
     )?;
     if !failures.is_empty() {
         return Err(other(format!(
@@ -280,7 +343,7 @@ pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
 
 fn process_resolved_batch<F>(
     db: &Db,
-    batch: ResolvedBatch,
+    mut batch: ResolvedBatch,
     on_session: &F,
     reingest: bool,
     failures: &mut Vec<String>,
@@ -295,11 +358,11 @@ where
             continue;
         };
         processed.insert(id.clone());
-        if reingest {
-            db.rewind_source_cursor(&id)?;
-        }
+        let prepared = batch
+            .prepared
+            .remove(&crate::adapters::adapter_for(session.agent).session_source_path(&session));
         on_session(&session);
-        match ingest_session(db, &session) {
+        match ingest_session_mode(db, &session, reingest, prepared) {
             Ok(messages) => total_messages += messages,
             Err(e) => {
                 eprintln!(
@@ -321,9 +384,11 @@ where
 /// remain visible in the reconciliation report.
 fn retry_undiscovered_sessions<F>(
     db: &Db,
-    agent: Agent,
+    sessions: &[Session],
     roots: &[PathBuf],
     processed: &BTreeSet<String>,
+    skipped_paths: &BTreeSet<PathBuf>,
+    force_full: bool,
     on_session: &F,
     failures: &mut Vec<String>,
 ) -> Result<i64>
@@ -331,20 +396,17 @@ where
     F: Fn(&Session),
 {
     let mut messages = 0;
-    for session in db.list_sessions(crate::storage::SessionFilter {
-        agent: Some(agent),
-        scope: crate::domain::SessionListScope::All,
-        ..Default::default()
-    })? {
+    for session in sessions {
         if processed.contains(&session.id)
+            || skipped_paths.contains(&PathBuf::from(&session.source_path))
             || !roots.iter().any(|root| {
                 crate::workspace::is_within(&session.source_path, &root.to_string_lossy())
             })
         {
             continue;
         }
-        on_session(&session);
-        match ingest_session(db, &session) {
+        on_session(session);
+        match ingest_session_mode(db, session, force_full, None) {
             Ok(count) => messages += count,
             Err(error) => failures.push(format!(
                 "Session {} ingest retry failed: {error}",
@@ -386,7 +448,15 @@ where
     F: Fn(&Session),
 {
     let adapters = crate::adapters::all_adapters();
-    let unchanged = unchanged_since_cursor(db)?;
+    let file_unchanged = unchanged_since_cursor(db)?;
+    let skipped_paths = std::cell::RefCell::new(BTreeSet::new());
+    let unchanged = |path: &std::path::Path| {
+        let same = file_unchanged(path);
+        if same {
+            skipped_paths.borrow_mut().insert(path.to_path_buf());
+        }
+        same
+    };
     let mut total_discovered = 0usize;
     let mut total_messages = 0i64;
     let mut failures = Vec::new();
@@ -397,7 +467,8 @@ where
             continue;
         }
         let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
-        let discovered = match adapter.discover_members_in(&roots, &unchanged) {
+        let sessions = db.sessions_for_ingestion(adapter.agent())?;
+        let discovered = match adapter.discover_batch_for_sessions(&roots, &unchanged, &sessions) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!(
@@ -412,8 +483,8 @@ where
                 continue;
             }
         };
-        total_discovered += discovered.len();
-        let resolved = match resolve_batch(db, adapter.as_ref(), &discovered) {
+        total_discovered += discovered.members.len();
+        let resolved = match resolve_batch(db, adapter.as_ref(), discovered) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[reconcile] resolve failed: {}", e);
@@ -429,9 +500,11 @@ where
         total_messages += messages;
         total_messages += retry_undiscovered_sessions(
             db,
-            adapter.agent(),
+            &sessions,
             &roots,
             &processed,
+            &skipped_paths.borrow(),
+            false,
             on_session,
             &mut failures,
         )?;
@@ -505,8 +578,9 @@ where
             .map(|s| PathBuf::from(s.path))
             .collect();
     }
-    let discovered = adapter.discover_members_in(&roots, &|_| false)?;
+    let discovered = adapter.discover_batch(&roots, &|_| false)?;
     let matching: Vec<_> = discovered
+        .members
         .into_iter()
         .filter(|d| d.kind.is_logical_root() && d.source_member_id == native_id)
         .collect();
@@ -516,7 +590,14 @@ where
         }
     }
     let count = matching.len();
-    let resolved = resolve_batch(db, adapter, &matching)?;
+    let resolved = resolve_batch(
+        db,
+        adapter,
+        DiscoveryBatch {
+            members: matching,
+            prepared: discovered.prepared,
+        },
+    )?;
     let mut failures = Vec::new();
     let (messages, _) = process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
     if !failures.is_empty() {
@@ -536,21 +617,32 @@ where
     F: Fn(&Session),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
-    let unchanged = unchanged_since_cursor(db)?;
+    let file_unchanged = unchanged_since_cursor(db)?;
+    let skipped_paths = std::cell::RefCell::new(BTreeSet::new());
+    let unchanged = |path: &std::path::Path| {
+        let same = file_unchanged(path);
+        if same {
+            skipped_paths.borrow_mut().insert(path.to_path_buf());
+        }
+        same
+    };
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_members_in(&roots, &unchanged)?;
-    let discovered_count = discovered.len();
+    let sessions = db.sessions_for_ingestion(source.agent)?;
+    let discovered = adapter.discover_batch_for_sessions(&roots, &unchanged, &sessions)?;
+    let discovered_count = discovered.members.len();
     let mut total_messages = 0i64;
     let mut failures = Vec::new();
-    let resolved = resolve_batch(db, adapter, &discovered)?;
+    let resolved = resolve_batch(db, adapter, discovered)?;
     let (messages, processed) =
         process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
     total_messages += messages;
     total_messages += retry_undiscovered_sessions(
         db,
-        source.agent,
+        &sessions,
         &roots,
         &processed,
+        &skipped_paths.borrow(),
+        false,
         on_session,
         &mut failures,
     )?;
@@ -560,11 +652,10 @@ where
     Ok((discovered_count, total_messages))
 }
 
-/// Re-ingest one source: rewind the cursors of every session found under
-/// its path and re-scan from scratch. THE MESSAGE STORE IS NEVER DELETED —
-/// message ids and every provenance ref stay valid, because unchanged content
-/// dedups by identity and only new/changed content appends. Context items,
-/// Tracking and audit history are untouched.
+/// Re-ingest one source: read every session under its path from the beginning
+/// without changing persisted cursors before a successful commit. Unchanged messages keep their ids;
+/// a complete snapshot removes retired messages. Failed reads keep the old
+/// messages and cursor. Context content and Tracking are untouched.
 ///
 /// A re-scan that finds the conversation rewritten, truncated or reordered raises
 /// the Session's fact generation (via the projection), which makes its Context
@@ -582,12 +673,25 @@ where
 {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = vec![PathBuf::from(&source.path)];
-    let discovered = adapter.discover_members_in(&roots, &|_| false)?;
-    let discovered_count = discovered.len();
+    let discovered = adapter.discover_batch(&roots, &|_| false)?;
+    let discovered_count = discovered.members.len();
     let mut total_messages = 0i64;
     let mut failures = Vec::new();
-    let resolved = resolve_batch(db, adapter, &discovered)?;
-    total_messages += process_resolved_batch(db, resolved, on_session, true, &mut failures)?.0;
+    let resolved = resolve_batch(db, adapter, discovered)?;
+    let (messages, processed) =
+        process_resolved_batch(db, resolved, on_session, true, &mut failures)?;
+    total_messages += messages;
+    let sessions = db.sessions_for_ingestion(source.agent)?;
+    total_messages += retry_undiscovered_sessions(
+        db,
+        &sessions,
+        &roots,
+        &processed,
+        &BTreeSet::new(),
+        true,
+        on_session,
+        &mut failures,
+    )?;
     if !failures.is_empty() {
         return Err(other(format!("部分来源重扫失败：{}", failures.join("; "))));
     }

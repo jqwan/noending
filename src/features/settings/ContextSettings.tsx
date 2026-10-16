@@ -5,7 +5,7 @@ import Icon from "../../components/Icon";
 import AgentIcon from "../../components/AgentIcon";
 import { AGENT_LABELS, type AgentRuntimeOverrides, type ExtractionSettings } from "../../types";
 import { useAgentRuntime } from "../agents/useAgentRuntime";
-import { CatalogStatus, NATIVE_RUNTIME } from "../agents/RuntimeFields";
+import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
 import { TemplateEditor } from "./SummaryPromptSettings";
 import PreferenceList from "../preferences/PreferenceList";
@@ -15,14 +15,11 @@ const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "none"] as const;
 export default function ContextSettings() {
   const [settings, setSettings] = useState<ExtractionSettings | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<"" | "saving" | "saved">("");
   const [attempt, setAttempt] = useState(0);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const agentRef = useRef<HTMLDivElement>(null);
   const active = useRef(true);
-  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const currentAgent = settings?.agent === "none" ? "codex" : (settings?.agent ?? "codex");
   const runtime = useAgentRuntime(currentAgent, Boolean(settings && settings.agent !== "none"));
@@ -41,7 +38,6 @@ export default function ContextSettings() {
     return () => {
       cancelled = true;
       active.current = false;
-      if (savedTimer.current) clearTimeout(savedTimer.current);
     };
   }, [attempt]);
 
@@ -67,28 +63,15 @@ export default function ContextSettings() {
 
   const applySettings = async (next: ExtractionSettings) => {
     setSettings(next);
-    setBusy(true);
     setError("");
-    setSaveStatus("saving");
     try {
       const saved = await api.setExtractionSettings(next);
       if (active.current) {
         setSettings(saved);
-        setSaveStatus("saved");
-        showToast("提取设置已生效");
-        if (savedTimer.current) clearTimeout(savedTimer.current);
-        savedTimer.current = setTimeout(() => {
-          if (active.current) setSaveStatus("");
-        }, 3000);
       }
     } catch (e) {
       if (active.current) {
         setError(String(e));
-        setSaveStatus("");
-      }
-    } finally {
-      if (active.current) {
-        setBusy(false);
       }
     }
   };
@@ -136,7 +119,7 @@ export default function ContextSettings() {
             <span>摘要与偏好</span>
           </h3>
           <p className="muted small" style={{ margin: "4px 0 0" }}>
-            会话、任务与项目摘要提取运行配置、提示词模板、全局用户偏好与更新诊断。
+            会话、任务与项目摘要提取运行配置、提示词模板、全局用户偏好与更新诊断。设置自动生效。
           </p>
         </div>
       </div>
@@ -159,12 +142,10 @@ export default function ContextSettings() {
                 className={`new-session-picker new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
                 ref={agentRef}
                 onClick={(e) => {
-                  if (busy) return;
                   if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
                   setAgentMenuOpen((v) => !v);
                 }}
                 onKeyDown={(e) => {
-                  if (busy) return;
                   if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
                     if (!agentMenuOpen) {
                       e.preventDefault();
@@ -172,7 +153,7 @@ export default function ContextSettings() {
                     }
                   }
                 }}
-                tabIndex={busy ? -1 : 0}
+                tabIndex={0}
                 role="button"
                 aria-haspopup="menu"
                 aria-expanded={agentMenuOpen}
@@ -191,7 +172,6 @@ export default function ContextSettings() {
                   title={agentLabel}
                   value={settings.agent}
                   onChange={(e) => void handleAgentChange(e.target.value as ExtractionSettings["agent"])}
-                  disabled={busy}
                   tabIndex={-1}
                 >
                   {EXTRACTION_AGENTS.map((a) => (
@@ -242,32 +222,16 @@ export default function ContextSettings() {
                   runtime={runtime}
                   value={settings.runtime}
                   direction="down"
-                  disabled={busy}
                   onChange={handleRuntimeChange}
                 />
               </div>
             )}
-
-            <div className="extraction-control-group">
-              {saveStatus === "saving" && (
-                <span className="muted small" role="status">正在生效…</span>
-              )}
-              {saveStatus === "saved" && (
-                <span className="extraction-saved-badge" role="status">
-                  <Icon name="check" /> 已自动生效
-                </span>
-              )}
-            </div>
           </div>
 
-          {settings.agent === "none" ? (
+          {settings.agent === "none" && (
             <div className="muted small">
-              已停用自动提取，应用将不会自动为会话、任务和项目提取摘要与偏好。
+              已停用提取，将不会为会话、任务和项目提取摘要与偏好。
             </div>
-          ) : (
-            runtime.options && (
-              <CatalogStatus options={runtime.options} />
-            )
           )}
 
           {(error || (settings.agent !== "none" && runtime.error)) && (
