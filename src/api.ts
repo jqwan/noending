@@ -90,6 +90,7 @@ export const api = {
       limit: limit ?? null,
     }),
   getSessionCountsByAgent: () => invoke<Partial<Record<Agent, number>>>("get_session_counts_by_agent"),
+  getAgentLatestActivities: () => invoke<Partial<Record<Agent, string>>>("get_agent_latest_activities"),
   // Session Lifecycle: UI 只提交 session id。没有删除 job，也不删来源：
   // NoEnding 不删 Agent 自有的源；permanent delete 是本地清除。
   archiveSession: (sessionId: string) => invoke<Session>("archive_session", { sessionId }),
@@ -279,8 +280,6 @@ export const api = {
 
   getAgentRuntimeSettings: (agent: Agent) =>
     invoke<AgentRuntimeSettings>("get_agent_runtime_settings", { agent }),
-  setAgentRuntimeOverrides: (agent: Agent, overrides: AgentRuntimeOverrides) =>
-    invoke<AgentRuntimeSettings>("set_agent_runtime_overrides", { agent, overrides }),
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
 };

@@ -121,8 +121,8 @@ pub fn effort_levels_for(agent: Agent) -> Vec<String> {
         Agent::Codex => codex::EFFORT_LEVELS,
         Agent::ClaudeCode => claude::EFFORT_LEVELS,
         Agent::Pi => pi::EFFORT_LEVELS,
-        // `agy --effort low|medium|high|max` (from the CLI's own help).
-        Agent::Antigravity => &["low", "medium", "high", "max"],
+        // `agy --effort low|medium|high|xhigh|max` (from the CLI's own help).
+        Agent::Antigravity => &["low", "medium", "high", "xhigh", "max"],
         Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode => &[],
     };
     levels.iter().map(|s| s.to_string()).collect()

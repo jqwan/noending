@@ -7,6 +7,7 @@ import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails,
 import { useRefreshSignal, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import WorkstreamFormModal from "./WorkstreamFormModal";
+import WorkstreamProjectPickerModal from "./WorkstreamProjectPickerModal";
 import {
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
@@ -57,6 +58,7 @@ export default function WorkstreamDetailView({
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [actionError, setActionError] = useState("");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -387,10 +389,23 @@ export default function WorkstreamDetailView({
           />
 
           <section className="card detail-section">
-            <h2 className="detail-section-title">
-              <Icon name="project" />
-              <span>关联项目 ({projectRows.length})</span>
-            </h2>
+            <div className="row between" style={{ alignItems: "center" }}>
+              <h2 className="detail-section-title">
+                <Icon name="project" />
+                <span>关联项目 ({projectRows.length})</span>
+              </h2>
+              {!archived && (
+                <button
+                  type="button"
+                  className="btn ghost icon-button small"
+                  title="关联项目"
+                  aria-label="关联项目"
+                  onClick={() => setProjectPickerOpen(true)}
+                >
+                  <Icon name="plus" />
+                </button>
+              )}
+            </div>
             {projectRows.length === 0 && (
               <div className="l1-none">
                 暂无项目
@@ -411,6 +426,17 @@ export default function WorkstreamDetailView({
           </section>
         </aside>
       </div>
+
+      {projectPickerOpen && (
+        <WorkstreamProjectPickerModal
+          initialSelectedIds={projectRows.map((p) => p.id)}
+          onClose={() => setProjectPickerOpen(false)}
+          onConfirm={async (nextSelected) => {
+            await api.setWorkstreamProjects(workstream.id, nextSelected);
+            refresh();
+          }}
+        />
+      )}
 
       {editing && (
         <WorkstreamFormModal

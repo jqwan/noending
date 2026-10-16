@@ -219,10 +219,16 @@ export default function NewSessionView({
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
 
-  const selectableProjects = useMemo(
-    () => projects.filter((p) => p.id === selectedProjectId || isSelectableProject(p)),
-    [projects, selectedProjectId],
-  );
+  const selectableProjects = useMemo(() => {
+    return projects
+      .filter((p) => p.id === selectedProjectId || isSelectableProject(p))
+      .sort((a, b) => {
+        const aTime = a.last_activity_at || a.updated_at || a.created_at || "";
+        const bTime = b.last_activity_at || b.updated_at || b.created_at || "";
+        const cmp = bTime.localeCompare(aTime);
+        return cmp !== 0 ? cmp : a.name.localeCompare(b.name);
+      });
+  }, [projects, selectedProjectId]);
 
   const [projectDetailPaths, setProjectDetailPaths] = useState<Record<string, { canonical_path: string; exists: boolean }[]>>({});
 
@@ -509,7 +515,7 @@ export default function NewSessionView({
                 {selectableProjects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
-                <option value="__new_project__">+ 新项目</option>
+                <option value="__new_project__">+ 新增项目</option>
               </select>
 
               {projectMenuOpen && (
@@ -547,7 +553,7 @@ export default function NewSessionView({
                     }}
                   >
                     <span className="action-icon"><Icon name="plus" /></span>
-                    <span>添加项目...</span>
+                    <span>新增项目</span>
                   </button>
                 </div>
               )}

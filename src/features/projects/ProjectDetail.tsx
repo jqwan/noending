@@ -83,7 +83,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
     path_count: detail.workspace_paths.length,
     missing_path_count: detail.workspace_paths.filter(path => !path.exists).length,
   });
-  useEffect(() => setNewTaskOpen(false), [projectId, allPathsMissing]);
+  useEffect(() => setNewTaskOpen(false), [projectId]);
 
   const sortedSessions = useMemo(() => {
     if (!detail) return [];
@@ -213,10 +213,9 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
                 <button
                   className="btn ghost icon-button small"
-                  title={allPathsMissing ? "项目全部目录缺失，无法新建会话" : "新建会话"}
+                  title="新建会话"
                   aria-label="新建会话"
-                  disabled={allPathsMissing}
-                  onClick={() => navigate({ view: "new-session", projectId: project.id })}
+                  onClick={() => navigate(allPathsMissing ? { view: "new-session" } : { view: "new-session", projectId: project.id })}
                 >
                   <Icon name="plus" />
                 </button>
@@ -277,8 +276,8 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
                 <span>关联任务 ({detail.workstreams.length})</span>
               </h2>
               <button type="button" className="btn ghost icon-button small"
-                title={allPathsMissing ? "项目全部目录缺失，无法新建任务" : "新建任务"}
-                aria-label="新建任务" disabled={allPathsMissing} onClick={() => setNewTaskOpen(true)}>
+                title="新建任务"
+                aria-label="新建任务" onClick={() => setNewTaskOpen(true)}>
                 <Icon name="plus" />
               </button>
             </div>
@@ -342,7 +341,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         </aside>
       </div>
 
-      {newTaskOpen && !allPathsMissing && (
+      {newTaskOpen && (
         <WorkstreamFormModal
           key={projectId}
           initialProjectId={projectId}

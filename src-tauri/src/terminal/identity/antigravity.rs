@@ -106,11 +106,28 @@ pub(super) fn hook_event(
                 starts_turn: true,
             }),
             "Stop" => Some(ActivitySignal {
-                state: match value["terminationReason"].as_str() {
-                    Some("error" | "max_steps_exceeded") => ActivityState::Failed,
-                    Some("model_stop") if value["fullyIdle"] == true => ActivityState::Completed,
-                    _ if value["fullyIdle"] == false => ActivityState::Working,
-                    _ => ActivityState::Idle,
+                state: {
+                    let fully_idle = value["fullyIdle"].as_bool().unwrap_or(true);
+                    let reason = value["terminationReason"].as_str().unwrap_or_default();
+                    if !fully_idle {
+                        ActivityState::Working
+                    } else if reason.eq_ignore_ascii_case("ERROR")
+                        || reason.eq_ignore_ascii_case("MAX_INVOCATIONS")
+                        || reason.eq_ignore_ascii_case("MAX_FORCED_INVOCATIONS")
+                        || reason.eq_ignore_ascii_case("MAX_TOKEN_BUDGET_EXCEEDED")
+                    {
+                        ActivityState::Failed
+                    } else if reason.eq_ignore_ascii_case("USER_CANCELED") {
+                        ActivityState::Interrupted
+                    } else if reason.eq_ignore_ascii_case("NO_TOOL_CALL")
+                        || reason.eq_ignore_ascii_case("TERMINAL_STEP_TYPE")
+                        || reason.eq_ignore_ascii_case("TERMINAL_CUSTOM_HOOK")
+                        || reason.eq_ignore_ascii_case("INJECTED_RESPONSE")
+                    {
+                        ActivityState::Completed
+                    } else {
+                        ActivityState::Idle
+                    }
                 },
                 turn_id: None,
                 starts_turn: false,
@@ -264,10 +281,17 @@ mod tests {
     fn activity_waits_for_background_work_and_does_not_treat_failure_as_completion() {
         let store = Store::new();
         for (reason, idle, expected) in [
-            ("model_stop", true, ActivityState::Completed),
-            ("model_stop", false, ActivityState::Working),
+            ("NO_TOOL_CALL", true, ActivityState::Completed),
+            ("no_tool_call", true, ActivityState::Completed),
+            ("TERMINAL_STEP_TYPE", true, ActivityState::Completed),
+            ("NO_TOOL_CALL", false, ActivityState::Working),
+            ("ERROR", true, ActivityState::Failed),
             ("error", true, ActivityState::Failed),
-            ("max_steps_exceeded", true, ActivityState::Failed),
+            ("MAX_INVOCATIONS", true, ActivityState::Failed),
+            ("MAX_TOKEN_BUDGET_EXCEEDED", true, ActivityState::Failed),
+            ("USER_CANCELED", true, ActivityState::Interrupted),
+            ("user_canceled", true, ActivityState::Interrupted),
+            ("UNKNOWN_REASON", true, ActivityState::Idle),
         ] {
             let mut value = input(&store.0, ROOT_A);
             value["terminationReason"] = serde_json::json!(reason);

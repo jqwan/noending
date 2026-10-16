@@ -27,6 +27,7 @@ vi.mock("../../api", () => ({
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
+    setWorkstreamProjects: vi.fn().mockResolvedValue(undefined),
     restoreWorkstream: vi.fn().mockResolvedValue({ id: "w1", visibility: "normal" }),
     deleteWorkstreamPermanently: vi.fn().mockResolvedValue(undefined),
   },
@@ -227,4 +228,22 @@ it("renders separate unarchive and permanent delete buttons when workstream is a
   expect((confirmBtn as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(confirmBtn);
   await waitFor(() => expect(api.deleteWorkstreamPermanently).toHaveBeenCalledWith("w1"));
+});
+
+it("allows associating projects directly from task detail page", async () => {
+  const p1 = { id: "pr", name: "Main" } as any;
+  const p2 = { id: "p2", name: "后端服务" } as any;
+  vi.mocked(api.listProjectCards).mockResolvedValue([p1, p2]);
+  await renderDetail();
+  fireEvent.click(screen.getByRole("button", { name: "关联项目" }));
+  const dialog = screen.getByRole("dialog", { name: "选择关联项目" });
+  const checkboxMain = await within(dialog).findByRole("checkbox", { name: "Main" });
+  const checkboxBackend = within(dialog).getByRole("checkbox", { name: "后端服务" });
+  expect(checkboxMain).toHaveProperty("checked", true);
+  expect(checkboxBackend).toHaveProperty("checked", false);
+  fireEvent.click(checkboxBackend);
+  expect(checkboxBackend).toHaveProperty("checked", true);
+  fireEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  await waitFor(() => expect(api.setWorkstreamProjects).toHaveBeenCalledWith("w1", ["pr", "p2"]));
+  expect(screen.queryByRole("dialog", { name: "选择关联项目" })).toBeNull();
 });

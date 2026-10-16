@@ -5,7 +5,7 @@ import Icon from "../../components/Icon";
 import type { Agent, AgentStatusEntry, SessionListItem, TerminalSummary } from "../../types";
 import { AGENT_LABELS } from "../../types";
 import SessionMiniList from "../sessions/SessionMiniList";
-import { CatalogStatus, NATIVE_RUNTIME } from "./RuntimeFields";
+import { CatalogStatus } from "./RuntimeFields";
 import { useAgentRuntime } from "./useAgentRuntime";
 import { extractVersion } from "./AgentsView";
 
@@ -218,17 +218,6 @@ export default function AgentConfiguration({
               <p className="muted small" style={{ marginTop: 0 }}>
                 展示当前 Agent 支持的模型与思考强度。新建会话时可在发送前直接选择。
               </p>
-              {!runtime.options && runtime.error && (
-                <button
-                  className="btn small"
-                  disabled={busy}
-                  onClick={() => void action(async () => {
-                    runtime.setLoaded(await api.setAgentRuntimeOverrides(agent, NATIVE_RUNTIME));
-                  })}
-                >
-                  恢复 Agent 默认参数
-                </button>
-              )}
               {runtime.options && (
                 <div className="agent-facts-group">
                   {runtime.options.models.length > 0 ? (

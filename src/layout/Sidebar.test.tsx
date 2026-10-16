@@ -613,6 +613,78 @@ describe("Sidebar 最近活动", () => {
     expect(titles[3]).toContain("Qoder");
   });
 
+  it("sorts agent groups dynamically by createdAt or updatedAt", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({
+        id: "s-codex",
+        title: "Codex 会话",
+        agent: "codex",
+        started_at: "2026-10-01T10:00:00.000Z",
+        last_conversation_at: "2026-10-10T12:00:00.000Z",
+      }),
+      session({
+        id: "s-claude",
+        title: "Claude 会话",
+        agent: "claude_code",
+        started_at: "2026-10-05T10:00:00.000Z",
+        last_conversation_at: "2026-10-06T12:00:00.000Z",
+      }),
+    ]);
+
+    renderSidebar();
+    switchGroupBy("按 Agent 归类");
+
+    await screen.findByRole("button", { name: /Claude Code/ });
+
+    // Default sortBy is createdAt: claude_code was created 2026-10-05, codex 2026-10-01
+    let groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    let titles = groupHeaders.map(h => h.textContent);
+    expect(titles[0]).toContain("Claude Code");
+    expect(titles[1]).toContain("Codex");
+
+    // Switch to 最近更新
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
+    fireEvent.click(filterBtn);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
+
+    // Under updatedAt: codex was updated 2026-10-10, claude 2026-10-06
+    groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    titles = groupHeaders.map(h => h.textContent);
+    expect(titles[0]).toContain("Codex");
+    expect(titles[1]).toContain("Claude Code");
+  });
+
+  it("sorts project groups dynamically by createdAt or updatedAt", async () => {
+    vi.mocked(api.listProjectCards).mockResolvedValue([
+      projectCard({ id: "p-a", name: "项目甲", created_at: "2026-10-01T10:00:00.000Z", updated_at: "2026-10-10T12:00:00.000Z", last_activity_at: "2026-10-10T12:00:00.000Z" }),
+      projectCard({ id: "p-b", name: "项目乙", created_at: "2026-10-05T10:00:00.000Z", updated_at: "2026-10-06T12:00:00.000Z", last_activity_at: "2026-10-06T12:00:00.000Z" }),
+    ]);
+    vi.mocked(api.listSessions).mockResolvedValue([
+      session({ id: "s-a", project_id: "p-a", title: "会话甲", started_at: "2026-10-01T10:00:00.000Z", last_conversation_at: "2026-10-10T12:00:00.000Z" }),
+      session({ id: "s-b", project_id: "p-b", title: "会话乙", started_at: "2026-10-05T10:00:00.000Z", last_conversation_at: "2026-10-06T12:00:00.000Z" }),
+    ]);
+
+    renderSidebar();
+    await screen.findByText("项目甲");
+
+    // Default sortBy is createdAt: Project B was created 2026-10-05, Project A 2026-10-01
+    let groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    let titles = groupHeaders.map(h => h.textContent);
+    expect(titles[0]).toContain("项目乙");
+    expect(titles[1]).toContain("项目甲");
+
+    // Switch to 最近更新
+    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
+    fireEvent.click(filterBtn);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
+
+    // Under updatedAt: Project A was updated 2026-10-10, Project B 2026-10-06
+    groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
+    titles = groupHeaders.map(h => h.textContent);
+    expect(titles[0]).toContain("项目甲");
+    expect(titles[1]).toContain("项目乙");
+  });
+
   it("moves pinned sessions out of the regular list and restores them on unpin", async () => {
     viewState.set("sidebar.recent.groupBy.v2", "project");
     vi.mocked(api.listSessions).mockResolvedValue([

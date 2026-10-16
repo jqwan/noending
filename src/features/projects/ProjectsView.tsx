@@ -347,7 +347,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                     className="btn small ghost icon-button"
                     aria-label="新建会话"
                     title="新建会话"
-                    onClick={() => navigate({ view: "new-session", projectId: c.id })}
+                    onClick={() => navigate(isProjectAllPathsMissing(c) ? { view: "new-session" } : { view: "new-session", projectId: c.id })}
                   >
                     <Icon name="plus" />
                   </button>
@@ -413,7 +413,7 @@ function ProjectCard({ card, navigate, onChanged }: {
               className="btn small ghost icon-button"
               aria-label="新建会话"
               title="新建会话"
-              onClick={() => navigate({ view: "new-session", projectId: card.id })}
+              onClick={() => navigate(isProjectAllPathsMissing(card) ? { view: "new-session" } : { view: "new-session", projectId: card.id })}
             >
               <Icon name="plus" />
             </button>

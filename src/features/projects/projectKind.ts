@@ -27,16 +27,6 @@ export function isProjectAllPathsMissing(project: {
   return missing >= total;
 }
 
-export function isNoEndingChatProject(project: {
-  id?: string;
-  name?: string;
-  purpose?: ProjectPurpose | null;
-}): boolean {
-  if (project.purpose !== "chat") return false;
-  const normalized = project.name?.trim().toLowerCase();
-  return normalized === "noending chat" || normalized === "noendingchat" || project.id === "noending-chat";
-}
-
 export function isSelectableProject(project: {
   id?: string;
   name?: string;
@@ -49,8 +39,5 @@ export function isSelectableProject(project: {
   representative_paths?: string[];
 }): boolean {
   if (project.visibility === "archived") return false;
-  if (project.kind !== "git" && project.purpose === "chat" && !isNoEndingChatProject(project)) {
-    return false;
-  }
   return !isProjectAllPathsMissing(project);
 }

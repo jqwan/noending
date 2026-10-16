@@ -82,6 +82,30 @@ impl Db {
         let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
+
+    /// Latest session activity timestamp per agent for sorting in the Agent board.
+    pub fn agent_latest_activities(&self) -> Result<HashMap<String, String>> {
+        let conn = self.read();
+        let mut statement = conn.prepare(
+            "SELECT agent, MAX(COALESCE(last_conversation_at, last_activity_at, started_at))
+             FROM sessions
+             WHERE archived_at IS NULL
+             GROUP BY agent",
+        )?;
+        let rows = statement.query_map([], |r| {
+            let agent: String = r.get(0)?;
+            let max_time: Option<String> = r.get(1)?;
+            Ok((agent, max_time))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (agent, max_time) = row?;
+            if let Some(t) = max_time {
+                map.insert(agent, t);
+            }
+        }
+        Ok(map)
+    }
 }
 
 fn row_list_item(r: &Row<'_>) -> rusqlite::Result<SessionListItem> {

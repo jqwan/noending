@@ -142,6 +142,14 @@ pub async fn get_session_counts_by_agent(
     super::run_on_blocking_worker(move || db.session_counts_by_agent()).await?
 }
 
+#[tauri::command]
+pub async fn get_agent_latest_activities(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>> {
+    let db = state.db.clone();
+    super::run_on_blocking_worker(move || db.agent_latest_activities()).await?
+}
+
 /// Filesystem and executable checks run off the UI thread, in one batch.
 #[tauri::command]
 pub async fn get_session_terminal_states(

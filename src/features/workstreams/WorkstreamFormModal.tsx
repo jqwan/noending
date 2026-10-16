@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
 import { Modal } from "../../components/common";
-import { isSelectableProject } from "../projects/projectKind";
+import WorkstreamProjectPickerModal from "./WorkstreamProjectPickerModal";
 import type { ProjectCardData, Workstream, WorkstreamProject } from "../../types";
 
 /** Projects are explicit memberships; editing a task never expands directories. */
@@ -15,12 +14,10 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
   const [description,setDescription]=useState(workstream?.description ?? "");
   const [projects,setProjects]=useState<ProjectCardData[]>([]);
   const [selected,setSelected]=useState<string[]>(()=>workstream ? initialProjects.map(p=>p.id) : initialProjectId && initialProjectId!=="none" ? [initialProjectId]:[]);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [search, setSearch] = useState("");
+  const [pickerModalOpen, setPickerModalOpen] = useState(false);
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   const pending=useRef(false);
-  const pickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let active = true;
     api.listProjectCards()
@@ -37,66 +34,9 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
 
   useEffect(() => {
     if (!workstream && projects.length > 0) {
-      setSelected((ids) =>
-        ids.filter((id) => {
-          const p = projects.find((proj) => proj.id === id);
-          return p ? isSelectableProject(p) : false;
-        })
-      );
+      setSelected((ids) => ids.filter((id) => projects.some((p) => p.id === id)));
     }
   }, [projects, workstream]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const handleDocClick = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleDocClick);
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      document.removeEventListener("mousedown", handleDocClick);
-      document.removeEventListener("keydown", handleKeyDown, true);
-    };
-  }, [menuOpen]);
-
-  const selectableProjects = useMemo(() => {
-    return projects
-      .filter((p) => (workstream && selected.includes(p.id)) || isSelectableProject(p))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [projects, selected, workstream]);
-
-  const filteredProjects = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return selectableProjects;
-    return selectableProjects.filter((p) => p.name.toLowerCase().includes(q));
-  }, [selectableProjects, search]);
-
-  const browse = async () => {
-    if (pending.current) return;
-    pending.current = true;
-    setBusy(true);
-    setError("");
-    try {
-      const path = await open({ directory: true, multiple: false, title: "选择项目目录" });
-      if (!path) return;
-      const result = await api.addProjectPath(Array.isArray(path) ? path[0] : path);
-      setProjects(await api.listProjectCards());
-      if (result.project_id) setSelected((ids) => [...new Set([...ids, result.project_id!])]);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      pending.current = false;
-      setBusy(false);
-    }
-  };
 
   const save = async () => {
     if (pending.current || !title.trim()) return;
@@ -145,22 +85,17 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
             placeholder="简要说明任务目标与背景（可选）..."
           />
         </label>
-        <div className="field workstream-projects-field" ref={pickerRef}>
+        <div className="field workstream-projects-field">
           <div className="row between" style={{ marginBottom: 6, alignItems: "center" }}>
             <div className="row" style={{ alignItems: "center", gap: 6 }}>
               <span>关联项目</span>
               <button
                 type="button"
-                className={`btn ghost icon-button small${menuOpen ? " on" : ""}`}
-                title={menuOpen ? "收起可选项目" : "添加关联项目"}
+                className="btn ghost icon-button small"
+                title="添加关联项目"
                 aria-label="添加关联项目"
-                aria-expanded={menuOpen}
-                aria-haspopup="menu"
                 disabled={busy}
-                onClick={() => {
-                  setMenuOpen((v) => !v);
-                  setSearch("");
-                }}
+                onClick={() => setPickerModalOpen(true)}
               >
                 <Icon name="plus" />
               </button>
@@ -194,75 +129,19 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
               暂未关联项目
             </div>
           )}
-
-          {menuOpen && (
-            <div
-              className="workstream-project-popover"
-              role="menu"
-              aria-label="项目多选列表"
-            >
-              {selectableProjects.length > 5 && (
-                <input
-                  type="text"
-                  className="workstream-project-search-input"
-                  placeholder="搜索项目…"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  autoFocus
-                />
-              )}
-              <div className="workstream-project-popover-list">
-                {filteredProjects.length === 0 ? (
-                  <div className="workstream-project-empty muted small">
-                    {selectableProjects.length === 0 ? "暂无可选项目" : "无匹配项目"}
-                  </div>
-                ) : (
-                  filteredProjects.map((p) => {
-                    const isChecked = selected.includes(p.id);
-                    return (
-                      <label
-                        key={p.id}
-                        className={`workstream-project-item${isChecked ? " checked" : ""}`}
-                        title={p.name}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          disabled={busy}
-                          aria-label={p.name}
-                          onChange={() => {
-                            setSelected((ids) =>
-                              isChecked
-                                ? ids.filter((id) => id !== p.id)
-                                : [...ids, p.id]
-                            );
-                          }}
-                        />
-                        <span className="workstream-project-item-icon">
-                          <Icon name="project" />
-                        </span>
-                        <span className="workstream-project-item-name truncate">
-                          {p.name}
-                        </span>
-                      </label>
-                    );
-                  })
-                )}
-              </div>
-              <div className="workstream-project-popover-divider" />
-              <button
-                type="button"
-                className="workstream-project-popover-action"
-                disabled={busy}
-                onClick={() => void browse()}
-              >
-                <Icon name="folder" />
-                <span>新增目录…</span>
-              </button>
-            </div>
-          )}
         </div>
         {error && <p role="alert" className="warning" style={{ margin: "4px 0 0" }}>{error}</p>}
+        {pickerModalOpen && (
+          <WorkstreamProjectPickerModal
+            initialSelectedIds={selected}
+            projects={projects}
+            onProjectsChange={(next) => setProjects(next)}
+            onClose={() => setPickerModalOpen(false)}
+            onConfirm={(nextSelected) => {
+              setSelected(nextSelected);
+            }}
+          />
+        )}
         <div
           className="modal-actions row between"
           style={{

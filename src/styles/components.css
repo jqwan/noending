@@ -561,6 +561,21 @@
   outline: none;
   border-color: var(--border-default);
 }
+.workstream-project-picker-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.workstream-project-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+}
 .workstream-project-popover-list {
   display: flex;
   flex-direction: column;

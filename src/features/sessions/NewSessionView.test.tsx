@@ -110,7 +110,6 @@ vi.mock("../../api", () => ({
     getAgentStatus: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
     refreshAgentRuntimeOptions: vi.fn(),
-    setAgentRuntimeOverrides: vi.fn(),
     getDefaultAgent: vi.fn(),
     setDefaultAgent: vi.fn(),
     prepareNewSession: vi.fn(),
@@ -160,7 +159,6 @@ beforeEach(() => {
   clearRuntimeCatalog();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
-  vi.mocked(api.setAgentRuntimeOverrides).mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.addProjectPath).mockReset();
   vi.mocked(api.launchEmbeddedNew).mockReset();
@@ -645,7 +643,6 @@ describe("NewSessionView runtime selection", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", "开始工作", expected));
-    expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
     cleanup();
     viewState.clear();
     render(<NewSessionView navigate={vi.fn()} />);
@@ -862,7 +859,7 @@ it("launches with multiple checked tasks and keeps only shared tasks after chang
   await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", ["shared", "first"], "/tmp/workspace", "开始这两项工作", NATIVE_RUNTIME));
 });
 
-it("does not show other chat projects or all-missing projects, but allows NoEnding Chat", async () => {
+it("shows chat projects including NoEnding Chat and agent chat, but filters all-missing projects", async () => {
   const otherChatProj: ProjectCardData = { ...chatProject, id: "agent-chat", name: "WorkBuddy Chat", purpose: "chat" as const, search_paths: ["/tmp/workbuddy-chat"], representative_paths: ["/tmp/workbuddy-chat"] };
   const missingProj: ProjectCardData = { ...chatProject, id: "missing", name: "丢失项目", path_count: 1, missing_path_count: 1, search_paths: ["/tmp/missing"], representative_paths: ["/tmp/missing"] };
   const validProj: ProjectCardData = { ...chatProject, id: "valid", name: "有效项目", purpose: null as never, search_paths: ["/tmp/workspace"], representative_paths: ["/tmp/workspace"] };
@@ -871,7 +868,7 @@ it("does not show other chat projects or all-missing projects, but allows NoEndi
   render(<NewSessionView navigate={vi.fn()} />);
   await screen.findByRole("option", { name: "有效项目" });
   expect(screen.getByRole("option", { name: "NoEnding Chat" })).toBeTruthy();
-  expect(screen.queryByRole("option", { name: "WorkBuddy Chat" })).toBeNull();
+  expect(screen.getByRole("option", { name: "WorkBuddy Chat" })).toBeTruthy();
   expect(screen.queryByRole("option", { name: "丢失项目" })).toBeNull();
 });
 

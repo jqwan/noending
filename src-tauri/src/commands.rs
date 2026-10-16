@@ -1043,20 +1043,6 @@ pub fn get_agent_runtime_settings(
     with_db(&state, |db| runtime_settings(db, agent))
 }
 
-#[tauri::command]
-pub fn set_agent_runtime_overrides(
-    state: State<AppState>,
-    agent: String,
-    overrides: crate::agent_runtime::AgentRuntimeOverrides,
-) -> Result<AgentRuntimeSettings> {
-    let agent = agent_of(&agent)?;
-    with_db(&state, |db| {
-        // Validates, then persists; an unsupported field never reaches storage.
-        crate::agent_runtime::set_runtime_overrides(db, agent, &overrides)?;
-        runtime_settings(db, agent)
-    })
-}
-
 /// Run a blocking closure on Tauri's blocking worker pool. The one door every
 /// potentially-slow (CLI-spawning) command body goes through; the join error
 /// folds into the app error type.

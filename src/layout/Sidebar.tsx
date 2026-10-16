@@ -234,12 +234,24 @@ export function isAgentTerminalContinuable(agentKey: string): boolean {
   return false;
 }
 
-function getProjectGroupTime(group: SidebarSessionGroup, projectMap: Map<string, ProjectCardData>): number {
+function getProjectGroupTime(
+  group: SidebarSessionGroup,
+  projectMap: Map<string, ProjectCardData>,
+  sortBy: SidebarSortKey = "createdAt",
+): number {
   if (group.id !== "__unassigned_project__" && projectMap.has(group.id)) {
     const card = projectMap.get(group.id)!;
-    if (card.created_at) {
-      const t = Date.parse(card.created_at);
-      if (!isNaN(t) && t > 0) return t;
+    if (sortBy === "updatedAt") {
+      const raw = card.last_activity_at || card.updated_at || card.created_at;
+      if (raw) {
+        const t = Date.parse(raw);
+        if (!isNaN(t) && t > 0) return Math.max(t, group.latestTime);
+      }
+    } else {
+      if (card.created_at) {
+        const t = Date.parse(card.created_at);
+        if (!isNaN(t) && t > 0) return Math.max(t, group.latestTime);
+      }
     }
   }
   return group.latestTime;
@@ -319,7 +331,7 @@ export function groupSidebarSessions(
       : 0;
   }
 
-  // 2. 项目/任务 也是按创建/发现时间排序，Agent 按是否可终端继续和名称进行排序；无任务/无项目固定沉底
+  // 2. 项目和 Agent 分组按创建时间或最近更新排序；无项目/未知 Agent 固定沉底
   const groupsList = Array.from(groupsMap.values());
 
   if (groupBy === "project") {
@@ -329,8 +341,8 @@ export function groupSidebarSessions(
       if (isUnassignedA !== isUnassignedB) {
         return isUnassignedA ? 1 : -1;
       }
-      const timeA = getProjectGroupTime(a, projectMap);
-      const timeB = getProjectGroupTime(b, projectMap);
+      const timeA = getProjectGroupTime(a, projectMap, sortBy);
+      const timeB = getProjectGroupTime(b, projectMap, sortBy);
       if (timeB !== timeA) return timeB - timeA;
       return a.title.localeCompare(b.title, "zh-Hans");
     });
@@ -340,6 +352,9 @@ export function groupSidebarSessions(
       const isUnknownB = b.id === "__unknown_agent__";
       if (isUnknownA !== isUnknownB) {
         return isUnknownA ? 1 : -1;
+      }
+      if (b.latestTime !== a.latestTime) {
+        return b.latestTime - a.latestTime;
       }
       const canA = isAgentGroupContinuable(a);
       const canB = isAgentGroupContinuable(b);

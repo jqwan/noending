@@ -9,6 +9,7 @@ import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
 import { copyToClipboard, Modal, openPath, timeAgo } from "../../components/common";
+import CustomSelect from "../../components/CustomSelect";
 import { showToast } from "../../components/Toast";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -24,6 +25,7 @@ const ALL_AGENTS = Object.keys(AGENT_LABELS) as Agent[];
 type OpenMethod = "terminal" | "desktop";
 
 type FilterTab = "all" | "tui" | "desktop";
+type AgentSortKey = "recent" | "name" | "sessions";
 
 interface SessionFormat {
   id: string;
@@ -198,6 +200,8 @@ export default function AgentsView({
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("agents.viewMode", "cards", preferenceValues("cards", "list"));
   const [sessionCounts, setSessionCounts] = useState<Record<string, number>>({});
+  const [latestActivities, setLatestActivities] = useState<Partial<Record<Agent, string>>>({});
+  const [sort, setSort] = useViewPreference<AgentSortKey>("agents.sort", "recent", preferenceValues("recent", "name", "sessions"));
   const scrollRef = useViewScroll("agents.scroll", agentStatus !== null);
 
   const clearMessages = () => setError("");
@@ -230,7 +234,12 @@ export default function AgentsView({
 
   const reloadSessions = useCallback(async () => {
     try {
-      setSessionCounts(await api.getSessionCountsByAgent());
+      const [counts, activities] = await Promise.all([
+        api.getSessionCountsByAgent(),
+        api.getAgentLatestActivities(),
+      ]);
+      setSessionCounts(counts);
+      setLatestActivities(activities);
     } catch (e) {
       console.error(e);
     }
@@ -383,8 +392,42 @@ export default function AgentsView({
     }
     return true;
   }), [agentStatus, initialAgent, filterTab]);
-  const search = useObjectMatches("agent", initialAgent ? "" : searchQuery, candidates, candidates);
-  const visibleAgents = search.pending || search.error ? [] : candidates.filter(agent => !search.ids || search.ids.has(agent));
+
+  const sorters: Record<AgentSortKey, (a: Agent, b: Agent) => number> = useMemo(() => ({
+    recent: (a, b) => {
+      const timeA = latestActivities[a] ?? "";
+      const timeB = latestActivities[b] ?? "";
+      if (timeA || timeB) {
+        if (timeA && timeB) {
+          const diff = timeB.localeCompare(timeA);
+          if (diff !== 0) return diff;
+        } else {
+          return timeA ? -1 : 1;
+        }
+      }
+      const readyA = Boolean(agentStatus?.[a]?.detected || agentStatus?.[a]?.desktop_app_present);
+      const readyB = Boolean(agentStatus?.[b]?.detected || agentStatus?.[b]?.desktop_app_present);
+      if (readyA !== readyB) return readyA ? -1 : 1;
+      return AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans");
+    },
+    name: (a, b) => AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans"),
+    sessions: (a, b) => {
+      const countA = sessionCounts[a] ?? 0;
+      const countB = sessionCounts[b] ?? 0;
+      if (countA !== countB) return countB - countA;
+      const readyA = Boolean(agentStatus?.[a]?.detected || agentStatus?.[a]?.desktop_app_present);
+      const readyB = Boolean(agentStatus?.[b]?.detected || agentStatus?.[b]?.desktop_app_present);
+      if (readyA !== readyB) return readyA ? -1 : 1;
+      return AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans");
+    },
+  }), [latestActivities, agentStatus, sessionCounts]);
+
+  const sortedCandidates = useMemo(() => {
+    return [...candidates].sort(sorters[sort]);
+  }, [candidates, sorters, sort]);
+
+  const search = useObjectMatches("agent", initialAgent ? "" : searchQuery, sortedCandidates, sortedCandidates);
+  const visibleAgents = search.pending || search.error ? [] : sortedCandidates.filter(agent => !search.ids || search.ids.has(agent));
 
   if (initialAgent) {
     const entry = agentStatus?.[initialAgent];
@@ -601,6 +644,20 @@ export default function AgentsView({
                   后台处理中…
                 </span>
               )}
+            </div>
+
+            <div className="ws-control">
+              <span className="muted small">排序</span>
+              <CustomSelect
+                value={sort}
+                onChange={(val) => setSort(val as AgentSortKey)}
+                ariaLabel="排序"
+                options={[
+                  { value: "recent", label: "最近活动" },
+                  { value: "name", label: "名称" },
+                  { value: "sessions", label: "会话数" },
+                ]}
+              />
             </div>
 
             {(searchQuery.trim() || filterTab !== "all") && (

@@ -21,7 +21,6 @@ vi.mock("../../api", () => ({
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
-    setAgentRuntimeOverrides: vi.fn(),
     refreshAgentRuntimeOptions: vi.fn(),
     setAgentLaunchEnabled: vi.fn(),
     redetectAgent: vi.fn(),
@@ -40,6 +39,7 @@ vi.mock("../../api", () => ({
     listWorkstreamCards: vi.fn(),
     listSessions: vi.fn(),
     getSessionCountsByAgent: vi.fn(),
+    getAgentLatestActivities: vi.fn(),
     prepareNewSession: vi.fn(),
     cancelPrepared: vi.fn(),
   },
@@ -122,7 +122,6 @@ beforeEach(() => {
   localStorage.clear();
   clearRuntimeCatalog();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
-  vi.mocked(api.setAgentRuntimeOverrides).mockReset().mockImplementation(async (agent, overrides) => ({ ...runtimeFixture(agent), overrides }));
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
   vi.mocked(api.setAgentLaunchEnabled).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.redetectAgent).mockReset().mockResolvedValue(runtimeFixture());
@@ -142,6 +141,7 @@ beforeEach(() => {
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
   vi.mocked(api.getSessionCountsByAgent).mockReset().mockResolvedValue({});
+  vi.mocked(api.getAgentLatestActivities).mockReset().mockResolvedValue({});
 });
 
 afterEach(cleanup);
@@ -319,13 +319,11 @@ describe("AgentsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", agent: "codex" });
 
-    // Can repair unreadable defaults by restoring native parameters
+    // Displays alert when runtime settings fail to load
     cleanup();
     vi.mocked(api.getAgentRuntimeSettings).mockRejectedValueOnce(new Error("配置损坏"));
     render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
-    fireEvent.click(await screen.findByRole("button", { name: "恢复 Agent 默认参数" }));
-    await waitFor(() => expect(api.setAgentRuntimeOverrides).toHaveBeenCalledWith("codex", { model: null, provider: null, effort: null }));
-    expect(await screen.findByText("模型与思考等级")).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toContain("配置损坏");
   });
 
   it("displays normalized CLI status, session count and toggles between card and list view", async () => {
@@ -377,4 +375,38 @@ it("uses lookup aliases while keeping the selected capability filter", async () 
   expect(api.matchObjects).toHaveBeenCalledWith("agent","claude", expect.any(Array));
   fireEvent.click(screen.getByRole("tab", {name:/桌面/}));
   expect(screen.queryByRole("button", { name: "查看 Claude Code Agent 详情" })).toBeNull();
+});
+
+it("sorts agents by recent activity, name, and session count", async () => {
+  vi.mocked(api.getAgentLatestActivities).mockResolvedValue({
+    pi: "2026-10-17T01:00:00Z",
+    claude_code: "2026-10-16T01:00:00Z",
+  });
+  vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({
+    antigravity: 10,
+    codex: 5,
+  });
+  const { container } = render(<AgentsView navigate={vi.fn()} />);
+  await screen.findByRole("button", { name: "查看 Pi Agent 详情" });
+
+  // Default is "recent": Pi is latest active -> first card
+  const cards = container.querySelectorAll(".agent-card");
+  expect(cards[0].getAttribute("aria-label")).toContain("Pi");
+  expect(cards[1].getAttribute("aria-label")).toContain("Claude Code");
+
+  // Switch to "sessions"
+  fireEvent.change(screen.getByRole("combobox", { name: "排序" }), {
+    target: { value: "sessions" },
+  });
+  const cardsBySessions = container.querySelectorAll(".agent-card");
+  expect(cardsBySessions[0].getAttribute("aria-label")).toContain("Antigravity");
+  expect(cardsBySessions[1].getAttribute("aria-label")).toContain("Codex");
+
+  // Switch to "name"
+  fireEvent.change(screen.getByRole("combobox", { name: "排序" }), {
+    target: { value: "name" },
+  });
+  const cardsByName = container.querySelectorAll(".agent-card");
+  expect(cardsByName[0].getAttribute("aria-label")).toContain("Antigravity");
+  expect(cardsByName[1].getAttribute("aria-label")).toContain("Claude Code");
 });

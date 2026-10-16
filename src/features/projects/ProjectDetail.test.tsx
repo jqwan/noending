@@ -32,7 +32,7 @@ beforeEach(() => {
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
-  vi.mocked(api.listProjectCards).mockReset();
+  vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.createWorkstream).mockReset();
   vi.mocked(api.getAgentStatus).mockResolvedValue({
     codex: {
@@ -140,20 +140,14 @@ describe("ProjectDetail", () => {
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
 
-  it.each(["empty", "all missing"])("blocks new tasks and sessions when project directories are %s", async mode => {
+  it("navigates without defaulting project for new sessions when directories are missing", async () => {
     const d = mockDetail();
-    d.workspace_paths = mode === "empty" ? [] : d.workspace_paths.map(path => ({ ...path, exists: false }));
+    d.workspace_paths = d.workspace_paths.map(path => ({ ...path, exists: false }));
     vi.mocked(api.getProjectDetail).mockResolvedValue(d);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const button = await screen.findByRole("button", { name: "新建任务" });
-    expect(button).toHaveProperty("disabled", true);
-    fireEvent.click(button);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(api.createWorkstream).not.toHaveBeenCalled();
-    const newSession = screen.getByRole("button", { name: "新建会话" });
-    expect(newSession).toHaveProperty("disabled", true);
+    const newSession = await screen.findByRole("button", { name: "新建会话" });
     fireEvent.click(newSession);
-    expect(navigate).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
   });
 
   it("creates a task in this project and refreshes its associated task list", async () => {

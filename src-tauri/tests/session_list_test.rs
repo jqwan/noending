@@ -78,6 +78,9 @@ fn session_lists_keep_old_rows_without_loading_source_metadata_and_counts_are_co
             db.session_counts_by_agent().unwrap(),
             std::collections::HashMap::from([("codex".to_string(), 600), ("pi".to_string(), 4)])
         );
+        let activities = db.agent_latest_activities().unwrap();
+        assert!(activities.contains_key("codex"));
+        assert!(activities.contains_key("pi"));
         let preview = db
             .list_session_items(
                 SessionFilter {
