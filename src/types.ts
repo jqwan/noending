@@ -496,6 +496,12 @@ export interface LaunchResult {
 
 // ---------------- Embedded terminal（内嵌终端子页） ----------------
 
+export interface TerminalActivity {
+  state: "unknown" | "idle" | "working" | "waiting" | "completed" | "failed" | "interrupted";
+  revision: number;
+  unread: boolean;
+}
+
 /** terminal_list / terminal_for_session 的一行：一个内嵌终端的运行时事实。 */
 export interface TerminalSummary {
   terminal_id: string;
@@ -505,6 +511,7 @@ export interface TerminalSummary {
   initial_workstream_ids: string[];
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
+  activity?: TerminalActivity;
   agent: Agent;
   cwd: string | null;
   created_at: string;

@@ -99,6 +99,24 @@ pub(super) fn hook_event(
         cwd,
         source_path: Some(transcript.to_string_lossy().into_owned()),
         source: Some(source.into()),
+        activity: match source {
+            "PreInvocation" => Some(ActivitySignal {
+                state: ActivityState::Working,
+                turn_id: None,
+                starts_turn: true,
+            }),
+            "Stop" => Some(ActivitySignal {
+                state: match value["terminationReason"].as_str() {
+                    Some("error" | "max_steps_exceeded") => ActivityState::Failed,
+                    Some("model_stop") if value["fullyIdle"] == true => ActivityState::Completed,
+                    _ if value["fullyIdle"] == false => ActivityState::Working,
+                    _ => ActivityState::Idle,
+                },
+                turn_id: None,
+                starts_turn: false,
+            }),
+            _ => None,
+        },
     })
 }
 
@@ -240,6 +258,29 @@ mod tests {
             "invocationNum":0,"initialNumSteps":3,
             "lastAssistantMessage":"private response"
         })
+    }
+
+    #[test]
+    fn activity_waits_for_background_work_and_does_not_treat_failure_as_completion() {
+        let store = Store::new();
+        for (reason, idle, expected) in [
+            ("model_stop", true, ActivityState::Completed),
+            ("model_stop", false, ActivityState::Working),
+            ("error", true, ActivityState::Failed),
+            ("max_steps_exceeded", true, ActivityState::Failed),
+        ] {
+            let mut value = input(&store.0, ROOT_A);
+            value["terminationReason"] = serde_json::json!(reason);
+            value["fullyIdle"] = serde_json::json!(idle);
+            assert_eq!(
+                hook_event(value, "Stop", &store.0)
+                    .unwrap()
+                    .activity
+                    .unwrap()
+                    .state,
+                expected
+            );
+        }
     }
 
     #[test]

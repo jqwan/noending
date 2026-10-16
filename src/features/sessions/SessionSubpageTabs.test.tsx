@@ -3,19 +3,21 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import { api } from "../../api";
 import { sessionPages, sessionTerminals } from "./sessionNavigation";
-import { EVT_TERMINALS } from "../../app/routes";
+import { EVT_TERMINALS, EVT_TERMINAL_ACTIVITY } from "../../app/routes";
 import type { TerminalSummary } from "../../types";
 vi.mock("../../api", () => ({ api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
+  terminalActivitySeen: vi.fn().mockResolvedValue(undefined),
   terminalReconnect: vi.fn(), terminalList: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
 } }));
 beforeEach(() => {
   vi.resetAllMocks(); sessionPages.clear(); sessionTerminals.clear();
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
+  vi.mocked(api.terminalActivitySeen).mockResolvedValue(undefined);
   vi.mocked(api.terminalReconnect).mockResolvedValue({ terminal_id: "reconnected" } as never);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const terminal = (id: string, live = true, sessionId = "s1"): TerminalSummary => ({
   terminal_id: id, session_id: sessionId, initial_workstream_ids: [], identity_revision: 1, agent: "codex", cwd: "/work",
   created_at: id, live, exit_code: null, session_title: "Session",
@@ -75,4 +77,28 @@ it("starts resume only on explicit terminal continue and blocks archived launche
   view.rerender(<SessionSubpageTabs sessionId="s1" agent="codex" navigate={navigate} />);
   fireEvent.click(screen.getByRole("button", { name: "在终端中继续" }));
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "new" })));
+});
+
+it("only marks the displayed, attached terminal read in a focused window", async () => {
+  const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  const rows = ["t1", "t2"].map(id => ({ ...terminal(id), activity: { state: "completed" as const, revision: 4, unread: true } }));
+  vi.mocked(api.terminalList).mockResolvedValue(rows);
+  const props = { sessionId: "s1", agent: "codex" as const, navigate: vi.fn() };
+  const view = render(<SessionSubpageTabs {...props} terminalId="t1" terminalLive />);
+  await screen.findByRole("button", { name: /终端.*未查看/ });
+  expect(api.terminalActivitySeen).not.toHaveBeenCalled();
+  view.rerender(<SessionSubpageTabs {...props} entry="conversation" />);
+  focus.mockReturnValue(true);
+  fireEvent.focus(window);
+  expect(api.terminalActivitySeen).not.toHaveBeenCalled();
+  view.rerender(<SessionSubpageTabs {...props} terminalId="t1" />);
+  expect(api.terminalActivitySeen).not.toHaveBeenCalled();
+  view.rerender(<SessionSubpageTabs {...props} terminalId="t1" terminalLive />);
+  await waitFor(() => expect(api.terminalActivitySeen).toHaveBeenCalledWith("t1", 4));
+  expect(api.terminalActivitySeen).toHaveBeenCalledTimes(1);
+  vi.mocked(api.terminalList).mockResolvedValue([{ ...rows[0], activity: { state: "completed", revision: 6, unread: true } }, rows[1]]);
+  act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
+  await waitFor(() => expect(api.terminalActivitySeen).toHaveBeenLastCalledWith("t1", 6));
+  expect(vi.mocked(api.terminalActivitySeen).mock.calls.every(([id]) => id === "t1")).toBe(true);
 });

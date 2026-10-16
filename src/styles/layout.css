@@ -1028,6 +1028,10 @@ button.sidebar-pinned-header,
 }
 .sidebar-session-dot.running { background: var(--success); }
 .sidebar-session-dot.exited { background: var(--text-muted); }
+.sidebar-session-dot.terminal-activity-working { background: transparent; border: 1.5px solid var(--success); width: 8px; height: 8px; }
+.sidebar-session-dot.terminal-activity-waiting { background: var(--warning); }
+.sidebar-session-dot.terminal-activity-failed { background: var(--danger); }
+.sidebar-session-dot.terminal-activity-unread::after { width: 4px; height: 4px; top: -2px; right: -3px; }
 .sidebar-recent-item:hover .sidebar-session-dot,
 .sidebar-recent-item:focus-within .sidebar-session-dot {
   opacity: 0;

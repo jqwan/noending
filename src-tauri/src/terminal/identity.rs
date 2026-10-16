@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::activity::{ActivitySignal, ActivityState};
 use crate::adapters::AgentCommand;
 use crate::domain::Agent;
 use crate::error::{other, Result};
@@ -35,6 +36,8 @@ pub struct NativeIdentityEvent {
     pub cwd: Option<String>,
     pub source_path: Option<String>,
     pub source: Option<String>,
+    #[serde(default)]
+    pub activity: Option<ActivitySignal>,
 }
 
 pub type IdentityCallback = Arc<dyn Fn(NativeIdentityEvent) + Send + Sync>;
@@ -170,7 +173,12 @@ fn prepare_at(
             let hooks = serde_json::json!({ "hooks": {
                 "SessionStart": [{ "hooks": [hook] }],
                 "Stop": [{ "hooks": [hook] }],
-                "UserPromptSubmit": [{ "hooks": [hook] }]
+                "UserPromptSubmit": [{ "hooks": [hook] }],
+                "PermissionRequest": [{ "hooks": [hook] }],
+                "PostToolUse": [{ "hooks": [hook] }],
+                "PostToolUseFailure": [{ "hooks": [hook] }],
+                "StopFailure": [{ "hooks": [hook] }],
+                "Notification": [{ "matcher": "idle_prompt", "hooks": [hook] }]
             }});
             write_private(
                 &plugin.join("hooks/hooks.json"),
@@ -200,14 +208,12 @@ fn prepare_at(
                 codex_cli_toml_string("command")?,
                 codex_cli_toml_string(&hook)?
             );
-            vec![
-                "-c".into(),
-                format!("hooks.SessionStart={group}"),
-                "-c".into(),
-                format!("hooks.Stop={group}"),
-                "-c".into(),
-                codex_trust_override(&hook)?,
-            ]
+            let mut args = Vec::new();
+            for event in CODEX_EVENTS {
+                args.extend(["-c".into(), format!("hooks.{event}={group}")]);
+            }
+            args.extend(["-c".into(), codex_trust_override(&hook)?]);
+            args
         }
         _ => unreachable!("supported agents checked above"),
     };
@@ -245,17 +251,33 @@ fn codex_cli_toml_string(value: &str) -> Result<String> {
     }
 }
 
+const CODEX_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PermissionRequest",
+    "PostToolUse",
+    "Stop",
+    "Interrupt",
+];
+
 fn codex_trust_override(command: &str) -> Result<String> {
     // These fingerprints are Codex's own versioned hook identity contract
     // (codex-rs/hooks/lib.rs and config/fingerprint.rs, rust-v0.160.1).
-    // Trust only the two handlers introduced by this launch. Never use the
+    // Trust only the handlers introduced by this launch. Never use the
     // global bypass flag, which would also enable unrelated untrusted hooks.
     #[cfg(windows)]
     let source = r"C:\<session-flags>\config.toml";
     #[cfg(not(windows))]
     let source = "/<session-flags>/config.toml";
     let mut entries = Vec::new();
-    for event in ["session_start", "stop"] {
+    for event in [
+        "session_start",
+        "user_prompt_submit",
+        "permission_request",
+        "post_tool_use",
+        "stop",
+        "interrupt",
+    ] {
         // Keep keys lexically ordered, including the nested handler object:
         // Codex hashes canonical compact JSON after normalization through TOML.
         let normalized = serde_json::json!({
@@ -357,22 +379,44 @@ fn pi_extension(address: SocketAddr, token: &str, terminal_id: &str) -> Result<S
         r#"import net from "node:net";
 const connection = {settings};
 export default function(pi) {{
-  const report = (source, ctx) => new Promise((resolve) => {{
+  let turn = 0;
+  let failed = false;
+  const report = (source, ctx, activity = null) => new Promise((resolve) => {{
     const native_id = ctx.sessionManager.getSessionId();
     if (!native_id) {{ resolve(); return; }}
     const event = {{ native_id, cwd: ctx.sessionManager.getCwd(),
-      source_path: ctx.sessionManager.getSessionFile() ?? null, source }};
+      source_path: ctx.sessionManager.getSessionFile() ?? null, source, activity }};
     const socket = net.createConnection({{host: connection.host, port: connection.port}});
     socket.setTimeout(400);
     socket.on("connect", () => socket.end(JSON.stringify({{
       token: connection.token, terminal_id: connection.terminal_id, event
     }}) + "\n"));
+    // Drain the acknowledgement so Node can deliver end/close before the
+    // awaited lifecycle callback returns. An unread ACK can strand the promise.
+    socket.resume();
     socket.on("timeout", () => socket.destroy());
     socket.on("error", () => socket.destroy());
     socket.on("close", () => resolve());
   }});
   pi.on("session_start", (event, ctx) => report(event.reason, ctx));
-  pi.on("agent_end", (_event, ctx) => report("agent_end", ctx));
+  pi.on("agent_start", (_event, ctx) => {{
+    failed = false;
+    return report("agent_start", ctx, {{state: "working", turn_id: String(++turn), starts_turn: true}});
+  }});
+  pi.on("ui_prompt_start", (_event, ctx) => report("ui_prompt_start", ctx,
+    {{state: "waiting", turn_id: String(turn)}}));
+  pi.on("ui_prompt_end", (_event, ctx) => report("ui_prompt_end", ctx,
+    {{state: "working", turn_id: String(turn)}}));
+  pi.on("agent_end", (event, ctx) => {{
+    const last = event.messages.filter(m => m.role === "assistant").at(-1);
+    failed = last?.stopReason === "error";
+    return report("agent_end", ctx);
+  }});
+  pi.on("agent_settled", (event, ctx) => {{
+    return report("agent_settled", ctx, {{state: event.aborted ? "interrupted"
+      : failed ? "failed" : "completed",
+      turn_id: String(turn)}});
+  }});
 }}
 "#
     ))
@@ -505,8 +549,18 @@ fn valid_native_id(id: &str) -> bool {
 
 fn hook_event(value: serde_json::Value) -> Option<NativeIdentityEvent> {
     let name = value.get("hook_event_name")?.as_str()?;
-    if !matches!(name, "SessionStart" | "Stop" | "UserPromptSubmit")
-        || value.get("is_sidechain").and_then(|v| v.as_bool()) == Some(true)
+    if !matches!(
+        name,
+        "SessionStart"
+            | "Stop"
+            | "UserPromptSubmit"
+            | "PermissionRequest"
+            | "PostToolUse"
+            | "PostToolUseFailure"
+            | "StopFailure"
+            | "Interrupt"
+            | "Notification"
+    ) || value.get("is_sidechain").and_then(|v| v.as_bool()) == Some(true)
         || value.get("is_subagent").and_then(|v| v.as_bool()) == Some(true)
         || value
             .get("agent_id")
@@ -531,6 +585,33 @@ fn hook_event(value: serde_json::Value) -> Option<NativeIdentityEvent> {
         cwd: text("cwd"),
         source_path: text("transcript_path"),
         source: text("source").or_else(|| Some(name.to_string())),
+        activity: hook_activity(name, &value),
+    })
+}
+
+fn hook_activity(name: &str, value: &serde_json::Value) -> Option<ActivitySignal> {
+    let state = match name {
+        "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" => ActivityState::Working,
+        "PermissionRequest" => ActivityState::Waiting,
+        "StopFailure" => ActivityState::Failed,
+        "Interrupt" => ActivityState::Interrupted,
+        "Notification" if value["notification_type"] == "idle_prompt" => ActivityState::Idle,
+        "Stop" => {
+            let background = value["background_tasks"]
+                .as_array()
+                .is_some_and(|tasks| !tasks.is_empty());
+            if background {
+                ActivityState::Working
+            } else {
+                ActivityState::Completed
+            }
+        }
+        _ => return None,
+    };
+    Some(ActivitySignal {
+        state,
+        turn_id: value["turn_id"].as_str().map(str::to_string),
+        starts_turn: name == "UserPromptSubmit",
     })
 }
 
@@ -664,6 +745,11 @@ fn active_record_event(path: &Path, trigger: &NativeIdentityEvent) -> Option<Nat
             .then(|| trigger.source_path.clone())
             .flatten(),
         source: Some("active_record".into()),
+        // An obsolete notification can reveal the current identity, but its
+        // turn state must never be assigned to that different conversation.
+        activity: (native_id == trigger.native_id)
+            .then(|| trigger.activity.clone())
+            .flatten(),
     })
 }
 
@@ -697,6 +783,7 @@ mod tests {
                 cwd: None,
                 source_path: None,
                 source: Some("resume".into()),
+                activity: None,
             },
             active_record: None,
         })
@@ -740,6 +827,128 @@ mod tests {
         assert!(prepare(&command(), Agent::ZCode, "terminal")
             .unwrap()
             .is_none());
+    }
+
+    /// Node is a prerequisite (also used by the app frontend and installed in CI).
+    /// Execute the generated extension against the real authenticated listener.
+    #[test]
+    fn pi_extension_activity_roundtrips_without_stalling_or_premature_completion() {
+        use std::process::{Command, Stdio};
+        let prepared = prepare(&command(), Agent::Pi, "terminal").unwrap().unwrap();
+        let (tx, rx) = mpsc::channel();
+        prepared.bridge.activate(Arc::new(move |event| {
+            tx.send(event).unwrap();
+        }));
+        let script = r#"
+const {pathToFileURL} = await import('node:url');
+const {default: extension} = await import(pathToFileURL(process.argv[1]).href);
+const handlers = new Map();
+extension({on(name, handler) { handlers.set(name, handler); }});
+const ctx = {sessionManager: {getSessionId:()=>"native", getCwd:()=>"/fixture", getSessionFile:()=>null}};
+const run = (name, event={}) => handlers.get(name)(event, ctx);
+await run("session_start", {reason:"resume"});
+await run("agent_start");
+await run("ui_prompt_start");
+await run("ui_prompt_end");
+await run("agent_end", {messages:[{role:"assistant", stopReason:"error"}]});
+await run("agent_end", {messages:[{role:"assistant", stopReason:"stop"}]});
+await run("agent_settled", {aborted:false});
+await run("agent_start");
+await run("agent_end", {messages:[{role:"assistant", stopReason:"error"}]});
+await run("agent_settled", {aborted:false});
+await run("agent_start");
+await run("agent_settled", {aborted:true});
+"#;
+        let mut child = Command::new("node")
+            .args(["--input-type=module", "--eval", script])
+            .arg(&prepared.command.args[1])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Node is required to verify the Pi extension protocol");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Pi lifecycle callbacks stalled on the bridge acknowledgement");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events: Vec<_> = (0..12)
+            .map(|_| rx.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        use ActivityState::*;
+        let states: Vec<_> = events
+            .iter()
+            .map(|e| e.activity.as_ref().map(|s| s.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                None,
+                Some(Working),
+                Some(Waiting),
+                Some(Working),
+                None,
+                None,
+                Some(Completed),
+                Some(Working),
+                None,
+                Some(Failed),
+                Some(Working),
+                Some(Interrupted)
+            ]
+        );
+        assert!(events.iter().all(|event| event.native_id == "native"));
+        assert_ne!(
+            events[1].activity.as_ref().unwrap().turn_id,
+            events[7].activity.as_ref().unwrap().turn_id
+        );
+    }
+
+    #[test]
+    fn hook_activity_distinguishes_prompt_permission_completion_and_failure() {
+        let parse = |name, fields: serde_json::Value| {
+            let mut input = serde_json::json!({"hook_event_name": name, "session_id":"native", "turn_id":"turn"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            hook_event(input).unwrap().activity.unwrap()
+        };
+        let start = parse("UserPromptSubmit", serde_json::json!({}));
+        assert_eq!(start.state, ActivityState::Working);
+        assert!(start.starts_turn);
+        assert_eq!(start.turn_id.as_deref(), Some("turn"));
+        for (name, expected) in [
+            ("PermissionRequest", ActivityState::Waiting),
+            ("PostToolUse", ActivityState::Working),
+            ("Stop", ActivityState::Completed),
+            ("StopFailure", ActivityState::Failed),
+            ("Interrupt", ActivityState::Interrupted),
+        ] {
+            let event = parse(name, serde_json::json!({}));
+            assert_eq!(event.state, expected);
+            assert!(!event.starts_turn);
+        }
+        assert_eq!(
+            parse(
+                "Stop",
+                serde_json::json!({"background_tasks":[{"id":"task"}]})
+            )
+            .state,
+            ActivityState::Working
+        );
     }
 
     #[test]
@@ -851,6 +1060,11 @@ mod tests {
             cwd: Some("/old-cwd".into()),
             source_path: Some("/old-transcript".into()),
             source: Some("fork".into()),
+            activity: Some(ActivitySignal {
+                state: ActivityState::Completed,
+                turn_id: Some("old-turn".into()),
+                starts_turn: false,
+            }),
         };
         write_record(&path, "current", "interactive");
         let current = active_record_event(&path, &trigger).unwrap();
@@ -858,6 +1072,7 @@ mod tests {
         assert_eq!(current.cwd.as_deref(), Some("/native-cwd"));
         assert_eq!(current.source.as_deref(), Some("active_record"));
         assert_eq!(current.source_path, None);
+        assert_eq!(current.activity, None);
         for kind in ["bg", "daemon", "daemon-worker"] {
             write_record(&path, "current", kind);
             assert!(active_record_event(&path, &trigger).is_none());
@@ -911,6 +1126,7 @@ mod tests {
                         cwd: None,
                         source_path: Some(format!("/{native_id}")),
                         source: Some(source.into()),
+                        activity: None,
                     },
                     active_record: Some(path.clone()),
                 },

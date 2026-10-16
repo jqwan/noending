@@ -1,3 +1,5 @@
+import { terminalActivityLabel, terminalActivityClass } from "./terminalActivity";
+import { useTerminalActivitySeen } from "./useTerminalActivitySeen";
 import { useEffect, useRef, useState } from "react";
 import SessionTaskTracking from "./SessionTaskTracking";
 import Icon from "../../components/Icon";
@@ -27,8 +29,10 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   const resumeStates = useTerminalResumeStates(sessionId ? [sessionId] : []);
   const peers = terminals.filter(t => sessionId ? t.session_id === sessionId : t.terminal_id === terminalId)
     .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.terminal_id.localeCompare(b.terminal_id));
-  const selected = terminalId ? peers.find(t => t.terminal_id === terminalId)
+  const found = terminalId ? peers.find(t => t.terminal_id === terminalId)
     : sessionId ? terminalForContinue(sessionId, peers) : undefined;
+  const selected = found && terminalId && terminalLive !== undefined ? { ...found, live: terminalLive } : found;
+  useTerminalActivitySeen(terminalId && terminalLive !== undefined ? selected : undefined);
   const live = terminalId ? terminalLive ?? selected?.live : selected?.live;
   const [open, setOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
@@ -74,9 +78,10 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     }
   };
   const terminalLabel = terminalId || selected
-    ? `终端 · ${live === undefined ? "正在连接" : live ? "运行中" : "已退出"}`
+    ? `终端 · ${live === undefined ? "正在连接" : selected ? terminalActivityLabel(selected) : live ? "运行中" : "已退出"}`
     : "在终端中继续";
-  const terminalTitle = availability.title;
+  const terminalTitle = availability.disabled ? availability.title
+    : selected && live ? `切回终端 · ${terminalActivityLabel(selected)}` : availability.title;
 
   return <div className="session-navigation" ref={root} onKeyDown={e => {
     if (!open || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
@@ -96,7 +101,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
         aria-label="会话详情" title="会话详情" disabled={!sessionId}
         onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>
       {canTerminal && <>
-        <button className={`${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
+        <button className={`${selected ? terminalActivityClass([selected]) : ""} ${terminalId ? "on " : ""}${live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
           aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalTitle}
           disabled={launching || terminalBusy || loading || availability.disabled}
           onClick={() => void openTerminal()}><Icon name="terminal" /></button>
@@ -110,8 +115,8 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
       {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}
         title={t.cwd ?? undefined} onClick={() => { setOpen(false); navigate({ ...terminalDestination(t), initialTitle: title ?? t.session_title ?? undefined }); }}>
-        <span className={t.live ? "terminal-running" : "terminal-exited"}><Icon name="terminal" /></span>
-        <span className="menu-label">{t.cwd ?? "默认工作目录"}<small>{t.live ? "运行中" : "已退出"}{Number.isFinite(Date.parse(t.created_at)) ? ` · ${new Date(t.created_at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}</small></span>
+        <span className={`${t.live ? "terminal-running" : "terminal-exited"} ${terminalActivityClass([t])}`}><Icon name="terminal" /></span>
+        <span className="menu-label">{t.cwd ?? "默认工作目录"}<small>{terminalActivityLabel(t)}{Number.isFinite(Date.parse(t.created_at)) ? ` · ${new Date(t.created_at).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : ""}</small></span>
         {t.terminal_id === (terminalId ?? selected?.terminal_id) && <Icon name="check" />}
       </button>)}
     </div>}

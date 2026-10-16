@@ -3004,6 +3004,22 @@ button.btn.ghost.terminal-exited,
 .terminal-menu .menu-label { min-width: 0; }
 .terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Lifecycle markers are independent of the green/grey PTY liveness icon. */
+.terminal-activity-unread { position: relative; }
+.terminal-activity-unread::after {
+  content: ""; position: absolute; top: 1px; right: 1px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 1px var(--bg-app); pointer-events: none;
+}
+.terminal-menu .terminal-activity-unread::after { top: -2px; right: -3px; }
+.terminal-activity-working > .ui-icon { animation: terminal-working-pulse 1.2s ease-in-out infinite; }
+.terminal-activity-waiting > .ui-icon { color: var(--warning); }
+.terminal-activity-failed > .ui-icon { color: var(--danger); }
+@keyframes terminal-working-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .terminal-activity-working > .ui-icon { animation: none; }
+}
+
 .summary-prompt-editor { min-height: 320px; resize: vertical; line-height: 1.7; }
 .summary-prompt-preview {
   min-height: 320px;

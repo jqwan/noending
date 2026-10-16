@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { EVT_TERMINALS, onEvent } from "../../app/routes";
+import { EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, onEvent } from "../../app/routes";
 import type { TerminalSummary } from "../../types";
 
 export function useSessionTerminals() {
@@ -17,7 +17,8 @@ export function useSessionTerminals() {
   useEffect(() => {
     refresh();
     const stop = onEvent(EVT_TERMINALS, refresh);
-    return () => { ++sequence.current; stop(); };
+    const stopActivity = onEvent(EVT_TERMINAL_ACTIVITY, refresh);
+    return () => { ++sequence.current; stop(); stopActivity(); };
   }, [refresh]);
   return { terminals, loading };
 }

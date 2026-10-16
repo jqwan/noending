@@ -11,8 +11,10 @@
 //! An Agent that must outlive the app belongs in the external terminal,
 //! which keeps working exactly as before.
 
+mod activity;
 #[cfg(any(windows, test))]
 mod flow;
+pub use activity::TerminalActivity;
 pub mod identity;
 pub mod spawn;
 
@@ -45,6 +47,8 @@ pub const EVENT_EXIT_PREFIX: &str = "terminal-exit://";
 /// List-level fact: terminal records or their state changed (spawn / exit / bind / close).
 /// Sidebar and any terminal-list consumer refetch once per event — no polling.
 pub const EVENT_CHANGED: &str = "terminals-changed";
+/// Lightweight state refresh; does not invalidate session/project discovery.
+pub const EVENT_ACTIVITY: &str = "terminal-activity";
 /// Identity fact: a terminal acquired, changed or cleared its Session binding.
 /// The revision orders events against attach snapshots and delayed DB reads.
 pub const EVENT_BOUND: &str = "terminal-bound";
@@ -69,6 +73,7 @@ pub struct TerminalSummary {
     /// Selected tasks before first binding; cleared after the initial tracking is consumed.
     pub initial_workstream_ids: Vec<String>,
     pub identity_revision: u64,
+    pub activity: TerminalActivity,
     pub agent: Agent,
     pub cwd: Option<String>,
     pub created_at: String,
@@ -347,6 +352,28 @@ impl TerminalRegistry {
         })
     }
 
+    fn emit_activity(&self) {
+        if let Some(app) = &self.app {
+            let _ = app.emit(EVENT_ACTIVITY, ());
+        }
+    }
+
+    /// A read receipt only clears the exact state rendered by the caller.
+    pub fn mark_activity_seen(&self, terminal_id: &str, revision: u64) {
+        let changed = self
+            .records
+            .lock()
+            .ok()
+            .and_then(|records| {
+                let mut record = records.get(terminal_id)?.lock().ok()?;
+                Some(record.summary.activity.mark_seen(revision))
+            })
+            .unwrap_or(false);
+        if changed {
+            self.emit_activity();
+        }
+    }
+
     fn emit_identity(&self, summary: &TerminalSummary) {
         if let Some(app) = &self.app {
             let _ = app.emit(
@@ -381,7 +408,16 @@ impl TerminalRegistry {
             let mut record = records.get(terminal_id)?.lock().ok()?;
             // Turn completion only refreshes the current conversation. It
             // must not restore an old identity after a lifecycle switch.
-            if matches!(event.source.as_deref(), Some("Stop" | "agent_end"))
+            if !record.summary.live {
+                return None;
+            }
+            if (matches!(
+                event.source.as_deref(),
+                Some("Stop" | "agent_end" | "agent_settled")
+            ) || event
+                .activity
+                .as_ref()
+                .is_some_and(|signal| !signal.starts_turn))
                 && record
                     .root_agent_session_id
                     .as_deref()
@@ -409,6 +445,7 @@ impl TerminalRegistry {
                         pending.native_id = Some(event.native_id.clone());
                     }
                 }
+                record.summary.activity.reset();
                 record.root_agent_session_id = Some(event.native_id.clone());
                 record.summary.session_id = None;
                 record.summary.session_title = None;
@@ -424,10 +461,19 @@ impl TerminalRegistry {
             if identity_changed || cwd_changed {
                 record.summary.identity_revision += 1;
             }
-            (record.summary.clone(), identity_changed || cwd_changed)
+            let activity_changed = event
+                .activity
+                .as_ref()
+                .is_some_and(|signal| record.summary.activity.apply(signal));
+            (
+                record.summary.clone(),
+                (identity_changed || cwd_changed, activity_changed),
+            )
         };
-        if changed {
+        if changed.0 {
             self.emit_identity(&summary);
+        } else if changed.1 {
+            self.emit_activity();
         }
         if summary.session_id.is_none() {
             self.resolve_native_identity(db, &summary, &event.native_id);
@@ -938,6 +984,7 @@ pub fn spawn_embedded(
         session_id: target.session_id.map(str::to_string),
         initial_workstream_ids: target.initial_workstream_ids.to_vec(),
         identity_revision: 0,
+        activity: TerminalActivity::default(),
         agent: target.agent,
         cwd: cmd.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         created_at: started_at,
@@ -966,6 +1013,17 @@ pub fn spawn_embedded(
             let state = app.state::<crate::commands::AppState>();
             if let Some(current) = registry.report_native_identity(&state.db, &terminal_id, &event)
             {
+                // Tool/permission activity must not enqueue a source rescan.
+                if current.session_id.is_some()
+                    && event.activity.as_ref().is_some_and(|signal| {
+                        matches!(
+                            signal.state,
+                            activity::ActivityState::Working | activity::ActivityState::Waiting
+                        )
+                    })
+                {
+                    return;
+                }
                 crate::commands::ingestion::enqueue(
                     &app,
                     crate::commands::ingestion::IngestScope::ReconcileNative {
@@ -1342,6 +1400,7 @@ mod tests {
                 session_id: session_id.map(str::to_string),
                 initial_workstream_ids: owner.into_iter().map(str::to_string).collect(),
                 identity_revision: 0,
+                activity: TerminalActivity::default(),
                 agent,
                 cwd: Some(fixture_cwd()),
                 created_at: now(),
@@ -1376,6 +1435,7 @@ mod tests {
             cwd: None,
             source_path: None,
             source: None,
+            activity: None,
         }
     }
 
@@ -1440,6 +1500,68 @@ mod tests {
             .tracked_workstream_ids
             .into_iter()
             .next()
+    }
+
+    #[test]
+    fn activity_is_per_terminal_and_rejects_stale_turns_identities_and_read_receipts() {
+        use activity::{ActivitySignal, ActivityState::*};
+        let db = binding_db();
+        let registry = registry();
+        let first = identity_terminal(&registry, Agent::Codex, Some("a"), None);
+        let peer = identity_terminal(&registry, Agent::Codex, Some("a"), None);
+        let notify = |id: &str, native: &str, turn: &str, state, starts_turn| {
+            let mut event = native_event(native);
+            event.activity = Some(ActivitySignal {
+                state,
+                turn_id: Some(turn.into()),
+                starts_turn,
+            });
+            registry.report_native_identity(&db, id, &event);
+        };
+        notify(&first, "a", "1", Working, true);
+        notify(&peer, "a", "peer", Working, true);
+        notify(&first, "a", "1", Waiting, false);
+        assert_eq!(
+            registry.attach(&first).unwrap().summary.activity.state,
+            Waiting
+        );
+        notify(&first, "a", "1", Completed, false);
+        let completed = registry.attach(&first).unwrap().summary.activity;
+        assert!(completed.unread);
+        assert_eq!(
+            registry.attach(&peer).unwrap().summary.activity.state,
+            Working
+        );
+        registry.mark_activity_seen(&first, completed.revision);
+        assert!(!registry.attach(&first).unwrap().summary.activity.unread);
+        notify(&first, "a", "2", Working, true);
+        notify(&first, "a", "1", Completed, false);
+        assert_eq!(
+            registry.attach(&first).unwrap().summary.activity.state,
+            Working
+        );
+        notify(&first, "a", "2", Completed, false);
+        registry.mark_activity_seen(&first, completed.revision);
+        assert!(registry.attach(&first).unwrap().summary.activity.unread);
+        // Even the correct old receipt cannot clear a different native session.
+        let receipt = registry.attach(&first).unwrap().summary.activity.revision;
+        registry.report_native_identity(&db, &first, &native_event("b"));
+        notify(&first, "a", "2", Completed, false);
+        assert_eq!(
+            registry.attach(&first).unwrap().summary.activity.state,
+            Unknown
+        );
+        notify(&first, "b", "3", Working, true);
+        notify(&first, "b", "3", Completed, false);
+        registry.mark_activity_seen(&first, receipt);
+        assert!(registry.attach(&first).unwrap().summary.activity.unread);
+        registry.close(&first);
+        notify(&first, "b", "3", Completed, false);
+        assert!(registry.attach(&first).is_err());
+        assert_eq!(
+            registry.attach(&peer).unwrap().summary.activity.state,
+            Working
+        );
     }
 
     #[test]

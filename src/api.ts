@@ -233,6 +233,8 @@ export const api = {
     invoke<import("./types").TerminalSummary | null>("terminal_for_session", { sessionId }),
   terminalAttach: (terminalId: string, consumerId?: string) =>
     invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId, consumerId }),
+  terminalActivitySeen: (terminalId: string, revision: number) =>
+    invoke<void>("terminal_activity_seen", { terminalId, revision }),
   terminalInput: (terminalId: string, data: string, binary = false) =>
     invoke<void>("terminal_input", { terminalId, data, binary }),
   terminalAcknowledgeOutput: (terminalId: string, offset: number, consumerId: string) =>

@@ -13,7 +13,7 @@ import { useAutoHideScrollbars } from "../hooks/useAutoHideScrollbars";
 import ToastHost, { showToast } from "../components/Toast";
 import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
-import { EVT_SYNCED, EVT_TERMINALS, type Route } from "./routes";
+import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, type Route } from "./routes";
 import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
 import { sessionDetailCache } from "../features/sessions/SessionDetailView";
 import { clearSessionsCache } from "../features/sessions/SessionsView";
@@ -246,7 +246,11 @@ export default function AppShell() {
     const un3 = listen("terminals-changed", () => {
       window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
     });
+    const unActivity = listen("terminal-activity", () => {
+      window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY));
+    });
     return () => {
+      unActivity.then(f => f());
       un1.then((f) => f());
       un2.then((f) => f());
       unCli.then((f) => f());

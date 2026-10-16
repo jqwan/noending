@@ -749,6 +749,15 @@ pub fn terminal_close(
 }
 
 #[tauri::command]
+pub fn terminal_activity_seen(
+    terminal: State<'_, crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+    revision: u64,
+) {
+    terminal.mark_activity_seen(&terminal_id, revision);
+}
+
+#[tauri::command]
 pub fn terminal_attach(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,

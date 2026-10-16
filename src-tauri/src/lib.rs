@@ -249,6 +249,7 @@ pub fn run() {
             commands::write_clipboard_for_terminal,
             commands::terminal_for_session,
             commands::terminal_attach,
+            commands::terminal_activity_seen,
             commands::terminal_input,
             commands::terminal_acknowledge_output,
             commands::terminal_release_output,

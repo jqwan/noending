@@ -1,3 +1,4 @@
+import { terminalActivitiesLabel, terminalActivityClass } from "./terminalActivity";
 import { useViewState } from "../../hooks/useViewState";
 import Icon from "../../components/Icon";
 import { useMemo, useState } from "react";
@@ -458,11 +459,11 @@ export function SessionResumeButton({
     };
 
     const terminalTitle = availability.disabled ? availability.title : hasLiveTerminal
-      ? `切回终端 · 运行中（${runningCount} 个运行中终端）` : availability.title;
+      ? `切回终端 · ${terminalActivitiesLabel(boundTerminals)}（${runningCount} 个运行中终端）` : availability.title;
 
     return (
       <button
-        className={`btn small ghost icon-button${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}`}
+        className={`btn small ghost icon-button ${terminalActivityClass(boundTerminals)}${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}`}
         title={terminalTitle}
         aria-label={`在终端中继续${sessionDisplayTitle(session.title)}`}
         disabled={availability.disabled || terminalBusy || (!onTerminalResume && !navigate)}

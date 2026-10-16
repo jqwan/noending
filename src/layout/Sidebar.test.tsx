@@ -7,7 +7,7 @@ import Sidebar from "./Sidebar";
 import { api } from "../api";
 import { viewState } from "../hooks/useViewState";
 import { sessionPages, sessionTerminals, rememberSessionPage } from "../features/sessions/sessionNavigation";
-import { EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
+import { EVT_TERMINALS, EVT_SYNCED, EVT_TERMINAL_ACTIVITY } from "../app/routes";
 import type { Route } from "../app/routes";
 import type { TerminalSummary, Session, ProjectCardData } from "../types";
 
@@ -151,7 +151,7 @@ describe("Sidebar unified sessions", () => {
     renderSidebar();
     await screen.findByRole("button", { name: "终端 · 已退出：旧会话" });
     expect(screen.getByText("旧会话")).toBeTruthy();
-    expect(screen.getByRole("img", { name: "0 个运行中终端，1 个已退出终端" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: /^0 个运行中终端，1 个已退出终端/ })).toBeTruthy();
     expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "all");
   });
 
@@ -193,7 +193,7 @@ describe("Sidebar unified sessions", () => {
     await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "live", initialSessionId: "s1", initialTitle: "共享会话" })));
     expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "在桌面应用中继续：共享会话" })).toBeNull();
-    expect(screen.getByRole("img", { name: "1 个运行中终端，1 个已退出终端" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: /^1 个运行中终端，1 个已退出终端/ })).toBeTruthy();
     navigate.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续：桌面会话" }));
     await waitFor(() => expect(api.continueSessionDesktop).toHaveBeenCalledWith("desktop"));
@@ -1035,4 +1035,18 @@ it("immediately removes a deleted pinned session and all its terminals even whil
   expect(screen.queryByText("待删除")).toBeNull();
   expect(screen.getByText("保留")).toBeTruthy();
   expect(JSON.parse(localStorage.getItem("noending.sidebar.pinnedSessions")!)).toEqual(["kept"]);
+});
+
+it("updates Agent activity without reloading all sessions, and retains unread from a peer terminal", async () => {
+  vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s1", title: "并行回答" })]);
+  const a = terminal({ terminal_id: "a", session_id: "s1", activity: { state: "working", revision: 1, unread: false } });
+  const b = terminal({ terminal_id: "b", session_id: "s1", activity: { state: "completed", revision: 2, unread: true } });
+  vi.mocked(api.terminalList).mockResolvedValue([a, b]);
+  renderSidebar();
+  await screen.findByRole("img", { name: /正在处理.*回答完成未查看/ });
+  const sessionQueries = vi.mocked(api.listSessions).mock.calls.length;
+  vi.mocked(api.terminalList).mockResolvedValue([{ ...a, activity: { state: "waiting", revision: 3, unread: false } }, b]);
+  act(() => window.dispatchEvent(new CustomEvent(EVT_TERMINAL_ACTIVITY)));
+  await screen.findByRole("img", { name: /等待输入.*回答完成未查看/ });
+  expect(vi.mocked(api.listSessions).mock.calls.length).toBe(sessionQueries);
 });

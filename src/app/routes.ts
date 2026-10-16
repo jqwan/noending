@@ -53,6 +53,7 @@ export const EVT_SYNCED = "noending:sync";
 /** 终端集合或状态变化（spawn / exit / bind / close）的全局刷新信号。后端 registry
  *  发 Tauri 事件 `terminals-changed`，AppShell 桥接成 window 事件。 */
 export const EVT_TERMINALS = "noending:terminals";
+export const EVT_TERMINAL_ACTIVITY = "noending:terminal-activity";
 
 export function onEvent(evt: string, cb: () => void) {
   const h = () => cb();

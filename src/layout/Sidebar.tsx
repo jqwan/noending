@@ -1,7 +1,8 @@
+import { terminalActivitiesLabel, terminalActivityClass, terminalActivityLabel } from "../features/sessions/terminalActivity";
 import { EVT_REMOVED, removedTargets, type RemovedTargets } from "../app/removedTargets";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import { onEvent, EVT_TERMINALS, EVT_SYNCED, type Route } from "../app/routes";
+import { onEvent, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, EVT_SYNCED, type Route } from "../app/routes";
 import Icon from "../components/Icon";
 import AgentIcon from "../components/AgentIcon";
 import { AGENT_LABELS, type Agent, type TerminalSummary, type Session, type ProjectCardData, type AgentStatusEntry, type TerminalResumeState } from "../types";
@@ -365,12 +366,12 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
   const selected = s.sessionId ? terminalForContinue(s.sessionId, s.terminals) : s.terminals[0];
   const caps = capsOf(s.agent, s.source_kind);
   const availability = terminalContinueState(s.sessionId, s.terminals, resumeState, !!s.archived_at);
-  const terminalLabel = selected ? `终端 · ${selected.live ? "运行中" : "已退出"}` : "在终端中继续";
+  const terminalLabel = selected ? `终端 · ${terminalActivityLabel(selected)}` : "在终端中继续";
   const terminalCount = s.terminals.length;
   const runningCount = s.terminals.filter(t => t.live).length;
   const hasLiveTerminal = runningCount > 0;
   const isTerminalActive = route.view === "terminal" && s.terminals.some(t => t.terminal_id === route.terminalId);
-  const counts = `${runningCount} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端`;
+  const counts = `${runningCount} 个运行中终端，${s.terminals.filter(t => !t.live).length} 个已退出终端；${terminalActivitiesLabel(s.terminals)}`;
   const openTerminal = async () => {
     if (pending.current) return;
     if (!s.sessionId) { if (selected) navigate(terminalDestination(selected)); return; }
@@ -434,7 +435,7 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
         <span ref={textRef} className="sidebar-session-title-text">{title}</span>
       </span>
       {s.terminals.length > 0 && <span role="img" aria-label={counts} title={counts}
-        className={`sidebar-session-dot ${hasLiveTerminal ? "running" : "exited"}`} />}
+        className={`sidebar-session-dot ${hasLiveTerminal ? "running" : "exited"} ${terminalActivityClass(s.terminals)}`} />}
     </button>
     <span className="sidebar-session-actions">
       {onTogglePin && (
@@ -452,7 +453,7 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
         </button>
       )}
       {(selected || caps.terminal) ? <button
-        className={`sidebar-session-action terminal-action${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}${isTerminalActive ? " active" : ""}`}
+        className={`sidebar-session-action terminal-action ${terminalActivityClass(s.terminals)}${hasLiveTerminal ? " terminal-running" : (terminalCount > 0 ? " terminal-exited" : "")}${isTerminalActive ? " active" : ""}`}
         aria-label={`${terminalLabel}：${title}`}
         title={availability.disabled ? availability.title : selected?.live ? `${terminalLabel} · ${counts}` : availability.title}
         disabled={busy || loading || availability.disabled}
@@ -596,6 +597,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
     return () => { ++refreshSeq.current; };
   }, [refreshTerminals]);
   useEffect(() => onEvent(EVT_TERMINALS, refreshTerminals), [refreshTerminals]);
+  useEffect(() => onEvent(EVT_TERMINAL_ACTIVITY, refreshTerminals), [refreshTerminals]);
   useEffect(refreshSessions, [refreshSessions]);
   useEffect(() => onEvent(EVT_TERMINALS, refreshSessions), [refreshSessions]);
   useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
