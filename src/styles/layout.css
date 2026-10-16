@@ -1019,7 +1019,6 @@ button.sidebar-pinned-header,
 .sidebar-session-activity { display: inline-flex; align-self: center; width: 12px; flex: none; margin-left: auto; transition: opacity 120ms ease; }
 .sidebar-recent-item:hover .sidebar-session-activity,
 .sidebar-recent-item:focus-within .sidebar-session-activity { opacity: 0; pointer-events: none; }
-.sidebar-recent-item.terminal-session-exited .sidebar-session-title { color: var(--text-muted); }
 .sidebar-session-title {
   display: block;
   flex: 1;

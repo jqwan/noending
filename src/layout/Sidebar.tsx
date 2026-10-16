@@ -431,7 +431,7 @@ function SidebarSessionRow({ session, route, navigate, agentStatus, loading, isP
   const isScrolling = hovered && overflow > 0;
   const duration = Math.max(2.5, overflow / 30);
 
-  return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}${terminalCount > 0 && !hasLiveTerminal ? " terminal-session-exited" : ""}`}
+  return <div className={`nav-item sidebar-recent-item ${active ? "active" : ""}`}
     onMouseEnter={onMouseEnter}
     onMouseLeave={onMouseLeave}
     onClick={(e) => {
