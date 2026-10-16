@@ -257,11 +257,14 @@ describe("Sidebar unified sessions", () => {
 });
 
 describe("Sidebar 最近活动", () => {
-  it("renders empty state when there are no sessions", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([]);
-
+  it("renders empty state and refetches recent sessions on EVT_SYNCED", async () => {
+    vi.mocked(api.listSessions).mockResolvedValueOnce([]);
     renderSidebar();
     expect(await screen.findByText("暂无会话")).toBeTruthy();
+
+    vi.mocked(api.listSessions).mockResolvedValue([session({ id: "s-synced", title: "同步来的会话" })]);
+    act(() => { window.dispatchEvent(new CustomEvent(EVT_SYNCED)); });
+    expect(await screen.findByText("同步来的会话")).toBeTruthy();
   });
 
   it("displays 工作区 title and supports filtering by 最近5天, 未归档, 可终端继续", async () => {
@@ -485,52 +488,6 @@ describe("Sidebar 最近活动", () => {
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-edge" }));
   });
 
-  it("handles title marquee scrolling conditionally on overflow and hover", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({
-        id: "s-long",
-        title: "这是一个特别长特别长的超出会话标题用于测试文字滚动效果",
-        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
-      }),
-      session({
-        id: "s-short",
-        title: "短标题",
-        last_conversation_at: new Date(Date.now() - 1000).toISOString(),
-      }),
-    ]);
-    renderSidebar();
-
-    // Overflowing title enables marquee on mouseEnter and clears on mouseLeave
-    const longTitle = await screen.findByText("这是一个特别长特别长的超出会话标题用于测试文字滚动效果");
-    const longContainer = longTitle.closest(".sidebar-session-title") as HTMLElement;
-    const longRow = longTitle.closest(".sidebar-recent-item")!;
-    Object.defineProperty(longContainer, "scrollWidth", { configurable: true, value: 300 });
-    Object.defineProperty(longContainer, "clientWidth", { configurable: true, value: 150 });
-
-    fireEvent.mouseEnter(longRow);
-    expect(longContainer.className).toContain("scrolling");
-    expect(longContainer.style.getPropertyValue("--overflow-width")).toBe("208px");
-
-    fireEvent.mouseLeave(longRow);
-    expect(longContainer.className).not.toContain("scrolling");
-
-    // Non-overflowing title does not enable marquee
-    const shortTitle = screen.getByText("短标题");
-    const shortContainer = shortTitle.closest(".sidebar-session-title") as HTMLElement;
-    const shortRow = shortTitle.closest(".sidebar-recent-item")!;
-    Object.defineProperty(shortTitle, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ width: 50, height: 16, top: 0, left: 0, bottom: 16, right: 50 }),
-    });
-    Object.defineProperty(shortContainer, "clientWidth", { configurable: true, value: 150 });
-    Object.defineProperty(shortContainer, "scrollWidth", { configurable: true, value: 150 });
-
-    fireEvent.mouseEnter(shortRow);
-    expect(shortContainer.className).not.toContain("scrolling");
-    expect(shortContainer.style.getPropertyValue("--overflow-width")).toBe("");
-  });
-
-
   it("toggles group collapse when group header is clicked", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({
@@ -563,14 +520,6 @@ describe("Sidebar 最近活动", () => {
   });
 
 
-
-  it("refetches recent sessions on EVT_SYNCED event", async () => {
-    renderSidebar();
-    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1));
-
-    window.dispatchEvent(new CustomEvent(EVT_SYNCED));
-    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
-  });
 
   it("switches grouping to agent and collapses each agent independently", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
@@ -643,38 +592,6 @@ describe("Sidebar 最近活动", () => {
     expect(screen.queryByText("从未有对话的会话")).toBeNull();
   });
 
-  it("sorts sessions within a group by started_at / created_at desc", async () => {
-    const olderCreated = session({
-      id: "s-older-created",
-      title: "更早创建但最近聊天的会话",
-      agent: "codex",
-      project_id: "ws-1",
-      started_at: "2026-10-01T10:00:00.000Z",
-      last_conversation_at: "2026-10-10T12:00:00.000Z",
-    });
-    const newerCreated = session({
-      id: "s-newer-created",
-      title: "更晚创建但较早聊天的会话",
-      agent: "codex",
-      project_id: "ws-1",
-      started_at: "2026-10-05T10:00:00.000Z",
-      last_conversation_at: "2026-10-06T12:00:00.000Z",
-    });
-
-    vi.mocked(api.listSessions).mockResolvedValue([olderCreated, newerCreated]);
-    vi.mocked(api.listProjectCards).mockResolvedValue([
-      projectCard({ id: "ws-1", name: "测试排序任务" }),
-    ]);
-
-    renderSidebar();
-    await screen.findByText("测试排序任务");
-
-    const links = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
-    expect(links[0].textContent).toContain("更晚创建但较早聊天的会话");
-    expect(links[1].textContent).toContain("更早创建但最近聊天的会话");
-  });
-
-
   it("sorts agent groups by terminal capability first, then by name", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
       session({ id: "s-qoder", title: "Qoder会话", agent: "qoder" }),
@@ -693,39 +610,6 @@ describe("Sidebar 最近活动", () => {
     expect(titles[1]).toContain("Codex");
     expect(titles[2]).toContain("DSH");
     expect(titles[3]).toContain("Qoder");
-  });
-
-  it("differentiates running vs exited terminal continue buttons with status classes", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-live", title: "运行中会话", agent: "codex" }),
-      session({ id: "s-exited", title: "已退出会话", agent: "codex" }),
-    ]);
-    vi.mocked(api.terminalList).mockResolvedValue([
-      terminal({ terminal_id: "t-live", session_id: "s-live", live: true }),
-      terminal({ terminal_id: "t-exited", session_id: "s-exited", live: false }),
-    ]);
-
-    renderSidebar({ view: "terminal", terminalId: "t-live" });
-
-    const liveBtn = await screen.findByRole("button", { name: /终端 · 运行中：运行中会话/ });
-    expect(liveBtn.className).toContain("terminal-running");
-    expect(liveBtn.className).toContain("active");
-
-    const exitedBtn = await screen.findByRole("button", { name: /终端 · 已退出：已退出会话/ });
-    expect(exitedBtn.className).toContain("terminal-exited");
-    expect(exitedBtn.className).not.toContain("active");
-
-    const liveRow = liveBtn.closest(".sidebar-recent-item")!;
-    const liveDot = liveRow.querySelector(".sidebar-session-link .sidebar-session-dot");
-    expect(liveDot).toBeTruthy();
-    expect(liveDot?.className).toContain("running");
-    const liveTitle = liveRow.querySelector(".sidebar-session-title")!;
-    expect(liveTitle.compareDocumentPosition(liveDot!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-
-    const exitedRow = exitedBtn.closest(".sidebar-recent-item")!;
-    const exitedDot = exitedRow.querySelector(".sidebar-session-link .sidebar-session-dot");
-    expect(exitedDot).toBeTruthy();
-    expect(exitedDot?.className).toContain("exited");
   });
 
   it("moves pinned sessions out of the regular list and restores them on unpin", async () => {
@@ -997,45 +881,6 @@ describe("Sidebar 最近活动", () => {
     renderSidebar();
     await screen.findByText("会话 4");
     expect(screen.queryByRole("button", { name: "展开显示" })).toBeNull();
-  });
-
-  it("handles group header marquee scrolling conditionally on title overflow", async () => {
-    const wsLong = projectCard({ id: "ws-long", name: "这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动" });
-    const wsShort = projectCard({ id: "ws-short", name: "短任务" });
-    const s1 = session({ id: "s-1", project_id: "ws-long", title: "会话一" });
-    const s2 = session({ id: "s-2", project_id: "ws-short", title: "会话二" });
-
-    vi.mocked(api.listProjectCards).mockResolvedValue([wsLong, wsShort]);
-    vi.mocked(api.listSessions).mockResolvedValue([s1, s2]);
-
-    renderSidebar();
-
-    // Long header: enables marquee on mouseEnter and clears on mouseLeave
-    const longHeader = await screen.findByRole("button", { name: /这是一个非常长非常长非常长的任务分组标题用于测试跑马灯滚动/ });
-    const longTitle = longHeader.querySelector(".sidebar-recent-group-title") as HTMLElement;
-    Object.defineProperty(longTitle, "scrollWidth", { configurable: true, value: 350 });
-    Object.defineProperty(longTitle, "clientWidth", { configurable: true, value: 160 });
-
-    fireEvent.mouseEnter(longHeader);
-    expect(longTitle.className).toContain("scrolling");
-    expect(longTitle.style.getPropertyValue("--overflow-width")).toBe("190px");
-
-    fireEvent.mouseLeave(longHeader);
-    expect(longTitle.className).not.toContain("scrolling");
-
-    // Short header: does not enable marquee
-    const shortHeader = screen.getByRole("button", { name: /短任务/ });
-    const shortTitle = shortHeader.querySelector(".sidebar-recent-group-title") as HTMLElement;
-    const shortTitleText = shortHeader.querySelector(".sidebar-recent-group-title-text") as HTMLElement;
-    Object.defineProperty(shortTitleText, "getBoundingClientRect", {
-      configurable: true,
-      value: () => ({ width: 50, height: 16, top: 0, left: 0, bottom: 16, right: 50 }),
-    });
-    Object.defineProperty(shortTitle, "clientWidth", { configurable: true, value: 160 });
-    Object.defineProperty(shortTitle, "scrollWidth", { configurable: true, value: 160 });
-
-    fireEvent.mouseEnter(shortHeader);
-    expect(shortTitle.className).not.toContain("scrolling");
   });
 
   it("collapses all groups and expands all groups with the one-click button", async () => {

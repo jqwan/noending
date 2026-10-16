@@ -533,6 +533,13 @@ button.sidebar-pinned-header,
   background: transparent;
   color: var(--accent);
 }
+.sidebar-running-filter:hover {
+  color: var(--text-muted);
+}
+.sidebar-running-filter.active,
+.sidebar-running-filter.active:hover {
+  color: var(--success);
+}
 .sidebar-filter-trigger .ui-icon {
   width: 13px;
   height: 13px;

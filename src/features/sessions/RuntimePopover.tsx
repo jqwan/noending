@@ -9,6 +9,7 @@ export interface RuntimePopoverProps {
   value: AgentRuntimeOverrides;
   onChange: (value: AgentRuntimeOverrides) => void;
   disabled?: boolean;
+  direction?: "up" | "down";
 }
 
 export default function RuntimePopover({
@@ -16,6 +17,7 @@ export default function RuntimePopover({
   value,
   onChange,
   disabled = false,
+  direction = "up",
 }: RuntimePopoverProps) {
   const [open, setOpen] = useState(false);
   const [subpage, setSubpage] = useState<"main" | "model" | "effort">("main");
@@ -94,7 +96,11 @@ export default function RuntimePopover({
 
       {/* 浮动卡片弹出层 */}
       {open && (
-        <div className="new-session-runtime-popover" role="dialog" aria-label="模型与推理设置">
+        <div
+          className={`new-session-runtime-popover${direction === "down" ? " popover-down" : ""}`}
+          role="dialog"
+          aria-label="模型与推理设置"
+        >
           {subpage === "main" && (
             <div className="new-session-popover-main">
               <div
@@ -165,7 +171,21 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
-                <button type="button" className="popover-option-item" onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>Agent 默认</button>
+                <button type="button" className={`popover-option-item ${!value.model ? "selected" : ""}`} onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>
+                  <span>Agent 默认</span>
+                  {!value.model && <Icon name="check" />}
+                </button>
+                {value.model && !models.some((m) => m.id === value.model) && (
+                  <button
+                    type="button"
+                    className="popover-option-item selected"
+                    onClick={() => setSubpage("main")}
+                    title={value.model}
+                  >
+                    <span className="truncate">{value.model}</span>
+                    <Icon name="check" />
+                  </button>
+                )}
                 {models.map((m) => {
                   const isSelected = selectedModelObj === m;
                   return (
@@ -192,7 +212,7 @@ export default function RuntimePopover({
                 })}
 
                 {runtime.error && <p role="alert" className="muted small">{runtime.error}</p>}
-                {models.length === 0 && (
+                {models.length === 0 && !value.model && (
                   <div className="muted small" style={{ padding: "8px 12px" }}>
                     暂未发现模型，可点击右上角刷新
                   </div>
@@ -217,7 +237,20 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
-                <button type="button" className="popover-option-item" onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>Agent 默认</button>
+                <button type="button" className={`popover-option-item ${!effectiveEffort ? "selected" : ""}`} onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>
+                  <span>Agent 默认</span>
+                  {!effectiveEffort && <Icon name="check" />}
+                </button>
+                {effectiveEffort && !availableEfforts.includes(effectiveEffort) && (
+                  <button
+                    type="button"
+                    className="popover-option-item selected"
+                    onClick={() => setSubpage("main")}
+                  >
+                    <span className="truncate">{effectiveEffort}</span>
+                    <Icon name="check" />
+                  </button>
+                )}
                 {availableEfforts.map((lvl) => {
                   const isSelected = effectiveEffort === lvl;
                   return (
@@ -236,7 +269,7 @@ export default function RuntimePopover({
                   );
                 })}
 
-                {availableEfforts.length === 0 && (
+                {availableEfforts.length === 0 && !effectiveEffort && (
                   <div className="muted small" style={{ padding: "8px 12px" }}>
                     当前模型暂无可选推理等级
                   </div>

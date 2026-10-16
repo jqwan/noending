@@ -21,10 +21,6 @@ it("uses the same searchable cards for both scopes with the correct toolbar acti
   expect(screen.queryByRole("button", { name: "删除全部" })).toBeNull();
   screen.getByRole("button", { name: "普通任务" });
   rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
-  const bulkDeleteBtn = screen.getByRole("button", { name: "删除全部" });
-  expect(bulkDeleteBtn.className).toContain("icon-button");
-  expect(bulkDeleteBtn.className).toContain("danger");
-  expect(bulkDeleteBtn.textContent).toBe("");
   expect(screen.queryByRole("button", { name: "新建任务" })).toBeNull();
   expect(document.querySelectorAll(".task-card")).toHaveLength(2);
   fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });

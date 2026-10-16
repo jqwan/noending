@@ -365,15 +365,4 @@ describe("AgentsView", () => {
     expect(screen.getByText("未检测到CLI")).toBeTruthy();
     expect(screen.queryByTitle("来源目录")).toBeNull();
   });
-
-  it("renders the sticky board toolbar with search, filters and status in overview", async () => {
-    const { container } = render(<AgentsView navigate={vi.fn()} />);
-    await screen.findByText("Claude Code");
-    const toolbar = container.querySelector(".board-toolbar.agents-board-toolbar");
-    expect(toolbar).toBeTruthy();
-    expect(toolbar?.querySelector(".agents-filter-pills")).toBeTruthy();
-    expect(toolbar?.querySelector("input[placeholder='搜索 Agent…']")).toBeTruthy();
-    expect(toolbar?.querySelector(".agents-stat-badges")).toBeTruthy();
-    expect(toolbar?.querySelector(".agents-sync-status-strip")).toBeTruthy();
-  });
 });

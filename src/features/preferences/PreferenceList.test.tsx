@@ -15,7 +15,7 @@ it("promotes a locked project preference and refreshes both project and user lis
   fireEvent.click(await screen.findByRole("button", { name: "升级为用户偏好：保持简洁" }));
   await waitFor(() => expect(api.promotePreference).toHaveBeenCalledWith("pref"));
   await waitFor(() => expect(screen.queryByRole("button", { name: "升级为用户偏好：保持简洁" })).toBeNull());
-  const user = screen.getByRole("region", { name: "用户偏好 / 准则" });
+  const user = screen.getByRole("region", { name: "用户偏好" });
   expect(user.textContent).toContain("保持简洁");
   expect(user.textContent).toContain("已锁定");
 });

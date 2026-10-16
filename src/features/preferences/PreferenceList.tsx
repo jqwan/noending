@@ -6,8 +6,19 @@ import Icon from "../../components/Icon";
 import type { Preference } from "../../types";
 
 /** Users can manage every item, including locked ones. No history is retained. */
-export default function PreferenceList({ projectId }: { projectId: string | null }) {
-  const title = projectId ? "项目偏好 / 准则" : "用户偏好 / 准则";
+export default function PreferenceList({
+  projectId,
+  embedded = false,
+}: {
+  projectId: string | null;
+  embedded?: boolean;
+}) {
+  const title = projectId ? "项目偏好" : "用户偏好";
+  const Container = embedded ? "div" : "section";
+  const containerClass = embedded
+    ? "preference-section preference-embedded"
+    : "card detail-section preference-section";
+  const TitleTag = embedded ? "h3" : "h2";
   const [items, setItems] = useState<Preference[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
@@ -49,35 +60,35 @@ export default function PreferenceList({ projectId }: { projectId: string | null
     }
   };
   return (
-    <section className="card detail-section preference-section" aria-label={title}>
+    <Container className={containerClass} role="region" aria-label={title}>
       <div className="row between" style={{ alignItems: "center" }}>
-        <h2 className="detail-section-title">
+        <TitleTag className="detail-section-title" style={embedded ? { margin: 0 } : undefined}>
           <Icon name="settings" />
           <span>{title}</span>
-        </h2>
+        </TitleTag>
         <button className="btn small ghost" disabled={busy} onClick={() => { setEditing({ id: null, content: "", locked: false }); setEditError(""); }}>新增</button>
       </div>
-      <p className="muted small" style={{ margin: 0 }}>随摘要提取更新；锁定仅禁止 Agent 修改或删除，您仍可编辑和删除。</p>
+      <p className="muted small" style={embedded ? { margin: "4px 0 0" } : { margin: 0 }}>随摘要提取更新；锁定仅禁止 Agent 修改或删除，您仍可编辑和删除。</p>
     {items.map(item => <div className="preference-row" key={item.id}>
       <div className="grow"><span className="preference-content">{item.content}</span>{item.locked && <span className="badge">已锁定</span>}</div>
       <div className="actions">
         {projectId && <button className="btn small ghost icon-button" title="升级为用户偏好" aria-label={`升级为用户偏好：${item.content}`} disabled={busy} onClick={()=>mutate(()=>api.promotePreference(item.id))}><Icon name="promote"/></button>}
-        <button className="btn small ghost" disabled={busy} onClick={() => mutate(() => api.savePreference(item.id, projectId, item.content, !item.locked))}>{item.locked ? "解锁" : "锁定"}</button>
+        <button type="button" className={`btn small ghost icon-button${item.locked ? " on" : ""}`} title={item.locked ? "解锁" : "锁定"} aria-label={item.locked ? "解锁" : "锁定"} disabled={busy} onClick={() => mutate(() => api.savePreference(item.id, projectId, item.content, !item.locked))}><Icon name={item.locked ? "lock" : "unlock"} /></button>
         <button className="btn small ghost icon-button" title="编辑偏好" aria-label={`编辑偏好：${item.content}`} disabled={busy} onClick={() => { setEditing(item); setEditError(""); }}><Icon name="edit" /></button>
         <button className="btn small ghost icon-button" title="删除偏好" aria-label={`删除偏好：${item.content}`} disabled={busy} onClick={() => mutate(() => api.deletePreference(item.id))}><Icon name="trash" /></button>
       </div>
     </div>)}
-    {loaded && items.length === 0 && <p className="muted small">暂无偏好或准则。</p>}
+    {loaded && items.length === 0 && <p className="muted small">暂无偏好。</p>}
     {error && <div role="alert"><p>{error}</p><button className="btn small ghost" disabled={busy} onClick={refresh}>重试</button></div>}
     {editing && <Modal title={editing.id ? "编辑偏好" : "新增偏好"} onClose={() => { if (!busyRef.current) setEditing(null); }}>
       <label className="field">
-        <span>偏好 / 准则</span>
+        <span>偏好</span>
         <textarea
           autoFocus
           rows={4}
           value={editing.content}
           disabled={busy}
-          placeholder="输入需要遵循的准则、开发偏好或代码风格..."
+          placeholder="输入需要遵循的开发偏好或代码风格..."
           onChange={e => setEditing({ ...editing, content: e.target.value })}
         />
       </label>
@@ -88,6 +99,6 @@ export default function PreferenceList({ projectId }: { projectId: string | null
         <button className="btn primary" disabled={busy || !editing.content.trim()} onClick={() => mutate(() => api.savePreference(editing.id, projectId, editing.content, editing.locked), true)}>{busy ? "保存中…" : "保存"}</button>
       </div>
     </Modal>}
-  </section>
+  </Container>
   );
 }

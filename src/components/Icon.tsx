@@ -4,6 +4,8 @@ const paths = {
   palette: "M9 2a7 7 0 1 0 0 14h1a2 2 0 0 0 1-4c-1-1 0-2 1-2h2c3 0 2-8-5-8ZM5 7h.1M8 5h.1M12 6h.1",
   database: "M3 5c0-4 12-4 12 0s-12 4-12 0Zm0 0v8c0 4 12 4 12 0V5M3 9c0 4 12 4 12 0",
   pin: "M6 2h6l-1 5 3 3v1H4v-1l3-3ZM9 11v5",
+  lock: "M5.5 8V5.5a3.5 3.5 0 1 1 7 0V8M3.5 8h11v7.5h-11ZM9 10.5v2.5",
+  unlock: "M5.5 8V5.5a3.5 3.5 0 0 1 7 0M3.5 8h11v7.5h-11ZM9 10.5v2.5",
   trash: "M3 5h12M7 5V3h4v2M5 5l1 10h6l1-10M8 8v4M10 8v4",
   edit: "M11 3l4 4M3 15l1-5 8-8 4 4-8 8Z",
   plus: "M9 3v12M3 9h12",

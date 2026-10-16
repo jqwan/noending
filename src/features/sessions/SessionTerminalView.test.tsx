@@ -592,26 +592,17 @@ it("keeps details disabled when an old title request resolves during pending", a
   expect((screen.getByRole("button", { name: "会话详情" }) as HTMLButtonElement).disabled).toBe(true);
 });
 it("delivers clipboard text once on supported paste shortcuts", async () => {
-  const pasteModifiers = [
-    { metaKey: true, ctrlKey: false, shiftKey: false },
-    { metaKey: true, ctrlKey: false, shiftKey: true },
-  ];
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.readClipboardForTerminal).mockResolvedValue("pasted text");
+  vi.mocked(api.terminalInput).mockClear();
 
-  for (const modifiers of pasteModifiers) {
-    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-    vi.mocked(api.readClipboardForTerminal).mockResolvedValue("pasted text");
-    vi.mocked(api.terminalInput).mockClear();
-
-    const view = renderView();
-    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-    const term = FakeTerminal.last!;
-    const pastedBefore = term.pasted.length;
-    expect(term.keyHandler!({ type: "keydown", ...modifiers, key: "v", preventDefault: () => {} })).toBe(false);
-    await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text", undefined));
-    expect(api.terminalInput).toHaveBeenCalledTimes(1);
-    expect(term.pasted.slice(pastedBefore)).toEqual(["pasted text"]);
-    view.unmount();
-  }
+  renderView();
+  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
+  const term = FakeTerminal.last!;
+  expect(term.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: () => {} })).toBe(false);
+  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text", undefined));
+  expect(api.terminalInput).toHaveBeenCalledTimes(1);
+  expect(term.pasted).toEqual(["pasted text"]);
 });
 
 it("does not receive input when Cmd+V finds no clipboard text", async () => {

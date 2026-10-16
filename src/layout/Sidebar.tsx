@@ -869,7 +869,7 @@ export default function Sidebar({ route, navigate, collapsed = false, hidden = f
           <div className="sidebar-header-actions">
             <button
               type="button"
-              className={`sidebar-filter-trigger${runningOnly ? " active" : ""}`}
+              className={`sidebar-filter-trigger sidebar-running-filter${runningOnly ? " active" : ""}`}
               onClick={() => setRunningOnly((prev) => !prev)}
               aria-label="仅显示运行中会话"
               aria-pressed={runningOnly}

@@ -114,6 +114,12 @@ it("keeps drafts across summary types, previews the draft and saves only the sel
   expect(screen.getByRole("textbox", {name: "会话摘要要求模板"})).toHaveProperty("value", "会话草稿");
   fireEvent.click(screen.getByRole("button", {name: "撤销修改"}));
   expect(screen.getByRole("textbox", {name: "会话摘要要求模板"})).toHaveProperty("value", templates.session);
+  fireEvent.click(screen.getByRole("tab", {name: "偏好提取"}));
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好提取要求模板"}), {target: {value: "只提取明确的长期约定"}});
+  vi.mocked(api.setSummaryPromptTemplate).mockResolvedValue({templates: {...templates, preferences: "只提取明确的长期约定"}, defaults: {...templates}});
+  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
+  await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
+  expect(api.setSummaryPromptTemplate).toHaveBeenCalledWith("preferences", "只提取明确的长期约定");
 });
 
 it("restores defaults explicitly, retains edits after save failure and rejects an empty draft", async () => {
@@ -148,7 +154,7 @@ it("lets users edit and delete locked preferences and create new locked items", 
   render(<SettingsView navigate={vi.fn()} />);
   await screen.findByText("原有锁定偏好");
   fireEvent.click(screen.getByRole("button", {name: "编辑偏好：原有锁定偏好"}));
-  fireEvent.change(screen.getByRole("textbox", {name: "偏好 / 准则"}), {target: {value: "用户修改的锁定偏好"}});
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好"}), {target: {value: "用户修改的锁定偏好"}});
   fireEvent.click(screen.getByRole("button", {name: "保存"}));
   await screen.findByText("用户修改的锁定偏好");
   expect(api.savePreference).toHaveBeenCalledWith("locked", null, "用户修改的锁定偏好", true);
@@ -157,7 +163,7 @@ it("lets users edit and delete locked preferences and create new locked items", 
   fireEvent.click(screen.getByRole("button", {name: "新增"}));
   const save = screen.getByRole("button", {name: "保存"});
   expect(save).toHaveProperty("disabled", true);
-  fireEvent.change(screen.getByRole("textbox", {name: "偏好 / 准则"}), {target: {value: "新偏好"}});
+  fireEvent.change(screen.getByRole("textbox", {name: "偏好"}), {target: {value: "新偏好"}});
   fireEvent.click(screen.getByRole("checkbox", {name: "锁定，禁止 Agent 修改或删除"}));
   fireEvent.click(save);
   await screen.findByText("新偏好");
@@ -167,44 +173,27 @@ it("lets users edit and delete locked preferences and create new locked items", 
   expect(api.savePreference).toHaveBeenLastCalledWith("new", null, "新偏好", false);
 });
 
-it("edits the shared preference extraction template without changing summary templates", async () => {
-  render(<SettingsView navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", {name: "查看与编辑"}));
-  await screen.findByRole("textbox", {name: "会话摘要要求模板"});
-  fireEvent.click(screen.getByRole("tab", {name: "偏好提取"}));
-  fireEvent.change(screen.getByRole("textbox", {name: "偏好提取要求模板"}), {target: {value: "只提取明确的长期约定"}});
-  vi.mocked(api.setSummaryPromptTemplate).mockResolvedValue({templates: {...templates, preferences: "只提取明确的长期约定"}, defaults: {...templates}});
-  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
-  await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
-  expect(api.setSummaryPromptTemplate).toHaveBeenCalledWith("preferences", "只提取明确的长期约定");
-});
-
-
-it("saves extraction runtime independently, retains failed drafts and restores saved settings", async () => {
+it("saves extraction settings immediately on selection and handles disable extraction", async () => {
   render(<SettingsView navigate={vi.fn()} />);
   const agent = await screen.findByLabelText("提取 Agent");
+
+  const piExpected = { agent: "pi" as const, runtime: { model: null, provider: null, effort: null } };
+  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(piExpected);
   fireEvent.change(agent, { target: { value: "pi" } });
-  fireEvent.change(await screen.findByLabelText("提供商"), { target: { value: "my-provider" } });
-  fireEvent.change(screen.getByLabelText("模型"), { target: { value: "summary-model" } });
-  fireEvent.change(screen.getByLabelText("推理强度"), { target: { value: "high" } });
-  const expected = { agent: "pi" as const, runtime: { provider: "my-provider", model: "summary-model", effort: "high" } };
-  expect(api.setExtractionSettings).not.toHaveBeenCalled();
-  vi.mocked(api.setExtractionSettings).mockRejectedValueOnce(new Error("save failed"));
-  fireEvent.click(screen.getByRole("button", { name: "保存提取设置" }));
-  await screen.findByText(/save failed/);
-  expect(screen.getByLabelText("模型")).toHaveProperty("value", "summary-model");
-  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(expected);
-  fireEvent.click(screen.getByRole("button", { name: "保存提取设置" }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "保存提取设置" })).toHaveProperty("disabled", true));
-  expect(api.setExtractionSettings).toHaveBeenLastCalledWith(expected);
-  expect(api.setSummaryPromptTemplate).not.toHaveBeenCalled();
-  cleanup(); viewState.clear();
-  vi.mocked(api.getExtractionSettings).mockResolvedValue(expected);
-  render(<SettingsView navigate={vi.fn()} />);
-  expect(await screen.findByLabelText("模型")).toHaveProperty("value", "summary-model");
-  expect(screen.getByLabelText("推理强度")).toHaveProperty("value", "high");
+  await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(piExpected));
+
+  const runtimeBtn = screen.getByRole("button", { name: "模型与推理设置" });
+  fireEvent.click(runtimeBtn);
+  fireEvent.click(screen.getByText("推理等级"));
+  const highEffortExpected = { agent: "pi" as const, runtime: { model: null, provider: null, effort: "high" } };
+  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(highEffortExpected);
+  fireEvent.click(screen.getByRole("button", { name: "high" }));
+  await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(highEffortExpected));
+
+  const noneExpected = { agent: "none" as const, runtime: { model: null, provider: null, effort: null } };
+  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(noneExpected);
   fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });
-  expect(screen.queryByLabelText("模型")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "撤销提取设置修改" }));
-  expect(await screen.findByLabelText("模型")).toHaveProperty("value", "summary-model");
+  await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(noneExpected));
+  expect(screen.queryByRole("button", { name: "模型与推理设置" })).toBeNull();
+  expect(screen.getByText(/已停用自动提取/)).toBeTruthy();
 });

@@ -145,6 +145,10 @@
   top: auto;
   bottom: calc(100% + 8px);
 }
+.new-session-dropdown-menu.dropdown-down {
+  top: calc(100% + 6px) !important;
+  bottom: auto !important;
+}
 .new-session-picker {
   position: relative;
   display: inline-flex;
@@ -1530,6 +1534,89 @@ button.btn.conversation-jump:active {
   flex-direction: column;
   gap: 12px;
   margin-bottom: 14px;
+}
+.extraction-settings-card {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.extraction-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.extraction-control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.extraction-control-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.extraction-saved-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+.extraction-saved-badge .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+.extraction-subtools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.extraction-subtool-card {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.extraction-subtool-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.extraction-subtool-title {
+  font-size: 13px;
+  font-weight: 550;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+}
+.extraction-subtool-title .ui-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+}
+.preference-section.preference-embedded {
+  margin: 18px 0 0;
+  padding: 18px 0 0;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
 }
 .settings-storage-card-header {
   display: flex;
@@ -2917,8 +3004,21 @@ button.btn.ghost.terminal-exited,
 .terminal-menu .menu-label { min-width: 0; }
 .terminal-menu small { display: block; font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.summary-prompt-editor { min-height: 280px; resize: vertical; line-height: 1.7; }
-.summary-prompt-preview { max-height: 50vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); font-size: 12px; line-height: 1.7; }
+.summary-prompt-editor { min-height: 320px; resize: vertical; line-height: 1.7; }
+.summary-prompt-preview {
+  min-height: 320px;
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.7;
+  transition: opacity 120ms ease;
+}
+.summary-prompt-preview.loading { opacity: 0.6; }
 .summary-prompt-actions { gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }
 
 .preference-section { margin: 24px 0; }
@@ -3179,6 +3279,12 @@ button.btn.ghost.terminal-exited,
   padding: 4px;
   z-index: 100;
   user-select: none;
+}
+.new-session-runtime-popover.popover-down {
+  bottom: auto;
+  top: calc(100% + 6px);
+  right: auto;
+  left: 0;
 }
 .new-session-popover-main {
   display: flex;

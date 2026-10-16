@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import PreferenceList from "../preferences/PreferenceList";
-import SummaryPromptSettings from "./SummaryPromptSettings";
-import ExtractionRuntimeSettings from "./ExtractionRuntimeSettings";
+import ContextSettings from "./ContextSettings";
 import PageHeader from "../../layout/PageHeader";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
@@ -11,8 +9,7 @@ import Icon from "../../components/Icon";
 import type { WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection, LegacySettingsSection } from "../../app/routes";
 
-/** Settings：设置页合并为统一平铺视图，聚焦于全局系统设置。 */
-/** Settings：设置页合并为统一平铺视图，聚焦于主题外观与本地存储数据。 */
+/** Settings：设置页合并为统一平铺视图，聚焦于主题外观、摘要偏好与本地存储数据。 */
 export default function SettingsView({ section: _section, navigate: _navigate }: {
   section?: SettingsSection | LegacySettingsSection;
   navigate?: (r: Route) => void;
@@ -21,14 +18,11 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
     <div className="main settings-page">
       <PageHeader
         title="设置"
-        sub="配置主题外观、摘要提取与本地存储数据。"
+        sub="配置主题外观、摘要提取、偏好与本地存储数据。"
       />
       <div className="settings-pane" style={{ marginTop: 18 }}>
         <AppearanceSettings />
-        <ExtractionRuntimeSettings />
-        <SummaryPromptSettings />
-        <PreferenceList projectId={null} />
-        <ContextDiagnosticsSettings />
+        <ContextSettings />
         <WorkspaceStorageSettings />
       </div>
     </div>
@@ -80,34 +74,6 @@ function AppearanceSettings() {
   );
 }
 
-function ContextDiagnosticsSettings() {
-  const openLogs = async () => {
-    try {
-      await api.openContextExtractionLogs();
-      showToast("已打开 Context 更新日志目录");
-    } catch (error) {
-      console.error(error);
-      showToast("无法打开 Context 更新日志目录");
-    }
-  };
-
-  return (
-    <section>
-      <div className="settings-section-header">
-        <div>
-          <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
-            <Icon name="terminal" />
-            <span>Context 更新诊断</span>
-          </h3>
-          <p className="muted small" style={{ margin: "4px 0 0" }}>
-            记录更新时间、目标、Agent 和失败阶段；不记录提示词、模型输出或终端错误文本，保留 14 天。
-          </p>
-        </div>
-        <button className="btn small" onClick={openLogs}>打开日志目录</button>
-      </div>
-    </section>
-  );
-}
 
 /* 数据存储目录（原 NoEnding Home）：
  * `get_workspace_settings` 读取的是启动时解析并管理进应用的存储根目录（NOENDING_HOME）。

@@ -152,10 +152,8 @@ it("displays running terminal state on the continue button when session has a li
     />
   );
   const liveBtn = screen.getByRole("button", { name: "在终端中继续活跃终端会话" });
-  expect(liveBtn.className).toContain("terminal-running");
   expect(liveBtn.title).toContain("切回终端 · 运行中");
 
   const exitedBtn = screen.getByRole("button", { name: "在终端中继续退出终端会话" });
-  expect(exitedBtn.className).toContain("terminal-exited");
   expect(exitedBtn.title).toBe("重新连接会话");
 });

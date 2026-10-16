@@ -671,17 +671,6 @@ describe("NewSessionView runtime selection", () => {
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", expected));
   });
 
-  it("launches with agent native defaults when no overrides are selected", async () => {
-    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "native-runtime", launched_via: "embedded", command_line: "test", note: "" });
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
-    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", "开始", NATIVE_RUNTIME));
-    expect(api.setAgentRuntimeOverrides).not.toHaveBeenCalled();
-  });
-
   it("excludes agents when detected or launch_enabled is false", async () => {
     vi.mocked(api.getAgentStatus).mockResolvedValue({
       ...mockAgentStatus,

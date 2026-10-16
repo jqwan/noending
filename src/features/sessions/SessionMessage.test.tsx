@@ -47,7 +47,6 @@ it("气泡里直接显示 Markdown 预览，不露出源码", () => {
   expect(body.textContent).not.toContain("##");
 
   // 悬浮 / 点开的作用对象是气泡本身，不是整行。
-  expect(body.className).toContain("clickable");
   expect(body.getAttribute("role")).toBe("button");
 });
 

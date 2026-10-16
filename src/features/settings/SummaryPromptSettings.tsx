@@ -28,17 +28,19 @@ export default function SummaryPromptSettings() {
   );
 }
 
-function TemplateEditor({ onClose }: { onClose: () => void }) {
+export function TemplateEditor({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<PromptSettings | null>(null);
   const [drafts, setDrafts] = useState<SummaryPromptTemplates | null>(null);
   const [kind, setKind] = useState<SummaryPromptKind>("session");
   const [previewing, setPreviewing] = useState(false);
-  const [preview, setPreview] = useState("");
+  const [previews, setPreviews] = useState<Partial<Record<SummaryPromptKind, string>>>({});
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const active = useRef(true);
+  const previewRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     active.current = true;
@@ -55,13 +57,27 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (!previewing || !drafts || !settings) return;
     let cancelled = false;
-    setPreview("");
+    setPreviewLoading(true);
     setError("");
     api.previewSummaryPrompt(kind, { ...settings.templates, [kind]: drafts[kind] }).then(text => {
-      if (!cancelled) setPreview(text);
-    }).catch(e => { if (!cancelled) setError(String(e)); });
+      if (!cancelled) {
+        setPreviews(prev => ({ ...prev, [kind]: text }));
+        setPreviewLoading(false);
+      }
+    }).catch(e => {
+      if (!cancelled) {
+        setError(String(e));
+        setPreviewLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, [previewing, kind, drafts, settings]);
+
+  useEffect(() => {
+    if (previewRef.current) {
+      previewRef.current.scrollTop = 0;
+    }
+  }, [kind]);
 
   const save = async () => {
     if (!drafts || busyRef.current) return;
@@ -83,6 +99,7 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
   };
 
   const changed = settings && drafts && drafts[kind] !== settings.templates[kind];
+  const currentPreview = previews[kind] || "";
   return <Modal title="摘要提取提示词" wide onClose={onClose}>
     {!settings || !drafts ? <>
       {error ? <div role="alert"><p>{error}</p><button className="btn small" onClick={() => setLoadAttempt(n => n + 1)}>重试</button></div> : <p className="muted" role="status">正在读取模板…</p>}
@@ -100,7 +117,13 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
       </div>
       {previewing ? <>
         <p className="muted small">预览使用当前类型的编辑内容，其他要求使用已保存模板；文件路径以占位符展示。</p>
-        <pre className="summary-prompt-preview" aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}完整提示词`}>{preview || (error ? "预览失败" : "正在生成预览…")}</pre>
+        <pre
+          ref={previewRef}
+          className={`summary-prompt-preview${previewLoading && !currentPreview ? " loading" : ""}`}
+          aria-label={`${labels[kind]}${kind === "preferences" ? "提取" : "摘要"}完整提示词`}
+        >
+          {currentPreview || (error ? "预览失败" : "正在生成预览…")}
+        </pre>
       </> : <label className="field">
         <span>{labels[kind]}{kind === "preferences" ? "提取" : "摘要"}要求模板</span>
         <textarea className="summary-prompt-editor" value={drafts[kind]} disabled={busy} onChange={e => { setDrafts({ ...drafts, [kind]: e.target.value }); setError(""); }} />
@@ -109,7 +132,7 @@ function TemplateEditor({ onClose }: { onClose: () => void }) {
       <div className="row summary-prompt-actions" style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)" }}>
         <button className="btn small ghost" disabled={busy || drafts[kind] === settings.defaults[kind]} onClick={() => { setDrafts({ ...drafts, [kind]: settings.defaults[kind] }); setError(""); }}>恢复默认</button>
         <button className="btn small ghost" disabled={busy || !changed} onClick={() => { setDrafts({ ...drafts, [kind]: settings.templates[kind] }); setError(""); }}>撤销修改</button>
-        {previewing && <button className="btn small ghost" disabled={!preview} onClick={async () => showToast(await copyToClipboard(preview) ? "已复制提示词" : "复制失败")}>复制提示词</button>}
+        {previewing && <button className="btn small ghost" disabled={!currentPreview} onClick={async () => showToast(await copyToClipboard(currentPreview) ? "已复制提示词" : "复制失败")}>复制提示词</button>}
         <button className="btn small primary" disabled={busy || !changed || !drafts[kind].trim()} onClick={save}>{busy ? "保存中…" : "保存模板"}</button>
       </div>
     </>}

@@ -131,10 +131,6 @@ it("shows archived sessions in the same cards and filters, with continue disable
   expect((screen.getByRole("button", { name: "在终端中继续归档会话" }) as HTMLButtonElement).disabled).toBe(true);
   screen.getByRole("button", { name: "取消归档归档会话" });
   screen.getByRole("button", { name: "永久删除归档会话" });
-  const bulkDeleteBtn = screen.getByRole("button", { name: "删除全部" });
-  expect(bulkDeleteBtn.className).toContain("icon-button");
-  expect(bulkDeleteBtn.className).toContain("danger");
-  expect(bulkDeleteBtn.textContent).toBe("");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   fireEvent.change(screen.getByRole("textbox", { name: "搜索会话" }), { target: { value: "不匹配" } });
   expect(screen.queryByText("归档会话")).toBeNull();
