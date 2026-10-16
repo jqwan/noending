@@ -8,6 +8,7 @@ import AgentConfiguration from "./AgentConfiguration";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
+import { PLUGIN_AGENTS } from "../plugins/pluginAgents";
 import { copyToClipboard, Modal, openPath, timeAgo } from "../../components/common";
 import CustomSelect from "../../components/CustomSelect";
 import { showToast } from "../../components/Toast";
@@ -444,6 +445,10 @@ export default function AgentsView({
             </span>
           }
           actions={
+            <>
+            <button className="btn ghost icon-button" title={PLUGIN_AGENTS.includes(initialAgent) ? "管理插件" : "此 Agent 暂未接入插件管理"} aria-label="管理插件" disabled={!PLUGIN_AGENTS.includes(initialAgent)} onClick={() => navigate({ view: "plugins", agent: initialAgent })}>
+              <Icon name="plugin" />
+            </button>
             <button
               className="btn ghost icon-button"
               disabled={running || agentSources.length === 0}
@@ -453,6 +458,7 @@ export default function AgentsView({
             >
               <Icon name="refresh" className={running ? "spinning" : ""} />
             </button>
+            </>
           }
         />
 

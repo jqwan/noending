@@ -14,6 +14,7 @@ use crate::error::{other, Result};
 use crate::storage::Db;
 
 pub mod ingestion;
+pub mod plugins;
 pub mod project;
 pub mod session_lifecycle;
 pub mod session_workspace;

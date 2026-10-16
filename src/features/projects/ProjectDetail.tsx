@@ -187,6 +187,9 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         }
         actions={
           <>
+          <button className="btn ghost icon-button" title="项目插件" aria-label="项目插件" onClick={() => navigate({ view: "plugins", projectId })}>
+            <Icon name="plugin" />
+          </button>
           <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
             onChanged={() => { clearProjectCardsCache(); refresh(); }}
             onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />

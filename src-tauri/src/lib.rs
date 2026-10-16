@@ -13,6 +13,7 @@ pub mod ingestion;
 pub mod launcher;
 pub mod lifecycle;
 pub mod platform;
+pub mod plugins;
 pub mod search;
 pub mod storage;
 pub mod sync;
@@ -156,6 +157,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::plugins::list_plugin_resources,
+            commands::plugins::get_plugin_resource,
+            commands::plugins::plugin_location_revision,
+            commands::plugins::install_plugin_skill,
+            commands::plugins::remove_plugin_skill,
+            commands::plugins::set_plugin_skill_state,
+            commands::plugins::save_plugin_mcp,
+            commands::plugins::remove_plugin_mcp,
+            commands::plugins::manage_plugin_package,
             // Projects derive membership from paths; lifecycle is user managed.
             commands::project::list_projects,
             commands::project::list_project_cards,

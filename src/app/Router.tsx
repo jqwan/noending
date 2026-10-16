@@ -9,6 +9,7 @@ import ProjectsView from "../features/projects/ProjectsView";
 import ProjectDetail, { projectDetailCache } from "../features/projects/ProjectDetail";
 import SettingsView from "../features/settings/SettingsView";
 import AgentsView from "../features/agents/AgentsView";
+import PluginsView from "../features/plugins/PluginsView";
 import type { Route } from "./routes";
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
@@ -90,6 +91,8 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
       return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
     case "agents":
       return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
+    case "plugins":
+      return <PluginsView key={`${route.projectId ?? "user"}:${route.agent ?? "all"}:${route.tab ?? "skill"}`} initialProjectId={route.projectId} initialAgent={route.agent} initialTab={route.tab} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     default:

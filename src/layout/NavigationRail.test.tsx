@@ -8,7 +8,7 @@ afterEach(cleanup);
 it("opens the existing primary pages", () => {
   const sections = [
     ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-    ["Agent", "agents"], ["设置", "settings"],
+    ["Agent", "agents"], ["插件", "plugins"], ["设置", "settings"],
   ] as const;
 
   for (const [label, view] of sections) {
@@ -27,6 +27,7 @@ it("highlights the owning section for routes", () => {
     [{ view: "sessions" }, "会话"],
     [{ view: "workstream", workstreamId: "w1" }, "任务"],
     [{ view: "project", projectId: "p1" }, "项目"],
+    [{ view: "plugins", projectId: "p1", agent: "pi" }, "插件"],
   ];
 
   for (const [route, label] of cases) {
