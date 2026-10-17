@@ -3,7 +3,7 @@ import Icon, { type IconName } from "../components/Icon";
 import type { Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
 
-export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "plugins" | "settings";
+export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "extensions" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
@@ -14,7 +14,7 @@ export function getRouteSection(route: Route): RailSection | null {
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
   if (route.view === "projects" || route.view === "project") return "projects";
   if (route.view === "agents") return "agents";
-  if (route.view === "plugins") return "plugins";
+  if (route.view === "extensions" || route.view === "extension") return "extensions";
   if (route.view === "settings") return "settings";
   return null;
 }
@@ -29,8 +29,8 @@ export function getSectionRootRoute(section: RailSection): Route {
       return { view: "projects" };
     case "agents":
       return { view: "agents" };
-    case "plugins":
-      return { view: "plugins" };
+    case "extensions":
+      return { view: "extensions" };
     case "settings":
       return { view: "settings" };
   }
@@ -82,7 +82,7 @@ export default function NavigationRail({ route, navigate }: {
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
     { section: "agents", label: "Agent", icon: "bot", active: route.view === "agents" },
-    { section: "plugins", label: "插件", icon: "plugin", active: route.view === "plugins" },
+    { section: "extensions", label: "扩展", icon: "extensions", active: currentSection === "extensions" },
   ];
 
   return (

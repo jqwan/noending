@@ -11,21 +11,21 @@ export type Agent =
   | "zcode"
   | "antigravity";
 
-export type PluginKind = "skill" | "mcp" | "package";
-export interface PluginScope { project_id?: string | null; workspace_path_id?: string | null }
-export interface PluginLocation {
-  id: string; kind: PluginKind; agent: Agent | null; scope: "user" | "project";
+export type ExtensionKind = "skill" | "mcp" | "package";
+export interface ExtensionScope { project_id?: string | null; workspace_path_id?: string | null }
+export interface ExtensionLocation {
+  id: string; kind: ExtensionKind; agent: Agent | null; scope: "user" | "project";
   path: string; label: string; writable: boolean; package: string | null; package_enabled: boolean | null;
 }
-export interface PluginResource {
-  id: string; kind: PluginKind; name: string; description: string; path: string;
+export interface ExtensionResource {
+  id: string; kind: ExtensionKind; name: string; description: string; path: string;
   locations: string[]; entry_paths: string[]; enabled: boolean | null;
   revision: string; managed: boolean; error: string | null;
   skill_controls: { agent: Agent; scope: "user" | "project"; enabled: boolean | null; revision: string }[];
 }
-export interface PluginInventory { resources: PluginResource[]; locations: PluginLocation[]; warnings: string[] }
-export interface PluginResourceDetail { resource: PluginResource; content: string; config: Record<string, unknown> | null }
-export interface PluginOperationResult { message: string }
+export interface ExtensionInventory { resources: ExtensionResource[]; locations: ExtensionLocation[]; warnings: string[] }
+export interface ExtensionResourceDetail { resource: ExtensionResource; content: string; config: Record<string, unknown> | null }
+export interface ExtensionOperationResult { message: string }
 
 /** Task archive state; there is no active/completed classification. */
 export type WorkstreamVisibility = "normal" | "archived";

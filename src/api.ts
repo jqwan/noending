@@ -24,24 +24,24 @@ async function invokeWithPreferences<T>(command: string, args: Record<string, un
 }
 
 export const api = {
-  listPluginResources: (scope: import("./types").PluginScope) =>
-    invoke<import("./types").PluginInventory>("list_plugin_resources", { scope }),
-  getPluginResource: (scope: import("./types").PluginScope, id: string) =>
-    invoke<import("./types").PluginResourceDetail>("get_plugin_resource", { scope, id }),
-  pluginLocationRevision: (scope: import("./types").PluginScope, locationId: string) =>
-    invoke<string>("plugin_location_revision", { scope, locationId }),
-  installPluginSkill: (scope: import("./types").PluginScope, source: string, locationId: string, mode: "copy" | "link" = "copy") =>
-    invoke<import("./types").PluginOperationResult>("install_plugin_skill", { scope, source, locationId, mode }),
-  removePluginSkill: (scope: import("./types").PluginScope, id: string, entryPath: string, revision: string) =>
-    invoke<import("./types").PluginOperationResult>("remove_plugin_skill", { scope, id, entryPath, revision }),
-  setPluginSkillState: (scope: import("./types").PluginScope, id: string, configScope: string, revision: string, enabled: boolean | null) =>
-    invoke<import("./types").PluginOperationResult>("set_plugin_skill_state", { scope, id, configScope, revision, enabled }),
-  savePluginMcp: (scope: import("./types").PluginScope, locationId: string, revision: string, name: string, config: Record<string, unknown>, create: boolean) =>
-    invoke<import("./types").PluginOperationResult>("save_plugin_mcp", { scope, locationId, revision, name, config, create }),
-  removePluginMcp: (scope: import("./types").PluginScope, id: string, revision: string) =>
-    invoke<import("./types").PluginOperationResult>("remove_plugin_mcp", { scope, id, revision }),
-  managePluginPackage: (scope: import("./types").PluginScope, agent: Agent, action: string, target: string, id?: string, revision?: string) =>
-    invoke<import("./types").PluginOperationResult>("manage_plugin_package", { scope, agent, action, target, id: id ?? null, revision: revision ?? null }),
+  listExtensionResources: (scope: import("./types").ExtensionScope) =>
+    invoke<import("./types").ExtensionInventory>("list_extension_resources", { scope }),
+  getExtensionResource: (scope: import("./types").ExtensionScope, id: string) =>
+    invoke<import("./types").ExtensionResourceDetail>("get_extension_resource", { scope, id }),
+  extensionLocationRevision: (scope: import("./types").ExtensionScope, locationId: string) =>
+    invoke<string>("extension_location_revision", { scope, locationId }),
+  installExtensionSkill: (scope: import("./types").ExtensionScope, source: string, locationId: string, mode: "copy" | "link" = "copy") =>
+    invoke<import("./types").ExtensionOperationResult>("install_extension_skill", { scope, source, locationId, mode }),
+  removeExtensionSkill: (scope: import("./types").ExtensionScope, id: string, entryPath: string, revision: string) =>
+    invoke<import("./types").ExtensionOperationResult>("remove_extension_skill", { scope, id, entryPath, revision }),
+  setExtensionSkillState: (scope: import("./types").ExtensionScope, id: string, configScope: string, revision: string, enabled: boolean | null) =>
+    invoke<import("./types").ExtensionOperationResult>("set_extension_skill_state", { scope, id, configScope, revision, enabled }),
+  saveExtensionMcp: (scope: import("./types").ExtensionScope, locationId: string, revision: string, name: string, config: Record<string, unknown>, create: boolean) =>
+    invoke<import("./types").ExtensionOperationResult>("save_extension_mcp", { scope, locationId, revision, name, config, create }),
+  removeExtensionMcp: (scope: import("./types").ExtensionScope, id: string, revision: string) =>
+    invoke<import("./types").ExtensionOperationResult>("remove_extension_mcp", { scope, id, revision }),
+  managePluginPackage: (scope: import("./types").ExtensionScope, agent: Agent, action: string, target: string, id?: string, revision?: string) =>
+    invoke<import("./types").ExtensionOperationResult>("manage_plugin_package", { scope, agent, action, target, id: id ?? null, revision: revision ?? null }),
   getSessionTerminalStates: (sessionIds: string[]) =>
     invoke<Record<string, import("./types").TerminalResumeState>>("get_session_terminal_states", { sessionIds }),
   // Project membership derives from paths; archive state is independent.

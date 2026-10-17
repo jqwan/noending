@@ -1,7 +1,7 @@
 //! Native customization contracts, isolated from the user's real Agent homes.
 use noending_lib::{
     domain::Agent,
-    plugins::{self, Roots},
+    extensions::{self, Roots},
 };
 use serde_json::json;
 use std::{
@@ -16,7 +16,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("noending-plugins-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("noending-extensions-{}", uuid::Uuid::new_v4()));
         let home = root.join("home");
         let cwd = root.join("repo");
         fs::create_dir_all(&home).unwrap();
@@ -42,8 +43,8 @@ impl Fixture {
         self.write(&path.join("scripts/check.sh"), "exit 91\n");
         path
     }
-    fn mcp(&self, agent: Agent, scope: &str) -> plugins::Location {
-        plugins::list(&self.roots, Some(&self.cwd))
+    fn mcp(&self, agent: Agent, scope: &str) -> extensions::Location {
+        extensions::list(&self.roots, Some(&self.cwd))
             .locations
             .into_iter()
             .find(|l| {
@@ -65,12 +66,12 @@ impl Drop for Fixture {
 fn skill_install_copies_support_files_and_never_overwrites_or_edits_the_source() {
     let f = Fixture::new();
     let source = f.source("input", "review");
-    let loc = plugins::list(&f.roots, None)
+    let loc = extensions::list(&f.roots, None)
         .locations
         .into_iter()
         .find(|l| l.kind == "skill" && l.agent.is_none())
         .unwrap();
-    plugins::install_skill(&f.roots, None, &source, &loc.id).unwrap();
+    extensions::install_skill(&f.roots, None, &source, &loc.id).unwrap();
     let installed = Path::new(&loc.path).join("review");
     assert_eq!(
         fs::read_to_string(installed.join("scripts/check.sh")).unwrap(),
@@ -78,25 +79,25 @@ fn skill_install_copies_support_files_and_never_overwrites_or_edits_the_source()
     );
     assert!(source.join("SKILL.md").exists());
     f.write(&installed.join("local.txt"), "keep");
-    assert!(plugins::install_skill(&f.roots, None, &source, &loc.id).is_err());
+    assert!(extensions::install_skill(&f.roots, None, &source, &loc.id).is_err());
     assert_eq!(
         fs::read_to_string(installed.join("local.txt")).unwrap(),
         "keep"
     );
-    let inventory = plugins::list(&f.roots, None);
+    let inventory = extensions::list(&f.roots, None);
     let row = inventory
         .resources
         .iter()
         .find(|r| r.kind == "skill")
         .unwrap();
-    let detail = plugins::detail(&f.roots, None, &row.id).unwrap();
+    let detail = extensions::detail(&f.roots, None, &row.id).unwrap();
     assert!(detail.content.contains("# Instructions"));
     assert_eq!(
         row.description.trim(),
         "Review source changes.\nKeep useful findings."
     );
-    assert!(plugins::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], "old").is_err());
-    plugins::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
+    assert!(extensions::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], "old").is_err());
+    extensions::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
     assert!(!installed.exists());
     assert!(source.join("SKILL.md").exists());
 }
@@ -111,7 +112,7 @@ fn same_name_skills_remain_distinct_and_listing_reports_parse_failures_without_w
     f.write(&claude.join("SKILL.md"), valid);
     f.write(&f.roots.pi.join("skills/broken/SKILL.md"), "not a skill");
     f.write(&f.roots.pi.join("mcp.json"), "{broken");
-    let inventory = plugins::list(&f.roots, None);
+    let inventory = extensions::list(&f.roots, None);
     assert_eq!(
         inventory
             .resources
@@ -144,7 +145,7 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
     let claude = f.roots.claude.join("skills");
     fs::create_dir_all(&shared).unwrap();
     fs::create_dir_all(&claude).unwrap();
-    let locations = plugins::list(&f.roots, None).locations;
+    let locations = extensions::list(&f.roots, None).locations;
     let shared_loc = locations
         .iter()
         .find(|l| l.kind == "skill" && l.agent.is_none())
@@ -153,9 +154,9 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
         .iter()
         .find(|l| l.kind == "skill" && l.agent == Some(Agent::ClaudeCode))
         .unwrap();
-    plugins::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
-    plugins::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
-    let inventory = plugins::list(&f.roots, None);
+    extensions::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
+    extensions::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
+    let inventory = extensions::list(&f.roots, None);
     assert_eq!(inventory.resources.len(), 1);
     let row = &inventory.resources[0];
     assert_eq!(row.entry_paths.len(), 2);
@@ -163,7 +164,7 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
         .join("review/SKILL.md")
         .to_string_lossy()
         .into_owned();
-    plugins::remove_skill(&f.roots, None, &row.id, &shared_entry, &row.revision).unwrap();
+    extensions::remove_skill(&f.roots, None, &row.id, &shared_entry, &row.revision).unwrap();
     assert!(!shared.join("review").exists());
     assert!(source.join("SKILL.md").exists());
     assert!(claude.join("review/SKILL.md").exists());
@@ -176,8 +177,8 @@ fn mcp_json_write_preserves_unrelated_settings_and_stale_or_invalid_results_do_n
     let original =
         "{\"custom\":{\"keep\":17},\"mcpServers\":{\"other\":{\"command\":\"other-server\"}}}";
     f.write(Path::new(&loc.path), original);
-    let revision = plugins::location_revision(&f.roots, None, &loc.id).unwrap();
-    plugins::save_mcp(
+    let revision = extensions::location_revision(&f.roots, None, &loc.id).unwrap();
+    extensions::save_mcp(
         &f.roots,
         None,
         &loc.id,
@@ -200,7 +201,7 @@ fn mcp_json_write_preserves_unrelated_settings_and_stale_or_invalid_results_do_n
         original
     );
     let written = fs::read(&loc.path).unwrap();
-    assert!(plugins::save_mcp(
+    assert!(extensions::save_mcp(
         &f.roots,
         None,
         &loc.id,
@@ -210,8 +211,8 @@ fn mcp_json_write_preserves_unrelated_settings_and_stale_or_invalid_results_do_n
         true
     )
     .is_err());
-    let current = plugins::location_revision(&f.roots, None, &loc.id).unwrap();
-    assert!(plugins::save_mcp(
+    let current = extensions::location_revision(&f.roots, None, &loc.id).unwrap();
+    assert!(extensions::save_mcp(
         &f.roots,
         None,
         &loc.id,
@@ -245,8 +246,8 @@ fn codex_toml_round_trip_preserves_comments_and_other_servers_and_removes_only_t
     let f = Fixture::new();
     let loc = f.mcp(Agent::Codex, "project");
     f.write(Path::new(&loc.path), "# personal comment\nmodel = \"keep-model\"\n[mcp_servers.keep]\ncommand = \"keep-server\"\n");
-    let revision = plugins::location_revision(&f.roots, Some(&f.cwd), &loc.id).unwrap();
-    plugins::save_mcp(
+    let revision = extensions::location_revision(&f.roots, Some(&f.cwd), &loc.id).unwrap();
+    extensions::save_mcp(
         &f.roots,
         Some(&f.cwd),
         &loc.id,
@@ -262,12 +263,12 @@ fn codex_toml_round_trip_preserves_comments_and_other_servers_and_removes_only_t
     assert_eq!(value["model"], "keep-model");
     assert_eq!(value["mcp_servers"]["keep"]["command"], "keep-server");
     assert_eq!(value["mcp_servers"]["team.docs"]["enabled"], false);
-    let row = plugins::list(&f.roots, Some(&f.cwd))
+    let row = extensions::list(&f.roots, Some(&f.cwd))
         .resources
         .into_iter()
         .find(|r| r.kind == "mcp" && r.name == "team.docs")
         .unwrap();
-    plugins::remove_mcp(&f.roots, Some(&f.cwd), &row.id, &row.revision).unwrap();
+    extensions::remove_mcp(&f.roots, Some(&f.cwd), &row.id, &row.revision).unwrap();
     let value: serde_json::Value =
         toml_edit::de::from_str(&fs::read_to_string(&loc.path).unwrap()).unwrap();
     assert!(value["mcp_servers"].get("team.docs").is_none());
@@ -280,29 +281,29 @@ fn project_mcp_is_local_to_its_directory_and_claude_private_scope_keeps_other_pr
     let other = f.root.join("other");
     fs::create_dir_all(&other).unwrap();
     let user = f.mcp(Agent::Pi, "user");
-    plugins::save_mcp(
+    extensions::save_mcp(
         &f.roots,
         None,
         &user.id,
-        &plugins::location_revision(&f.roots, None, &user.id).unwrap(),
+        &extensions::location_revision(&f.roots, None, &user.id).unwrap(),
         "tools",
         json!({"command":"tools"}),
         true,
     )
     .unwrap();
     let project = f.mcp(Agent::Pi, "project");
-    plugins::save_mcp(
+    extensions::save_mcp(
         &f.roots,
         Some(&f.cwd),
         &project.id,
-        &plugins::location_revision(&f.roots, Some(&f.cwd), &project.id).unwrap(),
+        &extensions::location_revision(&f.roots, Some(&f.cwd), &project.id).unwrap(),
         "tools",
         json!({"enabled":false}),
         true,
     )
     .unwrap();
     assert!(!other.join(".pi/mcp.json").exists());
-    let list = plugins::list(&f.roots, Some(&f.cwd));
+    let list = extensions::list(&f.roots, Some(&f.cwd));
     assert_eq!(
         list.resources
             .iter()
@@ -311,14 +312,14 @@ fn project_mcp_is_local_to_its_directory_and_claude_private_scope_keeps_other_pr
         2
     );
     assert_eq!(
-        plugins::list(&f.roots, Some(&other))
+        extensions::list(&f.roots, Some(&other))
             .resources
             .iter()
             .filter(|r| r.kind == "mcp" && r.name == "tools")
             .count(),
         1
     );
-    assert!(plugins::save_mcp(
+    assert!(extensions::save_mcp(
         &f.roots,
         Some(&other),
         &project.id,
@@ -337,11 +338,11 @@ fn project_mcp_is_local_to_its_directory_and_claude_private_scope_keeps_other_pr
         Path::new(&local.path),
         "{\"projects\":{\"/other\":{\"keep\":true}},\"theme\":\"dark\"}",
     );
-    plugins::save_mcp(
+    extensions::save_mcp(
         &f.roots,
         Some(&f.cwd),
         &local.id,
-        &plugins::location_revision(&f.roots, Some(&f.cwd), &local.id).unwrap(),
+        &extensions::location_revision(&f.roots, Some(&f.cwd), &local.id).unwrap(),
         "docs",
         json!({"type":"http","url":"https://example/mcp"}),
         true,
@@ -363,7 +364,12 @@ fn package_owned_components_are_read_only_and_scanning_does_not_run_bundled_comm
     let root = f.root.join("package");
     f.write(
         &root.join(".claude-plugin/plugin.json"),
-        "{\"name\":\"team\"}",
+        &json!({
+            "name": "team",
+            "skills": ["./skills/", "skills/../skills"],
+            "mcpServers": "./.mcp.json"
+        })
+        .to_string(),
     );
     f.write(
         &root.join("skills/review/SKILL.md"),
@@ -373,20 +379,30 @@ fn package_owned_components_are_read_only_and_scanning_does_not_run_bundled_comm
         &root.join(".mcp.json"),
         "{\"mcpServers\":{\"bundled\":{\"command\":\"must-not-be-executed\"}}}",
     );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join(".mcp.json"), root.join("mcp.json")).unwrap();
     f.write(&f.roots.claude.join("plugins/installed_plugins.json"), &json!({"version":2,"plugins":{"team@local":[{"scope":"user","installPath":root.to_str().unwrap(),"version":"1.2.3"}]}}).to_string());
     f.write(
         &f.roots.claude.join("settings.json"),
         "{\"enabledPlugins\":{\"team@local\":false}}",
     );
-    let list = plugins::list(&f.roots, None);
+    let list = extensions::list(&f.roots, None);
     let package = list.resources.iter().find(|r| r.kind == "package").unwrap();
     assert_eq!(package.enabled, Some(false));
     let skill = list.resources.iter().find(|r| r.kind == "skill").unwrap();
     assert!(skill.managed);
+    assert_eq!(skill.entry_paths.len(), 1);
     let mcp = list.resources.iter().find(|r| r.kind == "mcp").unwrap();
+    assert_eq!(list.resources.iter().filter(|r| r.kind == "mcp").count(), 1);
+    assert_eq!(
+        Path::new(&mcp.path),
+        fs::canonicalize(root.join(".mcp.json")).unwrap()
+    );
+    let detail = extensions::detail(&f.roots, None, &mcp.id).unwrap();
+    assert_eq!(detail.config.unwrap()["command"], "must-not-be-executed");
     assert!(mcp.managed);
     assert_eq!(mcp.enabled, Some(false));
-    assert!(plugins::remove_skill(
+    assert!(extensions::remove_skill(
         &f.roots,
         None,
         &skill.id,
@@ -394,13 +410,13 @@ fn package_owned_components_are_read_only_and_scanning_does_not_run_bundled_comm
         &skill.revision
     )
     .is_err());
-    assert!(plugins::remove_mcp(&f.roots, None, &mcp.id, &mcp.revision).is_err());
+    assert!(extensions::remove_mcp(&f.roots, None, &mcp.id, &mcp.revision).is_err());
     let loc = list
         .locations
         .iter()
         .find(|l| mcp.locations.contains(&l.id))
         .unwrap();
-    assert!(plugins::save_mcp(
+    assert!(extensions::save_mcp(
         &f.roots,
         None,
         &loc.id,
@@ -422,13 +438,13 @@ fn codex_skill_switch_edits_only_native_config_and_restores_inheritance() {
         "---\nname: review\ndescription: Review code\n---\nKeep unchanged.",
     );
     f.write(&f.roots.codex.join("config.toml"), "# keep this\nmodel = \"existing\"\n[[skills.config]]\npath = \"/unrelated/SKILL.md\"\nenabled = false\n");
-    let row = plugins::list(&f.roots, None)
+    let row = extensions::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|r| r.kind == "skill")
         .unwrap();
     assert_eq!(row.skill_controls[0].enabled, None);
-    plugins::set_skill_state(
+    extensions::set_skill_state(
         &f.roots,
         None,
         &row.id,
@@ -437,13 +453,13 @@ fn codex_skill_switch_edits_only_native_config_and_restores_inheritance() {
         Some(false),
     )
     .unwrap();
-    let current = plugins::list(&f.roots, None)
+    let current = extensions::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|r| r.kind == "skill")
         .unwrap();
     assert_eq!(current.skill_controls[0].enabled, Some(false));
-    assert!(plugins::set_skill_state(
+    assert!(extensions::set_skill_state(
         &f.roots,
         None,
         &row.id,
@@ -452,7 +468,7 @@ fn codex_skill_switch_edits_only_native_config_and_restores_inheritance() {
         Some(true)
     )
     .is_err());
-    plugins::set_skill_state(
+    extensions::set_skill_state(
         &f.roots,
         None,
         &row.id,
@@ -491,12 +507,12 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
         "mklink /J failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
-    let row = plugins::list(&f.roots, None)
+    let row = extensions::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|r| r.kind == "skill")
         .unwrap();
-    plugins::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
+    extensions::remove_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
     assert!(!junction.exists());
     assert!(source.join("SKILL.md").exists());
     let nested = source.join("linked-scripts");
@@ -507,12 +523,12 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
         .output()
         .unwrap();
     assert!(status.status.success());
-    let loc = plugins::list(&f.roots, None)
+    let loc = extensions::list(&f.roots, None)
         .locations
         .into_iter()
         .find(|l| l.kind == "skill" && l.agent.is_none())
         .unwrap();
-    assert!(plugins::install_skill(&f.roots, None, &source, &loc.id).is_err());
+    assert!(extensions::install_skill(&f.roots, None, &source, &loc.id).is_err());
     assert!(!root.join("review").exists());
     fs::remove_dir(nested).unwrap();
 }
@@ -530,9 +546,9 @@ fn codex_project_switches_override_user_resources_without_modifying_user_configu
         &f.roots.home.join(".agents/skills/review/SKILL.md"),
         "---\nname: review\ndescription: Review code\n---\nKeep this source.",
     );
-    let list = plugins::list(&f.roots, Some(&f.cwd));
+    let list = extensions::list(&f.roots, Some(&f.cwd));
     let package = list.resources.iter().find(|r| r.kind == "package").unwrap();
-    plugins::package_action(
+    extensions::package_action(
         &f.roots,
         Some(&f.cwd),
         Agent::Codex,
@@ -550,7 +566,7 @@ fn codex_project_switches_override_user_resources_without_modifying_user_configu
         fs::read_to_string(f.roots.codex.join("config.toml")).unwrap(),
         user_config
     );
-    let list = plugins::list(&f.roots, Some(&f.cwd));
+    let list = extensions::list(&f.roots, Some(&f.cwd));
     let project_package = list
         .resources
         .iter()
@@ -558,7 +574,7 @@ fn codex_project_switches_override_user_resources_without_modifying_user_configu
             r.kind == "package" && r.path == f.cwd.join(".codex/config.toml").to_string_lossy()
         })
         .unwrap();
-    plugins::package_action(
+    extensions::package_action(
         &f.roots,
         Some(&f.cwd),
         Agent::Codex,
@@ -576,7 +592,7 @@ fn codex_project_switches_override_user_resources_without_modifying_user_configu
         .is_none());
     assert_eq!(value["model"], "project");
     assert!(raw.contains("# team settings"));
-    let skill = plugins::list(&f.roots, Some(&f.cwd))
+    let skill = extensions::list(&f.roots, Some(&f.cwd))
         .resources
         .into_iter()
         .find(|r| r.kind == "skill")
@@ -586,7 +602,7 @@ fn codex_project_switches_override_user_resources_without_modifying_user_configu
         .iter()
         .find(|c| c.scope == "project")
         .unwrap();
-    plugins::set_skill_state(
+    extensions::set_skill_state(
         &f.roots,
         Some(&f.cwd),
         &skill.id,

@@ -221,6 +221,7 @@ it.each([
   { route: { view: "session", sessionId: "deleted", initialTitle: "S", initialAgent: "codex" }, targets: { sessionIds: ["deleted"] }, replacement: { view: "sessions", scope: "archived" }, section: "会话" },
   { route: { view: "workstream", workstreamId: "deleted", initialTitle: "T" }, targets: { workstreamIds: ["deleted"] }, replacement: { view: "workstreams", scope: "archived" }, section: "任务" },
   { route: { view: "project", projectId: "deleted", initialTitle: "P" }, targets: { projectIds: ["deleted"] }, replacement: { view: "projects", scope: "archived" }, section: "项目" },
+  { route: { view: "extension", resourceId: "mcp1", kind: "mcp", projectId: "deleted", workspacePathId: "w1" }, targets: { projectIds: ["deleted"] }, replacement: { view: "extensions" }, section: "扩展" },
   { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialAgent: "codex" }, section: "会话" },
 ] as const)("removes invalid $route.view routes from back/forward and section memory", ({ route, targets, replacement, section }) => {
   render(<AppShell />);

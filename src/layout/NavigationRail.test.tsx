@@ -8,7 +8,7 @@ afterEach(cleanup);
 it("opens the existing primary pages", () => {
   const sections = [
     ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-    ["Agent", "agents"], ["插件", "plugins"], ["设置", "settings"],
+    ["Agent", "agents"], ["扩展", "extensions"], ["设置", "settings"],
   ] as const;
 
   for (const [label, view] of sections) {
@@ -27,7 +27,8 @@ it("highlights the owning section for routes", () => {
     [{ view: "sessions" }, "会话"],
     [{ view: "workstream", workstreamId: "w1" }, "任务"],
     [{ view: "project", projectId: "p1" }, "项目"],
-    [{ view: "plugins", projectId: "p1", agent: "pi" }, "插件"],
+    [{ view: "extensions", projectId: "p1", agent: "pi" }, "扩展"],
+    [{ view: "extension", resourceId: "skill1", kind: "skill" }, "扩展"],
   ];
 
   for (const [route, label] of cases) {
@@ -42,6 +43,7 @@ it("jumps to its root board interface when clicking the active section icon", ()
     [{ view: "session", sessionId: "s1" }, "会话", { view: "sessions" }],
     [{ view: "workstream", workstreamId: "w1" }, "任务", { view: "workstreams" }],
     [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
+    [{ view: "extension", resourceId: "skill1", kind: "skill" }, "扩展", { view: "extensions" }],
     [{ view: "settings", section: "appearance" }, "设置", { view: "settings" }],
   ];
 

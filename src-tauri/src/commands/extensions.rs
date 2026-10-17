@@ -4,7 +4,7 @@ use super::AppState;
 use crate::{
     domain::Agent,
     error::{other, Result},
-    plugins::{self, Scope},
+    extensions::{self, Scope},
     storage::Db,
 };
 use std::path::PathBuf;
@@ -32,60 +32,63 @@ fn cwd(db: &Db, scope: &Scope) -> Result<Option<PathBuf>> {
 }
 
 #[tauri::command]
-pub async fn list_plugin_resources(
+pub async fn list_extension_resources(
     state: State<'_, AppState>,
     scope: Scope,
-) -> Result<plugins::Inventory> {
+) -> Result<extensions::Inventory> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        Ok(plugins::list(&plugins::Roots::current()?, cwd.as_deref()))
+        Ok(extensions::list(
+            &extensions::Roots::current()?,
+            cwd.as_deref(),
+        ))
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn get_plugin_resource(
+pub async fn get_extension_resource(
     state: State<'_, AppState>,
     scope: Scope,
     id: String,
-) -> Result<plugins::ResourceDetail> {
+) -> Result<extensions::ResourceDetail> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::detail(&plugins::Roots::current()?, cwd.as_deref(), &id)
+        extensions::detail(&extensions::Roots::current()?, cwd.as_deref(), &id)
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn plugin_location_revision(
+pub async fn extension_location_revision(
     state: State<'_, AppState>,
     scope: Scope,
     location_id: String,
 ) -> Result<String> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::location_revision(&plugins::Roots::current()?, cwd.as_deref(), &location_id)
+        extensions::location_revision(&extensions::Roots::current()?, cwd.as_deref(), &location_id)
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn install_plugin_skill(
+pub async fn install_extension_skill(
     state: State<'_, AppState>,
     scope: Scope,
     source: String,
     location_id: String,
     mode: Option<String>,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
         let install = match mode.as_deref().unwrap_or("copy") {
-            "copy" => plugins::install_skill,
-            "link" => plugins::link_skill,
+            "copy" => extensions::install_skill,
+            "link" => extensions::link_skill,
             _ => return Err(other("安装方式无效")),
         };
         install(
-            &plugins::Roots::current()?,
+            &extensions::Roots::current()?,
             cwd.as_deref(),
             std::path::Path::new(&source),
             &location_id,
@@ -95,17 +98,17 @@ pub async fn install_plugin_skill(
 }
 
 #[tauri::command]
-pub async fn remove_plugin_skill(
+pub async fn remove_extension_skill(
     state: State<'_, AppState>,
     scope: Scope,
     id: String,
     entry_path: String,
     revision: String,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::remove_skill(
-            &plugins::Roots::current()?,
+        extensions::remove_skill(
+            &extensions::Roots::current()?,
             cwd.as_deref(),
             &id,
             &entry_path,
@@ -116,18 +119,18 @@ pub async fn remove_plugin_skill(
 }
 
 #[tauri::command]
-pub async fn set_plugin_skill_state(
+pub async fn set_extension_skill_state(
     state: State<'_, AppState>,
     scope: Scope,
     id: String,
     config_scope: String,
     revision: String,
     enabled: Option<bool>,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::set_skill_state(
-            &plugins::Roots::current()?,
+        extensions::set_skill_state(
+            &extensions::Roots::current()?,
             cwd.as_deref(),
             &id,
             &config_scope,
@@ -139,7 +142,7 @@ pub async fn set_plugin_skill_state(
 }
 
 #[tauri::command]
-pub async fn save_plugin_mcp(
+pub async fn save_extension_mcp(
     state: State<'_, AppState>,
     scope: Scope,
     location_id: String,
@@ -147,11 +150,11 @@ pub async fn save_plugin_mcp(
     name: String,
     config: serde_json::Value,
     create: bool,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::save_mcp(
-            &plugins::Roots::current()?,
+        extensions::save_mcp(
+            &extensions::Roots::current()?,
             cwd.as_deref(),
             &location_id,
             &revision,
@@ -164,15 +167,20 @@ pub async fn save_plugin_mcp(
 }
 
 #[tauri::command]
-pub async fn remove_plugin_mcp(
+pub async fn remove_extension_mcp(
     state: State<'_, AppState>,
     scope: Scope,
     id: String,
     revision: String,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::remove_mcp(&plugins::Roots::current()?, cwd.as_deref(), &id, &revision)
+        extensions::remove_mcp(
+            &extensions::Roots::current()?,
+            cwd.as_deref(),
+            &id,
+            &revision,
+        )
     })
     .await?
 }
@@ -186,11 +194,11 @@ pub async fn manage_plugin_package(
     target: String,
     id: Option<String>,
     revision: Option<String>,
-) -> Result<plugins::OperationResult> {
+) -> Result<extensions::OperationResult> {
     let cwd = cwd(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        plugins::package_action(
-            &plugins::Roots::current()?,
+        extensions::package_action(
+            &extensions::Roots::current()?,
             cwd.as_deref(),
             agent,
             &action,
@@ -209,7 +217,7 @@ mod tests {
     #[test]
     fn project_configuration_rejects_unregistered_or_unrelated_paths() {
         let root =
-            std::env::temp_dir().join(format!("noending-plugin-scope-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("noending-extension-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let db = Db::open(&root.join("scope.db")).unwrap();
         db.write().execute("INSERT INTO projects(id,name,name_customized,visibility,created_at,updated_at) VALUES('p','P',0,'normal','now','now')", []).unwrap();

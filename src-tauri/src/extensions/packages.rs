@@ -4,7 +4,7 @@ use crate::{
     error::{other, Result},
 };
 use serde_json::{json, Value};
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 fn read_json(path: &Path, inventory: &mut Inventory) -> Option<Value> {
     if !path.exists() {
@@ -68,7 +68,7 @@ fn add_package(
     let allowed = |relative: &str| -> Option<std::path::PathBuf> {
         let path = root.join(relative);
         let real = fs::canonicalize(&path).ok()?;
-        real.starts_with(&canonical_root).then_some(path)
+        real.starts_with(&canonical_root).then_some(real)
     };
     let mut skill_paths = vec!["skills".to_string()];
     let pi = manifest.get("pi").unwrap_or(&manifest);
@@ -79,23 +79,22 @@ fn add_package(
         }
         _ => {}
     }
-    skill_paths.sort();
-    skill_paths.dedup();
-    for rel in skill_paths {
-        if let Some(path) = allowed(&rel) {
-            let mut child = location(
-                "skill",
-                loc.agent,
-                &loc.scope,
-                path,
-                &format!("插件包 · {name}"),
-            );
-            child.id = key(format!("{}:package:{name}", child.id));
-            child.writable = false;
-            child.package = Some(name.into());
-            child.package_enabled = enabled;
-            inventory.locations.push(child);
-        }
+    // Defaults and manifest entries can name the same file through ./, .. or
+    // symlinks. Deduplicate physical paths before creating resource locations.
+    let skill_paths: BTreeSet<_> = skill_paths.iter().filter_map(|rel| allowed(rel)).collect();
+    for path in skill_paths {
+        let mut child = location(
+            "skill",
+            loc.agent,
+            &loc.scope,
+            path,
+            &format!("插件包 · {name}"),
+        );
+        child.id = key(format!("{}:package:{name}", child.id));
+        child.writable = false;
+        child.package = Some(name.into());
+        child.package_enabled = enabled;
+        inventory.locations.push(child);
     }
     let mut mcps = vec![
         ".mcp.json".to_string(),
@@ -105,24 +104,24 @@ fn add_package(
     if let Some(s) = manifest.get("mcpServers").and_then(Value::as_str) {
         mcps.push(s.into());
     }
-    mcps.sort();
-    mcps.dedup();
-    for rel in mcps {
-        if let Some(path) = allowed(&rel).filter(|p| p.is_file()) {
-            let mut child = location(
-                "mcp",
-                loc.agent,
-                &loc.scope,
-                path,
-                &format!("插件包 · {name}"),
-            );
-            child.id = key(format!("{}:package:{name}", child.id));
-            child.writable = false;
-            child.package = Some(name.into());
-            child.package_enabled = enabled;
-            child.section = vec!["mcpServers".into()];
-            inventory.locations.push(child);
-        }
+    let mcps: BTreeSet<_> = mcps
+        .iter()
+        .filter_map(|rel| allowed(rel).filter(|p| p.is_file()))
+        .collect();
+    for path in mcps {
+        let mut child = location(
+            "mcp",
+            loc.agent,
+            &loc.scope,
+            path,
+            &format!("插件包 · {name}"),
+        );
+        child.id = key(format!("{}:package:{name}", child.id));
+        child.writable = false;
+        child.package = Some(name.into());
+        child.package_enabled = enabled;
+        child.section = vec!["mcpServers".into()];
+        inventory.locations.push(child);
     }
     if manifest.get("mcpServers").is_some_and(Value::is_object) {
         if let Some(path) = manifest_path {
@@ -393,7 +392,7 @@ pub fn package_action(
     if action != "install" {
         let row = row.ok_or_else(|| other("请选择已有插件包"))?;
         if row.managed {
-            return Err(other("NoEnding 内置插件由应用管理"));
+            return Err(other("NoEnding 内置插件包由应用管理"));
         }
         if row.name != target {
             return Err(other("插件包目标已变化"));

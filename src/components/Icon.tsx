@@ -1,4 +1,5 @@
 const paths = {
+  extensions: "M2.5 3h4.5v4.5H2.5ZM2.5 10h4.5v4.5H2.5ZM10 10h4.5v4.5H10ZM12 1.5 15.5 5 12 8.5 8.5 5Z",
   plugin: "M3 3h4V2a2 2 0 1 1 4 0v1h4v4h-1a2 2 0 1 0 0 4h1v4h-4v-1a2 2 0 1 0-4 0v1H3v-4h1a2 2 0 1 0 0-4H3Z",
   close: "M4 4l10 10M14 4L4 14",
   refresh: "M14 6A6 6 0 1 0 15 11M14 2v4h-4",
