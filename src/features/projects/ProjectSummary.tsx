@@ -13,7 +13,7 @@ export function clearProjectSummaryCache() { cache.clear(); }
 /** Pure reads on navigation; extraction requires an explicit user action. */
 export default function ProjectSummary({ projectId, sessions }: { projectId: string; sessions: SessionListItem[] }) {
   const [view, setView] = useState<ProjectContextView | null>(() => cache.get(projectId) ?? null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"update" | "regenerate" | false>(false);
   const busyRef = useRef(false);
   const active = useRef(true);
   const request = useRef(0);
@@ -43,7 +43,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
   const update = async (regenerate = false) => {
     if (busyRef.current) return;
     busyRef.current = true;
-    setBusy(true);
+    setBusy(regenerate ? "regenerate" : "update");
     setError(null);
     setPreferenceError(null);
     setFailed([]);
@@ -71,9 +71,39 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
           <span>项目摘要</span>
         </h2>
         <div className="actions" style={{ display: "flex", gap: 8 }}>
-          {view?.summary && <button className="btn small ghost" onClick={async () => showToast(await copyToClipboard(view.summary!) ? "已复制摘要" : "复制失败")}>复制</button>}
-          {view?.pending && <button className="btn small primary" disabled={busy} onClick={() => update()}>{busy ? "更新中…" : "更新摘要"}</button>}
-          <button className="btn small ghost" disabled={busy || !view} onClick={() => update(true)}>重新生成</button>
+          {view?.summary && (
+            <button
+              type="button"
+              className="btn ghost icon-button small"
+              title="复制摘要"
+              aria-label="复制摘要"
+              onClick={async () => showToast((await copyToClipboard(view.summary!)) ? "已复制摘要" : "复制失败")}
+            >
+              <Icon name="copy" />
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn ghost icon-button small"
+            disabled={Boolean(busy) || !view}
+            title={busy === "regenerate" ? "重新生成中…" : "重新生成"}
+            aria-label="重新生成"
+            onClick={() => update(true)}
+          >
+            <Icon name="refresh" className={busy === "regenerate" ? "spinning" : ""} />
+          </button>
+          {view?.pending && (
+            <button
+              type="button"
+              className="btn primary icon-button small"
+              disabled={Boolean(busy)}
+              title={busy === "update" ? "更新中…" : "更新摘要"}
+              aria-label="更新摘要"
+              onClick={() => update()}
+            >
+              <Icon name="spark" className={busy === "update" ? "spinning" : ""} />
+            </button>
+          )}
         </div>
       </div>
       {view?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}

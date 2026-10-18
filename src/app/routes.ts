@@ -42,7 +42,7 @@ export type Route =
    *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
   | { view: "agents"; agent?: Agent }
-  | { view: "extensions"; projectId?: string; agent?: Agent; tab?: import("../types").ExtensionKind }
+  | { view: "extensions"; projectId?: string; tab?: import("../types").ExtensionKind }
   | { view: "extension"; resourceId: string; kind: import("../types").ExtensionKind; initialTitle?: string; projectId?: string; workspacePathId?: string }
   | { view: "projects"; scope?: "unarchived" | "archived" }
   | { view: "project"; projectId: string; initialTitle?: string }

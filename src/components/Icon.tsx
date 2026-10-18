@@ -1,6 +1,5 @@
 const paths = {
   extensions: "M2.5 3h4.5v4.5H2.5ZM2.5 10h4.5v4.5H2.5ZM10 10h4.5v4.5H10ZM12 1.5 15.5 5 12 8.5 8.5 5Z",
-  plugin: "M3 3h4V2a2 2 0 1 1 4 0v1h4v4h-1a2 2 0 1 0 0 4h1v4h-4v-1a2 2 0 1 0-4 0v1H3v-4h1a2 2 0 1 0 0-4H3Z",
   close: "M4 4l10 10M14 4L4 14",
   refresh: "M14 6A6 6 0 1 0 15 11M14 2v4h-4",
   palette: "M9 2a7 7 0 1 0 0 14h1a2 2 0 0 0 1-4c-1-1 0-2 1-2h2c3 0 2-8-5-8ZM5 7h.1M8 5h.1M12 6h.1",
@@ -15,6 +14,8 @@ const paths = {
   chevronRight: "M7 4l5 5-5 5",
   chevronDown: "M4.5 7l4.5 4.5 4.5-4.5",
   promote: "M9 14V3M5 7l4-4 4 4M3 12v4h12v-4",
+  // 收入托盘的箭头，用于把外部 Skill / MCP 收进 NoEnding。
+  adopt: "M9 2v8M5.5 6.5L9 10l3.5-3.5M3 12v3h12v-3",
   arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",
   home: "M3 8l6-5 6 5v7H11v-4H7v4H3Z",
   search: "M12 12l4 4M13 8A5 5 0 1 1 3 8a5 5 0 0 1 10 0",
@@ -29,6 +30,8 @@ const paths = {
   chatPlus: "M3 3h12v9H8l-5 3ZM9 5v5M6.5 7.5h5",
   chatLines: "M3 3h12v9H8l-5 3ZM6 6.5h6M6 9.5h3.5",
   spark: "M9 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2Z",
+  // 带束带的等距包装盒，用于 Skill。
+  skill: "M9 2L15 5.5V12.5L9 16L3 12.5V5.5ZM3 5.5L9 9L15 5.5M9 9V16M3 8.8L9 12.3L15 8.8M3 10.8L9 14.3L15 10.8",
   chart: "M3.5 15V9M9 15V4M14.5 15V8",
   settings: "M3 5h12M3 13h12M6 3v4M12 11v4",
   play: "M6.5 4.5l7.5 4.5-7.5 4.5Z",
@@ -45,8 +48,11 @@ const paths = {
   check: "M3.5 9.5l3.5 3.5 7.5-7.5",
   grid: "M3.5 3.5h4.5v4.5h-4.5ZM10 3.5h4.5v4.5h-4.5ZM3.5 10h4.5v4.5h-4.5ZM10 10h4.5v4.5h-4.5Z",
   list: "M3.5 4.5h11M3.5 9h11M3.5 13.5h11",
+  file: "M4.5 1.5h5.5l4 4v11h-9.5ZM10 1.5v4h4M6.5 9h5M6.5 12.5h3",
   filter: "M2.5 3.5h13l-5 5.5v5.5l-3-2v-3.5Z",
   sliders: "M2.5 6h13M6.5 3.5v5M2.5 12h13M11.5 9.5v5",
+  // 两个相扣的环，用于 MCP 连接。
+  mcp: "M9.31 8.69A4.4 3.1 -45 1 1 3.09 14.91A4.4 3.1 -45 1 1 9.31 8.69M14.91 3.09A4.4 3.1 -45 1 1 8.69 9.31A4.4 3.1 -45 1 1 14.91 3.09",
   inbox: "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
   collapseAll: "M4 4.5l5 3.5 5-3.5M4 13.5l5-3.5 5 3.5",
   expandAll: "M4 8l5-3.5 5 3.5M4 10l5 3.5 5-3.5",

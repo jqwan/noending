@@ -65,16 +65,16 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
 
       <footer className="ws-card-meta">
         <span className="muted small">
-          {timeAgo(card.last_activity_at)}
+          {timeAgo(card.last_activity_at ?? card.updated_at)}
         </span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
           {!archived && <button
-            className={`btn small ws-btn ${card.latest_session ? "ghost icon-button" : ""}`}
+            className="btn small ws-btn ghost icon-button"
             aria-label="新建会话"
             title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
             onClick={() => navigate({ view: "new-session", workstreamId: card.id })}
           >
-            <Icon name="plus" />{!card.latest_session && "新建会话"}
+            <Icon name="plus" />
           </button>}
           <button className="btn small ghost icon-button" disabled={busy}
             aria-label={archived ? `取消归档${card.title}` : `归档${card.title}`}

@@ -50,7 +50,7 @@ export default function SessionDetailView({
   const [failed, setFailed] = useState(false);
   /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
-  const [ctxBusy, setCtxBusy] = useState(false);
+  const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
@@ -152,7 +152,7 @@ export default function SessionDetailView({
   const updateSummary = async (regenerate = false) => {
     if (ctxBusy) return;
     const updateSessionId = sessionId;
-    setCtxBusy(true);
+    setCtxBusy(regenerate ? "regenerate" : "update");
     setCtxReadError(null);
     setCtxError(null);
     setPreferenceError(null);
@@ -290,23 +290,40 @@ export default function SessionDetailView({
                 <Icon name="spark" />
                 <span>会话摘要</span>
               </div>
-              <div className="row" style={{ gap: 8 }}>
-                <button
-                  className="btn small ghost"
-                  disabled={!sessionCtx?.fields}
-                  title={sessionCtx?.fields ? "复制摘要" : "暂无摘要"}
-                  onClick={copyContext}
-                >
-                  复制
-                </button>
+              <div className="actions" style={{ display: "flex", gap: 8 }}>
+                {sessionCtx?.fields?.summary && (
+                  <button
+                    type="button"
+                    className="btn ghost icon-button small"
+                    title="复制摘要"
+                    aria-label="复制摘要"
+                    onClick={copyContext}
+                  >
+                    <Icon name="copy" />
+                  </button>
+                )}
                 {canRegenerateSummary && (
-                  <button className="btn small ghost" disabled={ctxBusy} onClick={() => updateSummary(true)}>
-                    重新生成
+                  <button
+                    type="button"
+                    className="btn ghost icon-button small"
+                    disabled={Boolean(ctxBusy)}
+                    title={ctxBusy === "regenerate" ? "重新生成中…" : "重新生成"}
+                    aria-label="重新生成"
+                    onClick={() => updateSummary(true)}
+                  >
+                    <Icon name="refresh" className={ctxBusy === "regenerate" ? "spinning" : ""} />
                   </button>
                 )}
                 {canUpdateSummary && (
-                  <button className="btn small primary" disabled={ctxBusy} onClick={() => updateSummary()}>
-                    {ctxBusy ? "更新中…" : "更新摘要"}
+                  <button
+                    type="button"
+                    className="btn primary icon-button small"
+                    disabled={Boolean(ctxBusy)}
+                    title={ctxBusy === "update" ? "更新中…" : "更新摘要"}
+                    aria-label="更新摘要"
+                    onClick={() => updateSummary()}
+                  >
+                    <Icon name="spark" className={ctxBusy === "update" ? "spinning" : ""} />
                   </button>
                 )}
               </div>

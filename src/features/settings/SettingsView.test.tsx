@@ -33,6 +33,12 @@ vi.mock("../../api", () => ({
       home_source: "bootstrap",
     }),
     openPath: vi.fn().mockResolvedValue(true),
+    listExtensionResources: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
+    listExtensionCatalog: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
+    enableExtensionSkillAll: vi.fn(),
+    disableExtensionSkillAll: vi.fn(),
+    enableMcpDefinitionUser: vi.fn(),
+    disableMcpDefinitionUser: vi.fn(),
     getExtractionSettings: vi.fn(),
     setExtractionSettings: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
@@ -160,7 +166,7 @@ it("lets users edit and delete locked preferences and create new locked items", 
   expect(api.savePreference).toHaveBeenCalledWith("locked", null, "用户修改的锁定偏好", true);
   fireEvent.click(screen.getByRole("button", {name: "删除偏好：用户修改的锁定偏好"}));
   await waitFor(() => expect(screen.queryByText("用户修改的锁定偏好")).toBeNull());
-  fireEvent.click(screen.getByRole("button", {name: "新增"}));
+  fireEvent.click(screen.getByRole("button", {name: "新增偏好"}));
   const save = screen.getByRole("button", {name: "保存"});
   expect(save).toHaveProperty("disabled", true);
   fireEvent.change(screen.getByRole("textbox", {name: "偏好"}), {target: {value: "新偏好"}});

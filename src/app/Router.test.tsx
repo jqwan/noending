@@ -7,7 +7,7 @@ const { detail, conversation, terminal, extension } = vi.hoisted(() => ({
   detail: vi.fn(() => <div>detail</div>),
   conversation: vi.fn(() => <div>conversation</div>),
   terminal: vi.fn(() => <div>terminal</div>),
-  extension: vi.fn(() => <div>extension detail</div>),
+  extension: vi.fn((_props: Record<string, unknown>) => <div>extension detail</div>),
 }));
 vi.mock("../features/sessions/SessionDetailView", () => ({ default: detail, sessionDetailCache: new Map() }));
 vi.mock("../features/sessions/SessionConversationView", () => ({ default: conversation }));
@@ -60,5 +60,6 @@ it("opens an extension detail with its resource and source workspace identities"
   const navigate = vi.fn();
   const goBack = vi.fn();
   render(<Router route={{ view: "extension", resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-  expect(extension).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate, goBack }), expect.anything());
+  expect(extension).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate }), expect.anything());
+  expect(extension.mock.calls[0][0]).not.toHaveProperty("goBack");
 });

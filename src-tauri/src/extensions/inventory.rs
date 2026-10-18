@@ -6,8 +6,13 @@ use crate::{
     error::{other, Result},
 };
 use serde_json::{json, Value};
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
+/// Agent configuration destinations only. Skill sources, including the
+/// NoEnding source library, are never scan roots or Locations.
 pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
     let mut rows = vec![
         location(
@@ -111,22 +116,57 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
             .into()];
             rows.push(row);
         }
-        let mut local = location(
-            "mcp",
-            Some(Agent::ClaudeCode),
-            "project",
-            claude_json,
-            "Claude Code · 当前目录私有",
-        );
-        local.id = key(format!("{}:{}", local.id, cwd.display()));
-        local.section = vec![
-            "projects".into(),
-            cwd.to_string_lossy().into_owned(),
-            "mcpServers".into(),
-        ];
-        rows.push(local);
     }
     rows
+}
+
+/// Project-level status only depends on the project's own skill destinations.
+/// Scanning user skills or MCP configs here multiplies the cost by the number
+/// of registered working directories.
+pub(super) fn list_project_skills(roots: &Roots, cwd: &Path) -> Inventory {
+    let mut result = Inventory::default();
+    result.locations.extend(
+        locations(roots, Some(cwd))
+            .into_iter()
+            .filter(|loc| loc.kind == "skill" && loc.scope == "project"),
+    );
+    let skill_locations = result.locations.clone();
+    let mut seen = HashSet::new();
+    for loc in &skill_locations {
+        super::skills::scan(loc, &mut seen, &mut result);
+    }
+    result.resources.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    result
+}
+
+/// One lightweight catalog across the user scope and every registered working
+/// directory. Project scans only touch project-level Skill and MCP locations;
+/// user skills and unrelated Agent files are read once.
+pub fn list_catalog(roots: &Roots, cwds: &[PathBuf]) -> Inventory {
+    let mut inventories = vec![list(roots, None)];
+    for cwd in cwds {
+        let mut inventory = list_project_skills(roots, cwd);
+        let mut mcp = Inventory::default();
+        mcp.locations = locations(roots, Some(cwd))
+            .into_iter()
+            .filter(|loc| loc.kind == "mcp" && loc.scope == "project")
+            .collect();
+        let mcp_locations = mcp.locations.clone();
+        for loc in &mcp_locations {
+            if let Err(error) = scan_mcp(loc, &mut mcp) {
+                mcp.warnings.push(format!("{}：{error}", loc.path));
+            }
+        }
+        inventory.locations.extend(mcp.locations);
+        inventory.resources.extend(mcp.resources);
+        inventory.warnings.extend(mcp.warnings);
+        inventories.push(inventory);
+    }
+    merge_inventories(inventories)
 }
 
 pub fn list(roots: &Roots, cwd: Option<&Path>) -> Inventory {
@@ -134,7 +174,6 @@ pub fn list(roots: &Roots, cwd: Option<&Path>) -> Inventory {
         locations: locations(roots, cwd),
         ..Default::default()
     };
-    super::packages::discover(roots, cwd, &mut result);
     let locations = result.locations.clone();
     let mut seen = HashSet::new();
     for loc in &locations {
@@ -148,7 +187,86 @@ pub fn list(roots: &Roots, cwd: Option<&Path>) -> Inventory {
             _ => {}
         }
     }
-    super::skills::controls(roots, cwd, &mut result);
+    let mut merged: Vec<Resource> = Vec::new();
+    for row in result.resources.drain(..) {
+        let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.id == row.id && existing.kind == row.kind)
+        else {
+            merged.push(row);
+            continue;
+        };
+        existing.registered |= row.registered;
+        if existing.error.is_none() {
+            existing.error = row.error;
+        }
+        for (index, location) in row.locations.iter().enumerate() {
+            if existing.locations.contains(location) {
+                continue;
+            }
+            let Some(entry) = row.entry_paths.get(index) else {
+                continue;
+            };
+            existing.locations.push(location.clone());
+            existing.entry_paths.push(entry.clone());
+            existing
+                .entry_links
+                .push(row.entry_links.get(index).copied().unwrap_or(false));
+        }
+    }
+    result.resources = merged;
+    result.resources.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    result
+}
+
+/// One inventory for a project spanning several working directories. Resources
+/// keep one row per source; entries from every directory stay aligned with their
+/// location ids.
+pub fn merge_inventories(inventories: Vec<Inventory>) -> Inventory {
+    let mut result = Inventory::default();
+    for inventory in inventories {
+        for loc in inventory.locations {
+            if !result
+                .locations
+                .iter()
+                .any(|existing| existing.id == loc.id)
+            {
+                result.locations.push(loc);
+            }
+        }
+        for warning in inventory.warnings {
+            if !result.warnings.contains(&warning) {
+                result.warnings.push(warning);
+            }
+        }
+        for row in inventory.resources {
+            let Some(existing) = result.resources.iter_mut().find(|r| r.id == row.id) else {
+                result.resources.push(row);
+                continue;
+            };
+            existing.registered |= row.registered;
+            if existing.error.is_none() {
+                existing.error = row.error;
+            }
+            for (index, location) in row.locations.iter().enumerate() {
+                if existing.locations.contains(location) {
+                    continue;
+                }
+                let Some(entry) = row.entry_paths.get(index) else {
+                    continue;
+                };
+                existing.locations.push(location.clone());
+                existing.entry_paths.push(entry.clone());
+                existing
+                    .entry_links
+                    .push(row.entry_links.get(index).copied().unwrap_or(false));
+            }
+        }
+    }
     result.resources.sort_by(|a, b| {
         a.kind
             .cmp(&b.kind)
@@ -192,7 +310,7 @@ fn scan_mcp(loc: &Location, inventory: &mut Inventory) -> Result<()> {
             .err()
             .map(|e| e.to_string());
         inventory.resources.push(Resource {
-            id: key(format!("{}:{name}", loc.id)),
+            id: super::mcp_registry::identity(name, server),
             kind: "mcp".into(),
             name: name.clone(),
             description: server
@@ -203,28 +321,10 @@ fn scan_mcp(loc: &Location, inventory: &mut Inventory) -> Result<()> {
             path: loc.path.clone(),
             locations: vec![loc.id.clone()],
             entry_paths: vec![loc.path.clone()],
-            enabled: if loc.agent == Some(Agent::ClaudeCode) && loc.package_enabled != Some(false) {
-                None
-            } else {
-                Some(
-                    loc.package_enabled != Some(false)
-                        && if loc.agent == Some(Agent::Antigravity) {
-                            !server
-                                .get("disabled")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false)
-                        } else {
-                            server
-                                .get("enabled")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(true)
-                        },
-                )
-            },
+            entry_links: Vec::new(),
             revision: revision.clone(),
-            managed: loc.package.is_some(),
+            registered: false,
             error,
-            skill_controls: Vec::new(),
         });
     }
     Ok(())
@@ -263,18 +363,53 @@ pub fn detail(roots: &Roots, cwd: Option<&Path>, id: &str) -> Result<ResourceDet
             resource,
         });
     }
-    // Package rows can point at settings.json/config.toml. Never render the
-    // entire unrelated settings file (which can contain credentials).
-    let content = serde_json::to_string_pretty(&json!({
-        "name": resource.name, "description": resource.description,
-        "enabled": resource.enabled, "configuration_path": resource.path,
-        "agent": loc.agent, "scope": loc.scope,
-    }))?;
-    Ok(ResourceDetail {
-        content,
-        config: None,
-        resource,
-    })
+    Err(other("资源类型未知"))
+}
+
+/// Detail for one resource taken from an already-merged catalog. Callers that
+/// also need the catalog (the detail page) reuse a single scan.
+pub fn detail_in_catalog(
+    inventory: &Inventory,
+    mcp_registry: &super::McpRegistry,
+    id: &str,
+) -> Result<Option<ResourceDetail>> {
+    let Some(mut resource) = inventory.resources.iter().find(|row| row.id == id).cloned() else {
+        return Ok(None);
+    };
+    if resource.kind == "skill" {
+        return Ok(Some(ResourceDetail {
+            content: files::read(Path::new(&resource.path))?,
+            config: None,
+            resource,
+        }));
+    }
+    if resource.kind == "mcp" {
+        if let Some(definition) = super::mcp_registry::find(mcp_registry, id) {
+            resource.revision = super::mcp_registry::revision(definition);
+            return Ok(Some(ResourceDetail {
+                content: serde_json::to_string_pretty(&definition.config)?,
+                config: Some(definition.config.clone()),
+                resource,
+            }));
+        }
+        let location = resource
+            .locations
+            .iter()
+            .find_map(|id| inventory.locations.iter().find(|loc| &loc.id == id))
+            .ok_or_else(|| other("配置来源已不存在"))?;
+        let (document, revision) = config(location)?;
+        let value = section(&document, location)
+            .and_then(|section| section.get(&resource.name))
+            .cloned()
+            .ok_or_else(|| other("配置已变化，请刷新"))?;
+        resource.revision = revision;
+        return Ok(Some(ResourceDetail {
+            content: serde_json::to_string_pretty(&value)?,
+            config: Some(value),
+            resource,
+        }));
+    }
+    Err(other("资源类型未知"))
 }
 
 pub(super) fn validate_name(name: &str) -> Result<()> {
@@ -367,7 +502,7 @@ pub(super) fn validate_mcp(agent: Agent, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn mutate_mcp(
+pub(super) fn mutate_mcp(
     loc: &Location,
     expected: &str,
     name: &str,
@@ -464,9 +599,6 @@ pub fn remove_mcp(
         .iter()
         .find(|r| r.id == id && r.kind == "mcp")
         .ok_or_else(|| other("MCP 已不存在"))?;
-    if row.managed {
-        return Err(other("请通过所属插件包移除"));
-    }
     let loc = list
         .locations
         .iter()

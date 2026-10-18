@@ -362,7 +362,7 @@ it("renders summary, supports copying, and updates context on pending increment"
   expect(screen.getByText("正在重构前端入口").tagName).toBe("STRONG");
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-  fireEvent.click(screen.getByRole("button", { name: /^复制$/ }));
+  fireEvent.click(screen.getByRole("button", { name: "复制摘要" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
     "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
   ));
@@ -410,6 +410,7 @@ it("shows and copies structured Context failure details, retains across sync, an
   const { navigate, rerender } = await renderDetail(detail(session("session-a"), {
     messages: [message("session-a", 1, "user", "开始吧")],
   }));
+  expect(screen.queryByRole("button", { name: "复制摘要" })).toBeNull();
 
   // 1. Shows error and copies error details
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));

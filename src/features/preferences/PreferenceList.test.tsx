@@ -19,3 +19,13 @@ it("promotes a locked project preference and refreshes both project and user lis
   expect(user.textContent).toContain("保持简洁");
   expect(user.textContent).toContain("已锁定");
 });
+
+it("opens the add preference modal when the add icon button is clicked", async () => {
+  vi.mocked(api.listPreferences).mockResolvedValue([]);
+  render(<PreferenceList projectId="proj-1" />);
+  const addBtn = await screen.findByRole("button", { name: "新增偏好" });
+  expect(addBtn.title).toBe("新增偏好");
+  fireEvent.click(addBtn);
+  expect(screen.getByRole("dialog", { name: "新增偏好" })).toBeDefined();
+});
+

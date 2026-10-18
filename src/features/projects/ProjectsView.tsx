@@ -325,7 +325,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                   <span>{c.path_count} 目录</span>
                   <span>{c.workstream_count} 任务</span>
                   <span>{c.session_count} 会话</span>
-                  <span title={c.last_activity_at ?? undefined}>{timeAgo(c.last_activity_at)}</span>
+                  <span title={c.last_activity_at ?? c.updated_at ?? undefined}>{timeAgo(c.last_activity_at ?? c.updated_at)}</span>
                 </div>
                 {c.representative_paths.length > 0 && (
                   <div className="project-list-path mono" title={c.representative_paths[0]}>
@@ -404,7 +404,7 @@ function ProjectCard({ card, navigate, onChanged }: {
         </div>
       </div>
       <div className="ws-card-meta">
-        <span className="muted small">{timeAgo(card.last_activity_at)}</span>
+        <span className="muted small">{timeAgo(card.last_activity_at ?? card.updated_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
           <ProjectLifecycleActions project={card} onChanged={onChanged} />
           {(card.purpose === "assistant" || !isDirectoryGroupProject(card)) && (

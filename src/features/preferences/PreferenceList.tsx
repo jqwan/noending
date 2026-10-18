@@ -66,7 +66,19 @@ export default function PreferenceList({
           <Icon name="settings" />
           <span>{title}</span>
         </TitleTag>
-        <button className="btn small ghost" disabled={busy} onClick={() => { setEditing({ id: null, content: "", locked: false }); setEditError(""); }}>新增</button>
+        <button
+          type="button"
+          className="btn ghost icon-button small"
+          title="新增偏好"
+          aria-label="新增偏好"
+          disabled={busy}
+          onClick={() => {
+            setEditing({ id: null, content: "", locked: false });
+            setEditError("");
+          }}
+        >
+          <Icon name="plus" />
+        </button>
       </div>
       <p className="muted small" style={embedded ? { margin: "4px 0 0" } : { margin: 0 }}>随摘要提取更新；锁定仅禁止 Agent 修改或删除，您仍可编辑和删除。</p>
     {items.map(item => <div className="preference-row" key={item.id}>

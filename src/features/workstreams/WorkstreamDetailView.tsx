@@ -53,7 +53,7 @@ export default function WorkstreamDetailView({
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
-  const [ctxUpdating, setCtxUpdating] = useState(false);
+  const [ctxUpdating, setCtxUpdating] = useState<"update" | "regenerate" | false>(false);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [busy, setBusy] = useState(false);
@@ -137,7 +137,7 @@ export default function WorkstreamDetailView({
   /** 一次点击 → 相关 Session 摘要与 Workstream 状态一起更新（后端一次模型调用）。 */
   const updateContext = async (regenerate = false) => {
     if (ctxUpdating) return;
-    setCtxUpdating(true);
+    setCtxUpdating(regenerate ? "regenerate" : "update");
     setCtxUpdateError(null);
     setPreferenceError(null);
     setFailedSessions([]);
@@ -356,9 +356,39 @@ export default function WorkstreamDetailView({
                 <span>任务摘要</span>
               </h2>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
-                {ctxState?.summary && <button className="btn small ghost" onClick={copyContext}>复制</button>}
-                {ctxState?.pending && <button className="btn small primary" disabled={ctxUpdating} onClick={() => updateContext()}>{ctxUpdating ? "更新中…" : "更新摘要"}</button>}
-                <button className="btn small ghost" disabled={ctxUpdating} onClick={() => updateContext(true)}>重新生成</button>
+                {ctxState?.summary && (
+                  <button
+                    type="button"
+                    className="btn ghost icon-button small"
+                    title="复制摘要"
+                    aria-label="复制摘要"
+                    onClick={copyContext}
+                  >
+                    <Icon name="copy" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn ghost icon-button small"
+                  disabled={Boolean(ctxUpdating)}
+                  title={ctxUpdating === "regenerate" ? "重新生成中…" : "重新生成"}
+                  aria-label="重新生成"
+                  onClick={() => updateContext(true)}
+                >
+                  <Icon name="refresh" className={ctxUpdating === "regenerate" ? "spinning" : ""} />
+                </button>
+                {ctxState?.pending && (
+                  <button
+                    type="button"
+                    className="btn primary icon-button small"
+                    disabled={Boolean(ctxUpdating)}
+                    title={ctxUpdating === "update" ? "更新中…" : "更新摘要"}
+                    aria-label="更新摘要"
+                    onClick={() => updateContext()}
+                  >
+                    <Icon name="spark" className={ctxUpdating === "update" ? "spinning" : ""} />
+                  </button>
+                )}
               </div>
             </div>
             {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}

@@ -279,6 +279,28 @@ pub fn add_project_path(
             .unwrap_or_else(|| "未命名项目".to_string());
         Ok((outcome.path.project_id.clone(), name))
     })?;
+    // Project-level Skills follow the project, not the directory. A conflicting
+    // physical Skill must not block registration; project status shows the
+    // directory as partially covered instead.
+    let new_cwds: Vec<std::path::PathBuf> = std::iter::once(&outcome.path)
+        .chain(outcome.discovered.iter())
+        .map(|path| std::path::PathBuf::from(&path.canonical_path))
+        .collect();
+    if let Ok(paths) = state
+        .db
+        .list_workspace_paths_for_project(&outcome.path.project_id)
+    {
+        let existing: Vec<_> = paths
+            .into_iter()
+            .map(|path| std::path::PathBuf::from(path.canonical_path))
+            .filter(|path| path.is_dir() && !new_cwds.contains(path))
+            .collect();
+        if !existing.is_empty() {
+            if let Ok(roots) = crate::extensions::Roots::current() {
+                let _ = crate::extensions::inherit_project_skills(&roots, &existing, &new_cwds);
+            }
+        }
+    }
     Ok(AddProjectPathResult {
         path: outcome.path,
         project_id,

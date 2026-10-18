@@ -8,7 +8,6 @@ import AgentConfiguration from "./AgentConfiguration";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
-import { EXTENSION_AGENTS } from "../extensions/extensionAgents";
 import { copyToClipboard, Modal, openPath, timeAgo } from "../../components/common";
 import CustomSelect from "../../components/CustomSelect";
 import { showToast } from "../../components/Toast";
@@ -446,9 +445,6 @@ export default function AgentsView({
           }
           actions={
             <>
-            <button className="btn ghost icon-button" title={EXTENSION_AGENTS.includes(initialAgent) ? "管理扩展" : "此 Agent 暂未接入扩展管理"} aria-label="管理扩展" disabled={!EXTENSION_AGENTS.includes(initialAgent)} onClick={() => navigate({ view: "extensions", agent: initialAgent })}>
-              <Icon name="extensions" />
-            </button>
             <button
               className="btn ghost icon-button"
               disabled={running || agentSources.length === 0}

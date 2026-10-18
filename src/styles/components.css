@@ -2235,6 +2235,11 @@ button.icon-button.small .ui-icon {
   width: 14px;
   height: 14px;
 }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
+.ui-icon.spinning,
+.spinning {
+  animation: icon-spin 0.8s linear infinite;
+}
 .filter-panel { margin-bottom: 16px; }
 .filter-panel > summary { cursor: pointer; color: var(--text-secondary); width: fit-content; margin-bottom: 10px; }
 .filter-panel .toolbar { margin-bottom: 0; }

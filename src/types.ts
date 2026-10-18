@@ -11,20 +11,27 @@ export type Agent =
   | "zcode"
   | "antigravity";
 
-export type ExtensionKind = "skill" | "mcp" | "package";
+export type ExtensionKind = "skill" | "mcp";
 export interface ExtensionScope { project_id?: string | null; workspace_path_id?: string | null }
 export interface ExtensionLocation {
   id: string; kind: ExtensionKind; agent: Agent | null; scope: "user" | "project";
-  path: string; label: string; writable: boolean; package: string | null; package_enabled: boolean | null;
+  path: string; label: string;
 }
 export interface ExtensionResource {
   id: string; kind: ExtensionKind; name: string; description: string; path: string;
-  locations: string[]; entry_paths: string[]; enabled: boolean | null;
-  revision: string; managed: boolean; error: string | null;
-  skill_controls: { agent: Agent; scope: "user" | "project"; enabled: boolean | null; revision: string }[];
+  locations: string[]; entry_paths: string[]; entry_links: boolean[];
+  revision: string; registered: boolean; error: string | null;
 }
 export interface ExtensionInventory { resources: ExtensionResource[]; locations: ExtensionLocation[]; warnings: string[] }
+export interface ExtensionSkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
+export interface ExtensionProjectWorkspaceScope { workspace_path_id: string; path: string; entries: ExtensionSkillScopeEntry[] }
+export interface ExtensionProjectSkillScope { project_id: string; project_name: string; workspaces: ExtensionProjectWorkspaceScope[]; enabled: boolean; full: boolean }
 export interface ExtensionResourceDetail { resource: ExtensionResource; content: string; config: Record<string, unknown> | null }
+export type ExtensionSkillSourceKind = "library" | "agent" | "external";
+export interface ExtensionDetailBundle { detail: ExtensionResourceDetail; locations: ExtensionLocation[]; scopes: ExtensionProjectSkillScope[]; source_kind: ExtensionSkillSourceKind | null }
+export interface ExtensionUninstallPreview { delete_source_required: boolean; entry_count: number; source_path: string }
+export interface ExtensionSkillMigrationPreview { source_path: string; target_path: string; entry_count: number; physical_entries: number }
+export interface ExtensionSkillMigrationResult { message: string; source_path: string; resource_id: string; name: string; description: string }
 export interface ExtensionOperationResult { message: string }
 
 /** Task archive state; there is no active/completed classification. */

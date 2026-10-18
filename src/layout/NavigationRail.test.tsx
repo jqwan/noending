@@ -27,7 +27,7 @@ it("highlights the owning section for routes", () => {
     [{ view: "sessions" }, "会话"],
     [{ view: "workstream", workstreamId: "w1" }, "任务"],
     [{ view: "project", projectId: "p1" }, "项目"],
-    [{ view: "extensions", projectId: "p1", agent: "pi" }, "扩展"],
+    [{ view: "extensions", projectId: "p1" }, "扩展"],
     [{ view: "extension", resourceId: "skill1", kind: "skill" }, "扩展"],
   ];
 

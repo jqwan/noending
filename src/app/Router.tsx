@@ -93,9 +93,9 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
     case "agents":
       return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
     case "extensions":
-      return <ExtensionsView key={`${route.projectId ?? "user"}:${route.agent ?? "all"}:${route.tab ?? "skill"}`} initialProjectId={route.projectId} initialAgent={route.agent} initialTab={route.tab} navigate={navigate} />;
+      return <ExtensionsView key={`${route.projectId ?? "user"}:${route.tab ?? "skill"}`} initialProjectId={route.projectId} initialTab={route.tab} navigate={navigate} />;
     case "extension":
-      return <ExtensionDetailView key={`${route.resourceId}:${route.projectId ?? ""}:${route.workspacePathId ?? ""}`} {...route} navigate={navigate} goBack={goBack} />;
+      return <ExtensionDetailView key={`${route.resourceId}:${route.projectId ?? ""}:${route.workspacePathId ?? ""}`} {...route} navigate={navigate} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     default:

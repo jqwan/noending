@@ -6,6 +6,7 @@ import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import PreferenceList from "../preferences/PreferenceList";
+import ExtensionScopeConfig from "../extensions/ExtensionScopeConfig";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./ProjectsView";
 import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
@@ -187,9 +188,6 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         }
         actions={
           <>
-          <button className="btn ghost icon-button" title="项目扩展" aria-label="项目扩展" onClick={() => navigate({ view: "extensions", projectId })}>
-            <Icon name="extensions" />
-          </button>
           <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
             onChanged={() => { clearProjectCardsCache(); refresh(); }}
             onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />
@@ -271,6 +269,8 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               创建于 {timeAgo(project.created_at)}
             </div>
           </section>
+
+          <ExtensionScopeConfig projectId={projectId} navigate={navigate} workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
 
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
