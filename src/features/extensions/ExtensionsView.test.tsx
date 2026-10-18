@@ -138,7 +138,7 @@ it("keeps unrelated detail actions available while a scope change runs", async (
   await waitFor(() => expect(api.disableExtensionSkillAll).toHaveBeenCalled());
   expect((within(dialog).getByRole("button", { name: "保存中…" }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole("button", { name: "卸载 Skill" }) as HTMLButtonElement).disabled).toBe(false);
-  expect((screen.getByRole("button", { name: "转移到 NoEnding" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "托管到 NoEnding" }) as HTMLButtonElement).disabled).toBe(false);
   await act(async () => { finish(); });
 });
 
@@ -181,14 +181,14 @@ it("registers a physical Skill source and deletes it after confirming", async ()
   fireEvent.click(await screen.findByRole("button", { name: /review/ }));
   const section = await screen.findByLabelText("源目录");
   expect(screen.queryByRole("button", { name: "配置" })).toBeNull();
-  fireEvent.click(within(section).getByRole("button", { name: "转移到 NoEnding" }));
-  const dialog = await screen.findByRole("dialog", { name: "转移到 NoEnding" });
+  fireEvent.click(within(section).getByRole("button", { name: "托管到 NoEnding" }));
+  const dialog = await screen.findByRole("dialog", { name: "托管到 NoEnding" });
   expect(await within(dialog).findByText(/1 个（其中 1 个物理入口）/)).toBeTruthy();
-  const removeSource = within(dialog).getByRole("checkbox", { name: "转移后删除源目录" }) as HTMLInputElement;
+  const removeSource = within(dialog).getByRole("checkbox", { name: "托管后删除源目录" }) as HTMLInputElement;
   expect(removeSource.checked).toBe(true);
   expect(removeSource.disabled).toBe(true);
-  expect(within(dialog).getByText(/源目录位于 Agent 配置目录，转移后会删除源目录/)).toBeTruthy();
-  fireEvent.click(within(dialog).getByRole("button", { name: "转移" }));
+  expect(within(dialog).getByText(/源目录位于 Agent 配置目录，托管后会删除源目录/)).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.migrateExtensionSkill).toHaveBeenCalledWith("review", true));
   await waitFor(() => expect(navigation).toHaveBeenLastCalledWith(expect.objectContaining({ view: "extension", resourceId: "migrated-review", kind: "skill", initialTitle: "review" })));
 });
@@ -203,14 +203,14 @@ it("offers registration for a linked source and can keep the original directory"
   render(<ExtensionDetailView resourceId="review" kind="skill" initialTitle="review" navigate={navigation} />);
   expect(await screen.findByText("外部目录")).toBeTruthy();
   const section = await screen.findByLabelText("源目录");
-  fireEvent.click(within(section).getByRole("button", { name: "转移到 NoEnding" }));
-  const dialog = await screen.findByRole("dialog", { name: "转移到 NoEnding" });
+  fireEvent.click(within(section).getByRole("button", { name: "托管到 NoEnding" }));
+  const dialog = await screen.findByRole("dialog", { name: "托管到 NoEnding" });
   expect(await within(dialog).findByText("1 个链接入口")).toBeTruthy();
-  const removeSource = within(dialog).getByRole("checkbox", { name: "转移后删除源目录" }) as HTMLInputElement;
+  const removeSource = within(dialog).getByRole("checkbox", { name: "托管后删除源目录" }) as HTMLInputElement;
   expect(removeSource.checked).toBe(true);
   expect(removeSource.disabled).toBe(false);
   fireEvent.click(removeSource);
-  fireEvent.click(within(dialog).getByRole("button", { name: "转移" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.migrateExtensionSkill).toHaveBeenCalledWith("review", false));
 });
 
@@ -223,10 +223,10 @@ it("registers a discovered Skill from its card", async () => {
   render(<ExtensionTestApp />);
   const card = await screen.findByRole("button", { name: /review/ });
   expect(within(card).queryByRole("button", { name: "配置" })).toBeNull();
-  fireEvent.click(within(card).getByRole("button", { name: "转移" }));
-  const dialog = await screen.findByRole("dialog", { name: "转移到 NoEnding" });
+  fireEvent.click(within(card).getByRole("button", { name: "托管" }));
+  const dialog = await screen.findByRole("dialog", { name: "托管到 NoEnding" });
   await within(dialog).findByText("1 个链接入口");
-  fireEvent.click(within(dialog).getByRole("button", { name: "转移" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.migrateExtensionSkill).toHaveBeenCalledWith("review", true));
 });
 
@@ -239,7 +239,7 @@ it("keeps a disabled registered Skill listed and enables it from the detail", as
   render(<ExtensionTestApp />);
   const row = await screen.findByRole("button", { name: /review/ });
   expect(within(row).getByText("未启用")).toBeTruthy();
-  expect(within(row).queryByRole("button", { name: "转移" })).toBeNull();
+  expect(within(row).queryByRole("button", { name: "托管" })).toBeNull();
   fireEvent.click(row);
   const section = await screen.findByLabelText("启用范围");
   expect(within(section).getByText("当前未在任何作用域启用。")).toBeTruthy();
@@ -378,9 +378,9 @@ it("registers a discovered MCP definition from its card", async () => {
   vi.mocked(api.saveMcpDefinition).mockResolvedValue({ message: "Created" });
   render(<ExtensionTestApp initialTab="mcp" />);
   const card = await screen.findByRole("button", { name: /docs/ });
-  fireEvent.click(within(card).getByRole("button", { name: "登记" }));
+  fireEvent.click(within(card).getByRole("button", { name: "托管" }));
   expect(await screen.findByText(/https:\/\/example\/mcp/)).toBeTruthy();
-  fireEvent.click(within(screen.getByRole("dialog", { name: "登记到 NoEnding" })).getByRole("button", { name: "登记" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "托管到 NoEnding" })).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.saveMcpDefinition).toHaveBeenCalledWith("docs", "Project documentation", { url: "https://example/mcp", headers: { "X-Team": "keep" }, exposure: "deferred" }));
 });
 
@@ -388,8 +388,8 @@ it("registers a discovered MCP definition from the detail page", async () => {
   vi.mocked(api.saveMcpDefinition).mockResolvedValue({ message: "Created" });
   render(<ExtensionDetailView resourceId="server" kind="mcp" initialTitle="docs" navigate={navigation} />);
   const section = await screen.findByLabelText("配置文件");
-  fireEvent.click(within(section).getByRole("button", { name: "登记" }));
-  fireEvent.click(within(await screen.findByRole("dialog", { name: "登记到 NoEnding" })).getByRole("button", { name: "登记" }));
+  fireEvent.click(within(section).getByRole("button", { name: "托管到 NoEnding" }));
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "托管到 NoEnding" })).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.saveMcpDefinition).toHaveBeenCalledWith("docs", "Project documentation", { url: "https://example/mcp", headers: { "X-Team": "keep" }, exposure: "deferred" }));
 });
 
@@ -527,10 +527,10 @@ it("filters cards by registration state", async () => {
   inventory = { locations: [loc], resources: [registered, discovered], warnings: [] };
   render(<ExtensionTestApp initialTab="mcp" />);
   await screen.findByRole("button", { name: /docs/ });
-  fireEvent.change(screen.getByRole("combobox", { name: "筛选登记状态" }), { target: { value: "registered" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "筛选托管状态" }), { target: { value: "registered" } });
   expect(screen.getByRole("button", { name: /docs/ })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /native/ })).toBeNull();
-  fireEvent.change(screen.getByRole("combobox", { name: "筛选登记状态" }), { target: { value: "unregistered" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "筛选托管状态" }), { target: { value: "unregistered" } });
   expect(screen.queryByRole("button", { name: /docs/ })).toBeNull();
   expect(screen.getByRole("button", { name: /native/ })).toBeTruthy();
 });
@@ -543,8 +543,8 @@ it("shows MCP enablement scope read-only", async () => {
   expect(within(section).getByText("用户级")).toBeTruthy();
   expect(within(section).getByRole("img", { name: "Pi" })).toBeTruthy();
   expect(within(section).queryByText(loc.path)).toBeNull();
-  expect(within(section).queryByRole("button", { name: /^(启用|停用|补齐|编辑配置|删除配置|登记)$/ })).toBeNull();
-  expect(within(screen.getByLabelText("配置文件")).getByRole("button", { name: "登记" })).toBeTruthy();
+  expect(within(section).queryByRole("button", { name: /^(启用|停用|补齐|编辑配置|删除配置|托管)$/ })).toBeNull();
+  expect(within(screen.getByLabelText("配置文件")).getByRole("button", { name: "托管到 NoEnding" })).toBeTruthy();
 });
 
 it("creates an MCP definition from the board without choosing a scope", async () => {
@@ -568,9 +568,9 @@ it("browses all Skills and registers a source without writing an Agent entry", a
   render(<ExtensionTestApp initialTab="skill" initialProjectId="p" />);
   expect(await screen.findByRole("button", { name: /review/ })).toBeTruthy();
   expect(screen.queryByLabelText("配置工作目录")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "转移 Skill 源" }));
+  fireEvent.click(screen.getByRole("button", { name: "托管 Skill 源" }));
   fireEvent.change(screen.getByLabelText("源 Skill 目录"), { target: { value: "/tmp/review" } });
-  fireEvent.click(screen.getByRole("button", { name: "转移源" }));
+  fireEvent.click(screen.getByRole("button", { name: "托管源" }));
   await waitFor(() => expect(api.registerExtensionSkillSource).toHaveBeenCalledWith("/tmp/review"));
 });
 

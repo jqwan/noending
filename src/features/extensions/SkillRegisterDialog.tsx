@@ -39,23 +39,34 @@ export default function SkillRegisterDialog({ id, name, onClose, onDone }: {
     }
   };
 
-  return <Modal title="转移到 NoEnding" onClose={() => { if (!busy) onClose(); }}>
-    <p className="small muted">转移后会把 {name} 的源目录收进 NoEnding 源库，现有加载入口改为指向新位置，之后统一在这里启停和管理。</p>
+  return <Modal title="托管到 NoEnding" onClose={() => { if (!busy) onClose(); }}>
+    <p className="small muted" style={{ margin: "0 0 14px" }}>将 {name} 托管到 NoEnding 统一管理，之后可在用户级或项目中灵活启停；现有 Agent 入口将自动指向新位置。</p>
     <dl className="extension-properties">
       <dt>源目录</dt><dd className="mono">{preview?.source_path ?? (loading ? "读取中…" : "—")}</dd>
-      <dt>目标目录</dt><dd className="mono">{preview?.target_path ?? (loading ? "读取中…" : "—")}</dd>
       <dt>加载入口</dt><dd>{preview ? !preview.entry_count ? "无加载入口" : preview.physical_entries ? `${preview.entry_count} 个（其中 ${preview.physical_entries} 个物理入口）` : `${preview.entry_count} 个链接入口` : loading ? "读取中…" : "—"}</dd>
     </dl>
-    {physical
-      ? <>
-        <label className="extension-check"><input type="checkbox" checked disabled />转移后删除源目录</label>
-        <p className="small muted">源目录位于 Agent 配置目录，转移后会删除源目录并由 NoEnding 管理。</p>
-      </>
-      : <label className="extension-check"><input type="checkbox" checked={deleteSource} disabled={busy} onChange={e => setDeleteSource(e.target.checked)} />转移后删除源目录</label>}
+    <div className="extension-dialog-option">
+      <label className={`extension-check${physical || deleteSource ? " danger" : ""}${physical ? " disabled" : ""}`}>
+        <input
+          type="checkbox"
+          checked={physical ? true : deleteSource}
+          disabled={busy || physical}
+          onChange={e => setDeleteSource(e.target.checked)}
+        />
+        <span>托管后删除源目录</span>
+      </label>
+      <p className={`small ${physical || deleteSource ? "extension-danger-note" : "extension-safe-note"}`}>
+        {physical
+          ? "源目录位于 Agent 配置目录，托管后会删除源目录并由 NoEnding 管理。"
+          : deleteSource
+            ? "源目录将移入 NoEnding，删除外部原目录。"
+            : "源目录将复制到 NoEnding，保留外部原目录。"}
+      </p>
+    </div>
     {error && <div role="alert" className="extension-error">{error}</div>}
     <div className="row extension-dialog-actions">
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
-      <button className="btn primary" disabled={busy || loading || !preview} onClick={() => void submit()}>{busy ? "转移中…" : "转移"}</button>
+      <button className="btn primary" disabled={busy || loading || !preview} onClick={() => void submit()}>{busy ? "托管中…" : "托管"}</button>
     </div>
   </Modal>;
 }

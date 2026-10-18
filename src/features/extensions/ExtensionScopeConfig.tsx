@@ -128,7 +128,7 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
               {row.error && <span className="small extension-config-error">{row.error}</span>}
             </div>
             <div className="extension-config-actions">
-              {!row.registered && <span className="badge">未登记</span>}
+              {!row.registered && <span className="badge">未托管</span>}
               {physical && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 不停用该入口，迁移或卸载时才会处理">物理入口</span>}
               {!userEffective && row.registered && enabled && !full && <button className="btn small" disabled={busy === row.id} onClick={e => { e.stopPropagation(); void apply(row, true); }}>补齐</button>}
             </div>

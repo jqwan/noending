@@ -38,8 +38,8 @@ export default function McpRegisterDialog({ row, onClose, onDone }: {
     }
   };
 
-  return <Modal title="登记到 NoEnding" onClose={() => { if (!busy) onClose(); }}>
-    <p className="small muted">将这份原生 MCP 配置登记为 NoEnding 定义，之后可在用户级或项目中启停；不会修改 Agent 文件。</p>
+  return <Modal title="托管到 NoEnding" onClose={() => { if (!busy) onClose(); }}>
+    <p className="small muted">将这份原生 MCP 配置托管到 NoEnding，之后可在用户级或项目中启停；不会修改 Agent 本地文件。</p>
     <dl className="extension-properties">
       <dt>名称</dt><dd>{row.name}</dd>
       <dt>配置</dt><dd>{loading ? "读取中…" : <pre className="extension-source">{config ? JSON.stringify(config, null, 2) : "—"}</pre>}</dd>
@@ -47,7 +47,7 @@ export default function McpRegisterDialog({ row, onClose, onDone }: {
     {error && <div role="alert" className="extension-error">{error}</div>}
     <div className="row extension-dialog-actions">
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
-      <button className="btn primary" disabled={busy || loading || !config} onClick={() => void submit()}>{busy ? "登记中…" : "登记"}</button>
+      <button className="btn primary" disabled={busy || loading || !config} onClick={() => void submit()}>{busy ? "托管中…" : "托管"}</button>
     </div>
   </Modal>;
 }

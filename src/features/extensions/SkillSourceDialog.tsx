@@ -18,12 +18,12 @@ export default function SkillSourceDialog({ onClose, onDone }: { onClose: () => 
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
-  return <Modal title="转移 Skill 源" onClose={() => { if (!busy) onClose(); }}>
+  return <Modal title="托管 Skill 源" onClose={() => { if (!busy) onClose(); }}>
     <div className="extension-form">
-      <p className="small muted">选择包含 SKILL.md 的目录。转移后源目录会移入 NoEnding 源库，不新增 Agent 入口；之后可在看板或项目详情启用。</p>
+      <p className="small muted">选择包含 SKILL.md 的目录。托管后源目录会移入 NoEnding 源库，不新增 Agent 入口；之后可在看板或项目详情启用。</p>
       <label>源 Skill 目录<div className="row"><input type="text" aria-label="源 Skill 目录" value={source} disabled={busy} onChange={e => setSource(e.target.value)} /><button className="btn" disabled={busy} onClick={async () => { const picked = await open({ directory: true, multiple: false, title: "选择包含 SKILL.md 的目录" }); if (typeof picked === "string") setSource(picked); }}>选择目录</button></div></label>
       {error && <div role="alert" className="extension-error">{error}</div>}
-      <div className="row extension-dialog-actions"><button className="btn" disabled={busy} onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !source.trim()} onClick={() => void submit()}>{busy ? "处理中…" : "转移源"}</button></div>
+      <div className="row extension-dialog-actions"><button className="btn" disabled={busy} onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !source.trim()} onClick={() => void submit()}>{busy ? "处理中…" : "托管源"}</button></div>
     </div>
   </Modal>;
 }

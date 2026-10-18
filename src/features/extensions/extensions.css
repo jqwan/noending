@@ -60,7 +60,6 @@
 .extension-scope-summary-row { display: contents; }
 .extension-scope-summary dt { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
 .extension-scope-summary dd { display: flex; align-items: center; margin: 0; }
-.extension-scope-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 .extension-scope-agents { display: inline-flex; align-items: center; gap: 6px; }
 .extension-scope-agents > span[role="img"] { display: inline-flex; }
 .extension-config-list { display: flex; flex-direction: column; margin: 0 -8px; }
@@ -79,6 +78,14 @@
 .extension-source-location { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; font-size: 12px; line-height: 1.7; }
 .extension-source-location .mono { overflow-wrap: anywhere; }
 .extension-dialog-actions { justify-content: flex-end; gap: 8px; }
+.extension-dialog-option { display: flex; flex-direction: column; gap: 6px; margin: 16px 0 12px; }
+.extension-dialog-option .extension-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+.extension-dialog-option .extension-check input { margin: 0; width: auto; flex: none; cursor: pointer; }
+.extension-dialog-option .extension-check.danger { color: var(--danger); font-weight: 550; }
+.extension-dialog-option .extension-check.disabled { cursor: not-allowed; }
+.extension-dialog-option .extension-check.disabled input { cursor: not-allowed; }
+.extension-dialog-option .extension-danger-note { margin: 0; padding-left: 22px; color: var(--danger); line-height: 1.5; font-size: 12px; }
+.extension-dialog-option .extension-safe-note { margin: 0; padding-left: 22px; color: var(--text-muted); line-height: 1.5; font-size: 12px; }
 .extension-migration { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-subtle); }
 .extension-migration > span { align-self: stretch; }
 @media (max-width: 700px) {

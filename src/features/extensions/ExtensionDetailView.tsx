@@ -124,11 +124,6 @@ export default function ExtensionDetailView({ resourceId, kind, initialTitle, na
   const projects = projectScopes ?? [];
   const enabledProjects = projects.filter(project => project.enabled);
   const canConfigure = !!row && row.registered;
-  const scopeActions = canConfigure
-    ? <div className="extension-scope-actions">
-      <button className="btn small" disabled={loading} onClick={() => setConfiguring(true)}>配置</button>
-    </div>
-    : null;
 
   return <div className="main extension-detail-page">
     <PageHeader title={<><Icon name={kind === "mcp" ? "mcp" : "skill"} /><span>{row?.name ?? initialTitle ?? EXTENSION_LABELS[kind]}</span></>} actions={<>
@@ -166,18 +161,32 @@ export default function ExtensionDetailView({ resourceId, kind, initialTitle, na
             {sourceKind && <span className="badge">{SOURCE_KIND_LABELS[sourceKind]}</span>}
           </div>
           {kind === "skill" && sourceKind && sourceKind !== "library" && <div className="extension-migration">
-            <button className="btn small" disabled={loading} onClick={() => setRegistering(true)}>转移到 NoEnding</button>
-            <span className="small muted">{sourceKind === "agent" ? "源目录位于 Agent 加载位置" : "源目录不在 NoEnding 源库中"}，转移后统一管理。</span>
+            <button className="btn small" disabled={loading} onClick={() => setRegistering(true)}>托管到 NoEnding</button>
+            <span className="small muted">{sourceKind === "agent" ? "源目录位于 Agent 加载位置" : "源目录不在 NoEnding 源库中"}，托管后统一管理。</span>
           </div>}
           {kind === "mcp" && <div className="extension-migration">
-            <button className="btn small" disabled={loading} onClick={() => setRegistering(true)}>登记</button>
-            <span className="small muted">这是原生配置，登记后统一管理并可在用户级或项目中启停。</span>
+            <button className="btn small" disabled={loading} onClick={() => setRegistering(true)}>托管到 NoEnding</button>
+            <span className="small muted">这是原生配置，托管后统一管理并可在用户级或项目中启停。</span>
           </div>}
         </section>}
         {row && <section className="card detail-section" aria-label="启用范围">
-          <h2><Icon name="folder" />启用范围</h2>
+          <div className="row between" style={{ alignItems: "center" }}>
+            <h2><Icon name="folder" />启用范围</h2>
+            {canConfigure && (
+              <button
+                type="button"
+                className="btn ghost icon-button small"
+                title="配置"
+                aria-label="配置"
+                disabled={loading}
+                onClick={() => setConfiguring(true)}
+              >
+                <Icon name="sliders" />
+              </button>
+            )}
+          </div>
           <p className="small muted">{!row.registered
-            ? kind === "skill" ? "尚未转移，转移到 NoEnding 后可在用户级或项目中配置。" : "尚未登记，登记后可在用户级或项目中配置。"
+            ? "尚未托管，托管到 NoEnding 后可在用户级或项目中配置。"
             : "用户级对所有项目生效；项目级按项目添加。"}</p>
           {projectScopes === null ? <p className="small muted" role="status">正在读取启用范围…</p>
             : !userScopeEntries.length && !enabledProjects.length ? <p className="small muted">当前未在任何作用域启用。</p>
@@ -194,7 +203,6 @@ export default function ExtensionDetailView({ resourceId, kind, initialTitle, na
                 </div>;
               })}
             </dl>}
-          {scopeActions}
         </section>}
       </aside>
     </div>}

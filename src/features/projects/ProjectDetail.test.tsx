@@ -371,7 +371,7 @@ describe("ProjectDetail", () => {
     vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
     const section = await screen.findByLabelText("扩展");
-    expect(await within(section).findByText("未登记")).toBeTruthy();
+    expect(await within(section).findByText("未托管")).toBeTruthy();
     expect(within(section).queryByRole("button", { name: /^(补齐|停用)$/ })).toBeNull();
   });
 

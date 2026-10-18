@@ -97,7 +97,7 @@ export default function ExtensionsView({ initialProjectId = "", initialTab = "sk
       </div>
       <span className="session-action-divider" aria-hidden="true" />
       {tab === "mcp" && <button className="btn ghost icon-button" aria-label="新增 MCP 定义" title="新增 MCP 定义" disabled={loading} onClick={() => setDefining(true)}><Icon name="plus" /></button>}
-      {tab === "skill" && <button className="btn ghost icon-button" aria-label="转移 Skill 源" title="转移 Skill 源" disabled={loading} onClick={() => setAdding(true)}><Icon name="plus" /></button>}
+      {tab === "skill" && <button className="btn ghost icon-button" aria-label="托管 Skill 源" title="托管 Skill 源" disabled={loading} onClick={() => setAdding(true)}><Icon name="plus" /></button>}
     </>} />
     <div className="board-toolbar">
       <input type="text" className="ws-search" aria-label="搜索扩展" placeholder="搜索扩展…（名称、说明或路径）" value={query} onChange={e => setQuery(e.target.value)} />
@@ -110,8 +110,8 @@ export default function ExtensionsView({ initialProjectId = "", initialTab = "sk
               ...projects.map(p => ({ value: p.id, label: `${p.name}${p.visibility === "archived" ? "（已归档）" : ""}` })),
             ]} />
           </div>
-          <div className="ws-control"><span className="muted small">登记</span>
-            <CustomSelect value={registration} onChange={value => setRegistration(value as RegistrationFilter)} ariaLabel="筛选登记状态" options={[{ value: "", label: "全部" }, { value: "registered", label: "已登记" }, { value: "unregistered", label: "未登记" }]} />
+          <div className="ws-control"><span className="muted small">托管</span>
+            <CustomSelect value={registration} onChange={value => setRegistration(value as RegistrationFilter)} ariaLabel="筛选托管状态" options={[{ value: "", label: "全部" }, { value: "registered", label: "已托管" }, { value: "unregistered", label: "未托管" }]} />
           </div>
           <div className="ws-control"><span className="muted small">排序</span>
             <CustomSelect value={sort} onChange={value => setSort(value as ExtensionSort)} ariaLabel="排序" options={[{ value: "name", label: "名称" }, { value: "scope", label: "启用范围" }]} />
@@ -155,8 +155,8 @@ export default function ExtensionsView({ initialProjectId = "", initialTab = "sk
             {canConfigure
               ? <button className="btn ghost icon-button small" aria-label="配置" title="配置" onClick={e => { e.stopPropagation(); setConfiguring(row); }}><Icon name="sliders" /></button>
               : row.kind === "skill"
-                ? <button className="btn ghost icon-button small" aria-label="转移" title="转移到 NoEnding 后才能配置用户级和项目级" onClick={e => { e.stopPropagation(); setRegisteringSkill(row); }}><Icon name="adopt" /></button>
-                : <button className="btn ghost icon-button small" aria-label="登记" title="将该原生配置登记为 NoEnding 定义，之后可启停" onClick={e => { e.stopPropagation(); setRegistering(row); }}><Icon name="adopt" /></button>}
+                ? <button className="btn ghost icon-button small" aria-label="托管" title="托管到 NoEnding 后才能在用户级和项目中配置" onClick={e => { e.stopPropagation(); setRegisteringSkill(row); }}><Icon name="adopt" /></button>
+                : <button className="btn ghost icon-button small" aria-label="托管" title="将该原生配置托管到 NoEnding，之后可在用户级或项目中启停" onClick={e => { e.stopPropagation(); setRegistering(row); }}><Icon name="adopt" /></button>}
           </span>
         </div>;
       })}
