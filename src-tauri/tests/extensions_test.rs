@@ -1400,6 +1400,18 @@ fn migration_refuses_to_overwrite_an_existing_managed_skill() {
     );
 }
 
+/// mklink treats a forward slash as an option prefix, so a path built with
+/// `.join(".agents/skills")` makes it read `/skills` as an unknown switch.
+#[cfg(windows)]
+fn create_junction(link: &Path, target: &Path) -> std::process::Output {
+    let link = link.to_string_lossy().replace('/', "\\");
+    let target = target.to_string_lossy().replace('/', "\\");
+    std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J", link.as_str(), target.as_str()])
+        .output()
+        .expect("Windows cmd is required for junction coverage")
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctions() {
@@ -1408,12 +1420,7 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
     let root = f.roots.home.join(".agents/skills");
     fs::create_dir_all(&root).unwrap();
     let junction = root.join("review");
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(&junction)
-        .arg(&source)
-        .output()
-        .expect("Windows cmd is required for junction coverage");
+    let status = create_junction(&junction, &source);
     assert!(
         status.status.success(),
         "mklink /J failed: {}",
@@ -1428,13 +1435,12 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
     assert!(!junction.exists());
     assert!(source.join("SKILL.md").exists());
     let nested = source.join("linked-scripts");
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(&nested)
-        .arg(source.join("scripts"))
-        .output()
-        .unwrap();
-    assert!(status.status.success());
+    let status = create_junction(&nested, &source.join("scripts"));
+    assert!(
+        status.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
     let loc = extensions::list(&f.roots, None)
         .locations
         .into_iter()
