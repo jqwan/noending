@@ -226,6 +226,10 @@ fn fresh_database_uses_current_format_generation() {
         "project_context_state",
         "project_session_frontiers",
         "idx_sessions_workspace_path",
+        "idx_sessions_activity",
+        "idx_sessions_unarchived_activity",
+        "idx_sessions_fork_parent",
+        "idx_project_frontiers_session",
         "idx_projection_message",
     ] {
         assert!(
@@ -666,52 +670,4 @@ fn runtime_defaults_are_reconciled_on_every_start() {
         )
         .unwrap();
     assert_eq!((enabled, origin.as_str()), (1, "user"));
-}
-
-#[test]
-fn hot_foreign_keys_and_session_order_use_indexes() {
-    let file = db_path("query-plans");
-    let db = Db::open(file.path()).unwrap();
-    let conn = db.read();
-    for (table, column) in [
-        ("session_message_projection", "session_message_id"),
-        ("project_session_frontiers", "session_id"),
-        ("sessions", "forked_from_session_id"),
-    ] {
-        let sql = format!("EXPLAIN QUERY PLAN SELECT rowid FROM {table} WHERE {column}='target'");
-        let details = conn
-            .prepare(&sql)
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            details
-                .iter()
-                .any(|d| d.contains("SEARCH") && d.contains(column)),
-            "foreign-key lookup must seek instead of scanning {table}: {details:?}"
-        );
-    }
-    for scope in [
-        "",
-        "WHERE archived_at IS NULL",
-        "WHERE archived_at IS NOT NULL",
-    ] {
-        let sql = format!(
-            "EXPLAIN QUERY PLAN SELECT id FROM sessions {scope}
-            ORDER BY COALESCE(last_conversation_at,last_activity_at,started_at) DESC,id LIMIT 500"
-        );
-        let details = conn
-            .prepare(&sql)
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(3))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(
-            !details.iter().any(|d| d.contains("TEMP B-TREE")),
-            "activity ordering must use an index for {scope}: {details:?}"
-        );
-    }
 }

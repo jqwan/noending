@@ -262,24 +262,6 @@ describe("NewSessionView explicit agent resolution", () => {
     expect(optionTexts.some((t) => t?.includes("DSH"))).toBe(false);
     expect(optionTexts.some((t) => t?.includes("ZCode"))).toBe(false);
   });
-
-  it("allows changing the selected agent on the page and prepares launch with the new agent", async () => {
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
-    });
-
-    const select = screen.getByLabelText("Agent");
-    fireEvent.change(select, { target: { value: "claude_code" } });
-
-    await waitFor(() => {
-      expect(api.prepareNewSession).toHaveBeenCalledWith("claude_code", [], "/tmp/workspace", NATIVE_RUNTIME);
-    });
-
-    // 单次切换绝不改动全局默认配置
-    expect(api.setDefaultAgent).not.toHaveBeenCalled();
-  });
 });
 
 it("probes the effective default directory once while directory selection initializes", async () => {

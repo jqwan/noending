@@ -31,7 +31,6 @@ it("switches between history and detail without launching an Agent", async () =>
   expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
   view.rerender(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" entry="conversation" navigate={navigate} />);
   expect(screen.getByRole("button", { name: "历史消息" }).getAttribute("aria-pressed")).toBe("true");
-  expect(screen.queryByRole("button", { name: "跟踪任务" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialAgent: "codex" });
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();

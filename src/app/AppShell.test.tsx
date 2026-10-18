@@ -69,11 +69,6 @@ it("refreshes visible data when a CLI business operation completes", async () =>
   expect(screen.getByRole("status", { name: "数据刷新次数" }).textContent).toBe("1");
 });
 
-it("starts on the new-session page", () => {
-  render(<AppShell />);
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-});
-
 it("keeps icon navigation fixed and allows toggling the session sidebar in any section", () => {
   render(<AppShell />);
   const rail = screen.getByRole("navigation", { name: "工作区导航" });

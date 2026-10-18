@@ -162,26 +162,26 @@ describe("Projects Board", () => {
 
   it("toggles between card and list view and restores the choice after a restart", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([card()]);
-    const { container } = render(<ProjectsView navigate={navigate} />);
+    render(<ProjectsView navigate={navigate} />);
     await screen.findByText("NoEnding");
 
-    expect(container.querySelector(".board-grid")).toBeTruthy();
-    expect(container.querySelector(".project-list")).toBeNull();
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-    expect(container.querySelector(".project-list")).toBeTruthy();
-    expect(container.querySelector(".board-grid")).toBeNull();
+    expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("false");
 
     cleanup();
     viewState.clear();
-    const reopened = render(<ProjectsView navigate={navigate} />);
+    render(<ProjectsView navigate={navigate} />);
     await screen.findByText("NoEnding");
-    expect(reopened.container.querySelector(".project-list")).toBeTruthy();
-    expect(reopened.container.querySelector(".board-grid")).toBeNull();
+    expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
-    expect(reopened.container.querySelector(".board-grid")).toBeTruthy();
-    expect(reopened.container.querySelector(".project-list")).toBeNull();
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("false");
   });
 
   it("add_project_button_opens_picker_and_calls_add_project_path", async () => {

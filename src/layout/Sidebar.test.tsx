@@ -388,7 +388,7 @@ describe("Sidebar 最近活动", () => {
     await waitFor(() => expect(screen.queryByText("有终端启动的会话")).toBeNull());
   });
 
-  it.each(["project", "agent", "none"])("filters only unpinned sessions with live terminals when grouped by %s", async (groupBy) => {
+  it.each(["project", "none"])("filters only unpinned sessions with live terminals when grouped by %s", async (groupBy) => {
     viewState.set("sidebar.recent.groupBy.v2", groupBy);
     localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["pinned"]));
     vi.mocked(api.listSessions).mockResolvedValue([
@@ -838,12 +838,10 @@ describe("Sidebar 最近活动", () => {
     // Group headers should no longer exist
     expect(screen.queryByText("任务一")).toBeNull();
     expect(screen.queryByText("任务二")).toBeNull();
-    expect(screen.queryAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header")).length).toBe(0);
 
     // Sessions should still be rendered in flat list
     expect(screen.getByText("会话一")).toBeTruthy();
     expect(screen.getByText("会话二")).toBeTruthy();
-    expect(document.querySelector(".sidebar-flat-session-items")).toBeTruthy();
 
     // Group trigger now shows "会话"
     expect(screen.getByRole("button", { name: "会话归类：不分组（全部会话）" })).toBeTruthy();

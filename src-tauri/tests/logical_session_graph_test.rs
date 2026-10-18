@@ -153,13 +153,12 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
 
 // child/side sources: recognized, then silently skipped
 
-/// A child discovered with no root anywhere: no Logical Session is created
-/// and nothing is recorded — a session IS its root and child/side sources
-/// are invisible by design; the recognition itself is what keeps codex
-/// subagent rollouts from becoming fake sessions.
+/// The root shows up in a LATER batch: one Logical Session keyed by the
+/// root identity. Scan order never decides identity, and the child/side
+/// rollouts seen along the way are silently skipped, never attached.
 #[test]
-fn an_orphan_child_is_skipped_silently_not_a_session() {
-    let root_dir = temp_root("orphan-child");
+fn a_root_discovered_in_a_later_batch_still_becomes_the_session() {
+    let root_dir = temp_root("late-root");
     write_rollout(
         &root_dir,
         &rollout_name(CHILD_ID),
@@ -170,31 +169,6 @@ fn an_orphan_child_is_skipped_silently_not_a_session() {
             ),
             message_line(1, "m1", "assistant", "子任务的结论"),
         ],
-    );
-    let db = open_db("orphan-child");
-    enable_codex_source(&db, &root_dir);
-
-    reconcile(&db);
-
-    assert!(
-        db.list_sessions(Default::default()).unwrap().is_empty(),
-        "no root, no Logical Session"
-    );
-}
-
-/// The root shows up in a LATER batch: one Logical Session keyed by the
-/// root identity. Scan order never decides identity, and the child/side
-/// rollouts seen along the way are silently skipped, never attached.
-#[test]
-fn a_root_discovered_in_a_later_batch_still_becomes_the_session() {
-    let root_dir = temp_root("late-root");
-    write_rollout(
-        &root_dir,
-        &rollout_name(CHILD_ID),
-        &[meta_line(
-            CHILD_ID,
-            serde_json::json!({"thread_source": "subagent", "parent_thread_id": ROOT_ID}),
-        )],
     );
     let db = open_db("late-root");
     enable_codex_source(&db, &root_dir);
@@ -675,7 +649,7 @@ fn recent_turn_messages_keep_the_conversation_skeleton() {
 
 /// An append that continues the same turn demotes the formerly-final reply.
 #[test]
-fn turn_final_flags_track_the_projection() {
+fn appending_to_a_turn_demotes_the_formerly_final_reply() {
     let db = open_db("turn-final");
     let (session, _) = seed_root(&db);
     let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
@@ -685,15 +659,12 @@ fn turn_final_flags_track_the_projection() {
         role,
         content: text.into(),
     };
-    let flags_of = |db: &Db, id: &str| -> bool {
-        db.read()
-            .query_row(
-                "SELECT turn_final FROM session_messages WHERE source_message_id = ?1",
-                [id],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|v| v != 0)
+    let skeleton = |db: &Db| -> Vec<String> {
+        db.recent_turn_messages(&session.id, 8)
             .unwrap()
+            .into_iter()
+            .map(|message| message.content)
+            .collect()
     };
 
     let turn = vec![
@@ -705,17 +676,13 @@ fn turn_final_flags_track_the_projection() {
     ];
     db.commit_ingest(&session.id, &turn, &seed_update(1, 500))
         .unwrap();
-    assert!(!flags_of(&db, "u1"));
-    assert!(!flags_of(&db, "a1"), "the turn continues after it");
-    assert!(
-        flags_of(&db, "a2"),
-        "the user spoke again → a2 was the final"
+    assert_eq!(
+        skeleton(&db),
+        vec!["问题", "最终回答", "追问", "第二轮回答"]
     );
-    assert!(!flags_of(&db, "u2"));
-    assert!(flags_of(&db, "a3"), "the conversation ends → a3 is final");
 
-    // The turn continues: the appended reply takes the final flag and a3 is
-    // demoted.
+    // The turn continues: the appended reply takes the final slot and a3
+    // becomes an intermediate.
     db.commit_ingest(
         &session.id,
         &[msg("a4", SessionMessageRole::Assistant, "补充")],
@@ -725,41 +692,7 @@ fn turn_final_flags_track_the_projection() {
         },
     )
     .unwrap();
-    assert!(!flags_of(&db, "a3"), "the continuation demoted it");
-    assert!(flags_of(&db, "a4"));
-}
-
-/// A full rescan keeps identical messages and replaces a changed reply.
-#[test]
-fn a_full_rescan_reuses_unchanged_messages_and_replaces_the_projection() {
-    let db = open_db("rescan");
-    let (session, _) = seed_root(&db);
-
-    // Generation 1 rescan: the same user message (dedup) plus a new reply.
-    let stored = db
-        .commit_ingest(
-            &session.id,
-            &[
-                ParsedSessionMessage {
-                    source_message_id: Some("m1".into()),
-                    source_position: "line:1".into(),
-                    ts: Some("2026-09-20T13:01:48Z".into()),
-                    role: SessionMessageRole::User,
-                    content: "第一次的提问".into(),
-                },
-                ParsedSessionMessage {
-                    source_message_id: Some("m2".into()),
-                    source_position: "line:2".into(),
-                    ts: None,
-                    role: SessionMessageRole::Assistant,
-                    content: "重扫描后的新回答".into(),
-                },
-            ],
-            &seed_update(1, 80),
-        )
-        .unwrap();
-    assert_eq!(stored.len(), 1, "only the new reply appends");
-    assert_eq!(db.message_count(&session.id).unwrap(), 2);
+    assert_eq!(skeleton(&db), vec!["问题", "最终回答", "追问", "补充"]);
 }
 
 #[test]

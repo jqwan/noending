@@ -189,14 +189,12 @@ describe("ProjectDetail", () => {
 
   it("orders git main worktree first in workspace paths list", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const { container } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Test Project");
-    const pathRows = container.querySelectorAll(".project-workspace-paths .list-row");
-    expect(pathRows.length).toBe(2);
     // Even though /a/linked/worktree is alphabetically earlier, /z/main/worktree is git_kind: "main" and comes first
-    expect(pathRows[0].textContent).toContain("/z/main/worktree");
-    expect(pathRows[1].textContent).toContain("/a/linked/worktree");
+    expect(screen.getAllByTitle(/\/worktree$/).map(link => link.getAttribute("title")))
+      .toEqual(["/z/main/worktree", "/a/linked/worktree"]);
   });
 
   it("renders desktop continue for desktop-only session rows and stops row navigation", async () => {

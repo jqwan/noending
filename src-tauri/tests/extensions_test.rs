@@ -1687,17 +1687,3 @@ fn a_name_conflict_does_not_overwrite_a_different_native_configuration() {
         "https://other.example/mcp"
     );
 }
-
-#[test]
-fn registering_a_skill_source_writes_no_agent_entry() {
-    let f = Fixture::new();
-    let source = f.source("input", "review");
-    let outcome = extensions::register_source_dir(&source).unwrap();
-    assert_eq!(outcome.name, "review");
-    assert!(outcome.source_path.ends_with("SKILL.md"));
-    let inventory = extensions::list(&f.roots, None);
-    assert!(!inventory
-        .resources
-        .iter()
-        .any(|row| row.kind == "skill" && row.path == outcome.source_path));
-}

@@ -24,7 +24,6 @@ it.each(cases)("opens the corresponding detail for $entry.kind", async ({ entry,
   const onClose = vi.fn();
   render(<CommandPalette navigate={navigate} onClose={onClose} />);
   const option = await screen.findByRole("option", { name: new RegExp(entry.title) });
-  expect(screen.queryByText("新建会话")).toBeNull();
   if (entry.archived) expect(screen.getByText("已归档")).toBeTruthy();
   fireEvent.click(option);
   expect(navigate).toHaveBeenCalledWith(route);

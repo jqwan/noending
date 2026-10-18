@@ -328,7 +328,7 @@ describe("AgentsView", () => {
 
   it("displays normalized CLI status, session count and toggles between card and list view", async () => {
     vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({ codex: 602 });
-    const { container } = render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentsView navigate={vi.fn()} />);
     await screen.findByText("Claude Code");
     expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
     expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
@@ -337,11 +337,12 @@ describe("AgentsView", () => {
     expect(screen.queryByText(/仅同步历史/)).toBeNull();
 
     // Toggle to list view and back
-    expect(container.querySelector(".agents-grid")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-    expect(container.querySelector(".agents-list")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
-    expect(container.querySelector(".agents-grid")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {

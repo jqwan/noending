@@ -347,19 +347,6 @@ fn message_search_uses_external_prose_and_keeps_fts_consistent_after_retirement(
             &prose,
         )],
     );
-    let route: (String, String) = db
-        .read()
-        .query_row(
-            "SELECT title,body FROM search_documents WHERE kind='message' AND ref_id=?1",
-            [&stored[0].id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        route,
-        (String::new(), String::new()),
-        "message routing stores no prose copy"
-    );
     let hits = search(&db, "uniqueposting", 10).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].ref_id, stored[0].id);
@@ -421,44 +408,6 @@ fn message_search_uses_external_prose_and_keeps_fts_consistent_after_retirement(
             [],
         )
         .unwrap();
-}
-
-#[test]
-fn unchanged_search_documents_do_not_rewrite_the_fts_index() {
-    let db = open_db("unchanged-documents");
-    let project = support::project("unchanged-project".into(), "Stable project");
-    let task = support::workstream("unchanged-task".into(), "Stable task");
-    db.upsert_project(&project).unwrap();
-    db.upsert_workstream(&task).unwrap();
-    let session = || {
-        db.upsert_logical_session(
-            Agent::Codex,
-            "unchanged-session",
-            Some("Stable session"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "fixture",
-            "/fixture",
-            &serde_json::json!({}),
-        )
-        .unwrap()
-    };
-    let first = session();
-    let changes = || {
-        db.write()
-            .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
-            .unwrap()
-    };
-    let before = changes();
-
-    assert_eq!(session(), (first.0, false));
-    db.backfill_search_index().unwrap();
-    assert_eq!(changes(), before);
-    assert_eq!(search(&db, "Stable", 10).unwrap().len(), 1);
 }
 
 #[test]

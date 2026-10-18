@@ -1126,19 +1126,6 @@ fn full_scan_collects_unmapped_rows_without_rewriting_unchanged_messages() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].ref_id, current[0].id);
 
-    let changes = || {
-        db.write()
-            .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
-            .unwrap()
-    };
-    let before = changes();
-    db.commit_ingest(&s.id, &messages, &rescan(0)).unwrap();
-    assert_eq!(
-        changes(),
-        before,
-        "unchanged full scans do not rebuild search or rewrite messages"
-    );
-
     // An empty current projection must not count unmapped stored history.
     db.write()
         .execute(

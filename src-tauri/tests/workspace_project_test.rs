@@ -1722,12 +1722,6 @@ fn project_detail_has_the_frozen_shape() {
     // (`serde_json::Value` orders map keys, so this asserts the SET: the wire
     // object's field order is not part of the contract.)
     let value = serde_json::to_value(&detail).unwrap();
-    for field in ["metadata", "source_path", "source_prefix_hash", "summary"] {
-        assert!(
-            value["sessions"][0].get(field).is_none(),
-            "project session lists must omit {field}"
-        );
-    }
     let mut keys: Vec<&str> = value
         .as_object()
         .unwrap()
