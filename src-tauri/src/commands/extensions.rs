@@ -619,16 +619,12 @@ pub async fn save_mcp_definition(
 ) -> Result<extensions::OperationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
-    let mut registry = extensions::load_mcp_registry(&state.db)?;
-    let id = extensions::register_mcp_definition(
-        &mut registry,
+    let id = extensions::store_mcp_definition(
+        &state.db,
         &name,
         description.as_deref().unwrap_or_default(),
         config,
-    )?
-    .id
-    .clone();
-    extensions::save_mcp_registry(&state.db, &registry)?;
+    )?;
     Ok(extensions::OperationResult {
         message: format!("MCP 定义已创建：{name}（{id}）"),
     })
@@ -704,15 +700,13 @@ pub async fn uninstall_mcp_definition(
     let _catalog_reset = CatalogReset;
     let cwds = workspace_cwds(&state.db)?;
     let mut registry = extensions::load_mcp_registry(&state.db)?;
-    let (registry, result) = super::run_on_blocking_worker(
-        move || -> Result<(extensions::McpRegistry, extensions::OperationResult)> {
-            let roots = extensions::Roots::current()?;
-            let result = extensions::uninstall_mcp_definition(&mut registry, &roots, &id, &cwds)?;
-            Ok((registry, result))
-        },
-    )
+    let remove_id = id.clone();
+    let result = super::run_on_blocking_worker(move || -> Result<extensions::OperationResult> {
+        let roots = extensions::Roots::current()?;
+        extensions::uninstall_mcp_definition(&mut registry, &roots, &id, &cwds)
+    })
     .await??;
-    extensions::save_mcp_registry(&state.db, &registry)?;
+    extensions::forget_mcp_definition(&state.db, &remove_id)?;
     Ok(result)
 }
 

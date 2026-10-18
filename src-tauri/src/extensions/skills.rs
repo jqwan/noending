@@ -1639,6 +1639,7 @@ fn migration_plan(
             target.display()
         )));
     }
+    validate_migration_links(&source_dir, &source_dir, 0)?;
     Ok(MigrationPlan {
         name: meta.name,
         description: meta.description,
@@ -1717,7 +1718,7 @@ pub fn migrate_skill(
     if delete_source {
         move_dir(&plan.source_dir, &plan.target)?;
     } else {
-        copy_migration_tree(&plan.source_dir, &plan.target, 0)?;
+        copy_migration_dir(&plan.source_dir, &plan.target)?;
     }
     let target = fs::canonicalize(&plan.target)?;
     // Physical entries are the Agent-visible source itself. Creating their
@@ -1830,24 +1831,83 @@ fn move_dir(source: &Path, target: &Path) -> Result<()> {
     match fs::rename(source, target) {
         Ok(()) => Ok(()),
         Err(error) if is_cross_device(&error) => {
-            let parent = target.parent().ok_or_else(|| other("目标路径无效"))?;
-            let temp = parent.join(format!(".noending-{}", uuid::Uuid::new_v4()));
-            if let Err(error) = copy_migration_tree(source, &temp, 0) {
-                let _ = fs::remove_dir_all(&temp);
-                return Err(error);
-            }
-            if let Err(error) = fs::rename(&temp, target) {
-                let _ = fs::remove_dir_all(&temp);
-                return Err(error.into());
-            }
-            if let Err(error) = fs::remove_dir_all(source) {
-                let _ = fs::remove_dir_all(target);
-                return Err(error.into());
-            }
-            Ok(())
+            copy_then_remove(source, target, |path| fs::remove_dir_all(path))
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn copy_then_remove(
+    source: &Path,
+    target: &Path,
+    remove_source: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
+    copy_migration_dir(source, target)?;
+    if let Err(error) = remove_source(source) {
+        // Recursive deletion can fail after removing part of the source. The
+        // destination may now be the only complete copy, so never roll it back.
+        return Err(other(format!(
+            "源目录清理失败：{error}；完整副本已保留在 {}，请检查并处理源目录",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Publish only a complete copy. Failed copies must neither appear as library
+/// resources nor occupy the final name and prevent a later retry.
+fn copy_migration_dir(source: &Path, target: &Path) -> Result<()> {
+    let parent = target.parent().ok_or_else(|| other("目标路径无效"))?;
+    let temp = parent.join(format!(".noending-{}", uuid::Uuid::new_v4()));
+    let result = copy_migration_tree(source, &temp, 0)
+        .and_then(|()| fs::rename(&temp, target).map_err(Into::into));
+    if let Err(error) = result {
+        if temp.exists() {
+            if let Err(cleanup) = fs::remove_dir_all(&temp) {
+                return Err(other(format!(
+                    "{error}；临时副本清理失败：{cleanup}（{}）",
+                    temp.display()
+                )));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Relative links that escape the package depend on its original location.
+/// Reject these before touching either copy rather than silently breaking the
+/// Skill or rewriting references to files outside the managed package.
+fn validate_migration_links(root: &Path, dir: &Path, depth: usize) -> Result<()> {
+    if depth > 64 {
+        return Err(other("Skill 目录嵌套过深"));
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            let value = fs::read_link(entry.path())?;
+            if value.is_absolute() {
+                continue;
+            }
+            let mut level = dir.strip_prefix(root).map_err(other)?.components().count();
+            for component in value.components() {
+                use std::path::Component;
+                match component {
+                    Component::Normal(_) => level += 1,
+                    Component::CurDir => {}
+                    Component::ParentDir if level > 0 => level -= 1,
+                    _ => return Err(other(format!(
+                        "Skill 包含指向源目录外部的相对链接：{}；请先改为绝对链接或将引用文件放入 Skill 目录",
+                        entry.path().display()
+                    ))),
+                }
+            }
+        } else if kind.is_dir() {
+            validate_migration_links(root, &entry.path(), depth + 1)?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_migration_tree(source: &Path, dest: &Path, depth: usize) -> Result<()> {
@@ -1941,4 +2001,52 @@ fn replace_wrapper_dir(dir: &Path, target: &Path) -> Result<()> {
         return Err(error.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_device_move_keeps_the_complete_copy_when_source_cleanup_partially_fails() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            Cleanup(std::env::temp_dir().join(format!("noending-move-{}", uuid::Uuid::new_v4())));
+        let source = root.0.join("source");
+        let target = root.0.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("first.txt"), "first file").unwrap();
+        fs::write(source.join("second.txt"), "second file").unwrap();
+        let error = copy_then_remove(&source, &target, |source| {
+            // Model remove_dir_all deleting one file before encountering a
+            // locked or inaccessible entry. No second volume is required.
+            fs::remove_file(source.join("first.txt"))?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "entry is locked",
+            ))
+        })
+        .unwrap_err();
+        assert!(!source.join("first.txt").exists());
+        assert_eq!(
+            fs::read_to_string(source.join("second.txt")).unwrap(),
+            "second file"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("first.txt")).unwrap(),
+            "first file"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("second.txt")).unwrap(),
+            "second file"
+        );
+        assert!(error
+            .to_string()
+            .contains(target.to_string_lossy().as_ref()));
+    }
 }

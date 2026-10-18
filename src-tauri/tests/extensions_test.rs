@@ -1055,6 +1055,109 @@ fn registration_can_copy_an_external_source_and_keep_the_original() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn migration_rejects_external_relative_links_before_changing_the_source_or_entries() {
+    for delete_source in [false, true] {
+        let f = Fixture::new();
+        let source = f.source("input", "review");
+        f.write(&f.root.join("shared.txt"), "shared reference");
+        std::os::unix::fs::symlink("../shared.txt", source.join("ref.txt")).unwrap();
+        std::os::unix::fs::symlink("scripts/check.sh", source.join("check.sh")).unwrap();
+        let shared = extensions::list(&f.roots, None)
+            .locations
+            .into_iter()
+            .find(|loc| loc.kind == "skill" && loc.agent.is_none())
+            .unwrap();
+        extensions::link_skill(&f.roots, None, &source, &shared.id).unwrap();
+        let entry = Path::new(&shared.path).join("review");
+        let original_entry = fs::read_link(&entry).unwrap();
+        let source_path = fs::canonicalize(source.join("SKILL.md"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let id = extensions::source_id(&source_path);
+        let managed = f.root.join("managed");
+        assert!(extensions::preview_skill_migration(
+            &f.roots,
+            &[],
+            &managed,
+            &id,
+            Some(&source_path)
+        )
+        .is_err());
+        assert!(extensions::migrate_skill(
+            &f.roots,
+            &[],
+            &managed,
+            &id,
+            Some(&source_path),
+            delete_source
+        )
+        .is_err());
+        assert!(!managed.join("review").exists());
+        assert_eq!(fs::read_link(&entry).unwrap(), original_entry);
+        assert_eq!(
+            fs::read_to_string(source.join("ref.txt")).unwrap(),
+            "shared reference"
+        );
+
+        // An explicit external absolute link and an internal relative link
+        // remain valid in both copy and move modes.
+        fs::remove_file(source.join("ref.txt")).unwrap();
+        std::os::unix::fs::symlink(
+            fs::canonicalize(f.root.join("shared.txt")).unwrap(),
+            source.join("ref.txt"),
+        )
+        .unwrap();
+        extensions::migrate_skill(
+            &f.roots,
+            &[],
+            &managed,
+            &id,
+            Some(&source_path),
+            delete_source,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(managed.join("review/ref.txt")).unwrap(),
+            "shared reference"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("review/check.sh")).unwrap(),
+            "exit 91\n"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_skill_copy_leaves_no_partial_library_resource_and_can_be_retried() {
+    let f = Fixture::new();
+    let source = f.source("input", "review");
+    // macOS's default temporary path can exceed the Unix socket path limit.
+    // Bind at a short path, then move the socket into the source package.
+    let socket = PathBuf::from("/tmp").join(format!("ne-{}", uuid::Uuid::new_v4()));
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::rename(&socket, source.join("server.sock")).unwrap();
+    let file = fs::canonicalize(source.join("SKILL.md"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let id = extensions::source_id(&file);
+    let managed = f.root.join("managed");
+    assert!(extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).is_err());
+    assert!(source.join("SKILL.md").is_file());
+    assert_eq!(fs::read_dir(&managed).unwrap().count(), 0);
+
+    fs::remove_file(source.join("server.sock")).unwrap();
+    extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(managed.join("review/scripts/check.sh")).unwrap(),
+        "exit 91\n"
+    );
+}
+
 /// Legacy installers expose a Skill as a real directory whose files link into
 /// the source. That wrapper can be replaced without touching the source.
 #[cfg(unix)]
@@ -1484,6 +1587,12 @@ fn identical_mcp_configurations_collapse_and_definitions_remain_listed() {
         Path::new(&project.path),
         r#"{"mcpServers":{"docs":{"serverUrl":"https://docs.example/mcp","type":"http","headers":{"X-Team":"one"}}}}"#,
     );
+    let codex = f.mcp(Agent::Codex, "user");
+    f.write(
+        Path::new(&codex.path),
+        "[mcp_servers.docs]\nurl = \"https://docs.example/mcp\"\nenabled = false\n[mcp_servers.docs.http_headers]\nX-Team = \"one\"\n",
+    );
+    let original_codex = fs::read(&codex.path).unwrap();
     let inventory = extensions::list(&f.roots, Some(&f.cwd));
     let rows: Vec<_> = inventory
         .resources
@@ -1491,7 +1600,7 @@ fn identical_mcp_configurations_collapse_and_definitions_remain_listed() {
         .filter(|row| row.kind == "mcp")
         .collect();
     assert_eq!(rows.len(), 1, "identical configs are one MCP");
-    assert_eq!(rows[0].locations.len(), 2);
+    assert_eq!(rows[0].locations.len(), 3);
 
     let id = extensions::mcp_identity(
         "docs",
@@ -1509,8 +1618,17 @@ fn identical_mcp_configurations_collapse_and_definitions_remain_listed() {
     .unwrap();
     assert_eq!(registry.definitions[0].id, id);
 
+    // Agent-owned disable flags do not change configuration identity and
+    // must not be rewritten when NoEnding finds the matching configuration.
+    extensions::enable_mcp_user(&f.roots, &registry, &id, &[]).unwrap();
+    assert_eq!(fs::read(&codex.path).unwrap(), original_codex);
+
     fs::remove_file(&user.path).unwrap();
     fs::remove_file(&project.path).unwrap();
+    fs::remove_file(&codex.path).unwrap();
+    for agent in [Agent::ClaudeCode, Agent::Antigravity] {
+        fs::remove_file(f.mcp(agent, "user").path).unwrap();
+    }
     let mut inventory = extensions::list(&f.roots, Some(&f.cwd));
     extensions::merge_mcp_definitions(&registry, &mut inventory, true);
     let row = inventory
@@ -1545,6 +1663,13 @@ fn enabling_a_definition_writes_every_agent_and_disable_preserves_other_servers(
         let value = read_mcp(&f, agent, "user");
         let server = &mcp_section(&value, agent)["docs"];
         assert!(server.is_object(), "{agent:?} did not receive docs");
+        if agent == Agent::Codex {
+            assert_eq!(server["http_headers"]["X-Team"], "one");
+            assert!(server.get("headers").is_none());
+        } else {
+            assert_eq!(server["headers"]["X-Team"], "one");
+            assert!(server.get("http_headers").is_none());
+        }
         if agent == Agent::Antigravity {
             assert_eq!(server["serverUrl"], "https://docs.example/mcp");
         }
@@ -1562,6 +1687,51 @@ fn enabling_a_definition_writes_every_agent_and_disable_preserves_other_servers(
             "{agent:?} kept docs"
         );
     }
+}
+
+#[test]
+fn concurrent_mcp_registrations_survive_uninstalling_an_earlier_snapshot() {
+    let f = Fixture::new();
+    let db = std::sync::Arc::new(Db::open(&f.root.join("state.db")).unwrap());
+    let old =
+        extensions::store_mcp_definition(&db, "old", "", json!({"command":"old-server"})).unwrap();
+    let mut uninstall_snapshot = extensions::load_mcp_registry(&db).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let workers: Vec<_> = (0..8)
+        .map(|index| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                extensions::store_mcp_definition(
+                    &db,
+                    &format!("new-{index}"),
+                    "",
+                    json!({"command":"new-server"}),
+                )
+                .unwrap()
+            })
+        })
+        .collect();
+    let added: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    extensions::uninstall_mcp_definition(&mut uninstall_snapshot, &f.roots, &old, &[]).unwrap();
+    // The command removes only this ID from current persistence once its
+    // asynchronous file worker finishes; it never writes the worker's snapshot.
+    extensions::forget_mcp_definition(&db, &old).unwrap();
+    let current = extensions::load_mcp_registry(&db).unwrap();
+    assert!(extensions::find_mcp_definition(&current, &old).is_none());
+    assert_eq!(current.definitions.len(), 8);
+    for id in added {
+        assert!(extensions::find_mcp_definition(&current, &id).is_some());
+    }
+    assert!(
+        extensions::store_mcp_definition(&db, "new-0", "", json!({"command":"new-server"}))
+            .is_err()
+    );
+    assert_eq!(extensions::load_mcp_registry(&db).unwrap(), current);
 }
 
 #[test]

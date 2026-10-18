@@ -20,10 +20,11 @@ pub use inventory::{
 pub use mcp_registry::{
     detail as detail_mcp_definition, disable_projects as disable_mcp_projects,
     disable_user as disable_mcp_user, enable_projects as enable_mcp_projects,
-    enable_user as enable_mcp_user, find as find_mcp_definition, identity as mcp_identity,
-    load as load_mcp_registry, merge as merge_mcp_definitions, register as register_mcp_definition,
-    remove as remove_mcp_definition, revision as mcp_definition_revision,
-    save as save_mcp_registry, uninstall as uninstall_mcp_definition, McpDefinition, McpRegistry,
+    enable_user as enable_mcp_user, find as find_mcp_definition, forget as forget_mcp_definition,
+    identity as mcp_identity, load as load_mcp_registry, merge as merge_mcp_definitions,
+    register as register_mcp_definition, remove as remove_mcp_definition,
+    revision as mcp_definition_revision, store as store_mcp_definition,
+    uninstall as uninstall_mcp_definition, McpDefinition, McpRegistry,
 };
 pub use registry::{
     find_source, load as load_skill_registry, merge as merge_skill_sources, register_source,

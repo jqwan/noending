@@ -8,6 +8,7 @@ use crate::{
     error::{other, Result},
     storage::Db,
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -32,15 +33,61 @@ pub struct McpDefinition {
 
 pub fn load(db: &Db) -> Result<McpRegistry> {
     match db.get_setting(KEY)? {
-        Some(raw) => {
-            serde_json::from_str(&raw).map_err(|e| other(format!("MCP 定义清单无法读取：{e}")))
-        }
+        Some(raw) => decode(&raw),
         None => Ok(McpRegistry::default()),
     }
 }
 
-pub fn save(db: &Db, registry: &McpRegistry) -> Result<()> {
-    db.set_setting(KEY, &serde_json::to_string(registry)?)
+fn decode(raw: &str) -> Result<McpRegistry> {
+    let mut registry: McpRegistry =
+        serde_json::from_str(raw).map_err(|e| other(format!("MCP 定义清单无法读取：{e}")))?;
+    let mut ids = std::collections::HashSet::new();
+    for definition in &mut registry.definitions {
+        definition.config = canonical(&definition.name, &definition.config)["config"].take();
+        definition.id = identity(&definition.name, &definition.config);
+    }
+    registry
+        .definitions
+        .retain(|definition| ids.insert(definition.id.clone()));
+    Ok(registry)
+}
+
+/// Read and edit the current registry under the database writer transaction.
+/// File operations must finish before entering this short transaction.
+fn edit<T>(db: &Db, change: impl FnOnce(&mut McpRegistry) -> Result<T>) -> Result<T> {
+    db.tx(|tx| {
+        let raw: Option<String> = tx
+            .query_row("SELECT value FROM settings WHERE key = ?1", [KEY], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let mut registry = match raw {
+            Some(raw) => decode(&raw)?,
+            None => McpRegistry::default(),
+        };
+        let result = change(&mut registry)?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [KEY, &serde_json::to_string(&registry)?],
+        )?;
+        Ok(result)
+    })
+}
+
+pub fn store(db: &Db, name: &str, description: &str, config: Value) -> Result<String> {
+    edit(db, |registry| {
+        Ok(register(registry, name, description, config)?.id.clone())
+    })
+}
+
+/// Remove only the uninstalled definition, preserving registrations made while
+/// its native configuration files were being removed.
+pub fn forget(db: &Db, id: &str) -> Result<()> {
+    edit(db, |registry| {
+        remove(registry, id);
+        Ok(())
+    })
 }
 
 /// Logical identity: transport spellings and native enable flags are Agent
@@ -58,6 +105,18 @@ pub fn canonical(name: &str, server: &Value) -> Value {
             }
         } else {
             map.remove("serverUrl");
+        }
+        if let Some(headers) = map.remove("http_headers") {
+            // Static HTTP headers have different native names in Codex and
+            // the JSON-based Agents, but represent the same configuration.
+            let mut headers = headers;
+            if let (Some(native), Some(portable)) = (
+                headers.as_object_mut(),
+                map.get("headers").and_then(Value::as_object),
+            ) {
+                native.extend(portable.clone());
+            }
+            map.insert("headers".into(), headers);
         }
         if matches!(
             map.get("type").and_then(Value::as_str),
@@ -176,7 +235,11 @@ fn for_agent(agent: Agent, config: &Value) -> Value {
     let Some(map) = server.as_object_mut() else {
         return server;
     };
-    if agent == Agent::Antigravity {
+    if agent == Agent::Codex {
+        if let Some(headers) = map.remove("headers") {
+            map.insert("http_headers".into(), headers);
+        }
+    } else if agent == Agent::Antigravity {
         if let Some(url) = map.remove("url") {
             map.insert("serverUrl".into(), url);
         }
