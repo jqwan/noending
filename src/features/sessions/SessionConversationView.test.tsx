@@ -613,3 +613,40 @@ it("shows the supplied title while session details are still loading", async () 
   resolveDetail!(detail(session("me")));
   await screen.findByText("你好");
 });
+
+it("does not flash empty state while messages are still loading, and shows empty state once loaded with 0 messages", async () => {
+  let resolveMessages!: (val: any) => void;
+  const messagesPromise = new Promise((resolve) => {
+    resolveMessages = resolve;
+  });
+  vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("me")));
+  vi.mocked(api.getSessionMessages).mockReturnValue(messagesPromise as any);
+  vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue([]);
+
+  render(
+    <SessionConversationView
+      sessionId="me"
+      initialTitle="测试会话"
+      navigate={vi.fn()}
+    />
+  );
+
+  // Still loading: empty message prompt MUST NOT be shown
+  expect(screen.queryByText(/还没有同步消息/)).toBeNull();
+
+  // Resolve with empty messages
+  await act(async () => {
+    resolveMessages({
+      messages: [],
+      generation: 1,
+      next_before_ordinal: null,
+      total: 0,
+      remaining: 0,
+      tail_ordinal: 0,
+    });
+  });
+
+  // Now that it has genuinely loaded with 0 messages, empty state appears
+  await screen.findByText(/还没有同步消息/);
+});
+

@@ -1,6 +1,8 @@
 import { removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
+import "./workstreams.css";
 import { api } from "../../api";
+
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
 import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo } from "../../components/common";
@@ -18,18 +20,10 @@ import SummaryMarkdown from "../sessions/SummaryMarkdown";
 import WorkstreamSessions from "./WorkstreamSessions";
 
 /** Task organization and the current Markdown summary. All reads are pure. */
-export const workstreamDetailCache = new Map<
-  string,
-  {
-    ctx: WorkstreamContextData;
-    ctxState: WorkstreamContextView | null;
+import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
+import { useLoadingDelay } from "../../hooks/useLoadingDelay";
+export { workstreamDetailCache, clearWorkstreamDetailCache };
 
-  }
->();
-
-export function clearWorkstreamDetailCache() {
-  workstreamDetailCache.clear();
-}
 
 export default function WorkstreamDetailView({
   workstreamId,
@@ -50,6 +44,7 @@ export default function WorkstreamDetailView({
   const [loadError, setLoadError] = useState("");
   const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(() => cached?.ctx ?? null);
+  const showSkeleton = useLoadingDelay(!ctx && loadError === "");
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
@@ -174,10 +169,12 @@ export default function WorkstreamDetailView({
       return (
         <div className="main task-detail" role="status">
           <PageHeader title={initialTitle ?? ""} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
-            <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
-            <div className="skeleton" style={{ height: 200, borderRadius: "var(--radius-lg)" }} />
-          </div>
+          {showSkeleton && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
+              <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
+              <div className="skeleton" style={{ height: 200, borderRadius: "var(--radius-lg)" }} />
+            </div>
+          )}
         </div>
       );
     }

@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useViewPreference, preferenceValues, useViewScroll } from "../../hooks/useViewState";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
+import "./agents.css";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
+
 import AgentConfiguration from "./AgentConfiguration";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";

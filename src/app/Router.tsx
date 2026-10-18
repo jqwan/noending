@@ -1,17 +1,42 @@
-import NewSessionView from "../features/sessions/NewSessionView";
-import WorkstreamsView from "../features/workstreams/WorkstreamsView";
-import WorkstreamDetailView, { workstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
-import SessionsView from "../features/sessions/SessionsView";
-import SessionDetailView, { sessionDetailCache } from "../features/sessions/SessionDetailView";
-import SessionConversationView from "../features/sessions/SessionConversationView";
-import SessionTerminalView from "../features/sessions/SessionTerminalView";
-import ProjectsView from "../features/projects/ProjectsView";
-import ProjectDetail, { projectDetailCache } from "../features/projects/ProjectDetail";
-import SettingsView from "../features/settings/SettingsView";
-import AgentsView from "../features/agents/AgentsView";
-import ExtensionsView from "../features/extensions/ExtensionsView";
-import ExtensionDetailView from "../features/extensions/ExtensionDetailView";
+import { lazy, Suspense } from "react";
+import { workstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
+import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
+import { projectDetailCache } from "../features/projects/projectDetailCache";
 import type { Route } from "./routes";
+
+const NewSessionView = lazy(() => import("../features/sessions/NewSessionView"));
+const WorkstreamsView = lazy(() => import("../features/workstreams/WorkstreamsView"));
+const WorkstreamDetailView = lazy(() => import("../features/workstreams/WorkstreamDetailView"));
+const SessionsView = lazy(() => import("../features/sessions/SessionsView"));
+const SessionDetailView = lazy(() => import("../features/sessions/SessionDetailView"));
+const SessionConversationView = lazy(() => import("../features/sessions/SessionConversationView"));
+const SessionTerminalView = lazy(() => import("../features/sessions/SessionTerminalView"));
+const ProjectsView = lazy(() => import("../features/projects/ProjectsView"));
+const ProjectDetail = lazy(() => import("../features/projects/ProjectDetail"));
+const SettingsView = lazy(() => import("../features/settings/SettingsView"));
+const AgentsView = lazy(() => import("../features/agents/AgentsView"));
+const ExtensionsView = lazy(() => import("../features/extensions/ExtensionsView"));
+const ExtensionDetailView = lazy(() => import("../features/extensions/ExtensionDetailView"));
+
+
+export function preloadCommonRoutes() {
+  const common = [
+    () => import("../features/sessions/SessionsView"),
+    () => import("../features/sessions/SessionConversationView"),
+    () => import("../features/sessions/SessionDetailView"),
+    () => import("../features/sessions/SessionTerminalView"),
+    () => import("../features/projects/ProjectsView"),
+    () => import("../features/workstreams/WorkstreamsView"),
+    () => import("../features/agents/AgentsView"),
+  ];
+  for (const load of common) {
+    try {
+      void load();
+    } catch {
+      // Ignore background preload failures
+    }
+  }
+}
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
   route: Route;
@@ -19,6 +44,19 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
   goBack: (fallback?: Route) => void;
   actionSeq: number;
 }) {
+  return (
+    <Suspense fallback={null}>
+      {renderRoute(route, navigate, goBack, actionSeq)}
+    </Suspense>
+  );
+}
+
+function renderRoute(
+  route: Route,
+  navigate: (r: Route) => void,
+  goBack: (fallback?: Route) => void,
+  actionSeq: number,
+) {
   switch (route.view) {
     case "new-session":
       return (

@@ -17,6 +17,46 @@ export default defineConfig({
     target: "es2021",
     minify: "esbuild",
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("@xterm")) {
+              return "vendor-xterm";
+            }
+            if (
+              id.includes("react-markdown") ||
+              id.includes("remark-gfm") ||
+              id.includes("micromark") ||
+              id.includes("mdast") ||
+              id.includes("unist") ||
+              id.includes("vfile") ||
+              id.includes("bail") ||
+              id.includes("trough") ||
+              id.includes("is-plain-obj") ||
+              id.includes("unified") ||
+              id.includes("decode-named-character-reference") ||
+              id.includes("character-entities") ||
+              id.includes("property-information") ||
+              id.includes("html-void-elements") ||
+              id.includes("ccount") ||
+              id.includes("markdown")
+            ) {
+              return "vendor-markdown";
+            }
+            if (
+              id.includes("/react/") ||
+              id.includes("/react-dom/") ||
+              id.includes("/scheduler/") ||
+              id.includes("react-is")
+            ) {
+              return "vendor-react";
+            }
+          }
+
+        },
+      },
+    },
   },
   test: {
     environment: "jsdom",

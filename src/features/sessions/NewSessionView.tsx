@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import "./newSession.css";
 import { api } from "../../api";
+
 import { useAgentRuntime } from "../agents/useAgentRuntime";
 import RuntimePopover from "./RuntimePopover";
 import { readNewSessionPreferences, updateNewSessionPreferences, lastNewSessionRuntime, rememberNewSessionRuntime } from "./newSessionPreferences";

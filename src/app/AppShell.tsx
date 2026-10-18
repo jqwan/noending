@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useTransition, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
 import NavigationRail, { isSessionRoute } from "../layout/NavigationRail";
-import Router from "./Router";
+import Router, { preloadCommonRoutes } from "./Router";
 import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
@@ -15,12 +15,13 @@ import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, type Route } from "./routes";
 import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
-import { sessionDetailCache } from "../features/sessions/SessionDetailView";
-import { clearSessionsCache } from "../features/sessions/SessionsView";
-import { clearProjectDetailCache } from "../features/projects/ProjectDetail";
-import { clearProjectCardsCache } from "../features/projects/ProjectsView";
+import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
+import { clearSessionsCache } from "../features/sessions/sessionsCache";
+import { clearProjectDetailCache } from "../features/projects/projectDetailCache";
+import { clearProjectCardsCache } from "../features/projects/projectCardsCache";
 import { clearWorkstreamCardsCache } from "../features/workstreams/useWorkstreamCards";
-import { clearWorkstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
+import { clearWorkstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
+
 
 type NavigationState = { entries: Route[]; index: number };
 
@@ -66,10 +67,23 @@ function sameRoute(a: Route, b: Route): boolean {
  */
 export default function AppShell() {
   useAutoHideScrollbars();
+  const [, startTransition] = useTransition();
   const [navigation, setNavigation] = useState<NavigationState>({
     entries: [{ view: "new-session" }],
     index: 0,
   });
+
+  // 在后台空闲时预热常用路由分块，确保点击切换时零等待且无 Suspense 闪烁
+  useEffect(() => {
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      const id = (window as unknown as { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
+        .requestIdleCallback(() => preloadCommonRoutes(), { timeout: 2000 });
+      return () => (window as unknown as { cancelIdleCallback: (id: number) => void }).cancelIdleCallback(id);
+    }
+    const timer = setTimeout(() => preloadCommonRoutes(), 120);
+    return () => clearTimeout(timer);
+  }, []);
+
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("noending.sidebarCollapsed") === "true",
@@ -128,18 +142,20 @@ export default function AppShell() {
     const request = ++navigationRequest.current;
     const commit = (r: Route) => {
       if (request !== navigationRequest.current || isRemovedRoute(r)) return;
-      setNavigation((current) => {
-        const entries = current.entries.slice(0, current.index + 1);
-        const currentRoute = entries[entries.length - 1];
-        if (sameRoute(currentRoute, r)) {
-          entries[entries.length - 1] = r;
+      startTransition(() => {
+        setNavigation((current) => {
+          const entries = current.entries.slice(0, current.index + 1);
+          const currentRoute = entries[entries.length - 1];
+          if (sameRoute(currentRoute, r)) {
+            entries[entries.length - 1] = r;
+            return { entries, index: entries.length - 1 };
+          }
+          entries[entries.length - 1] = withoutAction(currentRoute);
+          entries.push(r);
           return { entries, index: entries.length - 1 };
-        }
-        entries[entries.length - 1] = withoutAction(currentRoute);
-        entries.push(r);
-        return { entries, index: entries.length - 1 };
+        });
+        if ("action" in r && r.action) setActionSeq(++seqRef.current);
       });
-      if ("action" in r && r.action) setActionSeq(++seqRef.current);
     };
     const prepared = prepareNavigationTitle(normalizeRoute(target));
     if (prepared instanceof Promise) {
@@ -187,25 +203,29 @@ export default function AppShell() {
 
   const goBack = useCallback((fallback?: Route) => {
     ++navigationRequest.current;
-    setNavigation((current) => {
-      if (current.index === 0) {
-        return fallback ? { entries: [fallback], index: 0 } : current;
-      }
-      const entries = current.entries.slice();
-      entries[current.index - 1] = withoutAction(entries[current.index - 1]);
-      return { entries, index: current.index - 1 };
+    startTransition(() => {
+      setNavigation((current) => {
+        if (current.index === 0) {
+          return fallback ? { entries: [fallback], index: 0 } : current;
+        }
+        const entries = current.entries.slice();
+        entries[current.index - 1] = withoutAction(entries[current.index - 1]);
+        return { entries, index: current.index - 1 };
+      });
     });
-  }, []);
+  }, [startTransition]);
 
   const goForward = useCallback(() => {
     ++navigationRequest.current;
-    setNavigation((current) => {
-      if (current.index >= current.entries.length - 1) return current;
-      const entries = current.entries.slice();
-      entries[current.index + 1] = withoutAction(entries[current.index + 1]);
-      return { entries, index: current.index + 1 };
+    startTransition(() => {
+      setNavigation((current) => {
+        if (current.index >= current.entries.length - 1) return current;
+        const entries = current.entries.slice();
+        entries[current.index + 1] = withoutAction(entries[current.index + 1]);
+        return { entries, index: current.index + 1 };
+      });
     });
-  }, []);
+  }, [startTransition]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {

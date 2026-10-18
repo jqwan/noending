@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
+import "./promptTemplates.css";
+
 import { Modal, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";

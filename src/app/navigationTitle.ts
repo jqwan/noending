@@ -1,8 +1,9 @@
 import { api } from "../api";
-import { sessionDetailCache } from "../features/sessions/SessionDetailView";
-import { sessionDisplayTitle } from "../features/sessions/SessionTable";
-import { projectDetailCache } from "../features/projects/ProjectDetail";
-import { workstreamDetailCache } from "../features/workstreams/WorkstreamDetailView";
+import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
+import { sessionDisplayTitle } from "../features/sessions/sessionDisplay";
+import { projectDetailCache } from "../features/projects/projectDetailCache";
+import { workstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
+
 import { sessionPages } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
 import { isRemovedRoute } from "./removedTargets";

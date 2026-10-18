@@ -5,7 +5,9 @@ import CustomSelect from "../../components/CustomSelect";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import "../workstreams/workstreams.css";
 import { api } from "../../api";
+
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
@@ -40,17 +42,14 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
   paths: (a, b) => b.path_count - a.path_count || a.name.localeCompare(b.name, "zh-Hans"),
 };
 
-let cachedProjectCards: ProjectCardData[] | null = null;
-
-export function clearProjectCardsCache() {
-  cachedProjectCards = null;
-}
+import { projectCardsCache, clearProjectCardsCache } from "./projectCardsCache";
+export { clearProjectCardsCache };
 
 export default function ProjectsView({ navigate, scope }: { navigate: (r: Route) => void; scope?: "unarchived" | "archived" }) {
   const archivedMode = scope === "archived";
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
-  const [cards, setCards] = useState<ProjectCardData[] | null>(cachedProjectCards);
+  const [cards, setCards] = useState<ProjectCardData[] | null>(projectCardsCache.cards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState("projects.query", "");
   const [filter, setFilter] = useViewPreference<FilterKey>("projects.filter", "all", preferenceValues("all", "ok", "missing"));
@@ -64,7 +63,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       .listProjectCards()
       .then((cs) => {
         const current = cs.filter(p => !removedTargets.projects.has(p.id));
-        cachedProjectCards = current;
+        projectCardsCache.cards = current;
         setCards(current);
         setListError("");
       })

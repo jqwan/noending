@@ -12,12 +12,16 @@ import Icon from "../../components/Icon";
 import AgentIcon from "../../components/AgentIcon";
 import PageHeader from "../../layout/PageHeader";
 import { api } from "../../api";
+import "./sessions.css";
 import { showToast } from "../../components/Toast";
+
 import SessionMessage, { messageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionHeaderActions from "./SessionHeaderActions";
-import { sessionDisplayTitle, UNTITLED_SESSION } from "./SessionTable";
-import { sessionDetailCache } from "./SessionDetailView";
+import { sessionDisplayTitle, UNTITLED_SESSION } from "./sessionDisplay";
+import { sessionDetailCache } from "./sessionDetailCache";
+import { useLoadingDelay } from "../../hooks/useLoadingDelay";
+
 import type {
   Agent,
   Session,
@@ -161,9 +165,11 @@ export default function SessionConversationView({
     () => (initialTitle ? null : sessionDetailCache.get(sessionId)?.session ?? null),
   );
   const [messages, setMessages] = useState<SessionWindowMessage[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [marks, setMarks] = useState<SessionMessageMark[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
+  const showLoading = useLoadingDelay(!loaded && !failed);
   /** 头部动作簇的就地刷新信号：重跑打开即取的那次读取。 */
   const [reloadSeq, setReloadSeq] = useState(0);
   const [working, setWorking] = useState(false);
@@ -218,6 +224,7 @@ export default function SessionConversationView({
     setCursor(page.next_before_ordinal);
     setTailOrdinal(page.tail_ordinal);
     setRemaining(page.remaining);
+    setLoaded(true);
   }, []);
 
   const applyTail = useCallback((page: SessionMessageWindow) => {
@@ -271,6 +278,7 @@ export default function SessionConversationView({
   useEffect(() => {
     let live = true;
     setFailed(false);
+    setLoaded(false);
     void Promise.all([
       api.getSessionDetail(sessionId),
       api.getSessionMessages(sessionId, { limit: PAGE_SIZE }),
@@ -572,7 +580,13 @@ export default function SessionConversationView({
               </button>
             </div>
           )}
-          {messages.length === 0 ? (
+          {!loaded ? (
+            showLoading ? (
+              <div className="small muted" style={{ margin: "40px auto", textAlign: "center" }} role="status">
+                正在读取消息…
+              </div>
+            ) : null
+          ) : messages.length === 0 ? (
             <div className="empty">
               还没有同步消息。
               <div className="small" style={{ marginTop: 4 }}>

@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { listen } from "@tauri-apps/api/event";
 import "@xterm/xterm/css/xterm.css";
+import "./sessions.css";
 import PageHeader from "../../layout/PageHeader";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import { DesktopContinueButton } from "./SessionHeaderActions";

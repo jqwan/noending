@@ -7,8 +7,9 @@ import type { ProjectContextView, SessionListItem } from "../../types";
 
 import Icon from "../../components/Icon";
 
-const cache = new Map<string, ProjectContextView>();
-export function clearProjectSummaryCache() { cache.clear(); }
+import { projectSummaryCache as cache, clearProjectSummaryCache } from "./projectSummaryCache";
+export { clearProjectSummaryCache };
+
 
 /** Pure reads on navigation; extraction requires an explicit user action. */
 export default function ProjectSummary({ projectId, sessions }: { projectId: string; sessions: SessionListItem[] }) {

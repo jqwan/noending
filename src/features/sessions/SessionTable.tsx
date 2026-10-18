@@ -1,9 +1,11 @@
 import { useViewState } from "../../hooks/useViewState";
 import Icon from "../../components/Icon";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
+import "./sessions.css";
+import { type AgentStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
+
 import {
   continueSessionTerminalWithToast,
   terminalContinueState,
@@ -14,39 +16,33 @@ import {
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
+import {
+  UNTITLED_SESSION,
+  NO_CWD,
+  UNKNOWN_AGENT,
+  UNNAMED_WORKSTREAM,
+  PROJECT_PENDING,
+  PROJECT_NO_PATH,
+  agentDisplayLabel,
+  sessionDisplayTitle,
+} from "./sessionDisplay";
 
 /* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
  * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
  * provenance（AGENTS.md: Context Provenance Fidelity）。 */
 
-/** 无标题 / title 未知的 Session：不拿 root_agent_session_id 当标题糊用户。 */
-export const UNTITLED_SESSION = "未命名会话";
+export {
+  UNTITLED_SESSION,
+  NO_CWD,
+  UNKNOWN_AGENT,
+  UNNAMED_WORKSTREAM,
+  PROJECT_PENDING,
+  PROJECT_NO_PATH,
+  agentDisplayLabel,
+  sessionDisplayTitle,
+};
 
-/** 无 cwd 的 Session 仍然合法（Workstream 不是路径，Session 也不持有路径）。 */
-export const NO_CWD = "未设置";
 
-/** 后端新增未知 Agent 时的兜底，不留空白单元格。 */
-export const UNKNOWN_AGENT = "未知 Agent";
-
-/** Workstream 标题为空串时的兜底（Session 可以未归属，但不能显示成空白格）。 */
-export const UNNAMED_WORKSTREAM = "未命名任务";
-
-/** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
-export const PROJECT_PENDING = "待解析";
-
-/** 连 cwd 都没有的 Project 单元格状态（v0.2：Project 只能从工作目录派生）。 */
-export const PROJECT_NO_PATH = "无工作目录";
-
-export function agentDisplayLabel(agent: Agent | null | undefined): string {
-  const key = (agent ?? "") as string;
-  return (AGENT_LABELS as Record<string, string>)[key] ?? UNKNOWN_AGENT;
-}
-
-/** title 由首条用户消息派生，可能为 null / 全空白。 */
-export function sessionDisplayTitle(title: string | null | undefined): string {
-  const t = (title ?? "").replace(/\s+/g, " ").trim();
-  return t === "" ? UNTITLED_SESSION : t;
-}
 
 /**
  * Project 单元格。v0.2 里 Project 只有一条事实链：`workspace_path_id →
@@ -277,47 +273,40 @@ export default function SessionCards({
     [sessions, visibleCount, workstreamTitleById, projectNameById],
   );
 
+  const terminalsBySessionId = useMemo(() => {
+    const map = new Map<string, TerminalSummary[]>();
+    for (const t of terminals ?? []) {
+      if (!t.session_id) continue;
+      const list = map.get(t.session_id);
+      if (list) list.push(t);
+      else map.set(t.session_id, [t]);
+    }
+    return map;
+  }, [terminals]);
+
   if (viewMode === "list") {
     return (
       <div className="session-list" key="session-list">
         {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
-          <article className="session-list-row" key={`list-${s.id}`}>
-            <button className="session-open" onClick={() => onOpen(s.id)}>
-              <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
-                <AgentIcon agent={s.agent} size={15} />
-                <span>{sessionDisplayTitle(s.title)}</span>
-              </span>
-              <span className="session-list-meta">
-                <span>{agentDisplayLabel(s.agent)}</span>
-                {workstream && (
-                  <span title={workstreamFull ?? undefined} className="session-list-tag">
-                    <Icon name="tasks" />
-                    <span>{workstream}</span>
-                  </span>
-                )}
-                {!project.dim && (
-                  <span title={project.hint} className="session-list-tag">
-                    <Icon name="project" />
-                    <span>{project.text}</span>
-                  </span>
-                )}
-                <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-              </span>
-              {s.cwd && (
-                <span className="session-list-path" title={s.cwd}>
-                  <Icon name="folder" />
-                  <span>{cwdDisplayLabel(s.cwd, 90)}</span>
-                </span>
-              )}
-            </button>
-            <div className="session-list-actions">
-              <SessionResumeButton session={s} resumeState={resumeStates[s.id]} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
-              {s.archived_at ? <>
-                <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
-                <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
-              </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
-            </div>
-          </article>
+          <SessionListRowItem
+            key={`list-${s.id}`}
+            session={s}
+            workstream={workstream}
+            workstreamFull={workstreamFull}
+            project={project}
+            resumeState={resumeStates[s.id]}
+            agentStatus={agentStatus}
+            onOpen={onOpen}
+            onResume={onResume}
+            onTerminalResume={onTerminalResume}
+            onArchive={onArchive}
+            onRestore={onRestore}
+            onDelete={onDelete}
+            busy={busy}
+            navigate={navigate}
+            terminals={terminals}
+            boundTerminals={terminalsBySessionId.get(s.id)}
+          />
         ))}
         {sessions.length > visibleCount && (
           <div style={{ marginTop: 14, textAlign: "center" }}>
@@ -333,75 +322,24 @@ export default function SessionCards({
   return (
     <div className="ws-grid board-grid" key="session-cards">
       {rows.slice(0, visibleCount).map(({ session: s, workstreamFull, project }) => (
-        <article
-          className="ws-card session-card full"
+        <SessionCardItem
           key={`card-${s.id}`}
-          tabIndex={0}
-          role="button"
-          onClick={() => onOpen(s.id)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              onOpen(s.id);
-            }
-          }}
-        >
-          <header className="ws-card-head">
-            <div className="session-card-title-wrap session-list-title" title={sessionDisplayTitle(s.title)}>
-              <AgentIcon agent={s.agent} size={16} />
-              <h3 className="ws-card-title" style={{ minWidth: 0, flex: 1 }}>
-                <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
-              </h3>
-            </div>
-            {s.archived_at && (
-              <div className="ws-card-side">
-                <span className="badge warn">已归档</span>
-              </div>
-            )}
-          </header>
-
-          <div className="session-card-body">
-            <div className="board-stats">
-              <span title="历史消息">
-                <Icon name="chatLines" />
-                {s.latest_message_seq ?? 0}<span>消息</span>
-                <span className="sr-only">{s.latest_message_seq ?? 0} 条消息</span>
-              </span>
-              <span title={workstreamFull ? `跟踪任务: ${workstreamFull}` : "跟踪任务"}>
-                <Icon name="tasks" />
-                {s.tracked_workstream_ids.length}<span>任务</span>
-                <span className="sr-only">{s.tracked_workstream_ids.length} 个任务</span>
-              </span>
-            </div>
-
-            {!project.dim && (
-              <div className="session-card-prop" title={project.hint}>
-                <Icon name="project" />
-                <span className="truncate">{project.text}</span>
-              </div>
-            )}
-
-            {s.cwd && (
-              <div className="session-card-path" title={s.cwd}>
-                <Icon name="folder" />
-                <span className="mono">{cwdDisplayLabel(s.cwd, 40)}</span>
-              </div>
-            )}
-          </div>
-
-          <footer className="ws-card-meta session-card-meta">
-            <span className="muted small" title={formatDateTime(s.last_activity_at ?? s.started_at)}>
-              {timeAgo(s.last_activity_at ?? s.started_at)}
-            </span>
-            <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-              <SessionResumeButton session={s} resumeState={resumeStates[s.id]} agentStatus={agentStatus} onResume={onResume} onTerminalResume={onTerminalResume} navigate={navigate} terminals={terminals} />
-              {s.archived_at ? <>
-                <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
-                <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
-              </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
-            </div>
-          </footer>
-        </article>
+          session={s}
+          workstreamFull={workstreamFull}
+          project={project}
+          resumeState={resumeStates[s.id]}
+          agentStatus={agentStatus}
+          onOpen={onOpen}
+          onResume={onResume}
+          onTerminalResume={onTerminalResume}
+          onArchive={onArchive}
+          onRestore={onRestore}
+          onDelete={onDelete}
+          busy={busy}
+          navigate={navigate}
+          terminals={terminals}
+          boundTerminals={terminalsBySessionId.get(s.id)}
+        />
       ))}
       {sessions.length > visibleCount && (
         <div style={{ gridColumn: "1 / -1", textAlign: "center", marginTop: 8 }}>
@@ -414,6 +352,209 @@ export default function SessionCards({
   );
 }
 
+interface SessionRowProps {
+  session: SessionListItem;
+  workstream: string | null;
+  workstreamFull: string | null;
+  project: ProjectCell;
+  resumeState?: TerminalResumeState;
+  agentStatus: Record<string, AgentStatusEntry> | null;
+  onOpen: (id: string) => void;
+  onResume: (sessionId: string) => void;
+  onTerminalResume?: (session: SessionListItem) => void;
+  onArchive: (id: string) => void;
+  onRestore?: (id: string) => void;
+  onDelete?: (id: string) => void;
+  busy?: boolean;
+  navigate?: (r: Route) => void;
+  terminals?: TerminalSummary[];
+  boundTerminals?: TerminalSummary[];
+}
+
+const SessionListRowItem = memo(function SessionListRowItem({
+  session: s,
+  workstream,
+  workstreamFull,
+  project,
+  resumeState,
+  agentStatus,
+  onOpen,
+  onResume,
+  onTerminalResume,
+  onArchive,
+  onRestore,
+  onDelete,
+  busy,
+  navigate,
+  terminals,
+  boundTerminals,
+}: SessionRowProps) {
+  return (
+    <article className="session-list-row">
+      <button className="session-open" onClick={() => onOpen(s.id)}>
+        <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
+          <AgentIcon agent={s.agent} size={15} />
+          <span>{sessionDisplayTitle(s.title)}</span>
+        </span>
+        <span className="session-list-meta">
+          <span>{agentDisplayLabel(s.agent)}</span>
+          {workstream && (
+            <span title={workstreamFull ?? undefined} className="session-list-tag">
+              <Icon name="tasks" />
+              <span>{workstream}</span>
+            </span>
+          )}
+          {!project.dim && (
+            <span title={project.hint} className="session-list-tag">
+              <Icon name="project" />
+              <span>{project.text}</span>
+            </span>
+          )}
+          <span title={formatDateTime(s.last_activity_at ?? s.started_at)}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
+        </span>
+        {s.cwd && (
+          <span className="session-list-path" title={s.cwd}>
+            <Icon name="folder" />
+            <span>{cwdDisplayLabel(s.cwd, 90)}</span>
+          </span>
+        )}
+      </button>
+      <div className="session-list-actions">
+        <SessionResumeButton
+          session={s}
+          resumeState={resumeState}
+          agentStatus={agentStatus}
+          onResume={onResume}
+          onTerminalResume={onTerminalResume}
+          navigate={navigate}
+          terminals={terminals}
+          boundTerminals={boundTerminals}
+        />
+        {s.archived_at ? <>
+          <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
+          <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
+        </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
+      </div>
+    </article>
+  );
+});
+
+interface SessionCardProps {
+  session: SessionListItem;
+  workstreamFull: string | null;
+  project: ProjectCell;
+  resumeState?: TerminalResumeState;
+  agentStatus: Record<string, AgentStatusEntry> | null;
+  onOpen: (id: string) => void;
+  onResume: (sessionId: string) => void;
+  onTerminalResume?: (session: SessionListItem) => void;
+  onArchive: (id: string) => void;
+  onRestore?: (id: string) => void;
+  onDelete?: (id: string) => void;
+  busy?: boolean;
+  navigate?: (r: Route) => void;
+  terminals?: TerminalSummary[];
+  boundTerminals?: TerminalSummary[];
+}
+
+const SessionCardItem = memo(function SessionCardItem({
+  session: s,
+  workstreamFull,
+  project,
+  resumeState,
+  agentStatus,
+  onOpen,
+  onResume,
+  onTerminalResume,
+  onArchive,
+  onRestore,
+  onDelete,
+  busy,
+  navigate,
+  terminals,
+  boundTerminals,
+}: SessionCardProps) {
+  return (
+    <article
+      className="ws-card session-card full"
+      tabIndex={0}
+      role="button"
+      onClick={() => onOpen(s.id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(s.id);
+        }
+      }}
+    >
+      <header className="ws-card-head">
+        <div className="session-card-title-wrap session-list-title" title={sessionDisplayTitle(s.title)}>
+          <AgentIcon agent={s.agent} size={16} />
+          <h3 className="ws-card-title" style={{ minWidth: 0, flex: 1 }}>
+            <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
+          </h3>
+        </div>
+        {s.archived_at && (
+          <div className="ws-card-side">
+            <span className="badge warn">已归档</span>
+          </div>
+        )}
+      </header>
+
+      <div className="session-card-body">
+        <div className="board-stats">
+          <span title="历史消息">
+            <Icon name="chatLines" />
+            {s.latest_message_seq ?? 0}<span>消息</span>
+            <span className="sr-only">{s.latest_message_seq ?? 0} 条消息</span>
+          </span>
+          <span title={workstreamFull ? `跟踪任务: ${workstreamFull}` : "跟踪任务"}>
+            <Icon name="tasks" />
+            {s.tracked_workstream_ids.length}<span>任务</span>
+            <span className="sr-only">{s.tracked_workstream_ids.length} 个任务</span>
+          </span>
+        </div>
+
+        {!project.dim && (
+          <div className="session-card-prop" title={project.hint}>
+            <Icon name="project" />
+            <span className="truncate">{project.text}</span>
+          </div>
+        )}
+
+        {s.cwd && (
+          <div className="session-card-path" title={s.cwd}>
+            <Icon name="folder" />
+            <span className="mono">{cwdDisplayLabel(s.cwd, 40)}</span>
+          </div>
+        )}
+      </div>
+
+      <footer className="ws-card-meta session-card-meta">
+        <span className="muted small" title={formatDateTime(s.last_activity_at ?? s.started_at)}>
+          {timeAgo(s.last_activity_at ?? s.started_at)}
+        </span>
+        <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
+          <SessionResumeButton
+            session={s}
+            resumeState={resumeState}
+            agentStatus={agentStatus}
+            onResume={onResume}
+            onTerminalResume={onTerminalResume}
+            navigate={navigate}
+            terminals={terminals}
+            boundTerminals={boundTerminals}
+          />
+          {s.archived_at ? <>
+            <button className="btn small ghost icon-button" disabled={busy} title="取消归档" aria-label={`取消归档${sessionDisplayTitle(s.title)}`} onClick={() => onRestore?.(s.id)}><Icon name="unarchive" /></button>
+            <button className="btn small ghost icon-button danger" disabled={busy} title="永久删除" aria-label={`永久删除${sessionDisplayTitle(s.title)}`} onClick={() => onDelete?.(s.id)}><Icon name="trash" /></button>
+          </> : <button className="btn small ghost icon-button" disabled={busy} title="归档" aria-label={`将${sessionDisplayTitle(s.title)}归档`} onClick={() => onArchive(s.id)}><Icon name="archive" /></button>}
+        </div>
+      </footer>
+    </article>
+  );
+});
+
 /** Single inline continue action: terminal-capable formats use terminal, otherwise desktop. */
 export function SessionResumeButton({
   session,
@@ -422,6 +563,7 @@ export function SessionResumeButton({
   onTerminalResume,
   navigate,
   terminals,
+  boundTerminals: passedBoundTerminals,
   resumeState,
 }: {
   session: SessionListItem;
@@ -430,13 +572,18 @@ export function SessionResumeButton({
   onTerminalResume?: (session: SessionListItem) => void;
   navigate?: (r: Route) => void;
   terminals?: TerminalSummary[];
+  boundTerminals?: TerminalSummary[];
   resumeState?: TerminalResumeState;
 }) {
   const [terminalBusy, setTerminalBusy] = useState(false);
   const mode = resolveSessionContinueMode(session);
 
+  const boundTerminals = useMemo(() => {
+    if (passedBoundTerminals) return passedBoundTerminals;
+    return (terminals ?? []).filter((t) => t.session_id === session.id);
+  }, [passedBoundTerminals, terminals, session.id]);
+
   if (mode === "terminal") {
-    const boundTerminals = (terminals ?? []).filter(t => t.session_id === session.id);
     const terminalCount = boundTerminals.length;
     const runningCount = boundTerminals.filter(t => t.live).length;
     const hasLiveTerminal = runningCount > 0;

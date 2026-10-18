@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
+import "./settings.css";
+
 import ContextSettings from "./ContextSettings";
 import PageHeader from "../../layout/PageHeader";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";

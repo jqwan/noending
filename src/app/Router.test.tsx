@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import Router from "./Router";
 import type { Agent } from "../types";
@@ -25,11 +25,11 @@ vi.mock("../features/sessions/NewSessionView", () => ({
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
 
-it("routes new-session presets and resets the draft when any preset changes", () => {
+it("routes new-session presets and resets the draft when any preset changes", async () => {
   const navigate = vi.fn();
   const goBack = vi.fn();
   const { rerender } = render(<Router route={{ view: "new-session", workstreamId: "w1", agent: "codex" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-  expect(screen.getByLabelText("新会话预置").textContent).toBe("w1:codex:");
+  expect((await screen.findByLabelText("新会话预置")).textContent).toBe("w1:codex:");
   for (const preset of [
     { workstreamId: "w2", agent: "codex" as const },
     { workstreamId: "w2", agent: "claude_code" as const },
@@ -37,29 +37,30 @@ it("routes new-session presets and resets the draft when any preset changes", ()
   ]) {
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "之前的草稿" } });
     rerender(<Router route={{ view: "new-session", ...preset }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-    expect(screen.getByLabelText("新会话预置").textContent).toBe(`${preset.workstreamId}:${preset.agent}:${"projectId" in preset ? preset.projectId : ""}`);
+    await waitFor(() => expect(screen.getByLabelText("新会话预置").textContent).toBe(`${preset.workstreamId}:${preset.agent}:${"projectId" in preset ? preset.projectId : ""}`));
     expect((screen.getByLabelText("首条消息") as HTMLInputElement).value).toBe("");
   }
 });
 
-it("dispatches session overview, conversation and terminal routes with their identities", () => {
+it("dispatches session overview, conversation and terminal routes with their identities", async () => {
   const navigate = vi.fn();
   const goBack = vi.fn();
   const props = { navigate, goBack, actionSeq: 0 };
   const sessionRoute = { view: "session" as const, sessionId: "s1", initialTitle: "T", initialAgent: "codex" as const };
   const { rerender } = render(<Router route={sessionRoute} {...props} />);
-  expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", navigate }), expect.anything());
+  await waitFor(() => expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", navigate }), expect.anything()));
   expect(conversation).not.toHaveBeenCalled();
+
   rerender(<Router route={{ ...sessionRoute, entry: "conversation", initialTotal: 12 }} {...props} />);
-  expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", initialTotal: 12, navigate }), expect.anything());
+  await waitFor(() => expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", initialTotal: 12, navigate }), expect.anything()));
   rerender(<Router route={{ view: "terminal", terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1" }} {...props} />);
-  expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1", navigate }), expect.anything());
+  await waitFor(() => expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1", navigate }), expect.anything()));
 });
 
-it("opens an extension detail with its resource and source workspace identities", () => {
+it("opens an extension detail with its resource and source workspace identities", async () => {
   const navigate = vi.fn();
   const goBack = vi.fn();
   render(<Router route={{ view: "extension", resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-  expect(extension).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate }), expect.anything());
+  await waitFor(() => expect(extension).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate }), expect.anything()));
   expect(extension.mock.calls[0][0]).not.toHaveProperty("goBack");
 });

@@ -8,8 +8,8 @@ import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams
 import PreferenceList from "../preferences/PreferenceList";
 import ExtensionScopeConfig from "../extensions/ExtensionScopeConfig";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
-import { clearProjectCardsCache } from "./ProjectsView";
-import ProjectSummary, { clearProjectSummaryCache } from "./ProjectSummary";
+import { clearProjectCardsCache } from "./projectCardsCache";
+import ProjectSummary from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import { clearWorkstreamCardsCache } from "../workstreams/useWorkstreamCards";
@@ -27,12 +27,10 @@ import type { Route } from "../../app/routes";
  * Sessions（走权威链，不走缓存列，M29）。
  * 项目事实由目录派生，当前摘要由用户主动更新或重新生成。
  */
-export const projectDetailCache = new Map<string, ProjectDetailData>();
+import { projectDetailCache, clearProjectDetailCache } from "./projectDetailCache";
+import { useLoadingDelay } from "../../hooks/useLoadingDelay";
+export { projectDetailCache, clearProjectDetailCache };
 
-export function clearProjectDetailCache() {
-  projectDetailCache.clear();
-  clearProjectSummaryCache();
-}
 
 export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   projectId: string;
@@ -42,6 +40,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
   const [gone, setGone] = useState(false);
   const [failure, setFailure] = useState("");
+  const showSkeleton = useLoadingDelay(data === null && failure === "" && !gone);
   const [renaming, setRenaming] = useState(false);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
@@ -145,10 +144,12 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           <PageHeader
             title={initialTitle ?? ""}
           />
-          <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
-            <div className="skeleton" style={{ height: 100, borderRadius: "var(--radius-lg)" }} />
-            <div className="skeleton" style={{ height: 160, borderRadius: "var(--radius-lg)" }} />
-          </div>
+          {showSkeleton && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
+              <div className="skeleton" style={{ height: 100, borderRadius: "var(--radius-lg)" }} />
+              <div className="skeleton" style={{ height: 160, borderRadius: "var(--radius-lg)" }} />
+            </div>
+          )}
         </div>
       );
     }

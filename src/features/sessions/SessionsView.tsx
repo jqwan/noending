@@ -2,7 +2,9 @@ import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatch
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import "./sessions.css";
 import { api } from "../../api";
+
 import PageHeader from "../../layout/PageHeader";
 import EmptyState from "../../components/EmptyState";
 import Icon from "../../components/Icon";
@@ -21,19 +23,8 @@ import type { Route, SessionScope } from "../../app/routes";
  * Workstream 浏览。列表加载完整轻量列表项以保留筛选语义，详情与消息按需读取。
  * 未归档和已归档使用相同的筛选与展示，归档只改变继续和删除动作。
  */
-let cachedNormalSessions: SessionListItem[] | null = null;
-let cachedArchivedSessions: SessionListItem[] | null = null;
-let cachedProjects: Project[] = [];
-let cachedSources: IngestSource[] | null = null;
-let cachedWorkstreamTitleById = new Map<string, string>();
-
-export function clearSessionsCache() {
-  cachedNormalSessions = null;
-  cachedArchivedSessions = null;
-  cachedProjects = [];
-  cachedSources = null;
-  cachedWorkstreamTitleById = new Map();
-}
+import { sessionsCache, clearSessionsCache } from "./sessionsCache";
+export { clearSessionsCache };
 
 export default function SessionsView({ navigate, scope }: {
   navigate: (r: Route) => void;
@@ -41,13 +32,14 @@ export default function SessionsView({ navigate, scope }: {
 }) {
   const statePrefix = "sessions";
   const [archivedMode, setArchivedMode] = useState(scope === "archived");
-  const [sessions, setSessions] = useState<SessionListItem[] | null>(() => archivedMode ? cachedArchivedSessions : cachedNormalSessions);
-  const [projects, setProjects] = useState<Project[]>(cachedProjects);
+  const [sessions, setSessions] = useState<SessionListItem[] | null>(() => archivedMode ? sessionsCache.archivedSessions : sessionsCache.normalSessions);
+  const [projects, setProjects] = useState<Project[]>(sessionsCache.projects);
   /** Workstream id → 标题：跟踪任务 ID 的标题在这里解析。 */
-  const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(cachedWorkstreamTitleById);
+  const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(sessionsCache.workstreamTitleById);
   /** Session 来源只用来把"空"拆成两种真实情况：没启用来源 vs 启用了但还没发现。
    *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
-  const [sources, setSources] = useState<IngestSource[] | null>(cachedSources);
+  const [sources, setSources] = useState<IngestSource[] | null>(sessionsCache.sources);
+
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useViewState(`${statePrefix}.query`, "");
   const [agent, setAgent] = useViewPreference<"all" | Agent>(
@@ -73,14 +65,14 @@ export default function SessionsView({ navigate, scope }: {
         .then((ss) => {
           if (!cancelled) {
             setSources(ss);
-            cachedSources = ss;
+            sessionsCache.sources = ss;
           }
         })
         .catch((e) => {
           console.error(e);
           if (!cancelled) {
             setSources(null);
-            cachedSources = null;
+            sessionsCache.sources = null;
           }
         });
     }
@@ -98,11 +90,11 @@ export default function SessionsView({ navigate, scope }: {
         ws = ws?.filter(w => !removedTargets.workstreams.has(w.id));
         const wsMap = new Map((ws ?? []).map((w) => [w.id, w.title]));
         setWorkstreamTitleById(wsMap);
-        cachedWorkstreamTitleById = wsMap;
+        sessionsCache.workstreamTitleById = wsMap;
         setProjects(ps ?? []);
-        cachedProjects = ps ?? [];
-        if (!archivedMode) cachedNormalSessions = ss;
-        else cachedArchivedSessions = ss;
+        sessionsCache.projects = ps ?? [];
+        if (!archivedMode) sessionsCache.normalSessions = ss;
+        else sessionsCache.archivedSessions = ss;
         setSessions(ss);
         setLoadFailed(false);
       })
@@ -123,7 +115,7 @@ export default function SessionsView({ navigate, scope }: {
   useEffect(() => {
     const isArchived = scope === "archived";
     setArchivedMode(isArchived);
-    setSessions(isArchived ? cachedArchivedSessions : cachedNormalSessions);
+    setSessions(isArchived ? sessionsCache.archivedSessions : sessionsCache.normalSessions);
   }, [scope]);
 
   const projectNameById = useMemo(
@@ -191,8 +183,8 @@ export default function SessionsView({ navigate, scope }: {
       await api.archiveSession(archiveTarget.id);
       showToast("已归档");
       setArchiveSessionId(null);
-      cachedNormalSessions = null;
-      cachedArchivedSessions = null;
+      sessionsCache.normalSessions = null;
+      sessionsCache.archivedSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
@@ -220,8 +212,8 @@ export default function SessionsView({ navigate, scope }: {
     }
     setBulkPurgeBusy(false);
     setBulkPurgeOpen(false);
-    cachedNormalSessions = null;
-    cachedArchivedSessions = null;
+    sessionsCache.normalSessions = null;
+    sessionsCache.archivedSessions = null;
     refresh();
     showToast(
       failed === 0
@@ -237,8 +229,8 @@ export default function SessionsView({ navigate, scope }: {
     try {
       await api.restoreSession(s.id);
       showToast(`已恢复「${sessionDisplayTitle(s.title)}」`);
-      cachedNormalSessions = null;
-      cachedArchivedSessions = null;
+      sessionsCache.normalSessions = null;
+      sessionsCache.archivedSessions = null;
       refresh();
     } catch (e) {
       console.error(e);
@@ -533,7 +525,7 @@ export default function SessionsView({ navigate, scope }: {
         <PermanentDeleteModal
           sessionId={purgeSessionId}
           onClose={() => { setPurgeSessionId(null); refresh(); }}
-          onDeleted={() => { cachedNormalSessions = null; cachedArchivedSessions = null; setPurgeSessionId(null); refresh(); }}
+          onDeleted={() => { sessionsCache.normalSessions = null; sessionsCache.archivedSessions = null; setPurgeSessionId(null); refresh(); }}
         />
       )}
     </div>

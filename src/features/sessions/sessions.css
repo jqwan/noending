@@ -1,0 +1,1200 @@
+/* NoEnding - Sessions Feature Styles (Cards, Table, Conversation, Messages, Tracking) */
+
+/* ---------- Session cards and lists ---------- */
+.session-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+}
+.session-card-head { align-items: flex-start; flex-wrap: wrap; }
+.session-card-agent {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.session-card-body {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  font-size: 13px;
+}
+.session-card-line {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  align-items: baseline;
+}
+.session-card-line > :last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+.session-source-warning {
+  color: var(--warning);
+  font-size: 12px;
+  margin-top: 4px;
+}
+.session-table { width: 100%; border-collapse: collapse; }
+.session-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.session-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--bg-panel);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.session-table tbody tr { cursor: pointer; }
+.session-table tbody tr:hover { background: var(--bg-panel); }
+.session-table .cell-agent { color: var(--text-secondary); }
+.session-table .cell-agent-content { display: flex; align-items: center; gap: 7px; }
+.session-table .cell-title { font-weight: 550; }
+
+/* ---------- Session detail messages ---------- */
+/* 左右各留 8px 内距再负 margin 抵消：悬停底色才不会贴着文字，而独立事件的分隔线
+   也保持同宽（正文位置一点没动）。 */
+.event { display: flex; flex-direction: column; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-sm); }
+/* 技术事件（system / compact / 其它）仍是「分隔线 + 弱化的整行」——它们是系统噪音，
+   不是对话的一方；用户与 Agent 的对话行改用气泡分区，不再画线。 */
+.event.is-tech { padding: 12px 8px; border-top: 1px solid var(--bg-panel); }
+.event.is-tech:first-of-type { border-top: 0; }
+.event .head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+.event .who { font-weight: 600; font-size: 12.5px; white-space: nowrap; }
+/* 「来自谁」：只有跨线程信封（agent_message）才有，跟在 who 后面弱化显示。
+   它可能是一条很长的 agent 路径，所以自己是唯一可压缩的那一项：截断加省略号，
+   时间戳与标签都不跟着折行（全文在 title 提示里）。 */
+.event .from {
+  color: var(--text-muted); font-size: 11.5px;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.event .when { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
+.event .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 气泡只占 82%，对侧留白——一眼能看出「这句是谁说的」。标题行跟着气泡走，
+   而不是横铺整列，否则右对齐的气泡下面挂着一行左起的名字，读起来是断裂的。 */
+.event.is-user .head, .event.is-agent .head { max-width: 82%; }
+.event.is-user .head { align-self: flex-end; justify-content: flex-end; }
+.event.is-agent .head { align-self: flex-start; }
+.event.is-user .body, .event.is-agent .body {
+  max-width: 82%;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+.event.is-user .body {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  border-bottom-right-radius: var(--radius-sm);
+}
+.event.is-agent .body { align-self: flex-start; border-bottom-left-radius: var(--radius-sm); }
+.event.tool .body { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); }
+/* 系统事件里的 Markdown：一份文档用 11.5px 等宽字渲染就不叫预览了。
+   字号归回 .md-body 的 13px、字体归回正文字体；仍然保持 muted 颜色与 system 的降低
+   不透明度——它是系统噪音，只是有结构。 */
+.event.is-tech .body.md-body { font-family: inherit; font-size: 13px; }
+.event.system { opacity: 0.65; }
+.event.system .body { font-size: 12px; color: var(--text-muted); }
+/* 热区从整行收到气泡——整行的悬停底色是条与内容无关的宽条，而点开这件事
+   属于这条消息本身。按钮删掉了（气泡自己就是入口），键盘可达靠 role + tabIndex，
+   焦点环由全局的 :focus-visible 给。正文仍要能拖选复制，所以点击时只确认
+   「没有选中文字」，不阻止选择。 */
+.event .body.clickable { cursor: pointer; transition: background .12s; }
+.event.is-user .body.clickable:hover { background: var(--accent-wash-hover); }
+.event.is-agent .body.clickable:hover { background: var(--bg-hover); }
+/* Markdown 预览直接渲染在气泡里：不能再按字数切——切在 ``` 或 ** 中间会把
+   后半段整块渲染成代码。改成按高度收口 + 底部渐隐，点开看全文。
+   is-clamped 由 JS 量出来：内容本来就短的时候挂渐隐，会把最后两行擦掉。 */
+.event .body.md-body { white-space: normal; max-height: 132px; overflow: hidden; }
+.event .body.md-body.is-clamped {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+}
+
+/* 全文弹窗的正文：保留原始换行，宽度交给 .modal.wide，滚动交给弹窗自己
+   （不在这里再套一层滚动区，否则会出现嵌套滚动条）。 */
+.msg-full { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.65; }
+
+/* Markdown 预览。样式只落在这一个容器里，不去动全局标签：
+   渲染结果来自转录，外观越"普通"越好，免得读者以为这是 NoEnding 自己的排版。 */
+.md-body { font-size: 13px; line-height: 1.7; }
+.md-body > :first-child { margin-top: 0; }
+.md-body > :last-child { margin-bottom: 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+  font-size: 14px; margin: 16px 0 6px;
+}
+.md-body p { margin: 0 0 10px; }
+.md-body ul, .md-body ol { margin: 0 0 10px; padding-left: 22px; }
+.md-body li { margin: 2px 0; }
+.md-body code { font-family: var(--mono); font-size: 12px; background: var(--bg-panel); padding: 1px 5px; border-radius: 4px; }
+.md-body pre { background: var(--bg-panel); padding: 10px 12px; border-radius: var(--radius-sm); overflow-x: auto; margin: 0 0 10px; }
+.md-body pre code { background: transparent; padding: 0; }
+.md-body blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 2px solid var(--border-subtle); color: var(--text-secondary); }
+.md-body table { border-collapse: collapse; margin: 0 0 10px; }
+.md-body th, .md-body td { border: 1px solid var(--border-subtle); padding: 4px 8px; }
+.md-body hr { border: 0; border-top: 1px solid var(--border-subtle); margin: 14px 0; }
+.md-body .md-link { color: var(--accent); }
+.md-body .md-img { color: var(--text-muted); font-size: 12px; }
+
+.md-body .summary-topic { margin: 16px 0 10px; }
+.md-body .summary-topic:first-child { margin-top: 0; }
+.md-body .summary-topic > summary { cursor: pointer; margin-bottom: 6px; }
+.md-body .summary-topic > summary::marker { color: var(--text-muted); font-size: 11px; }
+.md-body .summary-topic > summary > :is(h1, h2, h3, h4, h5, h6) {
+  display: inline; margin: 0;
+}
+.md-body .summary-topic > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.md-body .summary-topic > :last-child { margin-bottom: 0; }
+
+/* ---------- Session conversation reader ---------- */
+/* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
+   最新、向上翻页时也能原地锚住。 */
+.conversation-body { position: relative; display: flex; flex: 1; min-height: 0; }
+
+/* 内嵌终端子页：PTY 在后端，这里只是 attach 的画布；深底是给 TUI 配色用的，
+   不随主题反转。 */
+.terminal-exit-banner {
+  flex: none;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.terminal-body { flex: 1; min-height: 0; display: flex; }
+/* WebKit 对屏幕外聚焦元素的 IME 插入不可靠（xterm 默认把辅助 textarea 扔在
+   left:-9999em）。用更高优先级的选择器把它拉回屏幕内（透明 2px，钉在终端
+   左上角）；组合期间 xterm 会以内联样式把它挪到光标处，内联优先级更高，
+   所以候选窗照常跟随光标。 */
+.terminal-host.terminal-mac .xterm .xterm-helper-textarea {
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+}
+.terminal-host {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-app);
+}
+/* IME preedit expands from xterm's cursor near the right edge. Prevent its
+   overflow from scrolling the host horizontally; xterm's viewport continues
+   to own vertical history scrolling and its textarea owns IME positioning. */
+.terminal-host[data-platform="windows"] {
+  overflow-x: clip;
+  overflow-y: visible;
+}
+.terminal-host[data-platform="windows"]:focus-within { outline: 1px solid var(--accent); outline-offset: -1px; }
+.terminal-context-menu {
+  position: fixed;
+  z-index: 1000;
+  width: 240px;
+  padding: 4px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+.terminal-context-menu button { display: block; width: 100%; padding: 8px 12px; text-align: left; border: 0; background: transparent; color: inherit; border-radius: 3px; }
+.terminal-context-menu button:hover:not(:disabled) { background: var(--bg-active); }
+.terminal-context-menu button:disabled { opacity: .5; }
+.terminal-context-menu [aria-checked="true"]::after { content: " ✓"; }
+.terminal-context-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.conversation-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 只纵向读：.event 的负外边距会溢出几个像素，不裁掉就会出现左右拖动。 */
+  overflow-x: hidden;
+  /* 位置只由代码里的锚点负责：引擎自己再补一次就会叠出一整页的位移。 */
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  padding: 8px 32px 40px;
+}
+@media (max-width: 800px) {
+  .conversation-scroll {
+    padding: 8px 20px 40px;
+  }
+}
+/* 顶部「还有 N 条更早消息」：向上滑会自动加载，也可以直接点这一条。 */
+.conversation-more { display: flex; justify-content: center; padding: 12px 0 20px; }
+/* 中间回复块：默认收起，一行摘要当门（工作了多久、多少条）；展开后把这轮的
+   中间消息缩进排在用户消息与最终回复之间。 */
+.turn-block { margin: 4px 0; }
+.turn-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 3px 8px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.turn-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.turn-toggle .ui-icon { width: 12px; height: 12px; transition: transform 160ms ease; }
+.turn-toggle.open .ui-icon { transform: rotate(90deg); }
+.turn-body {
+  margin: 2px 0 6px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border-subtle);
+}
+.turn-truncated { padding: 4px 8px; }
+/* 用户消息导航条：一条用户消息一根短横，按固定间距排成阶梯。位置只由它在用户消息
+   里的序号决定，不映射到消息在文档里的位置——它是「跳到第几条提问」的目录，不是
+   滚动条的替身。它落在 .main 的右内距里，不压正文，也不跟着内容滚。 */
+.conversation-nav {
+  position: absolute;
+  top: 50%;
+  right: calc(4px - var(--main-gutter));
+  width: 28px;
+  /* 阶梯高过上限就封顶，多出来的由轨道自己滚：刻度间距因此永不被压缩。 */
+  height: min(var(--nav-natural-height, 0px), calc(100% - 48px), 420px);
+  transform: translateY(-50%);
+  transition: height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.nav-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  /* 滚到头不把滚动链传回消息列。 */
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.nav-scroll::-webkit-scrollbar { display: none; }
+.nav-scroll.fade-up { mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 100%); }
+.nav-scroll.fade-down { mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 24px), transparent 100%); }
+.nav-scroll.fade-up.fade-down {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);
+}
+.nav-marks { position: relative; height: var(--nav-natural-height, 0px); }
+.nav-mark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 10px;
+  transform: translateY(-50%);
+  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.nav-tick {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.nav-tick::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--border-subtle);
+  transform: translateY(-50%);
+  transition: width 140ms ease, background 140ms ease;
+}
+/* 还没读进来的用户消息：短一截、淡一点，点它是「先加载再跳过去」。 */
+.nav-tick.is-unloaded::before { width: 8px; opacity: 0.6; }
+.nav-tick:hover::before { width: 18px; background: var(--text-muted); }
+/* 正在为它翻页：脉冲表示「在加载」。 */
+.nav-tick.is-busy::before { animation: nav-tick-busy 1s ease-in-out infinite; }
+/* 正在读的那条：最长最深，一眼看出读到哪了。 */
+.nav-tick.is-active::before { width: 20px; background: var(--text-primary); }
+/* 键盘焦点压过所有静止状态：全局 :focus-visible 会给按钮描一圈，这里的短横也要变。 */
+.nav-tick:focus-visible::before { width: 20px; background: var(--accent); }
+@keyframes nav-tick-busy {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.conversation-jump {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin-inline: auto;
+  bottom: 20px;
+  z-index: 5;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+button.btn.conversation-jump:active {
+  transform: scale(0.96);
+}
+.conversation-jump .ui-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+/* ---------- Aggregate continue button (Desktop / Terminal split button) ---------- */
+.continue-split-btn {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-app);
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+.continue-split-btn:hover {
+  border-color: var(--border-default);
+}
+.continue-split-btn .continue-main-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  width: 28px;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  border-top-left-radius: calc(var(--radius-md) - 1px);
+  border-bottom-left-radius: calc(var(--radius-md) - 1px);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.continue-split-btn .continue-main-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.continue-split-btn .continue-main-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.continue-split-btn .continue-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--border-subtle);
+  flex: none;
+}
+.continue-split-btn .continue-dropdown-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  width: 18px;
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  border-top-right-radius: calc(var(--radius-md) - 1px);
+  border-bottom-right-radius: calc(var(--radius-md) - 1px);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.continue-split-btn .continue-dropdown-btn .ui-icon {
+  width: 10px;
+  height: 10px;
+}
+.continue-split-btn .continue-dropdown-btn:hover,
+.continue-split-btn .continue-dropdown-btn.open {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.continue-split-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 164px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-menu);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  user-select: none;
+}
+.continue-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+.continue-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.continue-menu-item:active:not(:disabled) {
+  background: var(--bg-active);
+}
+.continue-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.continue-menu-item .menu-label {
+  flex: 1;
+  white-space: nowrap;
+}
+.continue-menu-item .menu-check {
+  margin-left: auto;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+}
+.continue-menu-item .menu-check .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* ---------- Session archive / permanent delete ---------- */
+/* 删除预览里的「将删除」清单（会话与任务共用）。 */
+.purge-list { margin: 6px 0 0; padding-left: 18px; }
+.purge-list li { margin: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
+
+.details-feed { border-top: 1px solid var(--border-subtle); margin-top: 18px; }
+.details-feed summary {
+  cursor: pointer; color: var(--text-muted); font-size: 12px; padding: 10px 0;
+  list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.details-feed summary::-webkit-details-marker { display: none; }
+.details-feed summary::before { content: "▸"; transition: transform .15s; }
+.details-feed[open] summary::before { transform: rotate(90deg); }
+.feed-row {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 0; border-top: 1px solid var(--bg-panel); font-size: 12.5px;
+}
+.feed-row .when { color: var(--text-muted); flex: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .mark-reveal {
+    clip-path: inset(0 100% 0 0);
+    animation: mark-reveal 0.7s ease-out forwards;
+  }
+}
+@keyframes mark-reveal { to { clip-path: inset(0 0 0 0); } }
+
+
+/* ---------- Session Cards (会话卡片网格) ---------- */
+.session-card {
+  min-height: 164px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 164px;
+}
+.session-card .ws-card-head {
+  align-items: center;
+}
+.session-card-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.session-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+}
+.session-card-prop {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.session-card-prop .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.session-card-prop .truncate {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+}
+.session-card-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.session-card-path .ui-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.session-card-meta {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.session-list,
+.task-list,
+.project-list {
+  border-top: 1px solid var(--border-subtle);
+}
+.session-list-row,
+.task-list-row,
+.project-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: background 0.12s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 68px;
+}
+.session-list-row:hover,
+.session-list-row:focus-within,
+.task-list-row:hover,
+.task-list-row:focus-within,
+.project-list-row:hover,
+.project-list-row:focus-within {
+  background: var(--bg-panel);
+}
+.session-open,
+.task-open,
+.project-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.session-list-title,
+.task-list-title,
+.project-list-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  font-weight: 600;
+}
+.session-list-title > span,
+.task-list-title > span,
+.project-list-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.session-list-meta,
+.task-list-meta,
+.project-list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.task-list-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+}
+.task-list-summary {
+  color: var(--text-muted);
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-list-actions,
+.project-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-list-path,
+.project-list-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-list-path .ui-icon,
+.project-list-path .ui-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.session-list-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 320px;
+}
+.session-list-tag .ui-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.session-list-tag > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.path-text-with-icon {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+  text-align: left;
+}
+.path-text-with-icon .ui-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  margin-top: 2.5px;
+  color: var(--text-muted);
+}
+.path-text-with-icon > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agent-card.agent-list-item {
+  width: 100%;
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+.session-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.session-title-with-icon .session-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.filter-panel { margin-bottom: 16px; }
+
+.filter-panel > summary { cursor: pointer; color: var(--text-secondary); width: fit-content; margin-bottom: 10px; }
+.filter-panel .toolbar { margin-bottom: 0; }
+
+.settings-nav { align-self: start; position: sticky; top: 0; }
+.settings-pane { min-width: 0; }
+.settings-pane .row-line { flex-wrap: wrap; }
+/* 会话信息字段（只在 Session 详情页右栏，宽度 240–300px）：标签在上、值在下。
+   两列的话值只剩一百来像素，路径与 Agent ID 会被拆成五六行，比多占几行更难读。
+   Field 渲染的是「标签 div + 值 div」两个兄弟节点，所以 :nth-child(odd) 就是标签。 */
+.session-info-fields { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 12px; }
+.session-info-fields > *:nth-child(odd) { margin-top: 12px; }
+.session-info-fields > *:nth-child(odd):first-child { margin-top: 0; }
+.session-info-fields button.link .ui-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+.session-info-fields button.link .agent-icon {
+  color: var(--text-primary);
+}
+.session-field-label-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.session-field-copy-btn {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.session-field-copy-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.session-field-copy-btn.copied {
+  color: var(--text-accent);
+}
+.session-field-copy-btn .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+.path-link {
+  cursor: pointer;
+  transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+}
+.path-link:hover {
+  color: var(--accent) !important;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.project-detail-layout aside .list-row { flex-wrap: wrap; }
+.project-detail-layout aside .grow { flex-basis: 100%; }
+.detail-aside .list-row.session-tracked-task-row,
+.task-detail-aside .list-row { flex-wrap: nowrap; }
+.detail-aside .session-tracked-task-row .grow,
+.task-detail-aside .list-row .grow { flex: 1 1 auto; min-width: 0; flex-basis: auto; }
+.task-detail-aside .side { flex-wrap: nowrap; }
+@media (max-width: 1100px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .settings-nav .nav-item { width: auto; }
+}
+
+.board-page, .agents-page, .settings-page, .session-detail, .task-detail, .project-detail { max-width: none; }
+.path-draft-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 10px; }
+.path-draft-list > .list-row { gap: 10px; flex-wrap: wrap; }
+.path-draft-name { min-width: 0; flex: 1; }
+.path-draft-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+.path-add-actions { gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.path-list-editor .workspace-path-field > .row { flex-wrap: wrap; }
+/* 看板页的搜索 / 筛选区：滚过之后钉在标题行下面，翻到列表中部也能改条件。
+   top 用「band 高 + --head-gap」而不是写 band 高——这正是它的静态位置（看板页
+   --head-gap 被清零，所以就是紧贴 band），钉住位置等于静态位置，不会先跟着滚一截。
+   ::before 垫一层 app 底色：卡片是圆角的，钉住后圆角会漏出从下面滚过去的正文。 */
+.board-toolbar {
+  position: sticky;
+  top: calc(var(--titlebar-height) + var(--head-gap));
+  z-index: 5;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+.board-toolbar::before {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--head-gap)) 0 0;
+  z-index: -1;
+  background: var(--bg-app);
+}
+.board-toolbar .ws-search {
+  margin: 0 0 12px;
+  max-width: 100%;
+}
+.board-toolbar .ws-controls {
+  margin: 0;
+  gap: 8px 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 28px;
+  display: flex;
+  justify-content: space-between;
+}
+.board-toolbar .ws-controls-group {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+}
+.board-toolbar .ws-controls-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.board-toolbar .ws-control {
+  gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+}
+.board-toolbar .ws-control select {
+  width: auto;
+  height: 28px;
+  padding: 0 8px;
+  max-width: 170px;
+  text-overflow: ellipsis;
+  font-size: 12.5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.board-toolbar .ws-control select:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-default);
+}
+.board-toolbar .ws-controls > span,
+.board-toolbar .ws-controls-meta > span {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.board-toolbar .ws-controls .btn.small {
+  height: 28px;
+  white-space: nowrap;
+}
+
+
+/* 迷你列表行（项目/任务详情的会话与任务）：图标 + 标题同行，标题截断。 */
+.mini-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.mini-title > span:first-child {
+  flex: none;
+  display: inline-flex;
+}
+
+/* 会话看板的运行中伪行/伪卡：可点击、与真实会话行视觉同族但有一道 accent 边。 */
+
+/* Unified session titlebar: icon navigation, instance menu and contextual actions. */
+.session-navigation { position: relative; display: flex; flex: none; align-items: center; gap: 8px; }
+.session-action-divider,
+.action-divider { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
+button.btn.ghost.terminal-running,
+.btn.terminal-running,
+.page-head .session-navigation .terminal-running,
+.terminal-running {
+  color: var(--success);
+}
+button.btn.ghost.terminal-running:hover:not(:disabled),
+.btn.terminal-running:hover:not(:disabled) {
+  color: var(--success);
+}
+button.btn.ghost.terminal-exited,
+.btn.terminal-exited,
+.page-head .session-navigation .terminal-exited,
+.terminal-exited {
+  color: var(--text-muted);
+}
+.page-head .session-navigation .terminal-dropdown { width: 18px; }
+.terminal-dropdown .ui-icon { width: 12px; height: 12px; }
+.terminal-menu { min-width: 240px; max-width: min(400px, calc(100vw - 24px)); max-height: 320px; overflow-y: auto; }
+.terminal-menu .continue-menu-item {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px 14px;
+  min-height: 32px; line-height: 20px;
+}
+.terminal-menu-icon { display: flex; align-items: center; justify-content: center; line-height: 0; }
+.terminal-menu-icon > .ui-icon { display: block; width: 16px; height: 16px; }
+.terminal-menu .menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.terminal-menu .menu-check { width: 14px; height: 18px; margin-left: 0; justify-content: center; }
+
+/* Agent activity never changes the terminal connection/action icon. */
+.terminal-activity-indicator {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 14px; flex: none; vertical-align: middle;
+}
+.terminal-activity-marker {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  box-sizing: border-box; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-muted);
+}
+.terminal-activity-marker.is-working {
+  width: 10px; height: 10px; background: none;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-color: var(--accent); animation: terminal-status-spin 1s linear infinite;
+}
+.terminal-activity-marker.is-waiting,
+.terminal-activity-marker.is-failed {
+  width: 11px; height: 11px; background: none; border: 1px solid currentColor;
+  font-size: 9px; line-height: 1; font-weight: 700; font-family: sans-serif;
+}
+.terminal-activity-marker.is-waiting { color: var(--warning); }
+.terminal-activity-marker.is-failed { color: var(--danger); }
+.terminal-activity-marker.is-exited { width: 7px; height: 2px; border-radius: 1px; }
+.terminal-activity-marker.is-unread { background: var(--success); }
+.terminal-connecting > .ui-icon { animation: terminal-status-spin 1s linear infinite; }
+@keyframes terminal-status-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .terminal-activity-marker.is-working,
+  .terminal-connecting > .ui-icon { animation: none; }
+}
+
+
+.session-tracking-panel {
+  position: fixed;
+  top: calc(var(--titlebar-height, 48px) + 8px);
+  right: max(16px, var(--main-gutter, 24px));
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100vh - var(--titlebar-height, 48px) - 24px);
+  z-index: 35;
+  padding: 14px 16px;
+  overflow: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-menu);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.session-tracking-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.session-tracking-head-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.session-tracking-head-title h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.session-tracking-head-title .ui-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-secondary);
+}
+.session-tracking-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.session-tracking-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.session-tracking-panel.collapsed {
+  padding-bottom: 12px;
+  gap: 0;
+}
+.session-tracking-panel.collapsed .session-tracking-head {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.session-tracked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.session-tracked-task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  min-height: 32px;
+  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.session-tracked-task-row:first-of-type {
+  border-top: none;
+}
+.session-tracked-task-row:hover {
+  background: var(--bg-hover);
+}
+.session-tracked-task-row .side { white-space: nowrap; }
+.session-tracked-task-row .mini-title {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.session-tracking-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  min-height: 32px;
+  border-radius: var(--radius-sm);
+  transition: background 0.1s ease;
+}
+.session-tracking-check-label {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.session-tracking-check-label input[type="checkbox"] {
+  cursor: pointer;
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+.session-tracking-row:hover {
+  background: var(--bg-hover);
+}
+.session-tracking-link {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  line-height: 1.4;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.session-tracking-link .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.session-tracking-link:hover {
+  color: var(--accent);
+}
+.session-tracking-link:hover .ui-icon {
+  color: var(--accent);
+}
+.session-tracking-remove:hover {
+  color: var(--danger) !important;
+}
+
+/* 跟踪任务多选弹窗 */
+.session-tracking-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 360px;
+  overflow-y: auto;
+  margin: 12px 0 6px;
+}
+.session-tracking-modal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  min-height: 34px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s ease;
+  user-select: none;
+}
+.session-tracking-modal-row:hover {
+  background: var(--bg-hover);
+}
+.session-tracking-modal-row.tracked {
+  background: var(--bg-panel);
+}
+.session-tracking-modal-row input[type="checkbox"] {
+  cursor: pointer;
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+.session-tracking-modal-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.session-tracking-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+  padding: 4px 8px;
+  background: var(--danger-wash, rgba(220, 38, 38, 0.08));
+  border-radius: var(--radius-sm);
+}

@@ -2,7 +2,9 @@ import { removedTargets } from "../../app/removedTargets";
 import SummaryMarkdown from "./SummaryMarkdown";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "./sessions.css";
 import { api } from "../../api";
+
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
@@ -33,7 +35,9 @@ import type { Route } from "../../app/routes";
  * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / task tracking。
  * 唯一的会话→会话链接是 fork 来源。
  */
-export const sessionDetailCache = new Map<string, SessionDetail>();
+import { sessionDetailCache } from "./sessionDetailCache";
+import { useLoadingDelay } from "../../hooks/useLoadingDelay";
+export { sessionDetailCache };
 
 export default function SessionDetailView({
   sessionId,
@@ -48,6 +52,7 @@ export default function SessionDetailView({
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
+  const showSkeleton = useLoadingDelay(!detail && !failed);
   /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
@@ -137,7 +142,7 @@ export default function SessionDetailView({
             </>
           )}
         </PageHeader>
-        {!failed && (
+        {!failed && showSkeleton && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
             <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
             <div className="skeleton" style={{ height: 180, borderRadius: "var(--radius-lg)" }} />
