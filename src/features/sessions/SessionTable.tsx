@@ -13,6 +13,8 @@ import {
   resolveSessionContinueMode,
   useAgentStatus,
 } from "./continueDesktop";
+import { api } from "../../api";
+import { sessionDetailCache, sessionContextCache } from "./sessionDetailCache";
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
@@ -390,7 +392,17 @@ const SessionListRowItem = memo(function SessionListRowItem({
   boundTerminals,
 }: SessionRowProps) {
   return (
-    <article className="session-list-row">
+    <article
+      className="session-list-row"
+      onPointerEnter={() => {
+        if (!sessionDetailCache.has(s.id)) {
+          void api.getSessionDetail(s.id).then(d => sessionDetailCache.set(s.id, d)).catch(() => {});
+        }
+        if (!sessionContextCache.has(s.id)) {
+          void api.getSessionContext(s.id).then(c => sessionContextCache.set(s.id, c)).catch(() => {});
+        }
+      }}
+    >
       <button className="session-open" onClick={() => onOpen(s.id)}>
         <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
           <AgentIcon agent={s.agent} size={15} />
@@ -480,6 +492,14 @@ const SessionCardItem = memo(function SessionCardItem({
       tabIndex={0}
       role="button"
       onClick={() => onOpen(s.id)}
+      onPointerEnter={() => {
+        if (!sessionDetailCache.has(s.id)) {
+          void api.getSessionDetail(s.id).then(d => sessionDetailCache.set(s.id, d)).catch(() => {});
+        }
+        if (!sessionContextCache.has(s.id)) {
+          void api.getSessionContext(s.id).then(c => sessionContextCache.set(s.id, c)).catch(() => {});
+        }
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();

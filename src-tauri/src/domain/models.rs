@@ -630,15 +630,14 @@ pub struct SourceCursorUpdate {
 
 /// A directory whose Agent sessions may be ingested. The standard agent
 /// data roots (~/.codex, ~/.claude, ~/.pi/agent/sessions, honoring env
-/// overrides) are seeded as DISABLED defaults; whether any source is
-/// ingested is always the user's decision. Users may add arbitrary custom
-/// roots.
+/// overrides) are registered automatically. Every registered source
+/// participates in automatic and explicit incremental sync. Users may add
+/// arbitrary custom roots.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestSource {
     pub id: Id,
     pub agent: Agent,
     pub path: String,
-    pub enabled: bool,
     pub origin: String, // default | user
     pub created_at: String,
 }

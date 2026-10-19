@@ -69,8 +69,8 @@ const TURN_INTERMEDIATES_MAX: i64 = 400;
 #[derive(Serialize)]
 pub struct SessionDetail {
     pub session: Session,
-    /// The Conversation: root user/assistant messages only.
-    pub messages: Vec<SessionMessage>,
+    /// Root user/assistant messages with their current conversation ordinals.
+    pub messages: Vec<SessionWindowMessage>,
     /// Message count statistics (user messages vs agent replies).
     pub message_stats: SessionMessageStats,
     /// The one Workstream this Session belongs to, or `None`.
@@ -170,7 +170,12 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .get_session(&session_id)?
             .ok_or_else(|| other("Session 不存在"))?;
         // 详情页预览只保留对话的骨架：用户消息 + 每轮的最终回复。
-        let messages = db.recent_turn_messages(&session_id, DETAIL_MESSAGE_PREVIEW)?;
+        let messages = db
+            .message_window(&session_id, None, DETAIL_MESSAGE_PREVIEW)?
+            .messages
+            .into_iter()
+            .map(SessionWindowMessage::from)
+            .collect();
         let message_stats = db.session_message_stats(&session_id)?;
         let adapter = crate::adapters::adapter_for(session.agent);
         let source_status = adapter.inspect_session_source(&session)?;

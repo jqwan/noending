@@ -131,41 +131,81 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
 /// the registry entry starts unbound and ingestion binds it later.
 #[test]
 fn an_embedded_new_launch_spawns_unbound() {
-    let db = open_db("embedded-new");
-    seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("embedded-new");
-
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            None,
-            Some("/tmp"),
-            &LaunchWorkspace::default(),
-        )
-        .expect("prepare");
-    let mut prepared = prepared;
-    prepared.embedded = true;
-
-    let result = launcher
-        .launch_prepared_with_in(
-            &db,
-            &prepared,
-            &LaunchWorkspace::default(),
-            fake_spawn,
-            fake_open,
-            Some(&noending::launcher::EmbeddedSpawn {
-                reconnect: None,
-                registry: &noending::terminal::TerminalRegistry::new(None),
-                spawn: unbound_embedded_spawn,
-            }),
-        )
-        .expect("embedded new launch must succeed");
-    assert_eq!(result.launched_via, "test-embedded-spawn");
-    assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::Pi,
+        Agent::Antigravity,
+    ] {
+        let db = open_db("embedded-new");
+        seed_installation(&db, agent);
+        let launcher = launcher_in("embedded-new");
+        let cwd = real_dir("embedded-new", "project");
+        for message in [None, Some("  \n\t".to_string())] {
+            let mut prepared = launcher
+                .prepare_new_in(&db, agent, None, Some(&cwd), &LaunchWorkspace::default())
+                .expect("prepare");
+            prepared.embedded = true;
+            prepared.initial_message = message;
+            let result = launcher
+                .launch_prepared_with_in(
+                    &db,
+                    &prepared,
+                    &LaunchWorkspace::default(),
+                    fake_spawn,
+                    fake_open,
+                    Some(&noending::launcher::EmbeddedSpawn {
+                        reconnect: None,
+                        registry: &noending::terminal::TerminalRegistry::new(None),
+                        spawn: unbound_embedded_spawn,
+                    }),
+                )
+                .expect("empty embedded new launch must succeed");
+            assert_eq!(result.launched_via, "test-embedded-spawn");
+            assert_eq!(result.terminal_id.as_deref(), Some("term-test-1"));
+        }
+    }
 }
 
 const FIRST_MESSAGE: &str = "  请开始实现\n$(id) 'literal' \"message\"  ";
+
+#[test]
+fn new_launch_enforces_the_composer_message_budget_before_spawning() {
+    let db = open_db("message-budget");
+    let launcher = launcher_in("message-budget");
+    let workspace = LaunchWorkspace::default();
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::Pi,
+        Agent::Antigravity,
+    ] {
+        seed_installation(&db, agent);
+        let mut prepared = launcher
+            .prepare_new_in(&db, agent, None, None, &workspace)
+            .unwrap();
+        // Chinese counts as one UTF-16 unit; this emoji counts as two.
+        let boundary = "中".repeat(1998) + "😀";
+        prepared.initial_message = Some(boundary.clone());
+        assert_eq!(
+            launcher
+                .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+                .unwrap()
+                .launched_via,
+            FAKE_SPAWN_TAG
+        );
+        prepared.initial_message = Some(boundary + "!");
+        let error = launcher
+            .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2000"), "{error}");
+        assert!(
+            !error.contains("😀"),
+            "launch errors must not echo private prompts"
+        );
+    }
+}
 
 fn capture_embedded_new_message(
     cmd: &AgentCommand,
@@ -647,10 +687,24 @@ fn fake_embedded_spawn(
 /// New flow only: the embedded target must arrive unbound — the launcher
 /// hands out no session_id, ingestion binds the terminal later.
 fn unbound_embedded_spawn(
-    _cmd: &AgentCommand,
+    cmd: &AgentCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
+    assert!(!cmd
+        .args
+        .iter()
+        .any(|arg| arg == "--" || arg == "--prompt-interactive"));
+    assert_eq!(
+        target.root_agent_session_id.is_some(),
+        matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
+    );
+    if let Some(id) = target.root_agent_session_id {
+        assert!(cmd
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--session-id" && pair[1] == id));
+    }
     Ok(LaunchOutcome {
         launched_via: "test-embedded-spawn".into(),
         command_line: format!("embedded session={:?}", target.session_id),

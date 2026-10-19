@@ -417,7 +417,7 @@ where
     Ok(messages)
 }
 
-/// Full reconcile over every agent's enabled sources: discover members,
+/// Full reconcile over every agent's registered sources: discover members,
 /// resolve the logical graph, then ingest each active session — facts only,
 /// no AI. `on_session` observes each session being processed.
 pub fn reconcile_all<F>(db: &Db, on_session: &F) -> Result<(usize, i64)>
@@ -435,7 +435,7 @@ where
 }
 
 /// Detailed result for the background coordinator. A pass is considered
-/// successful for freshness only when every enabled source and Session was
+/// successful for freshness only when every registered source and Session was
 /// discovered, resolved, and ingested without a partial failure.
 pub struct ReconcileReport {
     pub discovered: usize,
@@ -447,6 +447,7 @@ pub fn reconcile_all_report<F>(db: &Db, on_session: &F) -> Result<ReconcileRepor
 where
     F: Fn(&Session),
 {
+    let sources = db.list_ingest_sources()?;
     let adapters = crate::adapters::all_adapters();
     let file_unchanged = unchanged_since_cursor(db)?;
     let skipped_paths = std::cell::RefCell::new(BTreeSet::new());
@@ -462,11 +463,14 @@ where
     let mut failures = Vec::new();
 
     for adapter in &adapters {
-        let roots: Vec<String> = db.enabled_roots(adapter.agent())?;
+        let roots: Vec<PathBuf> = sources
+            .iter()
+            .filter(|source| source.agent == adapter.agent())
+            .flat_map(crate::adapters::source_discovery_roots)
+            .collect();
         if roots.is_empty() {
             continue;
         }
-        let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
         let sessions = db.sessions_for_ingestion(adapter.agent())?;
         let discovered = match adapter.discover_batch_for_sessions(&roots, &unchanged, &sessions) {
             Ok(v) => v,
@@ -530,8 +534,8 @@ where
 }
 
 /// Agent lifecycle notifications sync only the reported native root. This is
-/// independent of historical source enablement, so an owned terminal can bind
-/// even when the user has disabled automatic history import.
+/// scoped to the reported identity so neighboring histories cannot bind to
+/// an owned terminal.
 pub fn reconcile_native<F>(
     db: &Db,
     agent: Agent,
@@ -568,17 +572,18 @@ where
         }
     }
     // A session switch can report an ID before it knows the new transcript.
-    // Discover metadata under configured roots, including disabled ones, but
+    // Discover metadata under registered roots, but
     // only the exact native root below is ever written to NoEnding.
     if roots.is_empty() {
         roots = db
             .list_ingest_sources()?
             .into_iter()
             .filter(|s| s.agent == agent)
-            .map(|s| PathBuf::from(s.path))
+            .flat_map(|source| crate::adapters::source_discovery_roots(&source))
             .collect();
     }
-    let discovered = adapter.discover_batch(&roots, &|_| false)?;
+    let discovered =
+        adapter.discover_batch_for_sessions(&roots, &|_| false, existing.as_slice())?;
     let matching: Vec<_> = discovered
         .members
         .into_iter()
@@ -626,7 +631,7 @@ where
         }
         same
     };
-    let roots = vec![PathBuf::from(&source.path)];
+    let roots = crate::adapters::source_discovery_roots(source);
     let sessions = db.sessions_for_ingestion(source.agent)?;
     let discovered = adapter.discover_batch_for_sessions(&roots, &unchanged, &sessions)?;
     let discovered_count = discovered.members.len();
@@ -672,7 +677,7 @@ where
     F: Fn(&Session),
 {
     let adapter = crate::adapters::adapter_for(source.agent);
-    let roots = vec![PathBuf::from(&source.path)];
+    let roots = crate::adapters::source_discovery_roots(source);
     let discovered = adapter.discover_batch(&roots, &|_| false)?;
     let discovered_count = discovered.members.len();
     let mut total_messages = 0i64;

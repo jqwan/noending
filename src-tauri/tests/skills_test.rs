@@ -1,10 +1,9 @@
 //! Native customization contracts, isolated from the user's real Agent homes.
 use noending_lib::{
     domain::Agent,
-    extensions::{self, Roots},
+    skills::{self, Roots},
     storage::Db,
 };
-use serde_json::json;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -17,8 +16,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("noending-extensions-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("noending-skills-{}", uuid::Uuid::new_v4()));
         let home = root.join("home");
         let cwd = root.join("repo");
         fs::create_dir_all(&home).unwrap();
@@ -44,13 +42,6 @@ impl Fixture {
         self.write(&path.join("scripts/check.sh"), "exit 91\n");
         path
     }
-    fn mcp(&self, agent: Agent, scope: &str) -> extensions::Location {
-        extensions::list(&self.roots, Some(&self.cwd))
-            .locations
-            .into_iter()
-            .find(|l| l.kind == "mcp" && l.agent == Some(agent) && l.scope == scope)
-            .unwrap()
-    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -62,14 +53,14 @@ fn project_scopes(
     f: &Fixture,
     paths: &[(&str, PathBuf)],
     id: &str,
-) -> Vec<extensions::ProjectSkillScope> {
-    let inventory = extensions::merge_inventories(
+) -> Vec<skills::ProjectSkillScope> {
+    let inventory = skills::merge_inventories(
         paths
             .iter()
-            .map(|(_, path)| extensions::list(&f.roots, Some(path)))
+            .map(|(_, path)| skills::list(&f.roots, Some(path)))
             .collect(),
     );
-    extensions::project_scopes_from_inventory(
+    skills::project_scopes_from_inventory(
         &f.roots,
         &inventory,
         &[(
@@ -88,12 +79,12 @@ fn project_scopes(
 fn skill_install_copies_support_files_and_never_overwrites_or_edits_the_source() {
     let f = Fixture::new();
     let source = f.source("input", "review");
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
+        .find(|l| l.agent.is_none())
         .unwrap();
-    extensions::install_skill(&f.roots, None, &source, &loc.id).unwrap();
+    skills::install_skill(&f.roots, None, &source, &loc.id).unwrap();
     let installed = Path::new(&loc.path).join("review");
     assert_eq!(
         fs::read_to_string(installed.join("scripts/check.sh")).unwrap(),
@@ -101,18 +92,14 @@ fn skill_install_copies_support_files_and_never_overwrites_or_edits_the_source()
     );
     assert!(source.join("SKILL.md").exists());
     f.write(&installed.join("local.txt"), "keep");
-    assert!(extensions::install_skill(&f.roots, None, &source, &loc.id).is_err());
+    assert!(skills::install_skill(&f.roots, None, &source, &loc.id).is_err());
     assert_eq!(
         fs::read_to_string(installed.join("local.txt")).unwrap(),
         "keep"
     );
-    let inventory = extensions::list(&f.roots, None);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|r| r.kind == "skill")
-        .unwrap();
-    let detail = extensions::detail(&f.roots, None, &row.id).unwrap();
+    let inventory = skills::list(&f.roots, None);
+    let row = inventory.resources.iter().next().unwrap();
+    let detail = skills::detail(&f.roots, None, &row.id).unwrap();
     assert!(detail.content.contains("# Instructions"));
     assert_eq!(
         row.description.trim(),
@@ -120,13 +107,12 @@ fn skill_install_copies_support_files_and_never_overwrites_or_edits_the_source()
     );
     assert!(!row.entry_links[0]);
     assert!(
-        extensions::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision)
-            .is_err()
+        skills::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).is_err()
     );
     assert!(installed.join("SKILL.md").exists());
-    assert!(extensions::uninstall_skill(&f.roots, &[], &row.id, "old", true).is_err());
-    assert!(extensions::uninstall_skill(&f.roots, &[], &row.id, &row.revision, false).is_err());
-    extensions::uninstall_skill(&f.roots, &[], &row.id, &row.revision, true).unwrap();
+    assert!(skills::uninstall_skill(&f.roots, &[], &row.id, "old", true).is_err());
+    assert!(skills::uninstall_skill(&f.roots, &[], &row.id, &row.revision, false).is_err());
+    skills::uninstall_skill(&f.roots, &[], &row.id, &row.revision, true).unwrap();
     assert!(!installed.exists());
     assert!(source.join("SKILL.md").exists());
 }
@@ -140,8 +126,7 @@ fn same_name_skills_remain_distinct_and_listing_reports_parse_failures_without_w
     f.write(&shared.join("SKILL.md"), valid);
     f.write(&claude.join("SKILL.md"), valid);
     f.write(&f.roots.pi.join("skills/broken/SKILL.md"), "not a skill");
-    f.write(&f.roots.pi.join("mcp.json"), "{broken");
-    let inventory = extensions::list(&f.roots, None);
+    let inventory = skills::list(&f.roots, None);
     assert_eq!(
         inventory
             .resources
@@ -157,12 +142,117 @@ fn same_name_skills_remain_distinct_and_listing_reports_parse_failures_without_w
         .unwrap()
         .error
         .is_some());
-    assert_eq!(inventory.warnings.len(), 1);
+    assert!(inventory.warnings.is_empty());
     assert_eq!(fs::read_to_string(shared.join("SKILL.md")).unwrap(), valid);
-    assert_eq!(
-        fs::read_to_string(f.roots.pi.join("mcp.json")).unwrap(),
-        "{broken"
+}
+
+#[test]
+fn skill_discovery_and_uninstall_leave_native_agent_configs_untouched() {
+    let f = Fixture::new();
+    let configs = [
+        f.roots.codex.join("config.toml"),
+        f.roots.home.join(".claude.json"),
+        f.roots.pi.join("mcp.json"),
+        f.roots.home.join(".gemini/config/mcp_config.json"),
+        f.cwd.join(".codex/config.toml"),
+        f.cwd.join(".mcp.json"),
+        f.cwd.join(".pi/mcp.json"),
+        f.cwd.join(".agents/mcp_config.json"),
+    ];
+    // Invalid configuration would cause warnings if Skill discovery parsed it.
+    for path in &configs {
+        f.write(path, "invalid native config: { [");
+    }
+    let source = f.source("input", "review");
+    let location = skills::list(&f.roots, None)
+        .locations
+        .into_iter()
+        .find(|location| location.agent == Some(Agent::ClaudeCode))
+        .unwrap();
+    skills::install_skill(&f.roots, None, &source, &location.id).unwrap();
+    let inventory = skills::list_catalog(&f.roots, &[f.cwd.clone()]);
+    assert!(inventory.warnings.is_empty(), "{:?}", inventory.warnings);
+    assert_eq!(inventory.resources.len(), 1);
+    assert!(inventory
+        .locations
+        .iter()
+        .all(|location| !configs.contains(&PathBuf::from(&location.path))));
+    let row = &inventory.resources[0];
+    let detail = skills::detail_in_catalog(&inventory, &row.id)
+        .unwrap()
+        .unwrap();
+    assert!(detail.content.contains("# Instructions"));
+    skills::uninstall_skill(&f.roots, &[f.cwd.clone()], &row.id, &row.revision, true).unwrap();
+    assert!(source.join("SKILL.md").is_file());
+    assert!(skills::list_catalog(&f.roots, &[f.cwd.clone()])
+        .resources
+        .is_empty());
+    for path in &configs {
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "invalid native config: { ["
+        );
+        assert!(!PathBuf::from(format!("{}.noending.bak", path.display())).exists());
+    }
+}
+
+#[test]
+fn skill_scan_skips_plain_file_load_roots_without_following_or_modifying_them() {
+    let f = Fixture::new();
+    let user_skill = f.roots.home.join(".agents/skills/user-review/SKILL.md");
+    let project_skill = f.cwd.join(".agents/skills/project-review/SKILL.md");
+    f.write(
+        &user_skill,
+        "---\nname: user-review\ndescription: User skill\n---\nInstructions\n",
     );
+    f.write(
+        &project_skill,
+        "---\nname: project-review\ndescription: Project skill\n---\nInstructions\n",
+    );
+    // Git with core.symlinks=false checks out this directory link as a file.
+    let user_entry = f.roots.claude.join("skills");
+    let project_entry = f.cwd.join(".claude/skills");
+    for entry in [&user_entry, &project_entry] {
+        f.write(entry, "../.agents/skills");
+    }
+
+    let inventory = skills::list_catalog(&f.roots, &[f.cwd.clone()]);
+    assert!(inventory.warnings.is_empty(), "{:?}", inventory.warnings);
+    let mut found: Vec<_> = inventory
+        .resources
+        .iter()
+        .map(|row| row.path.clone())
+        .collect();
+    found.sort();
+    let mut expected: Vec<_> = [&user_skill, &project_skill]
+        .iter()
+        .map(|path| {
+            fs::canonicalize(path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(found, expected);
+    for row in &inventory.resources {
+        for id in &row.locations {
+            let location = inventory
+                .locations
+                .iter()
+                .find(|loc| &loc.id == id)
+                .unwrap();
+            assert_ne!(
+                location.agent,
+                Some(Agent::ClaudeCode),
+                "plain files cannot enable Claude Skills"
+            );
+        }
+    }
+    for entry in [&user_entry, &project_entry] {
+        assert!(entry.is_file());
+        assert_eq!(fs::read_to_string(entry).unwrap(), "../.agents/skills");
+    }
 }
 
 #[cfg(unix)]
@@ -174,18 +264,15 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
     let claude = f.roots.claude.join("skills");
     fs::create_dir_all(&shared).unwrap();
     fs::create_dir_all(&claude).unwrap();
-    let locations = extensions::list(&f.roots, None).locations;
-    let shared_loc = locations
-        .iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
-        .unwrap();
+    let locations = skills::list(&f.roots, None).locations;
+    let shared_loc = locations.iter().find(|l| l.agent.is_none()).unwrap();
     let claude_loc = locations
         .iter()
-        .find(|l| l.kind == "skill" && l.agent == Some(Agent::ClaudeCode))
+        .find(|l| l.agent == Some(Agent::ClaudeCode))
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
-    extensions::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
-    let inventory = extensions::list(&f.roots, None);
+    skills::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
+    skills::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
+    let inventory = skills::list(&f.roots, None);
     assert_eq!(inventory.resources.len(), 1);
     let row = &inventory.resources[0];
     assert_eq!(row.entry_paths.len(), 2);
@@ -194,7 +281,7 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
         .join("review/SKILL.md")
         .to_string_lossy()
         .into_owned();
-    extensions::disable_skill(&f.roots, None, &row.id, &shared_entry, &row.revision).unwrap();
+    skills::disable_skill(&f.roots, None, &row.id, &shared_entry, &row.revision).unwrap();
     assert!(!shared.join("review").exists());
     assert!(source.join("SKILL.md").exists());
     assert!(claude.join("review/SKILL.md").exists());
@@ -209,25 +296,22 @@ fn uninstall_skill_removes_all_links_and_keeps_the_external_source() {
     let claude = f.roots.claude.join("skills");
     fs::create_dir_all(&shared).unwrap();
     fs::create_dir_all(&claude).unwrap();
-    let locations = extensions::list(&f.roots, None).locations;
-    let shared_loc = locations
-        .iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
-        .unwrap();
+    let locations = skills::list(&f.roots, None).locations;
+    let shared_loc = locations.iter().find(|l| l.agent.is_none()).unwrap();
     let claude_loc = locations
         .iter()
-        .find(|l| l.kind == "skill" && l.agent == Some(Agent::ClaudeCode))
+        .find(|l| l.agent == Some(Agent::ClaudeCode))
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
-    extensions::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
-    let inventory = extensions::list(&f.roots, None);
+    skills::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
+    skills::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
+    let inventory = skills::list(&f.roots, None);
     let row = &inventory.resources[0];
     assert_eq!(row.entry_links, vec![true, true]);
-    extensions::uninstall_skill(&f.roots, &[], &row.id, &row.revision, false).unwrap();
+    skills::uninstall_skill(&f.roots, &[], &row.id, &row.revision, false).unwrap();
     assert!(!shared.join("review").exists());
     assert!(!claude.join("review").exists());
     assert!(source.join("SKILL.md").exists());
-    assert!(extensions::list(&f.roots, None).resources.is_empty());
+    assert!(skills::list(&f.roots, None).resources.is_empty());
 }
 
 #[cfg(unix)]
@@ -237,18 +321,18 @@ fn uninstall_skill_can_delete_an_external_source_after_removing_links() {
     let source = f.source("external-delete", "review");
     let shared = f.roots.home.join(".agents/skills");
     fs::create_dir_all(&shared).unwrap();
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
+        .find(|l| l.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &loc.id).unwrap();
-    let row = extensions::list(&f.roots, None).resources[0].clone();
+    skills::link_skill(&f.roots, None, &source, &loc.id).unwrap();
+    let row = skills::list(&f.roots, None).resources[0].clone();
     assert_eq!(row.entry_links, vec![true]);
-    extensions::uninstall_skill(&f.roots, &[], &row.id, &row.revision, true).unwrap();
+    skills::uninstall_skill(&f.roots, &[], &row.id, &row.revision, true).unwrap();
     assert!(!shared.join("review").exists());
     assert!(!source.exists());
-    assert!(extensions::list(&f.roots, None).resources.is_empty());
+    assert!(skills::list(&f.roots, None).resources.is_empty());
 }
 
 #[cfg(unix)]
@@ -259,26 +343,26 @@ fn disabling_a_registered_link_keeps_the_source_listed_as_inactive() {
     let source = f.source("managed/review", "review");
     let shared = f.roots.home.join(".agents/skills");
     fs::create_dir_all(&shared).unwrap();
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
+        .find(|l| l.agent.is_none())
         .unwrap();
-    let installed = extensions::link_skill(&f.roots, None, &source, &loc.id).unwrap();
-    let mut registry = extensions::SkillRegistry::default();
-    extensions::register_source(
+    let installed = skills::link_skill(&f.roots, None, &source, &loc.id).unwrap();
+    let mut registry = skills::SkillRegistry::default();
+    skills::register_source(
         &mut registry,
         &installed.source_path,
         &installed.name,
         &installed.description,
     );
-    let row = extensions::list(&f.roots, None).resources[0].clone();
-    extensions::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
+    let row = skills::list(&f.roots, None).resources[0].clone();
+    skills::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
     assert!(!shared.join("review").exists());
     assert!(source.join("SKILL.md").exists());
-    let source_id = extensions::source_id(&installed.source_path);
-    let mut inventory = extensions::list(&f.roots, None);
-    extensions::merge_skill_sources(&registry, &mut inventory, true, &managed);
+    let source_id = skills::source_id(&installed.source_path);
+    let mut inventory = skills::list(&f.roots, None);
+    skills::merge_skill_sources(&registry, &mut inventory, true, &managed);
     let inactive = inventory
         .resources
         .iter()
@@ -289,22 +373,18 @@ fn disabling_a_registered_link_keeps_the_source_listed_as_inactive() {
     assert_eq!(inactive.name, "review");
     assert_eq!(inactive.path, installed.source_path);
     let detail =
-        extensions::detail_registered(&f.roots, None, &managed, &registry, &registry.sources[0])
+        skills::detail_registered(&f.roots, None, &managed, &registry, &registry.sources[0])
             .unwrap();
     assert!(detail.content.contains("# Instructions"));
     let preview =
-        extensions::registered_uninstall_preview(&f.roots, &[], &registry.sources[0]).unwrap();
+        skills::registered_uninstall_preview(&f.roots, &[], &registry.sources[0]).unwrap();
     assert!(!preview.delete_source_required);
     assert_eq!(preview.entry_count, 0);
-    assert!(extensions::uninstall_registered_skill(
-        &f.roots,
-        &[],
-        &registry.sources[0],
-        "old",
-        false
-    )
-    .is_err());
-    extensions::uninstall_registered_skill(
+    assert!(
+        skills::uninstall_registered_skill(&f.roots, &[], &registry.sources[0], "old", false)
+            .is_err()
+    );
+    skills::uninstall_registered_skill(
         &f.roots,
         &[],
         &registry.sources[0],
@@ -323,23 +403,23 @@ fn uninstalling_a_registered_physical_source_requires_deleting_it() {
         &dir.join("SKILL.md"),
         "---\nname: review\ndescription: Review changes\n---\n# Review\n",
     );
-    let row = extensions::list(&f.roots, None).resources[0].clone();
-    let mut registry = extensions::SkillRegistry::default();
-    extensions::register_source(&mut registry, &row.path, &row.name, &row.description);
+    let row = skills::list(&f.roots, None).resources[0].clone();
+    let mut registry = skills::SkillRegistry::default();
+    skills::register_source(&mut registry, &row.path, &row.name, &row.description);
     let source = &registry.sources[0];
-    let preview = extensions::registered_uninstall_preview(&f.roots, &[], source).unwrap();
+    let preview = skills::registered_uninstall_preview(&f.roots, &[], source).unwrap();
     assert!(preview.delete_source_required);
     assert!(
-        extensions::uninstall_registered_skill(&f.roots, &[], source, &row.revision, false)
-            .is_err()
+        skills::uninstall_registered_skill(&f.roots, &[], source, &row.revision, false).is_err()
     );
     assert!(dir.join("SKILL.md").exists());
-    extensions::uninstall_registered_skill(&f.roots, &[], source, &row.revision, true).unwrap();
+    skills::uninstall_registered_skill(&f.roots, &[], source, &row.revision, true).unwrap();
     assert!(!dir.exists());
-    assert!(!extensions::list(&f.roots, None)
+    assert!(!skills::list(&f.roots, None)
         .resources
         .iter()
-        .any(|r| r.kind == "skill"));
+        .next()
+        .is_some());
 }
 
 #[cfg(unix)]
@@ -349,13 +429,13 @@ fn enabling_a_source_creates_a_link_without_touching_the_source() {
     let source = f.source("external", "review");
     let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let source_file = source_file.to_string_lossy().into_owned();
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent == Some(Agent::ClaudeCode))
+        .find(|l| l.agent == Some(Agent::ClaudeCode))
         .unwrap();
-    let id = extensions::source_id(&source_file);
-    extensions::enable_skill(&f.roots, None, &id, Some(&source_file), &loc.id).unwrap();
+    let id = skills::source_id(&source_file);
+    skills::enable_skill(&f.roots, None, &id, Some(&source_file), &loc.id).unwrap();
     let entry = f.roots.claude.join("skills/review");
     assert!(entry.is_symlink());
     assert_eq!(
@@ -371,8 +451,8 @@ fn enable_all_uses_shared_for_codex_and_pi_and_skips_their_own_dirs() {
     let f = Fixture::new();
     let source = f.source("external", "review");
     let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(source_file.to_string_lossy().as_ref());
-    extensions::enable_skill_all(
+    let id = skills::source_id(source_file.to_string_lossy().as_ref());
+    skills::enable_skill_all(
         &f.roots,
         &[],
         &id,
@@ -389,7 +469,7 @@ fn enable_all_uses_shared_for_codex_and_pi_and_skips_their_own_dirs() {
     assert!(!f.roots.codex.join("skills/review").exists());
     assert!(!f.roots.pi.join("skills/review").exists());
     assert!(!f.roots.home.join(".gemini/config/skills/review").exists());
-    let inventory = extensions::list(&f.roots, None);
+    let inventory = skills::list(&f.roots, None);
     assert_eq!(inventory.resources.len(), 1);
     let row = &inventory.resources[0];
     assert_eq!(row.entry_paths.len(), 3);
@@ -403,14 +483,14 @@ fn enable_all_does_not_add_a_shared_entry_for_an_agent_that_is_already_covered()
     let f = Fixture::new();
     let source = f.source("external", "review");
     let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(source_file.to_string_lossy().as_ref());
-    let pi = extensions::list(&f.roots, None)
+    let id = skills::source_id(source_file.to_string_lossy().as_ref());
+    let pi = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent == Some(Agent::Pi))
+        .find(|l| l.agent == Some(Agent::Pi))
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &pi.id).unwrap();
-    extensions::enable_skill_all(
+    skills::link_skill(&f.roots, None, &source, &pi.id).unwrap();
+    skills::enable_skill_all(
         &f.roots,
         &[],
         &id,
@@ -426,7 +506,7 @@ fn enable_all_does_not_add_a_shared_entry_for_an_agent_that_is_already_covered()
         .home
         .join(".gemini/antigravity-cli/skills/review")
         .is_symlink());
-    let row = &extensions::list(&f.roots, None).resources[0];
+    let row = &skills::list(&f.roots, None).resources[0];
     assert_eq!(row.entry_paths.len(), 4);
 }
 
@@ -436,15 +516,15 @@ fn disable_all_removes_user_links_and_keeps_the_source() {
     let f = Fixture::new();
     let source = f.source("external", "review");
     let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(source_file.to_string_lossy().as_ref());
-    extensions::enable_skill_all(
+    let id = skills::source_id(source_file.to_string_lossy().as_ref());
+    skills::enable_skill_all(
         &f.roots,
         &[],
         &id,
         Some(source_file.to_string_lossy().as_ref()),
     )
     .unwrap();
-    extensions::disable_skill_all(&f.roots, &id).unwrap();
+    skills::disable_skill_all(&f.roots, &id).unwrap();
     assert!(!f.roots.home.join(".agents/skills/review").exists());
     assert!(!f.roots.claude.join("skills/review").exists());
     assert!(!f
@@ -453,7 +533,7 @@ fn disable_all_removes_user_links_and_keeps_the_source() {
         .join(".gemini/antigravity-cli/skills/review")
         .exists());
     assert!(source.join("SKILL.md").exists());
-    assert!(extensions::list(&f.roots, None).resources.is_empty());
+    assert!(skills::list(&f.roots, None).resources.is_empty());
 }
 
 #[cfg(unix)]
@@ -466,25 +546,20 @@ fn a_physical_user_entry_is_skipped_but_other_links_still_toggle() {
         "---\nname: review\ndescription: Review changes\n---\n# Review\n",
     );
     let file = fs::canonicalize(dir.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
-    extensions::enable_skill_all(&f.roots, &[], &id, Some(file.to_string_lossy().as_ref()))
-        .unwrap();
+    let id = skills::source_id(file.to_string_lossy().as_ref());
+    skills::enable_skill_all(&f.roots, &[], &id, Some(file.to_string_lossy().as_ref())).unwrap();
     let claude = f.roots.claude.join("skills/review");
     let antigravity = f.roots.home.join(".gemini/antigravity-cli/skills/review");
     assert!(dir.join("SKILL.md").exists());
     assert!(claude.exists());
     assert!(antigravity.exists());
-    let disabled = extensions::disable_skill_all(&f.roots, &id).unwrap();
+    let disabled = skills::disable_skill_all(&f.roots, &id).unwrap();
     assert!(disabled.changed);
     assert!(disabled.message.contains("保持启用"));
     assert!(!claude.exists());
     assert!(!antigravity.exists());
     assert!(dir.join("SKILL.md").exists());
-    assert!(
-        !extensions::disable_skill_all(&f.roots, &id)
-            .unwrap()
-            .changed
-    );
+    assert!(!skills::disable_skill_all(&f.roots, &id).unwrap().changed);
     assert!(dir.join("SKILL.md").exists());
 }
 
@@ -495,11 +570,11 @@ fn user_level_enable_removes_same_source_project_links() {
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let source_id = file.to_string_lossy().into_owned();
-    let id = extensions::source_id(&source_id);
-    extensions::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
+    let id = skills::source_id(&source_id);
+    skills::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(f.cwd.join(".claude/skills/review").is_symlink());
     let outcome =
-        extensions::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
+        skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(outcome.message.contains("已清理"));
     assert!(!f.cwd.join(".agents/skills/review").exists());
     assert!(!f.cwd.join(".claude/skills/review").exists());
@@ -518,9 +593,9 @@ fn user_level_enable_keeps_a_physical_project_entry() {
     );
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
     let source_id = file.to_string_lossy().into_owned();
-    let id = extensions::source_id(&source_id);
+    let id = skills::source_id(&source_id);
     let outcome =
-        extensions::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
+        skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(!outcome.message.contains("已清理"));
     assert!(physical.join("SKILL.md").exists());
     assert!(f.roots.claude.join("skills/review").is_symlink());
@@ -533,9 +608,9 @@ fn project_enable_is_rejected_while_user_level_is_active() {
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let source_id = file.to_string_lossy().into_owned();
-    let id = extensions::source_id(&source_id);
-    extensions::enable_skill_all(&f.roots, &[], &id, Some(&source_id)).unwrap();
-    let error = extensions::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source_id))
+    let id = skills::source_id(&source_id);
+    skills::enable_skill_all(&f.roots, &[], &id, Some(&source_id)).unwrap();
+    let error = skills::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source_id))
         .err()
         .expect("project enable must be rejected");
     assert!(error.to_string().contains("用户级启用"));
@@ -548,178 +623,17 @@ fn skill_registry_round_trips_through_settings() {
         std::env::temp_dir().join(format!("noending-skill-registry-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let db = Db::open(&root.join("db.sqlite")).unwrap();
-    let mut registry = extensions::SkillRegistry::default();
-    extensions::register_source(
+    let mut registry = skills::SkillRegistry::default();
+    skills::register_source(
         &mut registry,
         "/tmp/source/SKILL.md",
         "review",
         "Review changes",
     );
-    extensions::save_skill_registry(&db, &registry).unwrap();
-    assert_eq!(extensions::load_skill_registry(&db).unwrap(), registry);
+    skills::save_skill_registry(&db, &registry).unwrap();
+    assert_eq!(skills::load_skill_registry(&db).unwrap(), registry);
     drop(db);
     fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn mcp_json_write_preserves_unrelated_settings_and_stale_or_invalid_results_do_not_write() {
-    let f = Fixture::new();
-    let loc = f.mcp(Agent::Pi, "user");
-    let original =
-        "{\"custom\":{\"keep\":17},\"mcpServers\":{\"other\":{\"command\":\"other-server\"}}}";
-    f.write(Path::new(&loc.path), original);
-    let revision = extensions::location_revision(&f.roots, None, &loc.id).unwrap();
-    extensions::save_mcp(
-        &f.roots,
-        None,
-        &loc.id,
-        &revision,
-        "docs",
-        json!({"url":"https://docs.example/mcp","headers":{"Authorization":"${DOCS_TOKEN}"}}),
-        true,
-    )
-    .unwrap();
-    let after: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&loc.path).unwrap()).unwrap();
-    assert_eq!(after["custom"]["keep"], 17);
-    assert_eq!(after["mcpServers"]["other"]["command"], "other-server");
-    assert_eq!(
-        after["mcpServers"]["docs"]["headers"]["Authorization"],
-        "${DOCS_TOKEN}"
-    );
-    assert_eq!(
-        fs::read_to_string(format!("{}.noending.bak", loc.path)).unwrap(),
-        original
-    );
-    let written = fs::read(&loc.path).unwrap();
-    assert!(extensions::save_mcp(
-        &f.roots,
-        None,
-        &loc.id,
-        &revision,
-        "new",
-        json!({"command":"should-not-run"}),
-        true
-    )
-    .is_err());
-    let current = extensions::location_revision(&f.roots, None, &loc.id).unwrap();
-    assert!(extensions::save_mcp(
-        &f.roots,
-        None,
-        &loc.id,
-        &current,
-        "bad",
-        json!({"type":"sse","url":"https://example/sse"}),
-        true
-    )
-    .is_err());
-    assert_eq!(fs::read(&loc.path).unwrap(), written);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&loc.path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            fs::metadata(format!("{}.noending.bak", loc.path))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-    }
-}
-
-#[test]
-fn codex_toml_round_trip_preserves_comments_and_other_servers_and_removes_only_the_target() {
-    let f = Fixture::new();
-    let loc = f.mcp(Agent::Codex, "project");
-    f.write(Path::new(&loc.path), "# personal comment\nmodel = \"keep-model\"\n[mcp_servers.keep]\ncommand = \"keep-server\"\n");
-    let revision = extensions::location_revision(&f.roots, Some(&f.cwd), &loc.id).unwrap();
-    extensions::save_mcp(
-        &f.roots,
-        Some(&f.cwd),
-        &loc.id,
-        &revision,
-        "team.docs",
-        json!({"url":"https://example/mcp","http_headers":{"X-Team":"one"},"enabled":false}),
-        true,
-    )
-    .unwrap();
-    let raw = fs::read_to_string(&loc.path).unwrap();
-    assert!(raw.contains("# personal comment"));
-    let value: serde_json::Value = toml_edit::de::from_str(&raw).unwrap();
-    assert_eq!(value["model"], "keep-model");
-    assert_eq!(value["mcp_servers"]["keep"]["command"], "keep-server");
-    assert_eq!(value["mcp_servers"]["team.docs"]["enabled"], false);
-    let row = extensions::list(&f.roots, Some(&f.cwd))
-        .resources
-        .into_iter()
-        .find(|r| r.kind == "mcp" && r.name == "team.docs")
-        .unwrap();
-    extensions::remove_mcp(&f.roots, Some(&f.cwd), &row.id, &row.revision).unwrap();
-    let value: serde_json::Value =
-        toml_edit::de::from_str(&fs::read_to_string(&loc.path).unwrap()).unwrap();
-    assert!(value["mcp_servers"].get("team.docs").is_none());
-    assert!(value["mcp_servers"].get("keep").is_some());
-}
-
-#[test]
-fn project_mcp_is_local_to_its_directory() {
-    let f = Fixture::new();
-    let other = f.root.join("other");
-    fs::create_dir_all(&other).unwrap();
-    let user = f.mcp(Agent::Pi, "user");
-    extensions::save_mcp(
-        &f.roots,
-        None,
-        &user.id,
-        &extensions::location_revision(&f.roots, None, &user.id).unwrap(),
-        "tools",
-        json!({"command":"tools"}),
-        true,
-    )
-    .unwrap();
-    let project = f.mcp(Agent::Pi, "project");
-    extensions::save_mcp(
-        &f.roots,
-        Some(&f.cwd),
-        &project.id,
-        &extensions::location_revision(&f.roots, Some(&f.cwd), &project.id).unwrap(),
-        "tools",
-        json!({"enabled":false}),
-        true,
-    )
-    .unwrap();
-    assert!(!other.join(".pi/mcp.json").exists());
-    let list = extensions::list(&f.roots, Some(&f.cwd));
-    assert_eq!(
-        list.resources
-            .iter()
-            .filter(|r| r.kind == "mcp" && r.name == "tools")
-            .count(),
-        2
-    );
-    assert_eq!(
-        extensions::list(&f.roots, Some(&other))
-            .resources
-            .iter()
-            .filter(|r| r.kind == "mcp" && r.name == "tools")
-            .count(),
-        1
-    );
-    assert!(extensions::save_mcp(
-        &f.roots,
-        Some(&other),
-        &project.id,
-        &project.id,
-        "tools",
-        json!({"command":"no"}),
-        true
-    )
-    .is_err());
 }
 
 #[test]
@@ -730,8 +644,8 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
     fs::create_dir_all(&second).unwrap();
     let cwds = vec![f.cwd.clone(), second.clone()];
     let skill = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(skill.to_str().unwrap());
-    extensions::enable_skill_project(&f.roots, &cwds, &id, Some(skill.to_str().unwrap())).unwrap();
+    let id = skills::source_id(skill.to_str().unwrap());
+    skills::enable_skill_project(&f.roots, &cwds, &id, Some(skill.to_str().unwrap())).unwrap();
     for cwd in &cwds {
         assert!(cwd.join(".agents/skills/review/SKILL.md").is_file());
         assert!(cwd.join(".claude/skills/review/SKILL.md").is_file());
@@ -754,7 +668,7 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
         .iter()
         .any(|entry| entry.agents.contains(&Agent::Antigravity)));
 
-    extensions::disable_skill_project(&f.roots, &cwds, &id).unwrap();
+    skills::disable_skill_project(&f.roots, &cwds, &id).unwrap();
     assert!(source.join("SKILL.md").exists());
     for cwd in &cwds {
         assert!(fs::symlink_metadata(cwd.join(".agents/skills/review")).is_err());
@@ -770,8 +684,8 @@ fn a_new_project_directory_inherits_enabled_skills() {
     let second = f.root.join("repo-two");
     fs::create_dir_all(&second).unwrap();
     let skill = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(skill.to_str().unwrap());
-    extensions::enable_skill_project(
+    let id = skills::source_id(skill.to_str().unwrap());
+    skills::enable_skill_project(
         &f.roots,
         std::slice::from_ref(&f.cwd),
         &id,
@@ -780,7 +694,7 @@ fn a_new_project_directory_inherits_enabled_skills() {
     .unwrap();
     assert!(fs::symlink_metadata(second.join(".agents/skills/review")).is_err());
 
-    extensions::inherit_project_skills(
+    skills::inherit_project_skills(
         &f.roots,
         std::slice::from_ref(&f.cwd),
         std::slice::from_ref(&second),
@@ -798,22 +712,18 @@ fn project_inventory_merges_entries_from_every_working_directory() {
     fs::create_dir_all(&second).unwrap();
     let cwds = vec![f.cwd.clone(), second.clone()];
     let skill = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(skill.to_str().unwrap());
-    extensions::enable_skill_project(&f.roots, &cwds, &id, Some(skill.to_str().unwrap())).unwrap();
+    let id = skills::source_id(skill.to_str().unwrap());
+    skills::enable_skill_project(&f.roots, &cwds, &id, Some(skill.to_str().unwrap())).unwrap();
 
-    let inventory = extensions::merge_inventories(vec![
-        extensions::list(&f.roots, Some(&cwds[0])),
-        extensions::list(&f.roots, Some(&cwds[1])),
+    let inventory = skills::merge_inventories(vec![
+        skills::list(&f.roots, Some(&cwds[0])),
+        skills::list(&f.roots, Some(&cwds[1])),
     ]);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.id == id && row.kind == "skill")
-        .unwrap();
+    let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
     assert_eq!(row.entry_paths.len(), 4);
     assert_eq!(row.locations.len(), 4);
     assert!(row.entry_links.iter().all(|link| *link));
-    let detail = extensions::detail_project(&f.roots, &cwds, &id).unwrap();
+    let detail = skills::detail_project(&f.roots, &cwds, &id).unwrap();
     assert!(detail.content.contains("# Instructions"));
 }
 
@@ -827,27 +737,27 @@ fn a_physical_project_entry_skips_its_directory_but_still_links_elsewhere() {
         "---\nname: review\ndescription: Review changes\n---\n# Review\n",
     );
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
+    let id = skills::source_id(file.to_string_lossy().as_ref());
     let source = file.to_string_lossy().into_owned();
-    extensions::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source)).unwrap();
+    skills::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source)).unwrap();
     let shared = f.cwd.join(".agents/skills/review");
     assert!(shared.is_symlink());
     assert!(physical.join("SKILL.md").exists());
     let second = f.root.join("repo-two");
     fs::create_dir_all(&second).unwrap();
     assert_eq!(
-        extensions::find_skill_source(&f.roots, &[f.cwd.clone(), second.clone()], &id),
+        skills::find_skill_source(&f.roots, &[f.cwd.clone(), second.clone()], &id),
         Some(file.clone())
     );
-    extensions::enable_skill_project(&f.roots, &[second.clone()], &id, Some(&source)).unwrap();
+    skills::enable_skill_project(&f.roots, &[second.clone()], &id, Some(&source)).unwrap();
     assert!(second.join(".agents/skills/review").is_symlink());
     assert!(second.join(".claude/skills/review").is_symlink());
-    let disabled = extensions::disable_skill_project(&f.roots, &[f.cwd.clone()], &id).unwrap();
+    let disabled = skills::disable_skill_project(&f.roots, &[f.cwd.clone()], &id).unwrap();
     assert!(disabled.changed);
     assert!(!shared.exists());
     assert!(physical.join("SKILL.md").exists());
     assert!(
-        !extensions::disable_skill_project(&f.roots, &[f.cwd.clone()], &id)
+        !skills::disable_skill_project(&f.roots, &[f.cwd.clone()], &id)
             .unwrap()
             .changed
     );
@@ -865,25 +775,25 @@ fn migration_moves_a_physical_user_skill_into_managed_storage() {
     );
     f.write(&physical.join("scripts/check.sh"), "exit 91\n");
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
-    let shared = extensions::list(&f.roots, None)
+    let id = skills::source_id(file.to_string_lossy().as_ref());
+    let shared = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "user" && loc.agent.is_none())
+        .find(|loc| loc.scope == "user" && loc.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, None, &physical, &shared.id).unwrap();
+    skills::link_skill(&f.roots, None, &physical, &shared.id).unwrap();
     let managed = f.root.join("managed");
-    let row = extensions::list(&f.roots, None)
+    let row = skills::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|row| row.id == id)
         .unwrap();
     assert_eq!(
-        extensions::skill_source_kind(&row, &managed),
-        extensions::SkillSourceKind::Agent
+        skills::skill_source_kind(&row, &managed),
+        skills::SkillSourceKind::Agent
     );
 
-    let preview = extensions::preview_skill_migration(&f.roots, &[], &managed, &id, None).unwrap();
+    let preview = skills::preview_skill_migration(&f.roots, &[], &managed, &id, None).unwrap();
     assert_eq!(preview.entry_count, 2);
     assert_eq!(preview.physical_entries, 1);
     assert_eq!(
@@ -891,11 +801,11 @@ fn migration_moves_a_physical_user_skill_into_managed_storage() {
         managed.join("review").to_string_lossy()
     );
     assert!(
-        extensions::migrate_skill(&f.roots, &[], &managed, &id, None, false).is_err(),
+        skills::migrate_skill(&f.roots, &[], &managed, &id, None, false).is_err(),
         "a physical source must not be kept after registration"
     );
 
-    let outcome = extensions::migrate_skill(&f.roots, &[], &managed, &id, None, true).unwrap();
+    let outcome = skills::migrate_skill(&f.roots, &[], &managed, &id, None, true).unwrap();
     let target = fs::canonicalize(managed.join("review")).unwrap();
     assert!(fs::symlink_metadata(&physical)
         .unwrap()
@@ -912,19 +822,15 @@ fn migration_moves_a_physical_user_skill_into_managed_storage() {
     );
     assert_eq!(
         outcome.resource_id,
-        extensions::source_id(
+        skills::source_id(
             fs::canonicalize(managed.join("review/SKILL.md"))
                 .unwrap()
                 .to_string_lossy()
                 .as_ref()
         )
     );
-    let inventory = extensions::list(&f.roots, None);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "skill")
-        .unwrap();
+    let inventory = skills::list(&f.roots, None);
+    let row = inventory.resources.iter().next().unwrap();
     assert_eq!(row.id, outcome.resource_id);
     assert!(row.entry_links.iter().all(|link| *link));
     assert!(inventory.resources.iter().all(|row| row.id != id));
@@ -940,23 +846,23 @@ fn migration_moves_a_physical_project_skill_and_keeps_the_project_enabled() {
         "---\nname: review\ndescription: Review changes\n---\n# Review\n",
     );
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
-    let shared = extensions::list(&f.roots, Some(&f.cwd))
+    let id = skills::source_id(file.to_string_lossy().as_ref());
+    let shared = skills::list(&f.roots, Some(&f.cwd))
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "project" && loc.agent.is_none())
+        .find(|loc| loc.scope == "project" && loc.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, Some(&f.cwd), &physical, &shared.id).unwrap();
+    skills::link_skill(&f.roots, Some(&f.cwd), &physical, &shared.id).unwrap();
     let managed = f.root.join("managed");
 
-    extensions::migrate_skill(&f.roots, &[f.cwd.clone()], &managed, &id, None, true).unwrap();
+    skills::migrate_skill(&f.roots, &[f.cwd.clone()], &managed, &id, None, true).unwrap();
     let target = fs::canonicalize(managed.join("review")).unwrap();
     assert_eq!(fs::read_link(&physical).unwrap(), target);
     assert_eq!(
         fs::read_link(f.cwd.join(".agents/skills/review")).unwrap(),
         target
     );
-    let migrated_id = extensions::source_id(
+    let migrated_id = skills::source_id(
         fs::canonicalize(managed.join("review/SKILL.md"))
             .unwrap()
             .to_string_lossy()
@@ -976,31 +882,30 @@ fn migration_moves_a_linked_external_source_and_repoints_its_entries() {
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let source_path = file.to_string_lossy().into_owned();
-    let id = extensions::source_id(&source_path);
-    let shared = extensions::list(&f.roots, None)
+    let id = skills::source_id(&source_path);
+    let shared = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "user" && loc.agent.is_none())
+        .find(|loc| loc.scope == "user" && loc.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &shared.id).unwrap();
+    skills::link_skill(&f.roots, None, &source, &shared.id).unwrap();
     let managed = f.root.join("managed");
-    let row = extensions::list(&f.roots, None)
+    let row = skills::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|row| row.id == id)
         .unwrap();
     assert_eq!(
-        extensions::skill_source_kind(&row, &managed),
-        extensions::SkillSourceKind::External
+        skills::skill_source_kind(&row, &managed),
+        skills::SkillSourceKind::External
     );
 
     let preview =
-        extensions::preview_skill_migration(&f.roots, &[], &managed, &id, Some(&source_path))
-            .unwrap();
+        skills::preview_skill_migration(&f.roots, &[], &managed, &id, Some(&source_path)).unwrap();
     assert_eq!(preview.entry_count, 1);
     assert_eq!(preview.physical_entries, 0);
 
-    extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), true).unwrap();
+    skills::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), true).unwrap();
     let target = fs::canonicalize(managed.join("review")).unwrap();
     assert_eq!(
         fs::read_link(f.roots.home.join(".agents/skills/review")).unwrap(),
@@ -1011,15 +916,11 @@ fn migration_moves_a_linked_external_source_and_repoints_its_entries() {
         fs::read_to_string(managed.join("review/scripts/check.sh")).unwrap(),
         "exit 91\n"
     );
-    let inventory = extensions::list(&f.roots, None);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "skill")
-        .unwrap();
+    let inventory = skills::list(&f.roots, None);
+    let row = inventory.resources.iter().next().unwrap();
     assert_eq!(
-        extensions::skill_source_kind(row, &managed),
-        extensions::SkillSourceKind::Library
+        skills::skill_source_kind(row, &managed),
+        skills::SkillSourceKind::Library
     );
     assert!(inventory.resources.iter().all(|row| row.id != id));
 }
@@ -1033,16 +934,16 @@ fn registration_can_copy_an_external_source_and_keep_the_original() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let id = extensions::source_id(&source_path);
-    let shared = extensions::list(&f.roots, None)
+    let id = skills::source_id(&source_path);
+    let shared = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "user" && loc.agent.is_none())
+        .find(|loc| loc.scope == "user" && loc.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &shared.id).unwrap();
+    skills::link_skill(&f.roots, None, &source, &shared.id).unwrap();
     let managed = f.root.join("managed");
 
-    extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), false).unwrap();
+    skills::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), false).unwrap();
     let target = fs::canonicalize(managed.join("review")).unwrap();
     assert_eq!(
         fs::read_link(f.roots.home.join(".agents/skills/review")).unwrap(),
@@ -1064,29 +965,25 @@ fn migration_rejects_external_relative_links_before_changing_the_source_or_entri
         f.write(&f.root.join("shared.txt"), "shared reference");
         std::os::unix::fs::symlink("../shared.txt", source.join("ref.txt")).unwrap();
         std::os::unix::fs::symlink("scripts/check.sh", source.join("check.sh")).unwrap();
-        let shared = extensions::list(&f.roots, None)
+        let shared = skills::list(&f.roots, None)
             .locations
             .into_iter()
-            .find(|loc| loc.kind == "skill" && loc.agent.is_none())
+            .find(|loc| loc.agent.is_none())
             .unwrap();
-        extensions::link_skill(&f.roots, None, &source, &shared.id).unwrap();
+        skills::link_skill(&f.roots, None, &source, &shared.id).unwrap();
         let entry = Path::new(&shared.path).join("review");
         let original_entry = fs::read_link(&entry).unwrap();
         let source_path = fs::canonicalize(source.join("SKILL.md"))
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let id = extensions::source_id(&source_path);
+        let id = skills::source_id(&source_path);
         let managed = f.root.join("managed");
-        assert!(extensions::preview_skill_migration(
-            &f.roots,
-            &[],
-            &managed,
-            &id,
-            Some(&source_path)
-        )
-        .is_err());
-        assert!(extensions::migrate_skill(
+        assert!(
+            skills::preview_skill_migration(&f.roots, &[], &managed, &id, Some(&source_path))
+                .is_err()
+        );
+        assert!(skills::migrate_skill(
             &f.roots,
             &[],
             &managed,
@@ -1110,7 +1007,7 @@ fn migration_rejects_external_relative_links_before_changing_the_source_or_entri
             source.join("ref.txt"),
         )
         .unwrap();
-        extensions::migrate_skill(
+        skills::migrate_skill(
             &f.roots,
             &[],
             &managed,
@@ -1144,14 +1041,14 @@ fn failed_skill_copy_leaves_no_partial_library_resource_and_can_be_retried() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let id = extensions::source_id(&file);
+    let id = skills::source_id(&file);
     let managed = f.root.join("managed");
-    assert!(extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).is_err());
+    assert!(skills::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).is_err());
     assert!(source.join("SKILL.md").is_file());
     assert_eq!(fs::read_dir(&managed).unwrap().count(), 0);
 
     fs::remove_file(source.join("server.sock")).unwrap();
-    extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).unwrap();
+    skills::migrate_skill(&f.roots, &[], &managed, &id, Some(&file), false).unwrap();
     assert_eq!(
         fs::read_to_string(managed.join("review/scripts/check.sh")).unwrap(),
         "exit 91\n"
@@ -1166,29 +1063,29 @@ fn migration_replaces_a_wrapper_entry_that_links_into_the_source() {
     let f = Fixture::new();
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
-    let shared = extensions::list(&f.roots, None)
+    let id = skills::source_id(file.to_string_lossy().as_ref());
+    let shared = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "user" && loc.agent.is_none())
+        .find(|loc| loc.scope == "user" && loc.agent.is_none())
         .unwrap();
     let wrapper = Path::new(&shared.path).join("review");
     fs::create_dir_all(&wrapper).unwrap();
     std::os::unix::fs::symlink(&file, wrapper.join("SKILL.md")).unwrap();
     let managed = f.root.join("managed");
 
-    let row = extensions::list(&f.roots, None)
+    let row = skills::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|row| row.id == id)
         .unwrap();
     assert_eq!(row.entry_links, vec![true]);
 
-    let preview = extensions::preview_skill_migration(&f.roots, &[], &managed, &id, None).unwrap();
+    let preview = skills::preview_skill_migration(&f.roots, &[], &managed, &id, None).unwrap();
     assert_eq!(preview.entry_count, 1);
     assert_eq!(preview.physical_entries, 0);
 
-    let outcome = extensions::migrate_skill(&f.roots, &[], &managed, &id, None, false).unwrap();
+    let outcome = skills::migrate_skill(&f.roots, &[], &managed, &id, None, false).unwrap();
     let target = fs::canonicalize(managed.join("review")).unwrap();
     assert!(fs::symlink_metadata(&wrapper)
         .unwrap()
@@ -1198,7 +1095,7 @@ fn migration_replaces_a_wrapper_entry_that_links_into_the_source() {
     assert!(source.join("SKILL.md").is_file());
     assert_eq!(
         outcome.resource_id,
-        extensions::source_id(
+        skills::source_id(
             fs::canonicalize(managed.join("review/SKILL.md"))
                 .unwrap()
                 .to_string_lossy()
@@ -1213,33 +1110,33 @@ fn wrapper_entries_can_be_disabled_and_uninstalled_without_the_source() {
     let f = Fixture::new();
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
-    let shared = extensions::list(&f.roots, None)
+    let id = skills::source_id(file.to_string_lossy().as_ref());
+    let shared = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|loc| loc.kind == "skill" && loc.scope == "user" && loc.agent.is_none())
+        .find(|loc| loc.scope == "user" && loc.agent.is_none())
         .unwrap();
     let wrapper = Path::new(&shared.path).join("review");
     fs::create_dir_all(&wrapper).unwrap();
     std::os::unix::fs::symlink(&file, wrapper.join("SKILL.md")).unwrap();
 
-    let preview = extensions::uninstall_preview(&f.roots, &[], &id).unwrap();
+    let preview = skills::uninstall_preview(&f.roots, &[], &id).unwrap();
     assert!(!preview.delete_source_required);
 
-    let disabled = extensions::disable_skill_all(&f.roots, &id).unwrap();
+    let disabled = skills::disable_skill_all(&f.roots, &id).unwrap();
     assert!(disabled.changed);
     assert!(!wrapper.exists());
     assert!(source.join("SKILL.md").is_file());
 
     fs::create_dir_all(&wrapper).unwrap();
     std::os::unix::fs::symlink(&file, wrapper.join("SKILL.md")).unwrap();
-    let revision = extensions::list(&f.roots, None)
+    let revision = skills::list(&f.roots, None)
         .resources
         .into_iter()
         .find(|row| row.id == id)
         .unwrap()
         .revision;
-    extensions::uninstall_skill(&f.roots, &[], &id, &revision, false).unwrap();
+    skills::uninstall_skill(&f.roots, &[], &id, &revision, false).unwrap();
     assert!(!wrapper.exists());
     assert!(source.join("SKILL.md").is_file());
 }
@@ -1250,7 +1147,7 @@ fn registering_an_external_source_adopts_it_into_the_library() {
     let source = f.source("external", "review");
     let managed = f.root.join("managed");
 
-    let outcome = extensions::adopt_source(&f.roots, &[], &managed, &source).unwrap();
+    let outcome = skills::adopt_source(&f.roots, &[], &managed, &source).unwrap();
     assert!(!source.exists());
     let adopted = fs::canonicalize(managed.join("review/SKILL.md")).unwrap();
     assert_eq!(outcome.source_path, adopted.to_string_lossy());
@@ -1263,7 +1160,7 @@ fn registering_a_library_source_keeps_it_in_place() {
     let managed = f.root.join("managed");
     let library = f.source("managed/kept", "kept");
 
-    let outcome = extensions::adopt_source(&f.roots, &[], &managed, &library).unwrap();
+    let outcome = skills::adopt_source(&f.roots, &[], &managed, &library).unwrap();
     assert!(library.exists());
     assert_eq!(
         outcome.source_path,
@@ -1280,7 +1177,7 @@ fn registering_the_library_root_is_rejected() {
     let root = f.source("managed", "stray");
 
     for path in [root.clone(), root.join("SKILL.md")] {
-        let error = extensions::adopt_source(&f.roots, &[], &managed, &path)
+        let error = skills::adopt_source(&f.roots, &[], &managed, &path)
             .err()
             .expect("the library root is a container, not a Skill");
         assert!(error.to_string().contains("源库根目录"));
@@ -1294,24 +1191,20 @@ fn migration_moves_a_registered_source_without_entries() {
     let source = f.source("external", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let source_path = file.to_string_lossy().into_owned();
-    let id = extensions::source_id(&source_path);
+    let id = skills::source_id(&source_path);
     let managed = f.root.join("managed");
 
     let preview =
-        extensions::preview_skill_migration(&f.roots, &[], &managed, &id, Some(&source_path))
-            .unwrap();
+        skills::preview_skill_migration(&f.roots, &[], &managed, &id, Some(&source_path)).unwrap();
     assert_eq!(preview.entry_count, 0);
     assert_eq!(preview.physical_entries, 0);
 
     let outcome =
-        extensions::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), true).unwrap();
+        skills::migrate_skill(&f.roots, &[], &managed, &id, Some(&source_path), true).unwrap();
     assert!(!source.exists());
     let migrated = fs::canonicalize(managed.join("review/SKILL.md")).unwrap();
     assert_eq!(outcome.source_path, migrated.to_string_lossy());
-    assert_eq!(
-        outcome.resource_id,
-        extensions::source_id(&outcome.source_path)
-    );
+    assert_eq!(outcome.resource_id, skills::source_id(&outcome.source_path));
     assert_eq!(outcome.name, "review");
 }
 
@@ -1328,8 +1221,8 @@ fn library_sources_are_discovered_as_registered_sources_without_entries() {
         &managed.join(".backup/SKILL.md"),
         "---\nname: backup\ndescription: Backup\n---\n",
     );
-    let mut registry = extensions::SkillRegistry::default();
-    assert!(extensions::discover_library_sources(&managed, &mut registry).unwrap());
+    let mut registry = skills::SkillRegistry::default();
+    assert!(skills::discover_library_sources(&managed, &mut registry).unwrap());
     assert_eq!(registry.sources.len(), 1);
     let (id, path) = {
         let source = &registry.sources[0];
@@ -1344,15 +1237,11 @@ fn library_sources_are_discovered_as_registered_sources_without_entries() {
             .to_string_lossy()
             .into_owned()
     );
-    assert!(!extensions::discover_library_sources(&managed, &mut registry).unwrap());
+    assert!(!skills::discover_library_sources(&managed, &mut registry).unwrap());
 
-    let mut inventory = extensions::list(&f.roots, None);
-    extensions::merge_skill_sources(&registry, &mut inventory, true, &managed);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "skill")
-        .unwrap();
+    let mut inventory = skills::list(&f.roots, None);
+    skills::merge_skill_sources(&registry, &mut inventory, true, &managed);
+    let row = inventory.resources.iter().next().unwrap();
     assert_eq!(row.id, id);
     assert!(row.registered);
     assert!(row.locations.is_empty());
@@ -1362,7 +1251,7 @@ fn library_sources_are_discovered_as_registered_sources_without_entries() {
         &managed.join("review/SKILL.md"),
         "---\nname: review\ndescription: Updated\n---\n# Review\n",
     );
-    assert!(extensions::discover_library_sources(&managed, &mut registry).unwrap());
+    assert!(skills::discover_library_sources(&managed, &mut registry).unwrap());
     assert_eq!(registry.sources[0].description, "Updated");
 }
 
@@ -1373,24 +1262,20 @@ fn a_library_source_is_registered_without_a_registry_row() {
     let managed = f.root.join("managed");
     let source = f.source("managed/review", "review");
     fs::create_dir_all(f.roots.home.join(".agents/skills")).unwrap();
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
+        .find(|l| l.agent.is_none())
         .unwrap();
-    extensions::link_skill(&f.roots, None, &source, &loc.id).unwrap();
-    let mut inventory = extensions::list(&f.roots, None);
-    extensions::merge_skill_sources(
-        &extensions::SkillRegistry::default(),
+    skills::link_skill(&f.roots, None, &source, &loc.id).unwrap();
+    let mut inventory = skills::list(&f.roots, None);
+    skills::merge_skill_sources(
+        &skills::SkillRegistry::default(),
         &mut inventory,
         true,
         &managed,
     );
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "skill")
-        .unwrap();
+    let row = inventory.resources.iter().next().unwrap();
     assert!(row.registered);
 }
 
@@ -1406,11 +1291,7 @@ fn a_location_root_skill_file_is_ignored_while_child_skills_are_listed() {
         &shared.join("review/SKILL.md"),
         "---\nname: review\ndescription: Review changes\n---\n",
     );
-    let rows: Vec<_> = extensions::list(&f.roots, None)
-        .resources
-        .into_iter()
-        .filter(|row| row.kind == "skill")
-        .collect();
+    let rows: Vec<_> = skills::list(&f.roots, None).resources.into_iter().collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].name, "review");
 }
@@ -1427,35 +1308,123 @@ fn an_agent_skills_root_cannot_be_imported_as_a_source() {
         &shared.join("review/SKILL.md"),
         "---\nname: review\ndescription: Review changes\n---\n",
     );
-    let error = extensions::adopt_source(&f.roots, &[], &f.root.join("managed"), &shared)
+    let error = skills::adopt_source(&f.roots, &[], &f.root.join("managed"), &shared)
         .err()
         .expect("Agent roots are containers, not Skill sources");
     assert!(error.to_string().contains("根目录"));
+    assert!(
+        skills::prepare_source(&f.roots, &[], &f.root.join("managed"), &shared, false).is_err()
+    );
     assert!(shared.join("SKILL.md").exists());
     assert!(shared.join("review/SKILL.md").exists());
 }
 
 #[test]
-fn a_registry_row_outside_the_library_is_listed_but_not_registered() {
+fn referencing_an_agent_source_preserves_its_identity_files_and_native_enablement() {
+    for project_level in [false, true] {
+        let f = Fixture::new();
+        let source = if project_level {
+            f.cwd.join(".claude/skills/review")
+        } else {
+            f.roots.claude.join("skills/review")
+        };
+        f.write(
+            &source.join("SKILL.md"),
+            "---\nname: review\ndescription: Original source\n---\n# Original\n",
+        );
+        f.write(&source.join("scripts/check.sh"), "keep original bytes\n");
+        let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+        let id = skills::source_id(source_file.to_string_lossy().as_ref());
+        // A library name conflict must not prevent referencing an external source.
+        let managed = f.root.join("managed");
+        f.write(&managed.join("review/SKILL.md"), "existing library source");
+        let cwds = vec![f.cwd.clone()];
+        let preview =
+            skills::preview_skill_registration(&f.roots, &cwds, &managed, &id, None).unwrap();
+        assert_eq!(preview.physical_entries, 1);
+        assert_eq!(preview.entry_count, 1);
+        let outcome = skills::prepare_source(&f.roots, &cwds, &managed, &source, false).unwrap();
+        assert_eq!(outcome.source_path, source_file.to_string_lossy());
+        let db = Db::open(&f.root.join("registry.db")).unwrap();
+        let mut registry = skills::SkillRegistry::default();
+        skills::register_source(
+            &mut registry,
+            &outcome.source_path,
+            &outcome.name,
+            &outcome.description,
+        );
+        skills::save_skill_registry(&db, &registry).unwrap();
+        let saved = skills::load_skill_registry(&db).unwrap();
+        let mut inventory = skills::list_catalog(&f.roots, &cwds);
+        skills::merge_skill_sources(&saved, &mut inventory, true, &managed);
+        let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
+        assert!(row.registered);
+        assert_eq!(row.entry_links, vec![false]);
+        assert_eq!(
+            skills::skill_source_kind(row, &managed),
+            skills::SkillSourceKind::Agent
+        );
+        let disabled = if project_level {
+            skills::disable_skill_project(&f.roots, &cwds, &id)
+        } else {
+            skills::disable_skill_all(&f.roots, &id)
+        }
+        .unwrap();
+        assert!(!disabled.changed);
+        assert!(source.is_dir());
+        assert!(!fs::symlink_metadata(&source)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(source.join("scripts/check.sh")).unwrap(),
+            "keep original bytes\n"
+        );
+        assert_eq!(
+            fs::read_to_string(managed.join("review/SKILL.md")).unwrap(),
+            "existing library source"
+        );
+        assert!(skills::list_catalog(&f.roots, &cwds)
+            .resources
+            .iter()
+            .any(|row| row.id == id));
+        if project_level {
+            let scopes = project_scopes(&f, &[("w", f.cwd.clone())], &id);
+            assert!(scopes[0].enabled);
+        }
+    }
+}
+
+#[test]
+fn a_registered_external_source_is_managed_without_copying_or_moving() {
     let f = Fixture::new();
     let source = f.source("external/review", "review");
-    let install = extensions::register_source_dir(&source).unwrap();
-    let mut registry = extensions::SkillRegistry::default();
-    extensions::register_source(
+    let managed = f.root.join("managed");
+    let install = skills::prepare_source(&f.roots, &[], &managed, &source, false).unwrap();
+    let mut registry = skills::SkillRegistry::default();
+    skills::register_source(
         &mut registry,
         &install.source_path,
         &install.name,
         &install.description,
     );
-    let mut inventory = extensions::list(&f.roots, None);
-    extensions::merge_skill_sources(&registry, &mut inventory, true, &f.root.join("managed"));
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "skill")
-        .unwrap();
-    assert!(!row.registered);
+    let mut inventory = skills::list(&f.roots, None);
+    skills::merge_skill_sources(&registry, &mut inventory, true, &f.root.join("managed"));
+    let row = inventory.resources.iter().next().unwrap();
+    assert!(row.registered);
+    assert_eq!(
+        Path::new(&row.path),
+        fs::canonicalize(source.join("SKILL.md")).unwrap()
+    );
+    assert!(!managed.exists());
+    assert!(source.join("scripts/check.sh").exists());
+    assert!(row.error.is_none());
     assert!(row.entry_paths.is_empty());
+    fs::remove_dir_all(&source).unwrap();
+    let mut missing = skills::list(&f.roots, None);
+    skills::merge_skill_sources(&registry, &mut missing, true, &managed);
+    assert!(missing.resources[0].registered);
+    assert!(missing.resources[0].error.is_some());
 }
 
 #[test]
@@ -1464,9 +1433,9 @@ fn migration_rejects_a_source_already_in_the_library() {
     let managed = f.root.join("managed");
     let source = f.source("managed", "review");
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
+    let id = skills::source_id(file.to_string_lossy().as_ref());
 
-    let error = extensions::preview_skill_migration(
+    let error = skills::preview_skill_migration(
         &f.roots,
         &[],
         &managed,
@@ -1487,15 +1456,15 @@ fn migration_refuses_to_overwrite_an_existing_managed_skill() {
         "---\nname: review\ndescription: Review changes\n---\n# Review\n",
     );
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
-    let id = extensions::source_id(file.to_string_lossy().as_ref());
+    let id = skills::source_id(file.to_string_lossy().as_ref());
     let managed = f.root.join("managed");
     f.write(&managed.join("review/SKILL.md"), "existing");
 
-    let error = extensions::preview_skill_migration(&f.roots, &[], &managed, &id, None)
+    let error = skills::preview_skill_migration(&f.roots, &[], &managed, &id, None)
         .err()
         .expect("existing target must be rejected");
     assert!(error.to_string().contains("已存在同名"));
-    assert!(extensions::migrate_skill(&f.roots, &[], &managed, &id, None, true).is_err());
+    assert!(skills::migrate_skill(&f.roots, &[], &managed, &id, None, true).is_err());
     assert!(physical.join("SKILL.md").exists());
     assert_eq!(
         fs::read_to_string(managed.join("review/SKILL.md")).unwrap(),
@@ -1529,12 +1498,12 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
         "mklink /J failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
-    let row = extensions::list(&f.roots, None)
+    let row = skills::list(&f.roots, None)
         .resources
         .into_iter()
-        .find(|r| r.kind == "skill")
+        .next()
         .unwrap();
-    extensions::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
+    skills::disable_skill(&f.roots, None, &row.id, &row.entry_paths[0], &row.revision).unwrap();
     assert!(!junction.exists());
     assert!(source.join("SKILL.md").exists());
     let nested = source.join("linked-scripts");
@@ -1544,316 +1513,254 @@ fn windows_junction_unlink_keeps_skill_source_and_install_rejects_nested_junctio
         "mklink /J failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
-    let loc = extensions::list(&f.roots, None)
+    let loc = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.kind == "skill" && l.agent.is_none())
+        .find(|l| l.agent.is_none())
         .unwrap();
-    assert!(extensions::install_skill(&f.roots, None, &source, &loc.id).is_err());
+    assert!(skills::install_skill(&f.roots, None, &source, &loc.id).is_err());
     assert!(!root.join("review").exists());
     fs::remove_dir(nested).unwrap();
 }
 
-fn mcp_section(value: &serde_json::Value, agent: Agent) -> &serde_json::Value {
-    value
-        .get(if agent == Agent::Codex {
-            "mcp_servers"
-        } else {
-            "mcpServers"
-        })
-        .unwrap()
-}
-
-fn read_mcp(f: &Fixture, agent: Agent, scope: &str) -> serde_json::Value {
-    let location = f.mcp(agent, scope);
-    let raw = fs::read_to_string(&location.path).unwrap();
-    if location.path.ends_with(".toml") {
-        toml_edit::de::from_str(&raw).unwrap()
-    } else {
-        serde_json::from_str(&raw).unwrap()
-    }
-}
-
 #[test]
-fn identical_mcp_configurations_collapse_and_definitions_remain_listed() {
-    let f = Fixture::new();
-    let user = f.mcp(Agent::Pi, "user");
-    let project = f.mcp(Agent::Pi, "project");
-    f.write(
-        Path::new(&user.path),
-        r#"{"mcpServers":{"docs":{"url":"https://docs.example/mcp","headers":{"X-Team":"one"}}}}"#,
-    );
-    f.write(
-        Path::new(&project.path),
-        r#"{"mcpServers":{"docs":{"serverUrl":"https://docs.example/mcp","type":"http","headers":{"X-Team":"one"}}}}"#,
-    );
-    let codex = f.mcp(Agent::Codex, "user");
-    f.write(
-        Path::new(&codex.path),
-        "[mcp_servers.docs]\nurl = \"https://docs.example/mcp\"\nenabled = false\n[mcp_servers.docs.http_headers]\nX-Team = \"one\"\n",
-    );
-    let original_codex = fs::read(&codex.path).unwrap();
-    let inventory = extensions::list(&f.roots, Some(&f.cwd));
-    let rows: Vec<_> = inventory
-        .resources
-        .iter()
-        .filter(|row| row.kind == "mcp")
-        .collect();
-    assert_eq!(rows.len(), 1, "identical configs are one MCP");
-    assert_eq!(rows[0].locations.len(), 3);
-
-    let id = extensions::mcp_identity(
-        "docs",
-        &json!({"serverUrl":"https://docs.example/mcp","headers":{"X-Team":"one"}}),
-    );
-    assert_eq!(rows[0].id, id);
-
-    let mut registry = extensions::McpRegistry::default();
-    extensions::register_mcp_definition(
-        &mut registry,
-        "docs",
-        "Documentation MCP",
-        json!({"url":"https://docs.example/mcp","headers":{"X-Team":"one"}}),
-    )
-    .unwrap();
-    assert_eq!(registry.definitions[0].id, id);
-
-    // Agent-owned disable flags do not change configuration identity and
-    // must not be rewritten when NoEnding finds the matching configuration.
-    extensions::enable_mcp_user(&f.roots, &registry, &id, &[]).unwrap();
-    assert_eq!(fs::read(&codex.path).unwrap(), original_codex);
-
-    fs::remove_file(&user.path).unwrap();
-    fs::remove_file(&project.path).unwrap();
-    fs::remove_file(&codex.path).unwrap();
-    for agent in [Agent::ClaudeCode, Agent::Antigravity] {
-        fs::remove_file(f.mcp(agent, "user").path).unwrap();
-    }
-    let mut inventory = extensions::list(&f.roots, Some(&f.cwd));
-    extensions::merge_mcp_definitions(&registry, &mut inventory, true);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.kind == "mcp" && row.id == id)
+fn unregistering_an_inactive_external_source_persists_without_deleting_files() {
+    for remove_links in [false, true] {
+        let f = Fixture::new();
+        let source = f.source("external/review", "review");
+        let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+        let db = Db::open(&f.root.join("registry.db")).unwrap();
+        let mut registry = skills::SkillRegistry::default();
+        let id = skills::register_source(&mut registry, file.to_str().unwrap(), "review", "Review")
+            .id
+            .clone();
+        skills::save_skill_registry(&db, &registry).unwrap();
+        let mut registry = skills::load_skill_registry(&db).unwrap();
+        skills::unregister_skill(
+            &f.roots,
+            &[],
+            &f.root.join("managed"),
+            &mut registry,
+            &id,
+            remove_links,
+        )
         .unwrap();
-    assert!(row.registered);
-    assert!(row.locations.is_empty());
-}
-
-#[test]
-fn enabling_a_definition_writes_every_agent_and_disable_preserves_other_servers() {
-    let f = Fixture::new();
-    let mut registry = extensions::McpRegistry::default();
-    let id = extensions::register_mcp_definition(
-        &mut registry,
-        "docs",
-        "",
-        json!({"url":"https://docs.example/mcp","headers":{"X-Team":"one"}}),
-    )
-    .unwrap()
-    .id
-    .clone();
-    extensions::enable_mcp_user(&f.roots, &registry, &id, &[]).unwrap();
-    for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
-    ] {
-        let value = read_mcp(&f, agent, "user");
-        let server = &mcp_section(&value, agent)["docs"];
-        assert!(server.is_object(), "{agent:?} did not receive docs");
-        if agent == Agent::Codex {
-            assert_eq!(server["http_headers"]["X-Team"], "one");
-            assert!(server.get("headers").is_none());
-        } else {
-            assert_eq!(server["headers"]["X-Team"], "one");
-            assert!(server.get("http_headers").is_none());
-        }
-        if agent == Agent::Antigravity {
-            assert_eq!(server["serverUrl"], "https://docs.example/mcp");
-        }
-    }
-    extensions::disable_mcp_user(&f.roots, &registry, &id).unwrap();
-    for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
-    ] {
-        let value = read_mcp(&f, agent, "user");
-        assert!(
-            mcp_section(&value, agent).get("docs").is_none(),
-            "{agent:?} kept docs"
+        skills::save_skill_registry(&db, &registry).unwrap();
+        assert!(skills::load_skill_registry(&db).unwrap().sources.is_empty());
+        assert_eq!(
+            fs::read_to_string(source.join("scripts/check.sh")).unwrap(),
+            "exit 91\n"
         );
+        let mut inventory = skills::list_catalog(&f.roots, &[]);
+        skills::merge_skill_sources(&registry, &mut inventory, true, &f.root.join("managed"));
+        assert!(!inventory.resources.iter().any(|row| row.id == id));
     }
 }
 
 #[test]
-fn concurrent_mcp_registrations_survive_uninstalling_an_earlier_snapshot() {
+fn unregister_rejects_library_and_unregistered_sources_without_changing_them() {
     let f = Fixture::new();
-    let db = std::sync::Arc::new(Db::open(&f.root.join("state.db")).unwrap());
-    let old =
-        extensions::store_mcp_definition(&db, "old", "", json!({"command":"old-server"})).unwrap();
-    let mut uninstall_snapshot = extensions::load_mcp_registry(&db).unwrap();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-    let workers: Vec<_> = (0..8)
-        .map(|index| {
-            let db = db.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                extensions::store_mcp_definition(
-                    &db,
-                    &format!("new-{index}"),
-                    "",
-                    json!({"command":"new-server"}),
-                )
-                .unwrap()
-            })
-        })
-        .collect();
-    let added: Vec<_> = workers
-        .into_iter()
-        .map(|worker| worker.join().unwrap())
-        .collect();
-    extensions::uninstall_mcp_definition(&mut uninstall_snapshot, &f.roots, &old, &[]).unwrap();
-    // The command removes only this ID from current persistence once its
-    // asynchronous file worker finishes; it never writes the worker's snapshot.
-    extensions::forget_mcp_definition(&db, &old).unwrap();
-    let current = extensions::load_mcp_registry(&db).unwrap();
-    assert!(extensions::find_mcp_definition(&current, &old).is_none());
-    assert_eq!(current.definitions.len(), 8);
-    for id in added {
-        assert!(extensions::find_mcp_definition(&current, &id).is_some());
+    let managed = f.root.join("managed");
+    let source = f.source("managed/review", "review");
+    let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+    let mut registry = skills::SkillRegistry::default();
+    let id = skills::register_source(&mut registry, file.to_str().unwrap(), "review", "Review")
+        .id
+        .clone();
+    for remove_links in [false, true] {
+        assert!(skills::unregister_skill(
+            &f.roots,
+            &[],
+            &managed,
+            &mut registry,
+            &id,
+            remove_links
+        )
+        .is_err());
+        assert!(skills::find_source(&registry, &id).is_some());
+        assert!(skills::unregister_skill(
+            &f.roots,
+            &[],
+            &managed,
+            &mut registry,
+            "unknown",
+            remove_links
+        )
+        .is_err());
     }
-    assert!(
-        extensions::store_mcp_definition(&db, "new-0", "", json!({"command":"new-server"}))
-            .is_err()
+    assert_eq!(
+        fs::read_to_string(source.join("scripts/check.sh")).unwrap(),
+        "exit 91\n"
     );
-    assert_eq!(extensions::load_mcp_registry(&db).unwrap(), current);
 }
 
+#[cfg(unix)]
 #[test]
-fn a_definition_enables_into_projects_and_uninstall_removes_every_matching_entry() {
-    let f = Fixture::new();
-    let mut registry = extensions::McpRegistry::default();
-    let id = extensions::register_mcp_definition(
-        &mut registry,
-        "docs",
-        "",
-        json!({"url":"https://docs.example/mcp"}),
-    )
-    .unwrap()
-    .id
-    .clone();
-    extensions::enable_mcp_projects(&f.roots, &registry, &id, std::slice::from_ref(&f.cwd))
+fn unregister_preserves_physical_entries_and_ancestor_links_and_optionally_removes_skill_links() {
+    use std::os::unix::fs::symlink;
+    for remove_links in [false, true] {
+        let f = Fixture::new();
+        let source = f.source("home/.claude/skills/review", "review");
+        let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+        let ancestor = f.roots.home.join(".agents/skills");
+        fs::create_dir_all(ancestor.parent().unwrap()).unwrap();
+        symlink(source.parent().unwrap(), &ancestor).unwrap();
+        let links = [
+            f.roots.pi.join("skills/review"),
+            f.cwd.join(".claude/skills/review"),
+            f.root.join("repo-two/.agents/skills/review"),
+        ];
+        for link in &links {
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(&source, link).unwrap();
+        }
+        let wrapper = f.cwd.join(".pi/skills/review");
+        fs::create_dir_all(&wrapper).unwrap();
+        symlink(source.join("SKILL.md"), wrapper.join("SKILL.md")).unwrap();
+        symlink(source.join("scripts"), wrapper.join("scripts")).unwrap();
+        let unrelated = f.source("other", "other");
+        let unrelated_link = f.cwd.join(".claude/skills/other");
+        symlink(&unrelated, &unrelated_link).unwrap();
+        let mut registry = skills::SkillRegistry::default();
+        let id = skills::register_source(&mut registry, file.to_str().unwrap(), "review", "Review")
+            .id
+            .clone();
+        let other_id = skills::register_source(
+            &mut registry,
+            fs::canonicalize(unrelated.join("SKILL.md"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "other",
+            "Other",
+        )
+        .id
+        .clone();
+        let cwds = [f.cwd.clone(), f.root.join("repo-two")];
+        skills::unregister_skill(
+            &f.roots,
+            &cwds,
+            &f.root.join("managed"),
+            &mut registry,
+            &id,
+            remove_links,
+        )
         .unwrap();
-    let scopes = project_scopes(&f, &[("w", f.cwd.clone())], &id);
-    assert!(scopes[0].enabled);
-    assert!(scopes[0].full);
-    assert_eq!(scopes[0].workspaces[0].entries.len(), 4);
-    assert!(scopes[0].workspaces[0]
-        .entries
-        .iter()
-        .all(|entry| entry.agents.len() == 1));
-    for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
-    ] {
-        let project = read_mcp(&f, agent, "project");
-        assert!(mcp_section(&project, agent).get("docs").is_some());
+        assert!(skills::find_source(&registry, &id).is_none());
+        assert!(skills::find_source(&registry, &other_id).is_some());
+        for link in links.iter().chain(std::iter::once(&wrapper)) {
+            assert_eq!(fs::symlink_metadata(link).is_ok(), !remove_links);
+        }
+        assert!(ancestor.is_symlink());
+        assert!(unrelated_link.is_symlink());
+        assert_eq!(
+            fs::read_to_string(source.join("scripts/check.sh")).unwrap(),
+            "exit 91\n"
+        );
+        let mut inventory = skills::list_catalog(&f.roots, &cwds);
+        skills::merge_skill_sources(&registry, &mut inventory, true, &f.root.join("managed"));
+        let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
+        assert!(!row.registered);
+        assert!(row.entry_links.iter().any(|link| !link));
+        assert_eq!(row.entry_links.iter().any(|link| *link), !remove_links);
     }
-    let enabled =
-        extensions::enable_mcp_user(&f.roots, &registry, &id, std::slice::from_ref(&f.cwd))
-            .unwrap();
-    assert!(enabled.message.contains("已清理"));
-    for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
-    ] {
-        let project = read_mcp(&f, agent, "project");
-        assert!(mcp_section(&project, agent).get("docs").is_none());
-        let user = read_mcp(&f, agent, "user");
-        assert!(mcp_section(&user, agent).get("docs").is_some());
-    }
+}
 
-    extensions::uninstall_mcp_definition(
-        &mut registry,
+#[cfg(unix)]
+#[test]
+fn unregister_cleans_dangling_source_links_and_rejects_a_library_alias() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let source = f.source("external/review", "review");
+    let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+    let load_root = f.cwd.join(".claude/skills");
+    fs::create_dir_all(&load_root).unwrap();
+    let link = load_root.join("review");
+    // A relative link must still be recognized after the source is deleted.
+    symlink("../../../external/review", &link).unwrap();
+    assert!(link.join("SKILL.md").is_file());
+    let mut registry = skills::SkillRegistry::default();
+    let id = skills::register_source(&mut registry, file.to_str().unwrap(), "review", "Review")
+        .id
+        .clone();
+    fs::remove_dir_all(&source).unwrap();
+    skills::unregister_skill(
         &f.roots,
+        &[f.cwd.clone()],
+        &f.root.join("managed"),
+        &mut registry,
         &id,
-        std::slice::from_ref(&f.cwd),
+        true,
     )
     .unwrap();
-    assert!(registry.definitions.is_empty());
-    for scope in ["user", "project"] {
-        for agent in [
-            Agent::Codex,
-            Agent::ClaudeCode,
-            Agent::Pi,
-            Agent::Antigravity,
-        ] {
-            let value = read_mcp(&f, agent, scope);
-            assert!(mcp_section(&value, agent).get("docs").is_none());
-        }
-    }
-}
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(registry.sources.is_empty());
 
-#[test]
-fn project_mcp_enable_is_rejected_while_user_level_is_active() {
-    let f = Fixture::new();
-    let mut registry = extensions::McpRegistry::default();
-    let id = extensions::register_mcp_definition(
+    let library_source = f.source("managed/review", "review");
+    let alias = f.root.join("alias");
+    symlink(&library_source, &alias).unwrap();
+    let id = skills::register_source(
         &mut registry,
-        "docs",
-        "",
-        json!({"url":"https://docs.example/mcp"}),
+        alias.join("SKILL.md").to_str().unwrap(),
+        "review",
+        "Review",
     )
-    .unwrap()
     .id
     .clone();
-    extensions::enable_mcp_user(&f.roots, &registry, &id, &[]).unwrap();
-    let error =
-        extensions::enable_mcp_projects(&f.roots, &registry, &id, std::slice::from_ref(&f.cwd))
-            .unwrap_err();
-    assert!(error.to_string().contains("用户级启用"));
-    for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
-    ] {
-        assert!(!Path::new(&f.mcp(agent, "project").path).exists());
-    }
+    assert!(skills::unregister_skill(
+        &f.roots,
+        &[],
+        &f.root.join("managed"),
+        &mut registry,
+        &id,
+        true
+    )
+    .is_err());
+    assert!(skills::find_source(&registry, &id).is_some());
+    assert!(library_source.join("SKILL.md").is_file());
 }
 
+#[cfg(windows)]
 #[test]
-fn a_name_conflict_does_not_overwrite_a_different_native_configuration() {
+fn windows_unregister_removes_skill_junctions_but_keeps_source_and_ancestor_junctions() {
     let f = Fixture::new();
-    let user = f.mcp(Agent::Pi, "user");
-    f.write(
-        Path::new(&user.path),
-        r#"{"mcpServers":{"docs":{"url":"https://other.example/mcp"}}}"#,
+    let source = f.source("home/.claude/skills/review", "review");
+    let ancestor = f.roots.home.join(".agents/skills");
+    fs::create_dir_all(ancestor.parent().unwrap()).unwrap();
+    let status = create_junction(&ancestor, source.parent().unwrap());
+    assert!(
+        status.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&status.stderr)
     );
-    let mut registry = extensions::McpRegistry::default();
-    let id = extensions::register_mcp_definition(
+    let link = f.cwd.join(".claude/skills/review");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let status = create_junction(&link, &source);
+    assert!(
+        status.status.success(),
+        "mklink /J failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+    let mut registry = skills::SkillRegistry::default();
+    let id = skills::register_source(&mut registry, file.to_str().unwrap(), "review", "Review")
+        .id
+        .clone();
+    skills::unregister_skill(
+        &f.roots,
+        &[f.cwd.clone()],
+        &f.root.join("managed"),
         &mut registry,
-        "docs",
-        "",
-        json!({"url":"https://docs.example/mcp"}),
+        &id,
+        true,
     )
-    .unwrap()
-    .id
-    .clone();
-    let result = extensions::enable_mcp_user(&f.roots, &registry, &id, &[]).unwrap();
-    assert!(result.message.contains("同名但不同配置"));
-    let value = read_mcp(&f, Agent::Pi, "user");
+    .unwrap();
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(ancestor.join("review/SKILL.md").is_file());
     assert_eq!(
-        mcp_section(&value, Agent::Pi)["docs"]["url"],
-        "https://other.example/mcp"
+        fs::read_to_string(source.join("scripts/check.sh")).unwrap(),
+        "exit 91\n"
     );
+    // Remove the ancestor junction explicitly so fixture cleanup cannot follow it.
+    fs::remove_dir(ancestor).unwrap();
 }

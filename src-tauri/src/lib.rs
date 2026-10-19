@@ -9,12 +9,12 @@ pub mod commands;
 pub mod context;
 pub mod domain;
 pub mod error;
-pub mod extensions;
 pub mod ingestion;
 pub mod launcher;
 pub mod lifecycle;
 pub mod platform;
 pub mod search;
+pub mod skills;
 pub mod storage;
 pub mod sync;
 pub mod terminal;
@@ -157,24 +157,19 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::extensions::list_extension_resources,
-            commands::extensions::list_extension_catalog,
-            commands::extensions::get_extension_detail,
-            commands::extensions::register_extension_skill_source,
-            commands::extensions::enable_extension_skill_all,
-            commands::extensions::disable_extension_skill_all,
-            commands::extensions::extension_skill_migration_preview,
-            commands::extensions::migrate_extension_skill,
-            commands::extensions::enable_extension_skill_projects,
-            commands::extensions::disable_extension_skill_projects,
-            commands::extensions::extension_skill_uninstall_preview,
-            commands::extensions::uninstall_extension_skill,
-            commands::extensions::save_mcp_definition,
-            commands::extensions::enable_mcp_definition_user,
-            commands::extensions::disable_mcp_definition_user,
-            commands::extensions::enable_mcp_definition_projects,
-            commands::extensions::disable_mcp_definition_projects,
-            commands::extensions::uninstall_mcp_definition,
+            commands::skills::list_skills,
+            commands::skills::list_skill_catalog,
+            commands::skills::get_skill_detail,
+            commands::skills::register_skill_source,
+            commands::skills::unregister_skill,
+            commands::skills::enable_skill_all,
+            commands::skills::disable_skill_all,
+            commands::skills::skill_registration_preview,
+            commands::skills::register_discovered_skill,
+            commands::skills::enable_skill_projects,
+            commands::skills::disable_skill_projects,
+            commands::skills::skill_uninstall_preview,
+            commands::skills::uninstall_skill,
             // Projects derive membership from paths; lifecycle is user managed.
             commands::project::list_projects,
             commands::project::list_project_cards,
@@ -245,8 +240,6 @@ pub fn run() {
             commands::ingestion::get_ingestion_status,
             commands::list_ingest_sources,
             commands::add_ingest_source,
-            commands::set_ingest_source_enabled,
-            commands::set_all_ingest_sources_enabled,
             commands::remove_ingest_source,
             commands::launch_new_session,
             commands::prepare_new_session,

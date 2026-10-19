@@ -6,7 +6,7 @@ import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
 import PreferenceList from "../preferences/PreferenceList";
-import ExtensionScopeConfig from "../extensions/ExtensionScopeConfig";
+import SkillScopeConfig from "../skills/SkillScopeConfig";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
 import ProjectSummary from "./ProjectSummary";
@@ -271,7 +271,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
             </div>
           </section>
 
-          <ExtensionScopeConfig projectId={projectId} navigate={navigate} workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
+          <SkillScopeConfig projectId={projectId} navigate={navigate} workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
 
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>

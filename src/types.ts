@@ -11,28 +11,27 @@ export type Agent =
   | "zcode"
   | "antigravity";
 
-export type ExtensionKind = "skill" | "mcp";
-export interface ExtensionScope { project_id?: string | null; workspace_path_id?: string | null }
-export interface ExtensionLocation {
-  id: string; kind: ExtensionKind; agent: Agent | null; scope: "user" | "project";
+export interface SkillScope { project_id?: string | null; workspace_path_id?: string | null }
+export interface SkillLocation {
+  id: string; agent: Agent | null; scope: "user" | "project";
   path: string; label: string;
 }
-export interface ExtensionResource {
-  id: string; kind: ExtensionKind; name: string; description: string; path: string;
+export interface SkillResource {
+  id: string; name: string; description: string; path: string;
   locations: string[]; entry_paths: string[]; entry_links: boolean[];
   revision: string; registered: boolean; error: string | null;
 }
-export interface ExtensionInventory { resources: ExtensionResource[]; locations: ExtensionLocation[]; warnings: string[] }
-export interface ExtensionSkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
-export interface ExtensionProjectWorkspaceScope { workspace_path_id: string; path: string; entries: ExtensionSkillScopeEntry[] }
-export interface ExtensionProjectSkillScope { project_id: string; project_name: string; workspaces: ExtensionProjectWorkspaceScope[]; enabled: boolean; full: boolean }
-export interface ExtensionResourceDetail { resource: ExtensionResource; content: string; config: Record<string, unknown> | null }
-export type ExtensionSkillSourceKind = "library" | "agent" | "external";
-export interface ExtensionDetailBundle { detail: ExtensionResourceDetail; locations: ExtensionLocation[]; scopes: ExtensionProjectSkillScope[]; source_kind: ExtensionSkillSourceKind | null }
-export interface ExtensionUninstallPreview { delete_source_required: boolean; entry_count: number; source_path: string }
-export interface ExtensionSkillMigrationPreview { source_path: string; target_path: string; entry_count: number; physical_entries: number }
-export interface ExtensionSkillMigrationResult { message: string; source_path: string; resource_id: string; name: string; description: string }
-export interface ExtensionOperationResult { message: string }
+export interface SkillInventory { resources: SkillResource[]; locations: SkillLocation[]; warnings: string[] }
+export interface SkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
+export interface SkillProjectWorkspaceScope { workspace_path_id: string; path: string; entries: SkillScopeEntry[] }
+export interface SkillProjectScope { project_id: string; project_name: string; workspaces: SkillProjectWorkspaceScope[]; enabled: boolean; full: boolean }
+export interface SkillResourceDetail { resource: SkillResource; content: string }
+export type SkillSourceKind = "library" | "agent" | "external";
+export interface SkillDetailBundle { detail: SkillResourceDetail; locations: SkillLocation[]; scopes: SkillProjectScope[]; source_kind: SkillSourceKind | null }
+export interface SkillUninstallPreview { delete_source_required: boolean; entry_count: number; source_path: string }
+export interface SkillRegistrationPreview { source_path: string; target_path: string; entry_count: number; physical_entries: number }
+export interface SkillRegistrationResult { message: string; source_path: string; resource_id: string; name: string; description: string }
+export interface SkillOperationResult { message: string }
 
 /** Task archive state; there is no active/completed classification. */
 export type WorkstreamVisibility = "normal" | "archived";
@@ -301,7 +300,6 @@ export interface IngestSource {
   id: string;
   agent: Agent;
   path: string;
-  enabled: boolean;
   origin: "default" | "user";
   created_at: string;
   exists: boolean;
@@ -376,7 +374,7 @@ export interface WorkstreamUpdateOutcome {
   preference_error: string | null;
 }
 
-/** `get_ingestion_status`：最近一次后台摄入任务的结果。 */
+/** `get_ingestion_status`：最近一次后台摄入任务；两个时间都为空表示已排队。 */
 export interface IngestTaskStatus {
   scope: string;
   started_at: string | null;
@@ -415,8 +413,8 @@ export interface TerminalResumeState {
 
 export interface SessionDetail {
   session: Session;
-  /** Conversation：只含根源的 user/assistant 消息。 */
-  messages: SessionMessage[];
+  /** Conversation：根源的 user/assistant 消息，带当前会话顺序编号。 */
+  messages: SessionWindowMessage[];
   /** 会话消息统计：用户消息与 Agent 回复总数。 */
   message_stats?: SessionMessageStats;
   /** 会话显式跟踪的任务，包含已归档任务。 */

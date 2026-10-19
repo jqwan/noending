@@ -27,7 +27,7 @@ import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import { isSelectableProject } from "../projects/projectKind";
 import PageHeader from "../../layout/PageHeader";
 
-/** 新会话页：预览启动目录，发送首条消息时才创建内嵌终端。 */
+/** 新会话页：预览启动目录，打开终端时可携带首条消息。 */
 export type NewSessionViewProps = {
   /** 预置选中的跟踪任务；省略或 "none" = standalone。 */
   workstreamId?: string | null;
@@ -39,6 +39,8 @@ export type NewSessionViewProps = {
 };
 
 const STANDALONE = "none";
+// Match the launcher's UTF-16 limit (String.length); keep long drafts intact.
+const INITIAL_MESSAGE_LIMIT = 2000;
 
 /** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
@@ -391,7 +393,10 @@ export default function NewSessionView({
     });
   };
 
-  const canSend = Boolean(message.trim() && selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
+  const hasMessage = Boolean(message.trim());
+  const messageTooLong = message.length > INITIAL_MESSAGE_LIMIT;
+  const launchLabel = hasMessage ? "发送" : "打开终端";
+  const canSend = Boolean(!messageTooLong && selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
 
   const start = async () => {
     if (!canSend || launching.current) return;
@@ -401,7 +406,7 @@ export default function NewSessionView({
     setBusy(true);
     setError("");
     try {
-      const r = await api.launchEmbeddedNew(selectedAgent, trackedWorkstreamIds, launchCwd, message, runtimeOverride);
+      const r = await api.launchEmbeddedNew(selectedAgent, trackedWorkstreamIds, launchCwd, hasMessage ? message : undefined, runtimeOverride);
       announceLaunch("启动", r);
       if (r.terminal_id) {
         rememberNewSessionRuntime(selectedAgent, runtimeOverride);
@@ -651,7 +656,9 @@ export default function NewSessionView({
             <textarea
               autoFocus
               aria-label="首条消息"
-              placeholder="描述你想完成的任务…"
+              placeholder="描述你想完成的任务，或直接打开终端…"
+              aria-invalid={messageTooLong}
+              aria-describedby="new-session-message-hint"
               value={message}
               onChange={(e) => handleMessageChange(e.target.value)}
               onKeyDown={(e) => {
@@ -761,8 +768,8 @@ export default function NewSessionView({
                 <button
                   type="submit"
                   className="new-session-send"
-                  aria-label={busy ? "启动中…" : "发送"}
-                  title={busy ? "启动中…" : preparing ? "准备中…" : "发送"}
+                  aria-label={busy ? "启动中…" : launchLabel}
+                  title={busy ? "启动中…" : preparing ? "准备中…" : launchLabel}
                   disabled={!canSend}
                 >
                   {busy ? <span className="new-session-spinner" aria-hidden="true" /> : (
@@ -789,7 +796,11 @@ export default function NewSessionView({
               )}
             </div>
           )}
-          <p className="new-session-hint">Enter 发送 · Shift + Enter 换行</p>
+          <p id="new-session-message-hint" className="new-session-hint" role={messageTooLong ? "alert" : undefined}>
+            {messageTooLong
+              ? `首条消息最多 ${INITIAL_MESSAGE_LIMIT} 字符，当前 ${message.length}。请缩短内容，或清空后直接打开终端输入。`
+              : `Enter ${launchLabel} · Shift + Enter 换行 · ${message.length}/${INITIAL_MESSAGE_LIMIT}`}
+          </p>
         </form>
       </div>
 

@@ -1,8 +1,6 @@
-//! NoEnding-owned Skill sources. Ownership is decided by the source's location
-//! inside the library, not by this registry. Native Agent directories remain
-//! authoritative for what is enabled; the registry keeps metadata and a source
-//! listed after every link is removed, so "disabled" is not the same as "never
-//! installed". Copied installs are independent physical Skills outside it.
+//! Registered Skill sources may live in the NoEnding library or remain in an
+//! external directory. Native Agent directories determine enablement; registry
+//! membership keeps referenced sources managed after their links are removed.
 use super::{files, Inventory, Resource};
 use crate::{
     error::{other, Result},
@@ -11,6 +9,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+// Keep the existing storage key so registered Skill sources retain their identities.
 pub(super) const KEY: &str = "extensions.skill_sources";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -92,10 +91,8 @@ fn missing_revision(path: &str) -> String {
     super::key(format!("missing:{path}"))
 }
 
-/// Registration is ownership: a Skill is registered exactly when its source
-/// directory resolves inside the NoEnding library, regardless of registry
-/// membership. The registry only supplies metadata and keeps sources with no
-/// Agent entry listed, so only the user-level library includes inactive rows.
+/// Explicit registration and placement in the NoEnding library both constitute
+/// management. Storage location is independent of registration and enablement.
 pub fn merge(
     registry: &SkillRegistry,
     inventory: &mut Inventory,
@@ -103,13 +100,10 @@ pub fn merge(
     managed_root: &Path,
 ) {
     let managed = fs::canonicalize(managed_root).unwrap_or_else(|_| managed_root.to_path_buf());
-    for row in inventory
-        .resources
-        .iter_mut()
-        .filter(|row| row.kind == "skill")
-    {
+    for row in inventory.resources.iter_mut() {
         let source = Path::new(&row.path);
-        row.registered = resolves_inside(&managed, source.parent().unwrap_or(source));
+        row.registered = find_source(registry, &row.id).is_some()
+            || resolves_inside(&managed, source.parent().unwrap_or(source));
         let Some(source) = find_source(registry, &row.id) else {
             continue;
         };
@@ -126,7 +120,7 @@ pub fn merge(
     if include_inactive {
         for source in &registry.sources {
             if !inventory.resources.iter().any(|row| row.id == source.id) {
-                inventory.resources.push(inactive(source, &managed));
+                inventory.resources.push(inactive(source));
             }
         }
     }
@@ -144,19 +138,18 @@ fn resolves_inside(root: &Path, path: &Path) -> bool {
         .starts_with(root)
 }
 
-fn inactive(source: &SkillSource, managed: &Path) -> Resource {
+fn inactive(source: &SkillSource) -> Resource {
     let present = Path::new(&source.path).is_file();
-    let path = Path::new(&source.path);
     Resource {
         id: source.id.clone(),
-        kind: "skill".into(),
+
         name: source.name.clone(),
         description: source.description.clone(),
         path: source.path.clone(),
         locations: Vec::new(),
         entry_paths: Vec::new(),
         entry_links: Vec::new(),
-        registered: resolves_inside(managed, path.parent().unwrap_or(path)),
+        registered: true,
         revision: source_revision(source),
         error: if present {
             None

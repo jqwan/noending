@@ -8,7 +8,7 @@
 //! * App startup → `ReconcileAll`
 //! * Return to foreground past the freshness threshold → `ReconcileAll`
 //! * Agent lifecycle notification → exact native root, including metadata
-//!   updates after binding (independent of enabled history sources)
+//!   updates after binding (independent of global discovery)
 //! * Resume launch success → `RefreshSession`
 //! * Advanced maintenance page → `ReconcileAll` / `ReconcileSource` /
 //!   `ReingestSource`
@@ -82,8 +82,8 @@ pub struct IngestionCoordinator {
 }
 
 impl IngestionCoordinator {
-    /// Merge duplicate scopes only. A full enabled-history pass does not
-    /// cover explicit refreshes or disabled sources requested by the user.
+    /// Merge duplicate scopes only. Exact refresh/native requests remain
+    /// independent of a global discovery pass.
     fn enqueue(&self, scope: IngestScope) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner.queue.contains(&scope) {
@@ -138,11 +138,27 @@ impl IngestionCoordinator {
     }
 
     pub fn status(&self) -> Option<IngestTaskStatus> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        // Before the worker starts, or between two tasks, report the queued
+        // scope rather than the previous completed task. Otherwise an immediate
+        // UI refresh clears the busy state while work is still pending.
+        if inner
             .status
-            .clone()
+            .as_ref()
+            .is_none_or(|status| status.finished_at.is_some())
+        {
+            if let Some(scope) = inner.queue.first() {
+                return Some(IngestTaskStatus {
+                    scope: scope.label(),
+                    started_at: None,
+                    finished_at: None,
+                    discovered: 0,
+                    messages: 0,
+                    error: None,
+                });
+            }
+        }
+        inner.status.clone()
     }
 
     /// True when the foreground-return trigger should start a reconcile.
@@ -282,7 +298,7 @@ mod tests {
         };
         assert!(coordinator.enqueue(native.clone()));
         assert!(!coordinator.enqueue(IngestScope::RefreshSession("owned".into())));
-        assert!(!coordinator.enqueue(IngestScope::ReconcileSource("disabled".into())));
+        assert!(!coordinator.enqueue(IngestScope::ReconcileSource("custom".into())));
         assert!(!coordinator.enqueue(IngestScope::ReconcileAll));
         assert_eq!(coordinator.next(), Some(native));
         assert_eq!(
@@ -291,9 +307,40 @@ mod tests {
         );
         assert_eq!(
             coordinator.next(),
-            Some(IngestScope::ReconcileSource("disabled".into()))
+            Some(IngestScope::ReconcileSource("custom".into()))
         );
         assert_eq!(coordinator.next(), Some(IngestScope::ReconcileAll));
+    }
+
+    #[test]
+    fn queued_sync_stays_busy_before_start_and_between_tasks() {
+        let coordinator = IngestionCoordinator::default();
+        assert!(coordinator.enqueue(IngestScope::ReconcileAll));
+        let queued = coordinator.status().unwrap();
+        assert_eq!(queued.scope, "reconcile_all");
+        assert!(queued.started_at.is_none() && queued.finished_at.is_none());
+        assert_eq!(coordinator.next(), Some(IngestScope::ReconcileAll));
+        assert!(!coordinator.enqueue(IngestScope::ReconcileSource("custom".into())));
+        assert!(!coordinator.enqueue(IngestScope::ReconcileSource("custom".into())));
+        // A global scan cannot swallow an explicit source refresh.
+        assert_eq!(coordinator.status().unwrap().scope, "reconcile_all");
+        coordinator.finish(0, 0, None, true);
+        let queued = coordinator.status().unwrap();
+        assert_eq!(queued.scope, "reconcile_source:custom");
+        assert!(queued.started_at.is_none() && queued.finished_at.is_none());
+        assert_eq!(
+            coordinator.next(),
+            Some(IngestScope::ReconcileSource("custom".into()))
+        );
+        assert!(coordinator.status().unwrap().started_at.is_some());
+        coordinator.finish(3, 7, None, true);
+        assert!(
+            coordinator.next().is_none(),
+            "duplicate source requests merge"
+        );
+        let done = coordinator.status().unwrap();
+        assert!(done.finished_at.is_some());
+        assert_eq!((done.discovered, done.messages), (3, 7));
     }
 
     #[test]
@@ -320,7 +367,7 @@ mod tests {
 // Commands
 // ---------------------------------------------------------------------------
 
-/// Advanced maintenance: reconcile every enabled Source.
+/// Incrementally synchronize every registered source.
 #[tauri::command]
 pub fn reconcile_all(app: AppHandle) -> Result<serde_json::Value> {
     enqueue(&app, IngestScope::ReconcileAll);

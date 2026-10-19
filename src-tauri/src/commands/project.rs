@@ -296,8 +296,8 @@ pub fn add_project_path(
             .filter(|path| path.is_dir() && !new_cwds.contains(path))
             .collect();
         if !existing.is_empty() {
-            if let Ok(roots) = crate::extensions::Roots::current() {
-                let _ = crate::extensions::inherit_project_skills(&roots, &existing, &new_cwds);
+            if let Ok(roots) = crate::skills::Roots::current() {
+                let _ = crate::skills::inherit_project_skills(&roots, &existing, &new_cwds);
             }
         }
     }

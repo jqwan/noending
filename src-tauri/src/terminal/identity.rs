@@ -32,9 +32,11 @@ const IO_TIMEOUT: Duration = Duration::from_millis(400);
 // Windows PowerShell 5.1 can inherit a legacy stdin code page. Codex/Claude
 // send UTF-8 JSON: decoding it first as an OEM code page can even consume JSON
 // backslashes following Chinese text, invalidating an otherwise valid Stop.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const POWERSHELL_HOOK_INPUT: &str = "$neHookInput = [System.IO.StreamReader]::new(\
      [Console]::OpenStandardInput(), [System.Text.UTF8Encoding]::new($false)).ReadToEnd();";
+#[cfg(any(windows, test))]
+const WINDOWS_HOOK_ENV: &str = "NOENDING_TERMINAL_HOOK";
 const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 const CLAUDE_RECORD_SETTLE_STEPS: usize = 16;
 const CLAUDE_RECORD_SETTLE_INTERVAL: Duration = Duration::from_millis(25);
@@ -176,7 +178,7 @@ fn prepare_at(
             // executable without the helper flag.
             let hook = serde_json::json!({
                 "type": "command",
-                "command": hook_command(address, &token, terminal_id, "claude_code")?,
+                "command": hook_command(address, &token, terminal_id, "claude_code", &bridge.resource_dir, &mut environment)?,
                 "timeout": 3
             });
             let hooks = serde_json::json!({ "hooks": {
@@ -205,24 +207,21 @@ fn prepare_at(
             ]
         }
         Agent::Codex => {
-            let hook = hook_command(address, &token, terminal_id, "codex")?;
+            let hook = hook_command(
+                address,
+                &token,
+                terminal_id,
+                "codex",
+                &bridge.resource_dir,
+                &mut environment,
+            )?;
             // Codex 0.160.1 dispatches queued SessionStart hooks when the
             // next user turn begins. Idle TUI switches therefore become
             // known on that next turn; they are never inferred from output.
             // Codex discovers hooks independently in every active config
             // layer. SessionFlags add a source; lower user/project layers keep
             // their hooks even though ordinary config arrays are overridden.
-            let group = format!(
-                "[{{hooks=[{{type={},command={},timeout=3,async=false}}]}}]",
-                codex_cli_toml_string("command")?,
-                codex_cli_toml_string(&hook)?
-            );
-            let mut args = Vec::new();
-            for event in CODEX_EVENTS {
-                args.extend(["-c".into(), format!("hooks.{event}={group}")]);
-            }
-            args.extend(["-c".into(), codex_trust_override(&hook)?]);
-            args
+            codex_hook_args(&hook, cfg!(windows))?
         }
         _ => unreachable!("supported agents checked above"),
     };
@@ -246,18 +245,29 @@ fn prepare_at(
 /// quotes, including through npm's .cmd shim. Our Windows hook command uses
 /// EncodedCommand, so these controlled strings can use TOML literal quotes.
 /// Do not change the decoded values: Codex fingerprints the parsed handlers.
-fn codex_cli_toml_string(value: &str) -> Result<String> {
-    #[cfg(windows)]
-    {
+fn codex_cli_toml_string(value: &str, windows: bool) -> Result<String> {
+    if windows {
         if value.contains(['\'', '\r', '\n']) {
             return Err(other("Codex hook 配置无法编码为单行 TOML 字符串"));
         }
         Ok(format!("'{value}'"))
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         Ok(serde_json::to_string(value)?)
     }
+}
+
+fn codex_hook_args(hook: &str, windows: bool) -> Result<Vec<String>> {
+    let group = format!(
+        "[{{hooks=[{{type={},command={},timeout=3,async=false}}]}}]",
+        codex_cli_toml_string("command", windows)?,
+        codex_cli_toml_string(hook, windows)?
+    );
+    let mut args = Vec::new();
+    for event in CODEX_EVENTS {
+        args.extend(["-c".into(), format!("hooks.{event}={group}")]);
+    }
+    args.extend(["-c".into(), codex_trust_override(hook, windows)?]);
+    Ok(args)
 }
 
 const CODEX_EVENTS: &[&str] = &[
@@ -269,15 +279,16 @@ const CODEX_EVENTS: &[&str] = &[
     "Interrupt",
 ];
 
-fn codex_trust_override(command: &str) -> Result<String> {
+fn codex_trust_override(command: &str, windows: bool) -> Result<String> {
     // These fingerprints are Codex's own versioned hook identity contract
     // (codex-rs/hooks/lib.rs and config/fingerprint.rs, rust-v0.160.1).
     // Trust only the handlers introduced by this launch. Never use the
     // global bypass flag, which would also enable unrelated untrusted hooks.
-    #[cfg(windows)]
-    let source = r"C:\<session-flags>\config.toml";
-    #[cfg(not(windows))]
-    let source = "/<session-flags>/config.toml";
+    let source = if windows {
+        r"C:\<session-flags>\config.toml"
+    } else {
+        "/<session-flags>/config.toml"
+    };
     let mut entries = Vec::new();
     for event in [
         "session_start",
@@ -297,23 +308,20 @@ fn codex_trust_override(command: &str) -> Result<String> {
             "sha256:{:x}",
             Sha256::digest(serde_json::to_vec(&normalized)?)
         );
-        let key = codex_cli_toml_string(&format!("{source}:{event}:0:0"))?;
+        let key = codex_cli_toml_string(&format!("{source}:{event}:0:0"), windows)?;
         entries.push(format!(
             "{key}={{enabled=true,trusted_hash={}}}",
-            codex_cli_toml_string(&hash)?
+            codex_cli_toml_string(&hash, windows)?
         ));
     }
     // The CLI's dotted override parser does not understand quoted keys that
     // themselves contain dots. Put complete keys inside one inline table.
-    #[cfg(windows)]
-    {
+    if windows {
         // Whitespace makes PowerShell quote the whole native argument. Keep
         // it even though TOML permits a compact form: CMD must not interpret
         // the angle brackets in <session-flags> as input/output redirection.
         Ok(format!("hooks.state={{ {} }}", entries.join(", ")))
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         Ok(format!("hooks.state={{{}}}", entries.join(",")))
     }
 }
@@ -346,6 +354,8 @@ fn hook_command(
     token: &str,
     terminal_id: &str,
     agent: &str,
+    _resource_dir: &Path,
+    _environment: &mut Vec<(String, String)>,
 ) -> Result<String> {
     let executable = std::env::current_exe()?;
     let executable = executable.to_string_lossy();
@@ -358,23 +368,59 @@ fn hook_command(
     }
     #[cfg(windows)]
     {
-        use base64::Engine;
-        // Codex can execute hooks through CMD, PowerShell, or a Unix-like
-        // shell. A simple outer command and an encoded PowerShell body work
-        // through all three, including executable paths containing spaces.
-        let executable = crate::platform::launcher::ps_quote(&executable);
-        let script = format!(
-            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
-             {POWERSHELL_HOOK_INPUT} \
-             $neHookInput | & {executable} {HELPER_FLAG} {address} {token} {terminal_id} {agent}; \
-             exit $LASTEXITCODE"
-        );
-        let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
-        Ok(format!(
-            "powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"
-        ))
+        let (command, environment) = windows_hook_command(
+            &executable,
+            address,
+            token,
+            terminal_id,
+            agent,
+            _resource_dir,
+        )?;
+        _environment.push(environment);
+        Ok(command)
     }
+}
+
+/// Keep the script out of Codex's repeated `-c hooks.*` arguments: the npm
+/// .cmd entry point has an 8191-character limit. Only a constant bootstrap is
+/// encoded; the per-terminal environment locates the private script, which
+/// stays alive with IdentityBridge and preserves UTF-8 input under PS 5.1.
+#[cfg(any(windows, test))]
+fn windows_hook_command(
+    executable: &str,
+    address: SocketAddr,
+    token: &str,
+    terminal_id: &str,
+    agent: &str,
+    resource_dir: &Path,
+) -> Result<(String, (String, String))> {
+    use crate::platform::launcher::ps_quote;
+    use base64::Engine;
+    let script = format!(
+        "\u{feff}$OutputEncoding = [System.Text.UTF8Encoding]::new($false); \
+         {POWERSHELL_HOOK_INPUT} \
+         $neHookInput | & {} {HELPER_FLAG} {} {} {} {}; \
+         exit $LASTEXITCODE",
+        ps_quote(executable),
+        ps_quote(&address.to_string()),
+        ps_quote(token),
+        ps_quote(terminal_id),
+        ps_quote(agent),
+    );
+    let path = resource_dir.join("identity-hook.ps1");
+    write_private(&path, script.as_bytes())?;
+    // No quoting-dependent path or metadata crosses CMD/native argument
+    // parsing. This also works if Codex selects a Unix-like hook shell.
+    let bootstrap = format!("& $env:{WINDOWS_HOOK_ENV}; exit $LASTEXITCODE");
+    let utf16: Vec<u8> = bootstrap
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    Ok((
+        format!("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"),
+        (WINDOWS_HOOK_ENV.into(), path.to_string_lossy().into_owned()),
+    ))
 }
 
 fn pi_extension(address: SocketAddr, token: &str, terminal_id: &str) -> Result<String> {
@@ -831,6 +877,12 @@ mod tests {
             );
             assert_eq!(prepared.command.program, original.program);
             assert!(prepared.bridge.resource_dir.exists());
+            #[cfg(windows)]
+            if matches!(agent, Agent::Codex | Agent::ClaudeCode) {
+                assert_eq!(prepared.environment.len(), 1);
+                assert_eq!(prepared.environment[0].0, WINDOWS_HOOK_ENV);
+                assert!(Path::new(&prepared.environment[0].1).is_file());
+            }
             let dir = prepared.bridge.resource_dir.clone();
             drop(prepared);
             assert!(!dir.exists());
@@ -838,6 +890,246 @@ mod tests {
         assert!(prepare(&command(), Agent::ZCode, "terminal")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn windows_codex_hooks_fit_cmd_limit_and_retain_all_trusted_events() {
+        use base64::Engine;
+        let directory = std::env::temp_dir().join(crate::storage::new_id());
+        create_private_dir(&directory).unwrap();
+        // A long, Unicode installation path must not be multiplied by six.
+        let executable = format!(
+            r"C:\Users\中文\{}\NoEnding's app.exe",
+            "long-dir\\".repeat(20)
+        );
+        let (hook, (name, path)) = windows_hook_command(
+            &executable,
+            "127.0.0.1:54321".parse().unwrap(),
+            "token",
+            "terminal",
+            "codex",
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(name, "NOENDING_TERMINAL_HOOK");
+        let script = std::fs::read_to_string(path).unwrap();
+        assert!(
+            script.starts_with('\u{feff}'),
+            "PS 5.1 must read non-ASCII paths as UTF-8"
+        );
+        assert!(script.contains("NoEnding''s app.exe"));
+        let encoded = hook.split_whitespace().last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let bootstrap = String::from_utf16(
+            &bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            bootstrap,
+            "& $env:NOENDING_TERMINAL_HOOK; exit $LASTEXITCODE"
+        );
+        let mut args = codex_hook_args(&hook, true).unwrap();
+        args.extend([
+            "resume".into(),
+            "12345678-1234-1234-1234-123456789012".into(),
+        ]);
+        let command = AgentCommand {
+            program: r"C:\Users\中文\AppData\Roaming\npm\codex.cmd".into(),
+            args: args.clone(),
+            cwd: Some(directory.clone()),
+        };
+        // Budget the PS invocation too, including literal quoting, with room
+        // for cmd.exe and the npm shim's node/script paths below 8191.
+        let length = crate::platform::launcher::render_ps(&command)
+            .encode_utf16()
+            .count();
+        assert!(
+            length < 6000,
+            "Windows Codex resume command is {length} characters"
+        );
+        let overrides = args[..args.len() - 2]
+            .chunks_exact(2)
+            .map(|pair| {
+                assert_eq!(pair[0], "-c");
+                pair[1].as_str()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config: serde_json::Value = toml_edit::de::from_str(&overrides).unwrap();
+        for (event, key) in [
+            ("SessionStart", "session_start"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("PermissionRequest", "permission_request"),
+            ("PostToolUse", "post_tool_use"),
+            ("Stop", "stop"),
+            ("Interrupt", "interrupt"),
+        ] {
+            assert_eq!(
+                config["hooks"][event][0]["hooks"][0],
+                serde_json::json!({"type":"command","command":hook,"timeout":3,"async":false})
+            );
+            let normalized = format!(
+                r#"{{"event_name":"{key}","hooks":[{{"async":false,"command":{},"timeout":3,"type":"command"}}]}}"#,
+                serde_json::to_string(&hook).unwrap()
+            );
+            let fingerprint = format!("sha256:{:x}", Sha256::digest(normalized.as_bytes()));
+            assert_eq!(
+                config["hooks"]["state"][format!(r"C:\<session-flags>\config.toml:{key}:0:0")],
+                serde_json::json!({"enabled":true,"trusted_hash":fingerprint})
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_codex_resume_preserves_hooks_and_arguments_through_the_login_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noending quote's 中文 {}",
+            crate::storage::new_id()
+        ));
+        create_private_dir(&directory).unwrap();
+        let executable = directory.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\0' \"$PWD\" \"$@\"\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = AgentCommand {
+            program: executable.to_string_lossy().into_owned(),
+            args: vec!["resume".into(), "native-session-id".into()],
+            cwd: Some(directory.clone()),
+        };
+        let prepared = prepare(&original, Agent::Codex, "terminal")
+            .unwrap()
+            .unwrap();
+        let wrapped = super::super::spawn::wrapped_command(&prepared.command);
+        let argv = wrapped.get_argv();
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = std::iter::once(directory.to_string_lossy().into_owned())
+            .chain(prepared.command.args.clone())
+            .map(|arg| format!("{arg}\0"))
+            .collect::<String>();
+        assert_eq!(output.stdout, expected.as_bytes());
+        let config: serde_json::Value = toml_edit::de::from_str(
+            &prepared.command.args[..14]
+                .chunks_exact(2)
+                .map(|pair| pair[1].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            config["hooks"]["SessionStart"][0]["hooks"][0]["type"],
+            "command"
+        );
+        assert_eq!(config["hooks"]["Stop"][0]["hooks"][0]["timeout"], 3);
+        assert_eq!(prepared.command.args[14..], ["resume", "native-session-id"]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Windows PowerShell 5.1 is an OS prerequisite; missing it fails this test.
+    // Node is provided by the frontend development/CI environment.
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_cmd_shim_preserves_resume_hooks_and_utf8_input() {
+        use std::os::windows::process::CommandExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noending quote's 中文 {}",
+            crate::storage::new_id()
+        ));
+        create_private_dir(&directory).unwrap();
+        let node = std::process::Command::new("node")
+            .args(["-p", "process.execPath"])
+            .creation_flags(0x08000000)
+            .output()
+            .expect("Node is required to exercise the npm .cmd protocol");
+        assert!(node.status.success());
+        let node = String::from_utf8(node.stdout).unwrap();
+        // The helper receives the real generated PS script's argv and stdin.
+        std::fs::write(directory.join("helper.cjs"), r#"
+let input = ''; process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => input += chunk);
+process.stdin.on('end', () => console.log(JSON.stringify({args:process.argv.slice(2),input:JSON.parse(input)})));
+"#).unwrap();
+        std::fs::write(directory.join("codex.cjs"), r#"
+const args=process.argv.slice(2);
+const hook=args.find(arg=>arg.startsWith('hooks.SessionStart=')).match(/command='([^']+)'/)[1];
+const result=require('node:child_process').spawnSync(hook,{shell:true,input:process.env.NOENDING_TEST_HOOK_INPUT,encoding:'utf8',timeout:5000,windowsHide:true});
+console.log(JSON.stringify({args,status:result.status,output:result.stdout,error:result.stderr}));
+"#).unwrap();
+        for name in ["helper", "codex"] {
+            std::fs::write(
+                directory.join(format!("{name}.cmd")),
+                format!(
+                    "@echo off\r\n\"{}\" \"%~dp0{name}.cjs\" %*\r\n",
+                    node.trim()
+                ),
+            )
+            .unwrap();
+        }
+        let (hook, (name, path)) = windows_hook_command(
+            &directory.join("helper.cmd").to_string_lossy(),
+            "127.0.0.1:54321".parse().unwrap(),
+            "token",
+            "terminal",
+            "codex",
+            &directory,
+        )
+        .unwrap();
+        let mut args = codex_hook_args(&hook, true).unwrap();
+        args.extend(["resume".into(), "native-session-id".into()]);
+        let cmd = AgentCommand {
+            program: directory.join("codex.cmd").to_string_lossy().into_owned(),
+            args: args.clone(),
+            cwd: Some(directory.clone()),
+        };
+        let wrapped = super::super::spawn::wrapped_command(&cmd);
+        let argv = wrapped.get_argv();
+        let input = serde_json::json!({"hook_event_name":"Stop","session_id":"native","last_assistant_message":"完成了\"OK\"，下一行\nC:\\工作\\项目"});
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env(name, path)
+            .env(
+                "NOENDING_TEST_HOOK_INPUT",
+                serde_json::to_string(&input).unwrap(),
+            )
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["args"], serde_json::json!(args));
+        assert_eq!(result["status"], 0, "{result}");
+        let helper: serde_json::Value =
+            serde_json::from_str(result["output"].as_str().unwrap().trim()).unwrap();
+        assert_eq!(
+            helper["args"],
+            serde_json::json!([
+                "--noending-identity-hook",
+                "127.0.0.1:54321",
+                "token",
+                "terminal",
+                "codex"
+            ])
+        );
+        assert_eq!(helper["input"], input);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     // Windows PowerShell 5.1 is an OS prerequisite; missing it fails this test.

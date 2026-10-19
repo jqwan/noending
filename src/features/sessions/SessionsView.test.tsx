@@ -83,7 +83,7 @@ beforeEach(() => {
   vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([
     { id: "w1", title: "会话与 Workstream 重构", description: "", visibility: "normal", created_at: "", updated_at: "" },
   ] as never);
-  vi.mocked(api.listIngestSources).mockReset().mockResolvedValue([{ id: "src", agent: "codex", path: "/p", enabled: true, origin: "default", created_at: "" }] as never);
+  vi.mocked(api.listIngestSources).mockReset().mockResolvedValue([{ id: "src", agent: "codex", path: "/p", origin: "default", created_at: "", exists: true }] as never);
   vi.mocked(listen).mockReset().mockResolvedValue(() => {});
 });
 
@@ -108,6 +108,18 @@ describe("Sessions 页按跟踪任务筛选", () => {
     screen.getByText("没归属");
     expect(screen.queryByText("有归属")).toBeNull();
   });
+});
+
+it.each([
+  { sources: [], hint: "请添加会话来源目录。" },
+  { sources: [{ id: "missing", agent: "codex", path: "/missing/history", origin: "default", created_at: "", exists: false }], hint: "来源目录不存在：/missing/history" },
+])("guides empty sessions to source configuration: $hint", async ({ sources, hint }) => {
+  vi.mocked(api.listSessions).mockResolvedValue([]);
+  vi.mocked(api.listIngestSources).mockResolvedValue(sources as never);
+  render(<SessionsView navigate={navigate} />);
+  await screen.findByText(hint);
+  fireEvent.click(screen.getByRole("button", { name: "配置会话来源" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "agents" });
 });
 
 it("opens the new-session page from the toolbar and empty-state action", async () => {

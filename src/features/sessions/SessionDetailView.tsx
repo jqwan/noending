@@ -9,7 +9,7 @@ import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
 import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import SessionMessage, { messageData, type SessionMessageData } from "./SessionMessage";
+import SessionMessage, { messageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
@@ -35,9 +35,9 @@ import type { Route } from "../../app/routes";
  * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / task tracking。
  * 唯一的会话→会话链接是 fork 来源。
  */
-import { sessionDetailCache } from "./sessionDetailCache";
+import { sessionDetailCache, sessionContextCache } from "./sessionDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
-export { sessionDetailCache };
+export { sessionDetailCache, sessionContextCache };
 
 export default function SessionDetailView({
   sessionId,
@@ -54,7 +54,7 @@ export default function SessionDetailView({
   const [failed, setFailed] = useState(false);
   const showSkeleton = useLoadingDelay(!detail && !failed);
   /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
-  const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(null);
+  const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(() => sessionContextCache.get(sessionId) ?? null);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
@@ -80,6 +80,7 @@ export default function SessionDetailView({
     if (currentSessionId.current !== sessionId) {
       currentSessionId.current = sessionId;
       setDetail(sessionDetailCache.get(sessionId) ?? null);
+      setSessionCtx(sessionContextCache.get(sessionId) ?? null);
     }
   }, [sessionId]);
 
@@ -94,7 +95,12 @@ export default function SessionDetailView({
       })
       .catch((e) => { console.error(e); setFailed(true); });
     api.getSessionContext(sessionId)
-      .then((c) => { setSessionCtx(c); setCtxReadError(null); })
+      .then((c) => {
+        if (removedTargets.sessions.has(sessionId)) return;
+        sessionContextCache.set(sessionId, c);
+        setSessionCtx(c);
+        setCtxReadError(null);
+      })
       .catch((e) => { console.error(e); setCtxReadError(contextUpdateErrorDetails(e)); });
   }, [sessionId]);
   useEffect(refresh, [refresh]);
@@ -224,7 +230,7 @@ export default function SessionDetailView({
   /** 这条会话「属于」哪个项目：工作目录与 Session API 使用相同的项目派生链。 */
 
   /** Conversation：只有 root 的 user/assistant prose。仅展示最近 3 条消息。 */
-  const messages: SessionMessageData[] = detail.messages.map((m) => messageData(m, session.agent));
+  const messages = detail.messages;
   const recentMessages = messages.slice(-3);
   const hasMessages = messages.length > 0 || detail.ingested_message_sequence > 0;
 
@@ -361,6 +367,8 @@ export default function SessionDetailView({
                   {sessionCtx.fields.summary}
                 </SummaryMarkdown>
               </div>
+            ) : sessionCtx === null ? (
+              <div className="skeleton" style={{ height: 48, borderRadius: "var(--radius-md)" }} />
             ) : (
               <div className="l1-none">
                 {!hasMessages ? "暂无消息" : "暂无摘要"}
@@ -394,7 +402,9 @@ export default function SessionDetailView({
               )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {recentMessages.map((m) => <SessionMessage key={m.sequence} msg={m} />)}
+              {recentMessages.map((m) => (
+                <SessionMessage key={m.sequence} msg={messageData(m, session.agent)} ordinal={m.ordinal} />
+              ))}
               {messages.length === 0 && (
                 <div className="empty">
                   还没有同步消息。
@@ -693,6 +703,7 @@ export default function SessionDetailView({
           onClose={() => { setPurgeOpen(false); refresh(); }}
           onDeleted={() => {
             sessionDetailCache.delete(sessionId);
+            sessionContextCache.delete(sessionId);
             setPurgeOpen(false);
             navigate({ view: "sessions", scope: "archived" });
           }}

@@ -82,7 +82,7 @@ fn links_inside(dir: &Path, source_dir: &Path) -> bool {
     true
 }
 
-/// Extension adapters exposed by the extension board. `Agent::all()` also
+/// Agents supported by Skill management. `Agent::all()` also
 /// contains history-only adapters that never scan skill directories.
 const ENABLE_AGENTS: [Agent; 4] = [
     Agent::Codex,
@@ -141,7 +141,6 @@ pub fn project_scopes_from_inventory(
     id: &str,
 ) -> Vec<ProjectSkillScope> {
     let row = inventory.resources.iter().find(|row| row.id == id);
-    let kind = row.map(|row| row.kind.as_str()).unwrap_or("skill");
     projects
         .iter()
         .map(|(project_id, project_name, paths)| {
@@ -151,7 +150,7 @@ pub fn project_scopes_from_inventory(
                     let project_locations: Vec<String> =
                         super::inventory::locations(roots, Some(path))
                             .into_iter()
-                            .filter(|loc| loc.kind == kind && loc.scope == "project")
+                            .filter(|loc| loc.scope == "project")
                             .map(|loc| loc.id)
                             .collect();
                     let entries = row
@@ -253,6 +252,11 @@ pub(super) fn scan(loc: &Location, seen: &mut HashSet<String>, inventory: &mut I
                 continue;
             }
         };
+        // Git may check out a directory symlink as a plain file on Windows.
+        // Such a load root has no Skills to scan; leave its contents untouched.
+        if depth == 0 && real.is_file() {
+            continue;
+        }
         if !visited.insert(real) {
             continue;
         }
@@ -333,7 +337,6 @@ pub(super) fn scan(loc: &Location, seen: &mut HashSet<String>, inventory: &mut I
                         };
                         inventory.resources.push(Resource {
                             id,
-                            kind: "skill".into(),
                             name,
                             description,
                             path: canonical,
@@ -432,10 +435,76 @@ pub fn register_source_dir(path: &Path) -> Result<SkillInstallResult> {
     let source = fs::canonicalize(&file)?;
     let meta = metadata(&files::read(&source)?)?;
     Ok(SkillInstallResult {
-        message: format!("已转移 Skill 源：{}", meta.name),
+        message: format!("已登记 Skill 源：{}", meta.name),
         source_path: source.to_string_lossy().into_owned(),
         name: meta.name,
         description: meta.description,
+    })
+}
+
+/// Register in place or adopt into the library. Referencing a source must not
+/// run migration checks or modify the source and its existing loading entries.
+pub fn prepare_source(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    managed_root: &Path,
+    path: &Path,
+    migrate_source: bool,
+) -> Result<SkillInstallResult> {
+    if migrate_source {
+        return adopt_source(roots, cwds, managed_root, path);
+    }
+    let install = register_source_dir(path)?;
+    validate_skill_name(&install.name)?;
+    let source_dir = Path::new(&install.source_path)
+        .parent()
+        .ok_or_else(|| other("Skill 源路径无效"))?;
+    let mut containers = vec![managed_root.to_path_buf()];
+    for cwd in std::iter::once(None).chain(cwds.iter().map(|path| Some(path.as_path()))) {
+        containers.extend(
+            super::inventory::locations(roots, cwd)
+                .into_iter()
+                .map(|loc| PathBuf::from(loc.path)),
+        );
+    }
+    if containers
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .any(|root| root == source_dir)
+    {
+        return Err(other(
+            "Skills 根目录不能作为 Skill 源，请选择其中的具体 Skill 目录",
+        ));
+    }
+    Ok(install)
+}
+
+/// Preview registration without requiring the source to be movable. Migration
+/// performs its stricter destination and filesystem checks only when selected.
+pub fn preview_skill_registration(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    managed_root: &Path,
+    id: &str,
+    source: Option<&str>,
+) -> Result<SkillMigrationPreview> {
+    let path = source
+        .map(PathBuf::from)
+        .or_else(|| find_source_path(roots, cwds, id))
+        .ok_or_else(|| other("Skill 已不存在"))?;
+    let install = prepare_source(roots, cwds, managed_root, &path, false)?;
+    let (_, entries, _) = collect_entries(roots, cwds, &super::source_id(&install.source_path));
+    Ok(SkillMigrationPreview {
+        source_path: install.source_path,
+        target_path: managed_root
+            .join(&install.name)
+            .to_string_lossy()
+            .into_owned(),
+        entry_count: entries.len(),
+        physical_entries: entries
+            .iter()
+            .filter(|entry| !entry_is_removable(Path::new(entry)))
+            .count(),
     })
 }
 
@@ -560,7 +629,7 @@ pub fn enable_skill(
         None => super::list(roots, cwd)
             .resources
             .iter()
-            .find(|row| row.id == id && row.kind == "skill")
+            .find(|row| row.id == id)
             .map(|row| PathBuf::from(&row.path))
             .ok_or_else(|| other("Skill 已不存在"))?,
     };
@@ -578,7 +647,6 @@ fn user_entry_exists(roots: &Roots, id: &str) -> bool {
     let inventory = super::list(roots, None);
     inventory.resources.iter().any(|row| {
         row.id == id
-            && row.kind == "skill"
             && row.locations.iter().any(|location| {
                 inventory
                     .locations
@@ -603,7 +671,7 @@ fn remove_project_links(
         let Some(row) = inventory
             .resources
             .iter()
-            .find(|row| row.id == id && row.kind == "skill" && row.path == source)
+            .find(|row| row.id == id && row.path == source)
         else {
             continue;
         };
@@ -650,10 +718,7 @@ pub fn enable_skill_all(
     source: Option<&str>,
 ) -> Result<SkillInstallResult> {
     let inventory = super::list(roots, None);
-    let row = inventory
-        .resources
-        .iter()
-        .find(|row| row.id == id && row.kind == "skill");
+    let row = inventory.resources.iter().find(|row| row.id == id);
     let source = match source {
         Some(path) => PathBuf::from(path),
         None => row
@@ -682,11 +747,7 @@ pub fn enable_skill_all(
     let mut targets = Vec::new();
     while remaining.iter().any(|value| *value) {
         let mut best: Option<(&Location, Vec<usize>, bool)> = None;
-        for loc in inventory
-            .locations
-            .iter()
-            .filter(|loc| loc.kind == "skill" && loc.scope == "user")
-        {
+        for loc in inventory.locations.iter().filter(|loc| loc.scope == "user") {
             let mut supported = Vec::new();
             for (index, agent) in ENABLE_AGENTS.iter().enumerate() {
                 if supports_user_agent(loc, *agent) {
@@ -786,7 +847,7 @@ fn project_targets(inventory: &Inventory, row: Option<&Resource>) -> (Vec<String
         for loc in inventory
             .locations
             .iter()
-            .filter(|loc| loc.kind == "skill" && loc.scope == "project")
+            .filter(|loc| loc.scope == "project")
         {
             let supported: Vec<usize> = ENABLE_AGENTS
                 .iter()
@@ -828,7 +889,7 @@ pub fn find_source_path(roots: &Roots, cwds: &[PathBuf], id: &str) -> Option<Pat
     if let Some(row) = super::list(roots, None)
         .resources
         .into_iter()
-        .find(|row| row.id == id && row.kind == "skill")
+        .find(|row| row.id == id)
     {
         return Some(PathBuf::from(row.path));
     }
@@ -836,7 +897,7 @@ pub fn find_source_path(roots: &Roots, cwds: &[PathBuf], id: &str) -> Option<Pat
         super::inventory::list_project_skills(roots, cwd)
             .resources
             .into_iter()
-            .find(|row| row.id == id && row.kind == "skill")
+            .find(|row| row.id == id)
             .map(|row| PathBuf::from(row.path))
     })
 }
@@ -871,10 +932,7 @@ pub fn enable_skill_project(
     let mut unplaced = Vec::new();
     for cwd in cwds {
         let inventory = super::inventory::list_project_skills(roots, cwd);
-        let row = inventory
-            .resources
-            .iter()
-            .find(|row| row.id == id && row.kind == "skill");
+        let row = inventory.resources.iter().find(|row| row.id == id);
         let (targets, partial) = project_targets(&inventory, row);
         if partial {
             unplaced.push(cwd.display().to_string());
@@ -929,11 +987,7 @@ pub fn disable_skill_project(
     let mut metadata: Option<(String, String, String)> = None;
     for cwd in cwds {
         let inventory = super::inventory::list_project_skills(roots, cwd);
-        let Some(row) = inventory
-            .resources
-            .iter()
-            .find(|row| row.id == id && row.kind == "skill")
-        else {
+        let Some(row) = inventory.resources.iter().find(|row| row.id == id) else {
             continue;
         };
         if metadata.is_none() {
@@ -1012,7 +1066,7 @@ pub fn inherit_project_skills(
     let mut sources = BTreeSet::<(String, String)>::new();
     for cwd in existing_cwds {
         let inventory = super::list(roots, Some(cwd));
-        for row in inventory.resources.iter().filter(|row| row.kind == "skill") {
+        for row in inventory.resources.iter() {
             let has_project_entry = row.entry_paths.iter().enumerate().any(|(index, _)| {
                 row.locations
                     .get(index)
@@ -1044,7 +1098,7 @@ fn install(
         .map_err(|_| other("配置操作锁不可用"))?;
     let loc = super::inventory::locations(roots, cwd)
         .into_iter()
-        .find(|l| l.id == location_id && l.kind == "skill")
+        .find(|l| l.id == location_id)
         .ok_or_else(|| other("Skill 安装位置无效"))?;
     let source = fs::canonicalize(source)?;
     let meta = metadata(&files::read(&source.join("SKILL.md"))?)?;
@@ -1136,7 +1190,7 @@ pub fn disable_skill(
     let resource = inventory
         .resources
         .iter()
-        .find(|r| r.id == id && r.kind == "skill")
+        .find(|r| r.id == id)
         .ok_or_else(|| other("Skill 已不存在"))?;
     super::check_revision(&resource.revision, expected)?;
     let index = resource
@@ -1180,7 +1234,7 @@ pub fn disable_skill_all(roots: &Roots, id: &str) -> Result<SkillDisableResult> 
     let resource = inventory
         .resources
         .iter()
-        .find(|row| row.id == id && row.kind == "skill")
+        .find(|row| row.id == id)
         .ok_or_else(|| other("Skill 已不存在"))?;
     let entries: Vec<&String> = resource
         .entry_paths
@@ -1228,7 +1282,7 @@ pub fn disable_skill_all(roots: &Roots, id: &str) -> Result<SkillDisableResult> 
     Ok(SkillDisableResult {
         message: if physical > 0 {
             format!(
-                "已停用 {} 个用户级链接入口；{physical} 个源目录入口保持启用",
+                "已停用 {} 个用户级链接入口；{physical} 个物理入口保持启用",
                 removable.len()
             )
         } else {
@@ -1255,12 +1309,10 @@ fn collect_entries(
     let mut rows = Vec::new();
     for inventory in inventories {
         for loc in inventory.locations {
-            if loc.kind == "skill" {
-                skill_roots.insert(PathBuf::from(loc.path));
-            }
+            skill_roots.insert(PathBuf::from(loc.path));
         }
         for row in inventory.resources {
-            if row.kind == "skill" && row.id == id {
+            if row.id == id {
                 entries.extend(row.entry_paths.iter().cloned());
                 rows.push(row);
             }
@@ -1337,7 +1389,6 @@ pub fn detail_registered(
     Ok(super::ResourceDetail {
         resource: row,
         content,
-        config: None,
     })
 }
 
@@ -1352,9 +1403,6 @@ pub fn detail_project(roots: &Roots, cwds: &[PathBuf], id: &str) -> Result<super
         .into_iter()
         .find(|row| row.id == id)
         .ok_or_else(|| other("Skill 已不存在"))?;
-    if row.kind != "skill" {
-        return Err(other("项目级 MCP 配置需要选择工作目录"));
-    }
     let path = Path::new(&row.path);
     let content = if path.is_file() {
         files::read(path)?
@@ -1364,7 +1412,6 @@ pub fn detail_project(roots: &Roots, cwds: &[PathBuf], id: &str) -> Result<super
     Ok(super::ResourceDetail {
         resource: row,
         content,
-        config: None,
     })
 }
 
@@ -1380,6 +1427,118 @@ pub fn registered_uninstall_preview(
             .any(|entry| !entry_is_removable(Path::new(entry))),
         entry_count: entries.len(),
         source_path: source.path.clone(),
+    })
+}
+
+/// Find directory links by destination as well as by parsed Skill metadata.
+/// This also catches dangling links when a registered source has disappeared.
+fn source_link_dirs(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    source_dir: &Path,
+) -> Result<BTreeSet<PathBuf>> {
+    let source = fs::canonicalize(source_dir).unwrap_or_else(|_| source_dir.to_path_buf());
+    let source = crate::workspace::normalize_path(&source.to_string_lossy())
+        .ok_or_else(|| other("Skill 源路径无效"))?;
+    let mut stack: Vec<(PathBuf, bool)> = std::iter::once(None)
+        .chain(cwds.iter().map(|cwd| Some(cwd.as_path())))
+        .flat_map(|cwd| super::inventory::locations(roots, cwd))
+        .map(|loc| (PathBuf::from(loc.path), true))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut links = BTreeSet::new();
+    while let Some((dir, is_root)) = stack.pop() {
+        if !is_root && is_link(&dir) {
+            let target = fs::canonicalize(&dir).or_else(|_| {
+                let target = fs::read_link(&dir)?;
+                Ok::<_, std::io::Error>(if target.is_absolute() {
+                    target
+                } else {
+                    fs::canonicalize(dir.parent().unwrap_or(&dir))?.join(target)
+                })
+            })?;
+            if crate::workspace::normalize_path(&target.to_string_lossy())
+                .is_some_and(|target| crate::workspace::identity::same_location(&target, &source))
+            {
+                links.insert(dir);
+                continue;
+            }
+        }
+        let real = match fs::canonicalize(&dir) {
+            Ok(real) => real,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !visited.insert(real.clone())
+            || !real.is_dir()
+            || (!is_root && dir.join("SKILL.md").is_file())
+        {
+            continue;
+        }
+        for child in fs::read_dir(&dir)? {
+            let child = child?;
+            if !child.file_name().to_string_lossy().starts_with('.') {
+                let path = child.path();
+                if path.is_dir() || is_link(&path) {
+                    stack.push((path, false));
+                }
+            }
+        }
+    }
+    Ok(links)
+}
+
+/// Stop managing an external source without deleting Skill files. Only the
+/// Skill's own removable entries are removed; physical entries and ancestor
+/// directory links stay in place.
+pub fn unregister_skill(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    managed_root: &Path,
+    registry: &mut super::SkillRegistry,
+    id: &str,
+    remove_links: bool,
+) -> Result<OperationResult> {
+    let _guard = super::MUTATION
+        .lock()
+        .map_err(|_| other("配置操作锁不可用"))?;
+    let source =
+        super::find_source(registry, id).ok_or_else(|| other("该 Skill 尚未托管或已取消托管"))?;
+    let source_dir = Path::new(&source.path)
+        .parent()
+        .ok_or_else(|| other("Skill 源路径无效"))?;
+    if source_is_managed(managed_root, source_dir) {
+        return Err(other("NoEnding 技能库中的 Skill 不能取消托管"));
+    }
+    let mut removed = 0;
+    if remove_links {
+        let (entries, _, _) = scan_registered(roots, cwds, id)?;
+        let mut dirs = source_link_dirs(roots, cwds, source_dir)?;
+        for entry in entries {
+            let path = Path::new(&entry);
+            if entry_is_removable(path) {
+                dirs.insert(
+                    path.parent()
+                        .ok_or_else(|| other("Skill 入口无效"))?
+                        .to_path_buf(),
+                );
+            }
+        }
+        for dir in dirs {
+            // Aliased load roots may expose the same link more than once.
+            if entry_is_removable(&dir.join("SKILL.md")) {
+                remove_entry_dir(&dir)?;
+                removed += 1;
+            }
+        }
+    }
+    super::remove_source(registry, id);
+    Ok(OperationResult {
+        message: if remove_links {
+            format!("已取消托管并移除 {removed} 个链接入口；源文件和物理入口已保留")
+        } else {
+            "已取消托管，源文件和所有加载入口已保留".into()
+        },
     })
 }
 

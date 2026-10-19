@@ -1,4 +1,5 @@
-//! Codex Adapter: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]`.
+//! Codex Adapter: `sessions/YYYY/MM/DD/` and `archived_sessions/` under the
+//! Agent data root, containing `rollout-*.jsonl[.zst]`.
 //! `CODEX_HOME` overrides the root. Raw data is read-only, always — NoEnding
 //! never deletes an Agent-owned source.
 //!
@@ -17,7 +18,7 @@
 //! model state events (`turn_context`, `thread_settings_applied`) — is not
 //! conversation and contributes nothing since the provenance retirement.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -471,6 +472,13 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         exec_resolver::resolve_quiet(Agent::Codex)
     }
 
+    fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
+        vec![
+            data_root.join("sessions"),
+            data_root.join("archived_sessions"),
+        ]
+    }
+
     fn discover_members_in(
         &self,
         roots: &[PathBuf],
@@ -781,8 +789,24 @@ impl ThreadNames {
 
     fn load(roots: &[PathBuf]) -> Self {
         let mut map = HashMap::new();
+        let mut seen = HashSet::new();
         for root in roots {
-            let Ok(lines) = crate::adapters::read_jsonl_lines(&root.join(Self::FILE)) else {
+            // Default discovery receives sessions/ and archived_sessions/;
+            // their shared title index remains beside those directories.
+            let mut path = root.join(Self::FILE);
+            if !path.is_file()
+                && root
+                    .file_name()
+                    .is_some_and(|name| name == "sessions" || name == "archived_sessions")
+            {
+                if let Some(parent) = root.parent() {
+                    path = parent.join(Self::FILE);
+                }
+            }
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Ok(lines) = crate::adapters::read_jsonl_lines(&path) else {
                 continue;
             };
             for (_, line) in &lines {

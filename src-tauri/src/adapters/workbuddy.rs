@@ -389,6 +389,10 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
         None
     }
 
+    fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
+        vec![data_root.join("projects")]
+    }
+
     fn discover_members_in(
         &self,
         roots: &[PathBuf],

@@ -3,7 +3,7 @@
 use super::AppState;
 use crate::{
     error::{other, Result},
-    extensions::{self, Scope},
+    skills::{self, Scope},
     storage::Db,
 };
 use std::{
@@ -21,7 +21,7 @@ const CATALOG_TTL: Duration = Duration::from_secs(10);
 struct CachedCatalog {
     key: String,
     at: Instant,
-    inventory: extensions::Inventory,
+    inventory: skills::Inventory,
 }
 
 static CATALOG: OnceLock<Mutex<Option<CachedCatalog>>> = OnceLock::new();
@@ -46,7 +46,7 @@ impl Drop for CatalogReset {
     }
 }
 
-fn catalog_key(roots: &extensions::Roots, cwds: &[PathBuf]) -> String {
+fn catalog_key(roots: &skills::Roots, cwds: &[PathBuf]) -> String {
     let mut paths: Vec<String> = cwds
         .iter()
         .map(|path| path.to_string_lossy().into())
@@ -66,21 +66,20 @@ fn catalog_key(roots: &extensions::Roots, cwds: &[PathBuf]) -> String {
 /// registered by location; discovery keeps its metadata and lists sources that
 /// currently have no Agent entry. Agent directories remain the only Locations.
 fn sync_library_sources(db: &Db, managed_root: &Path) -> Result<()> {
-    let mut registry = extensions::load_skill_registry(db)?;
-    if extensions::discover_library_sources(managed_root, &mut registry)? {
-        extensions::save_skill_registry(db, &registry)?;
+    let mut registry = skills::load_skill_registry(db)?;
+    if skills::discover_library_sources(managed_root, &mut registry)? {
+        skills::save_skill_registry(db, &registry)?;
         invalidate_catalog();
     }
     Ok(())
 }
 
 fn catalog(
-    roots: &extensions::Roots,
+    roots: &skills::Roots,
     cwds: &[PathBuf],
-    skill_registry: &extensions::SkillRegistry,
-    mcp_registry: &extensions::McpRegistry,
+    skill_registry: &skills::SkillRegistry,
     managed_root: &Path,
-) -> extensions::Inventory {
+) -> skills::Inventory {
     let key = catalog_key(roots, cwds);
     let mut cache = catalog_cache()
         .lock()
@@ -90,9 +89,8 @@ fn catalog(
             return cached.inventory.clone();
         }
     }
-    let mut inventory = extensions::list_catalog(roots, cwds);
-    extensions::merge_skill_sources(skill_registry, &mut inventory, true, managed_root);
-    extensions::merge_mcp_definitions(mcp_registry, &mut inventory, true);
+    let mut inventory = skills::list_catalog(roots, cwds);
+    skills::merge_skill_sources(skill_registry, &mut inventory, true, managed_root);
     *cache = Some(CachedCatalog {
         key,
         at: Instant::now(),
@@ -133,13 +131,10 @@ fn project_paths(db: &Db, project_id: &str) -> Result<Vec<crate::domain::Workspa
         .collect())
 }
 
-fn projects_with_paths(db: &Db) -> Result<Vec<(String, String, Vec<(String, PathBuf)>)>> {
+fn projects_with_paths(db: &Db) -> Result<skills::ProjectPaths> {
     let mut rows = Vec::new();
     for project in db.list_projects()? {
-        let paths = project_paths(db, &project.id)?;
-        if paths.is_empty() {
-            continue;
-        }
+        let paths = db.list_workspace_paths_for_project(&project.id)?;
         rows.push((
             project.id,
             project.name,
@@ -154,7 +149,7 @@ fn projects_with_paths(db: &Db) -> Result<Vec<(String, String, Vec<(String, Path
 
 /// A project without a workspace path is a project-wide scope: every registered
 /// working directory participates. A project with one is a single-directory
-/// scope used by MCP configuration.
+/// scope for a single working directory.
 fn scope_paths(db: &Db, scope: &Scope) -> Result<(Option<PathBuf>, Option<Vec<PathBuf>>)> {
     match (&scope.project_id, &scope.workspace_path_id) {
         (None, None) => Ok((None, None)),
@@ -192,55 +187,51 @@ fn managed_skills_dir(app: &tauri::AppHandle) -> Result<PathBuf> {
 }
 
 #[tauri::command]
-pub async fn list_extension_resources(
+pub async fn list_skills(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     scope: Scope,
-) -> Result<extensions::Inventory> {
+) -> Result<skills::Inventory> {
     let managed_root = managed_skills_dir(&app)?;
     sync_library_sources(&state.db, &managed_root)?;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let mcp_registry = extensions::load_mcp_registry(&state.db)?;
+    let registry = skills::load_skill_registry(&state.db)?;
     let (cwd, project_cwds) = scope_paths(&state.db, &scope)?;
     super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        let mut inventory = if let Some(paths) = project_cwds {
-            let inventories = paths
-                .iter()
-                .map(|path| extensions::list(&roots, Some(path)));
-            extensions::merge_inventories(inventories.collect())
-        } else {
-            extensions::list(&roots, cwd.as_deref())
+        let roots = skills::Roots::current()?;
+        let mut inventory = {
+            if let Some(paths) = project_cwds {
+                let inventories = paths.iter().map(|path| skills::list(&roots, Some(path)));
+                skills::merge_inventories(inventories.collect())
+            } else {
+                skills::list(&roots, cwd.as_deref())
+            }
         };
-        extensions::merge_skill_sources(&registry, &mut inventory, true, &managed_root);
-        extensions::merge_mcp_definitions(&mcp_registry, &mut inventory, true);
+        skills::merge_skill_sources(&registry, &mut inventory, true, &managed_root);
         Ok(inventory)
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn get_extension_detail(
+pub async fn get_skill_detail(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
-) -> Result<Option<extensions::DetailBundle>> {
+) -> Result<Option<skills::DetailBundle>> {
     let managed_root = managed_skills_dir(&app)?;
     sync_library_sources(&state.db, &managed_root)?;
-    let skill_registry = extensions::load_skill_registry(&state.db)?;
-    let mcp_registry = extensions::load_mcp_registry(&state.db)?;
+    let skill_registry = skills::load_skill_registry(&state.db)?;
     let cwds = workspace_cwds(&state.db)?;
     let projects = projects_with_paths(&state.db)?;
     super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        let inventory = catalog(&roots, &cwds, &skill_registry, &mcp_registry, &managed_root);
-        let Some(detail) = extensions::detail_in_catalog(&inventory, &mcp_registry, &id)? else {
+        let roots = skills::Roots::current()?;
+        let inventory = catalog(&roots, &cwds, &skill_registry, &managed_root);
+        let Some(detail) = skills::detail_in_catalog(&inventory, &id)? else {
             return Ok(None);
         };
-        let scopes = extensions::project_scopes_from_inventory(&roots, &inventory, &projects, &id);
-        let source_kind = (detail.resource.kind == "skill")
-            .then(|| extensions::skill_source_kind(&detail.resource, &managed_root));
-        Ok(Some(extensions::DetailBundle {
+        let scopes = skills::project_scopes_from_inventory(&roots, &inventory, &projects, &id);
+        let source_kind = Some(skills::skill_source_kind(&detail.resource, &managed_root));
+        Ok(Some(skills::DetailBundle {
             detail,
             locations: inventory.locations,
             scopes,
@@ -251,41 +242,41 @@ pub async fn get_extension_detail(
 }
 
 #[tauri::command]
-pub async fn list_extension_catalog(
+pub async fn list_skill_catalog(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<extensions::Inventory> {
+) -> Result<skills::Inventory> {
     let managed_root = managed_skills_dir(&app)?;
     sync_library_sources(&state.db, &managed_root)?;
-    let skill_registry = extensions::load_skill_registry(&state.db)?;
-    let mcp_registry = extensions::load_mcp_registry(&state.db)?;
+    let skill_registry = skills::load_skill_registry(&state.db)?;
     let cwds = workspace_cwds(&state.db)?;
     super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        Ok(catalog(
-            &roots,
-            &cwds,
-            &skill_registry,
-            &mcp_registry,
-            &managed_root,
-        ))
+        let roots = skills::Roots::current()?;
+        Ok(catalog(&roots, &cwds, &skill_registry, &managed_root))
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn register_extension_skill_source(
+pub async fn register_skill_source(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     source: String,
-) -> Result<extensions::OperationResult> {
+    migrate_source: bool,
+) -> Result<skills::OperationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
     let managed_root = managed_skills_dir(&app)?;
     let cwds = workspace_cwds(&state.db)?;
     let outcome = super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        extensions::adopt_source(&roots, &cwds, &managed_root, Path::new(&source))
+        let roots = skills::Roots::current()?;
+        skills::prepare_source(
+            &roots,
+            &cwds,
+            &managed_root,
+            Path::new(&source),
+            migrate_source,
+        )
     })
     .await??;
     save_skill_source(
@@ -294,119 +285,154 @@ pub async fn register_extension_skill_source(
         &outcome.name,
         &outcome.description,
     )?;
-    Ok(extensions::OperationResult {
+    Ok(skills::OperationResult {
         message: outcome.message,
     })
 }
 
 #[tauri::command]
-pub async fn enable_extension_skill_all(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).map(|source| source.path.clone());
-    let cwds = workspace_cwds(&state.db)?;
-    let outcome = super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        let source = source.or_else(|| {
-            extensions::find_skill_source(&roots, &cwds, &id)
-                .map(|path| path.to_string_lossy().into_owned())
-        });
-        extensions::enable_skill_all(&roots, &cwds, &id, source.as_deref())
-    })
-    .await??;
-    record_skill_source(&state, &outcome)?;
-    Ok(extensions::OperationResult {
-        message: outcome.message,
-    })
-}
-
-#[tauri::command]
-pub async fn disable_extension_skill_all(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let outcome = super::run_on_blocking_worker(move || {
-        extensions::disable_skill_all(&extensions::Roots::current()?, &id)
-    })
-    .await??;
-    save_skill_source(
-        &state,
-        &outcome.source_path,
-        &outcome.name,
-        &outcome.description,
-    )?;
-    Ok(extensions::OperationResult {
-        message: outcome.message,
-    })
-}
-
-#[tauri::command]
-pub async fn extension_skill_migration_preview(
+pub async fn unregister_skill(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
-) -> Result<extensions::SkillMigrationPreview> {
+    remove_links: bool,
+) -> Result<skills::OperationResult> {
+    invalidate_catalog();
+    let _catalog_reset = CatalogReset;
     let managed_root = managed_skills_dir(&app)?;
     let cwds = workspace_cwds(&state.db)?;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).map(|source| source.path.clone());
+    let mut registry = skills::load_skill_registry(&state.db)?;
+    let remove_id = id.clone();
+    let result = super::run_on_blocking_worker(move || {
+        skills::unregister_skill(
+            &skills::Roots::current()?,
+            &cwds,
+            &managed_root,
+            &mut registry,
+            &id,
+            remove_links,
+        )
+    })
+    .await??;
+    let mut registry = skills::load_skill_registry(&state.db)?;
+    skills::remove_source(&mut registry, &remove_id);
+    skills::save_skill_registry(&state.db, &registry)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn enable_skill_all(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<skills::OperationResult> {
+    invalidate_catalog();
+    let _catalog_reset = CatalogReset;
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).map(|source| source.path.clone());
+    let cwds = workspace_cwds(&state.db)?;
+    let outcome = super::run_on_blocking_worker(move || {
+        let roots = skills::Roots::current()?;
+        let source = source.or_else(|| {
+            skills::find_skill_source(&roots, &cwds, &id)
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+        skills::enable_skill_all(&roots, &cwds, &id, source.as_deref())
+    })
+    .await??;
+    record_skill_source(&state, &outcome)?;
+    Ok(skills::OperationResult {
+        message: outcome.message,
+    })
+}
+
+#[tauri::command]
+pub async fn disable_skill_all(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<skills::OperationResult> {
+    invalidate_catalog();
+    let _catalog_reset = CatalogReset;
+    let outcome = super::run_on_blocking_worker(move || {
+        skills::disable_skill_all(&skills::Roots::current()?, &id)
+    })
+    .await??;
+    save_skill_source(
+        &state,
+        &outcome.source_path,
+        &outcome.name,
+        &outcome.description,
+    )?;
+    Ok(skills::OperationResult {
+        message: outcome.message,
+    })
+}
+
+#[tauri::command]
+pub async fn skill_registration_preview(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<skills::SkillMigrationPreview> {
+    let managed_root = managed_skills_dir(&app)?;
+    let cwds = workspace_cwds(&state.db)?;
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).map(|source| source.path.clone());
     super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        extensions::preview_skill_migration(&roots, &cwds, &managed_root, &id, source.as_deref())
+        let roots = skills::Roots::current()?;
+        skills::preview_skill_registration(&roots, &cwds, &managed_root, &id, source.as_deref())
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn migrate_extension_skill(
+pub async fn register_discovered_skill(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
-    delete_source: bool,
-) -> Result<extensions::SkillMigrationResult> {
+    migrate_source: bool,
+) -> Result<skills::SkillMigrationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
     let managed_root = managed_skills_dir(&app)?;
     let cwds = workspace_cwds(&state.db)?;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).map(|source| source.path.clone());
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).map(|source| source.path.clone());
     let old_id = id.clone();
-    let outcome = super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
-        extensions::migrate_skill(
-            &roots,
-            &cwds,
-            &managed_root,
-            &id,
-            source.as_deref(),
-            delete_source,
-        )
+    let outcome = super::run_on_blocking_worker(move || -> Result<skills::SkillMigrationResult> {
+        let roots = skills::Roots::current()?;
+        let source = source
+            .map(PathBuf::from)
+            .or_else(|| skills::find_skill_source(&roots, &cwds, &id))
+            .ok_or_else(|| other("Skill 已不存在"))?;
+        let outcome =
+            skills::prepare_source(&roots, &cwds, &managed_root, &source, migrate_source)?;
+        Ok(skills::SkillMigrationResult {
+            resource_id: skills::source_id(&outcome.source_path),
+            source_path: outcome.source_path,
+            message: outcome.message,
+            name: outcome.name,
+            description: outcome.description,
+        })
     })
     .await??;
-    let mut registry = extensions::load_skill_registry(&state.db)?;
-    extensions::remove_source(&mut registry, &old_id);
-    extensions::register_source(
+    let mut registry = skills::load_skill_registry(&state.db)?;
+    skills::remove_source(&mut registry, &old_id);
+    skills::register_source(
         &mut registry,
         &outcome.source_path,
         &outcome.name,
         &outcome.description,
     );
-    extensions::save_skill_registry(&state.db, &registry)?;
+    skills::save_skill_registry(&state.db, &registry)?;
     Ok(outcome)
 }
 
 #[tauri::command]
-pub async fn enable_extension_skill_projects(
+pub async fn enable_skill_projects(
     state: State<'_, AppState>,
     project_ids: Vec<String>,
     id: String,
-) -> Result<extensions::OperationResult> {
+) -> Result<skills::OperationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
     let mut projects = Vec::new();
@@ -424,14 +450,14 @@ pub async fn enable_extension_skill_projects(
     if projects.is_empty() {
         return Err(other("请选择项目"));
     }
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).map(|source| source.path.clone());
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).map(|source| source.path.clone());
     let all_cwds = workspace_cwds(&state.db)?;
     let (enabled, failures, first_source) = super::run_on_blocking_worker(
-        move || -> Result<(usize, Vec<String>, Option<extensions::SkillInstallResult>)> {
-            let roots = extensions::Roots::current()?;
+        move || -> Result<(usize, Vec<String>, Option<skills::SkillInstallResult>)> {
+            let roots = skills::Roots::current()?;
             let source = source.or_else(|| {
-                extensions::find_skill_source(&roots, &all_cwds, &id)
+                skills::find_skill_source(&roots, &all_cwds, &id)
                     .map(|path| path.to_string_lossy().into_owned())
             });
             let mut enabled = 0;
@@ -446,7 +472,7 @@ pub async fn enable_extension_skill_projects(
                     failures.push(format!("{project_name}：没有可用的工作目录"));
                     continue;
                 }
-                match extensions::enable_skill_project(&roots, &cwds, &id, source.as_deref()) {
+                match skills::enable_skill_project(&roots, &cwds, &id, source.as_deref()) {
                     Ok(outcome) => {
                         enabled += 1;
                         if first_source.is_none() {
@@ -470,15 +496,15 @@ pub async fn enable_extension_skill_projects(
     if !failures.is_empty() {
         message.push_str(&format!("；失败：{}", failures.join("；")));
     }
-    Ok(extensions::OperationResult { message })
+    Ok(skills::OperationResult { message })
 }
 
 #[tauri::command]
-pub async fn disable_extension_skill_projects(
+pub async fn disable_skill_projects(
     state: State<'_, AppState>,
     project_ids: Vec<String>,
     id: String,
-) -> Result<extensions::OperationResult> {
+) -> Result<skills::OperationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
     let mut projects = Vec::new();
@@ -498,7 +524,7 @@ pub async fn disable_extension_skill_projects(
     }
     let (changed, failures) =
         super::run_on_blocking_worker(move || -> Result<(usize, Vec<String>)> {
-            let roots = extensions::Roots::current()?;
+            let roots = skills::Roots::current()?;
             let mut changed = 0;
             let mut failures = Vec::new();
             for (project_name, paths) in projects {
@@ -510,7 +536,7 @@ pub async fn disable_extension_skill_projects(
                     failures.push(format!("{project_name}：没有可用的工作目录"));
                     continue;
                 }
-                match extensions::disable_skill_project(&roots, &cwds, &id) {
+                match skills::disable_skill_project(&roots, &cwds, &id) {
                     Ok(outcome) if outcome.changed => changed += 1,
                     Ok(_) => {}
                     Err(error) => failures.push(format!("{project_name}：{error}")),
@@ -530,12 +556,12 @@ pub async fn disable_extension_skill_projects(
     if !failures.is_empty() {
         message.push_str(&format!("；失败：{}", failures.join("；")));
     }
-    Ok(extensions::OperationResult { message })
+    Ok(skills::OperationResult { message })
 }
 
 fn record_skill_source(
     state: &State<'_, AppState>,
-    outcome: &extensions::SkillInstallResult,
+    outcome: &skills::SkillInstallResult,
 ) -> Result<()> {
     save_skill_source(
         state,
@@ -551,180 +577,59 @@ fn save_skill_source(
     name: &str,
     description: &str,
 ) -> Result<()> {
-    let mut registry = extensions::load_skill_registry(&state.db)?;
-    extensions::register_source(&mut registry, source_path, name, description);
-    extensions::save_skill_registry(&state.db, &registry)
+    let mut registry = skills::load_skill_registry(&state.db)?;
+    skills::register_source(&mut registry, source_path, name, description);
+    skills::save_skill_registry(&state.db, &registry)
 }
 
 #[tauri::command]
-pub async fn extension_skill_uninstall_preview(
+pub async fn skill_uninstall_preview(
     state: State<'_, AppState>,
     id: String,
-) -> Result<extensions::UninstallPreview> {
+) -> Result<skills::UninstallPreview> {
     let cwds = workspace_cwds(&state.db)?;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).cloned();
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).cloned();
     super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
+        let roots = skills::Roots::current()?;
         match source {
-            Some(source) => extensions::registered_uninstall_preview(&roots, &cwds, &source),
-            None => extensions::uninstall_preview(&roots, &cwds, &id),
+            Some(source) => skills::registered_uninstall_preview(&roots, &cwds, &source),
+            None => skills::uninstall_preview(&roots, &cwds, &id),
         }
     })
     .await?
 }
 
 #[tauri::command]
-pub async fn uninstall_extension_skill(
+pub async fn uninstall_skill(
     state: State<'_, AppState>,
     id: String,
     revision: String,
     delete_source: bool,
-) -> Result<extensions::OperationResult> {
+) -> Result<skills::OperationResult> {
     invalidate_catalog();
     let _catalog_reset = CatalogReset;
     let cwds = workspace_cwds(&state.db)?;
-    let registry = extensions::load_skill_registry(&state.db)?;
-    let source = extensions::find_source(&registry, &id).cloned();
+    let registry = skills::load_skill_registry(&state.db)?;
+    let source = skills::find_source(&registry, &id).cloned();
     let registered = source.is_some();
     let remove_id = id.clone();
     let result = super::run_on_blocking_worker(move || {
-        let roots = extensions::Roots::current()?;
+        let roots = skills::Roots::current()?;
         match source {
-            Some(source) => extensions::uninstall_registered_skill(
-                &roots,
-                &cwds,
-                &source,
-                &revision,
-                delete_source,
-            ),
-            None => extensions::uninstall_skill(&roots, &cwds, &id, &revision, delete_source),
+            Some(source) => {
+                skills::uninstall_registered_skill(&roots, &cwds, &source, &revision, delete_source)
+            }
+            None => skills::uninstall_skill(&roots, &cwds, &id, &revision, delete_source),
         }
     })
     .await??;
     if registered {
-        let mut registry = extensions::load_skill_registry(&state.db)?;
-        extensions::remove_source(&mut registry, &remove_id);
-        extensions::save_skill_registry(&state.db, &registry)?;
+        let mut registry = skills::load_skill_registry(&state.db)?;
+        skills::remove_source(&mut registry, &remove_id);
+        skills::save_skill_registry(&state.db, &registry)?;
     }
     Ok(result)
-}
-
-#[tauri::command]
-pub async fn save_mcp_definition(
-    state: State<'_, AppState>,
-    name: String,
-    description: Option<String>,
-    config: serde_json::Value,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let id = extensions::store_mcp_definition(
-        &state.db,
-        &name,
-        description.as_deref().unwrap_or_default(),
-        config,
-    )?;
-    Ok(extensions::OperationResult {
-        message: format!("MCP 定义已创建：{name}（{id}）"),
-    })
-}
-
-#[tauri::command]
-pub async fn enable_mcp_definition_user(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let registry = extensions::load_mcp_registry(&state.db)?;
-    let cwds = workspace_cwds(&state.db)?;
-    super::run_on_blocking_worker(move || {
-        extensions::enable_mcp_user(&extensions::Roots::current()?, &registry, &id, &cwds)
-    })
-    .await?
-}
-
-#[tauri::command]
-pub async fn disable_mcp_definition_user(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let registry = extensions::load_mcp_registry(&state.db)?;
-    super::run_on_blocking_worker(move || {
-        extensions::disable_mcp_user(&extensions::Roots::current()?, &registry, &id)
-    })
-    .await?
-}
-
-#[tauri::command]
-pub async fn enable_mcp_definition_projects(
-    state: State<'_, AppState>,
-    project_ids: Vec<String>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let cwds = selected_cwds(&state.db, &project_ids)?;
-    let registry = extensions::load_mcp_registry(&state.db)?;
-    super::run_on_blocking_worker(move || {
-        extensions::enable_mcp_projects(&extensions::Roots::current()?, &registry, &id, &cwds)
-    })
-    .await?
-}
-
-#[tauri::command]
-pub async fn disable_mcp_definition_projects(
-    state: State<'_, AppState>,
-    project_ids: Vec<String>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let cwds = selected_cwds(&state.db, &project_ids)?;
-    let registry = extensions::load_mcp_registry(&state.db)?;
-    super::run_on_blocking_worker(move || {
-        extensions::disable_mcp_projects(&extensions::Roots::current()?, &registry, &id, &cwds)
-    })
-    .await?
-}
-
-#[tauri::command]
-pub async fn uninstall_mcp_definition(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<extensions::OperationResult> {
-    invalidate_catalog();
-    let _catalog_reset = CatalogReset;
-    let cwds = workspace_cwds(&state.db)?;
-    let mut registry = extensions::load_mcp_registry(&state.db)?;
-    let remove_id = id.clone();
-    let result = super::run_on_blocking_worker(move || -> Result<extensions::OperationResult> {
-        let roots = extensions::Roots::current()?;
-        extensions::uninstall_mcp_definition(&mut registry, &roots, &id, &cwds)
-    })
-    .await??;
-    extensions::forget_mcp_definition(&state.db, &remove_id)?;
-    Ok(result)
-}
-
-fn selected_cwds(db: &Db, project_ids: &[String]) -> Result<Vec<PathBuf>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut cwds = Vec::new();
-    for project in project_ids {
-        for path in project_paths(db, project)? {
-            let path = PathBuf::from(path.canonical_path);
-            if seen.insert(path.clone()) {
-                cwds.push(path);
-            }
-        }
-    }
-    if cwds.is_empty() {
-        return Err(other("项目没有可用的工作目录"));
-    }
-    Ok(cwds)
 }
 
 #[cfg(test)]
@@ -734,7 +639,7 @@ mod tests {
     #[test]
     fn project_configuration_rejects_unregistered_or_unrelated_paths() {
         let root =
-            std::env::temp_dir().join(format!("noending-extension-scope-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("noending-skill-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let db = Db::open(&root.join("scope.db")).unwrap();
         db.write().execute("INSERT INTO projects(id,name,name_customized,visibility,created_at,updated_at) VALUES('p','P',0,'normal','now','now')", []).unwrap();
@@ -791,16 +696,15 @@ mod tests {
     #[test]
     fn catalog_cache_reuses_the_scan_until_invalidated() {
         let root =
-            std::env::temp_dir().join(format!("noending-extension-cache-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("noending-skill-cache-{}", uuid::Uuid::new_v4()));
         let home = root.join("home");
-        let roots = extensions::Roots {
+        let roots = skills::Roots {
             codex: home.join(".codex"),
             claude: home.join(".claude"),
             pi: home.join(".pi/agent"),
             home: home.clone(),
         };
-        let registry = extensions::SkillRegistry::default();
-        let mcp = extensions::McpRegistry::default();
+        let registry = skills::SkillRegistry::default();
         let write = |name: &str| {
             let dir = home.join(".agents/skills").join(name);
             std::fs::create_dir_all(&dir).unwrap();
@@ -812,26 +716,11 @@ mod tests {
         };
         let managed = home.join("skills");
         write("one");
-        assert_eq!(
-            catalog(&roots, &[], &registry, &mcp, &managed)
-                .resources
-                .len(),
-            1
-        );
+        assert_eq!(catalog(&roots, &[], &registry, &managed).resources.len(), 1);
         write("two");
-        assert_eq!(
-            catalog(&roots, &[], &registry, &mcp, &managed)
-                .resources
-                .len(),
-            1
-        );
+        assert_eq!(catalog(&roots, &[], &registry, &managed).resources.len(), 1);
         invalidate_catalog();
-        assert_eq!(
-            catalog(&roots, &[], &registry, &mcp, &managed)
-                .resources
-                .len(),
-            2
-        );
+        assert_eq!(catalog(&roots, &[], &registry, &managed).resources.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

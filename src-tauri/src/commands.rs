@@ -13,11 +13,11 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-pub mod extensions;
 pub mod ingestion;
 pub mod project;
 pub mod session_lifecycle;
 pub mod session_workspace;
+pub mod skills;
 pub mod workspace;
 pub mod workstream;
 
@@ -853,8 +853,7 @@ pub fn list_ingest_sources(state: State<AppState>) -> Result<Vec<IngestSourceVie
 }
 
 /// Add a custom scan root for an agent. The path is scanned recursively
-/// with that agent's session-file rules and is enabled immediately —
-/// adding it IS the user's opt-in.
+/// with that agent's session-file rules. Registration includes it in sync.
 #[tauri::command]
 pub fn add_ingest_source(
     state: State<AppState>,
@@ -869,25 +868,9 @@ pub fn add_ingest_source(
         return Err(other(format!("目录不存在: {}", canonical)));
     }
     with_db(&state, |db| {
-        let src = db.add_ingest_source(agent, &canonical, true)?;
+        let src = db.add_ingest_source(agent, &canonical)?;
         Ok(source_view(src))
     })
-}
-
-#[tauri::command]
-pub fn set_ingest_source_enabled(
-    state: State<AppState>,
-    source_id: String,
-    enabled: bool,
-) -> Result<()> {
-    with_db(&state, |db| {
-        db.set_ingest_source_enabled(&source_id, enabled)
-    })
-}
-
-#[tauri::command]
-pub fn set_all_ingest_sources_enabled(state: State<AppState>, enabled: bool) -> Result<usize> {
-    with_db(&state, |db| db.set_all_ingest_sources_enabled(enabled))
 }
 
 #[tauri::command]

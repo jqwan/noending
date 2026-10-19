@@ -30,6 +30,11 @@ use crate::domain::Agent;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
 
+/// The New composer and backend share a UTF-16 budget so Windows launches
+/// leave room for runtime flags and native hooks. This is a product limit,
+/// not the operating system's total command-line limit.
+pub const INITIAL_MESSAGE_LIMIT: usize = 2000;
+
 /// How a prepared launch decided the directory the Agent will start in
 ///. This is a *user-visible* fact, not an implementation detail:
 /// every tier below the one the flow normally uses has to be sayable out loud
@@ -469,6 +474,15 @@ impl SessionLauncher {
             crate::assistant::cli_writable_directories(&self.runtime_dir, prepared.cwd.as_deref());
 
         if prepared.mode == "new" {
+            if prepared
+                .initial_message
+                .as_deref()
+                .is_some_and(|message| message.encode_utf16().count() > INITIAL_MESSAGE_LIMIT)
+            {
+                return Err(other(format!(
+                    "首条消息最多 {INITIAL_MESSAGE_LIMIT} 字符，请缩短内容，或不带消息打开终端后输入。"
+                )));
+            }
             for task in &prepared.initial_workstream_ids {
                 require_unarchived_task(db, task)?;
                 validate_initial_task(db, Some(task), prepared.cwd.as_deref(), workspace)?;

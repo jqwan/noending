@@ -638,8 +638,8 @@ fn runtime_defaults_are_reconciled_on_every_start() {
     // A source the user added: reconciliation must never touch it.
     db.write()
         .execute(
-            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
-             VALUES ('user-src', 'codex', '/mine', 1, 'user', '2026-01-01T00:00:00Z')",
+            "INSERT INTO ingest_sources (id, agent, path, origin, created_at)
+             VALUES ('user-src', 'codex', '/mine', 'user', '2026-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
@@ -653,21 +653,21 @@ fn runtime_defaults_are_reconciled_on_every_start() {
         reopened
             .read()
             .query_row(
-                "SELECT COUNT(*) FROM ingest_sources WHERE origin = 'default' AND enabled = 0",
+                "SELECT COUNT(*) FROM ingest_sources WHERE origin = 'default'",
                 [],
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
         seeded_sources,
-        "default ingest sources must be reconciled on every start, still disabled"
+        "default ingest sources must be reconciled on every start"
     );
-    let (enabled, origin): (i64, String) = reopened
+    let (path, origin): (String, String) = reopened
         .read()
         .query_row(
-            "SELECT enabled, origin FROM ingest_sources WHERE id = 'user-src'",
+            "SELECT path, origin FROM ingest_sources WHERE id = 'user-src'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!((enabled, origin.as_str()), (1, "user"));
+    assert_eq!((path.as_str(), origin.as_str()), ("/mine", "user"));
 }

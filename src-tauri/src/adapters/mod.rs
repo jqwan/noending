@@ -831,9 +831,15 @@ pub trait AgentAdapter: Send + Sync {
     /// CLI detect() via ExecutableResolver + data-dir presence.
     fn detect(&self) -> Option<AgentInstallation>;
 
-    /// Discover execution members under the given roots (the user-enabled
-    /// ingest sources). Each root is scanned recursively with the adapter's
-    /// own matching rules; missing directories are skipped quietly.
+    /// Bound a default Agent data directory to its conversation stores.
+    /// Custom sources bypass this mapping, so an explicit transcript directory
+    /// never needs to match the Agent's normal installation layout.
+    fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
+        vec![data_root.to_path_buf()]
+    }
+
+    /// Discover execution members under the resolved scan roots using the
+    /// adapter's matching rules; missing directories are skipped quietly.
     ///
     /// `unchanged` is the store's "this member's source is already fully
     /// ingested and its cursor still matches the source on disk" verdict: a
@@ -1003,6 +1009,18 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(zcode::ZCodeAdapter),
         Box::new(antigravity::AntigravityAdapter),
     ]
+}
+
+/// Default sources describe Agent data roots; user sources describe exactly
+/// the directory the user selected. Keep this distinction shared by automatic,
+/// explicit, full and native-fallback discovery.
+pub fn source_discovery_roots(source: &crate::domain::IngestSource) -> Vec<PathBuf> {
+    let path = Path::new(&source.path);
+    if source.origin == crate::domain::ingest_origin::DEFAULT {
+        adapter_for(source.agent).default_discovery_roots(path)
+    } else {
+        vec![path.to_path_buf()]
+    }
 }
 
 pub fn adapter_for(agent: Agent) -> &'static dyn AgentAdapter {

@@ -15,8 +15,8 @@ const ProjectsView = lazy(() => import("../features/projects/ProjectsView"));
 const ProjectDetail = lazy(() => import("../features/projects/ProjectDetail"));
 const SettingsView = lazy(() => import("../features/settings/SettingsView"));
 const AgentsView = lazy(() => import("../features/agents/AgentsView"));
-const ExtensionsView = lazy(() => import("../features/extensions/ExtensionsView"));
-const ExtensionDetailView = lazy(() => import("../features/extensions/ExtensionDetailView"));
+const SkillsView = lazy(() => import("../features/skills/SkillsView"));
+const SkillDetailView = lazy(() => import("../features/skills/SkillDetailView"));
 
 
 export function preloadCommonRoutes() {
@@ -28,6 +28,8 @@ export function preloadCommonRoutes() {
     () => import("../features/projects/ProjectsView"),
     () => import("../features/workstreams/WorkstreamsView"),
     () => import("../features/agents/AgentsView"),
+    () => import("../features/skills/SkillsView"),
+    () => import("../features/skills/SkillDetailView"),
   ];
   for (const load of common) {
     try {
@@ -36,6 +38,9 @@ export function preloadCommonRoutes() {
       // Ignore background preload failures
     }
   }
+  void import("../features/agents/agentsCache")
+    .then((m) => m.preloadAgentsCache())
+    .catch(() => {});
 }
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
@@ -130,10 +135,10 @@ function renderRoute(
       return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
     case "agents":
       return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
-    case "extensions":
-      return <ExtensionsView key={`${route.projectId ?? "user"}:${route.tab ?? "skill"}`} initialProjectId={route.projectId} initialTab={route.tab} navigate={navigate} />;
-    case "extension":
-      return <ExtensionDetailView key={`${route.resourceId}:${route.projectId ?? ""}:${route.workspacePathId ?? ""}`} {...route} navigate={navigate} />;
+    case "skills":
+      return <SkillsView key={route.projectId ?? "user"} initialProjectId={route.projectId} navigate={navigate} />;
+    case "skill":
+      return <SkillDetailView key={`${route.resourceId}:${route.projectId ?? ""}:${route.workspacePathId ?? ""}`} {...route} navigate={navigate} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     default:

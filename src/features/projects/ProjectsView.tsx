@@ -13,7 +13,7 @@ import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import { EVT_SYNCED, type Route } from "../../app/routes";
-import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal } from "./ProjectLifecycleActions";
+import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal, type LifecycleProject } from "./ProjectLifecycleActions";
 import type { ProjectCardData, ProjectKind } from "../../types";
 import { projectKindLabels, isDirectoryGroupProject, isProjectAllPathsMissing } from "./projectKind";
 
@@ -49,6 +49,8 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
   const archivedMode = scope === "archived";
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<LifecycleProject | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [cards, setCards] = useState<ProjectCardData[] | null>(projectCardsCache.cards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState("projects.query", "");
@@ -136,6 +138,23 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
     refresh();
     window.dispatchEvent(new Event(EVT_SYNCED));
     showToast(`已永久删除 ${deleted} 个项目${deleted < targets.length ? `，${targets.length - deleted} 个删除失败` : ""}`);
+  };
+
+  const handleDeleteTarget = async (p: LifecycleProject) => {
+    if (deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      await api.deleteProjectPermanently(p.id);
+      setDeleteTarget(null);
+      clearProjectCardsCache();
+      refresh();
+      window.dispatchEvent(new Event(EVT_SYNCED));
+      showToast("项目已永久删除");
+    } catch (e) {
+      showToast(`操作失败：${String(e)}`);
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const scrollRef = useViewScroll("projects.scroll", cards !== null);
@@ -302,7 +321,15 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
 
       {viewMode === "cards" ? (
         <div className="ws-grid board-grid">
-          {list?.map((c) => <ProjectCard key={c.id} card={c} navigate={navigate} onChanged={refresh} />)}
+          {list?.map((c) => (
+            <ProjectCard
+              key={c.id}
+              card={c}
+              navigate={navigate}
+              onChanged={refresh}
+              onRequestDelete={setDeleteTarget}
+            />
+          ))}
         </div>
       ) : (
         <div className="project-list">
@@ -339,7 +366,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 )}
               </button>
               <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
-                <ProjectLifecycleActions project={c} onChanged={refresh} />
+                <ProjectLifecycleActions project={c} onChanged={refresh} onRequestDelete={setDeleteTarget} />
                 {(c.purpose === "assistant" || !isDirectoryGroupProject(c)) && (
                   <button
                     type="button"
@@ -356,6 +383,14 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
           ))}
         </div>
       )}
+      {deleteTarget && (
+        <ProjectDeleteModal
+          names={[deleteTarget.name]}
+          busy={deleteBusy}
+          onClose={() => { if (!deleteBusy) setDeleteTarget(null); }}
+          onConfirm={() => void handleDeleteTarget(deleteTarget)}
+        />
+      )}
       {bulkDeleteOpen && <ProjectDeleteModal names={deletableProjects.map((p) => p.name)} busy={bulkDeleteBusy}
         onClose={() => setBulkDeleteOpen(false)} onConfirm={() => void bulkDelete()} />}
 
@@ -364,10 +399,11 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
 }
 
 /** 信息密度受控的卡片：名字、可用性、两条代表路径、计数、最近活动。 */
-function ProjectCard({ card, navigate, onChanged }: {
+function ProjectCard({ card, navigate, onChanged, onRequestDelete }: {
   card: ProjectCardData;
   onChanged: () => void;
   navigate: (r: Route) => void;
+  onRequestDelete?: (p: LifecycleProject) => void;
 }) {
   return (
     <article
@@ -405,7 +441,7 @@ function ProjectCard({ card, navigate, onChanged }: {
       <div className="ws-card-meta">
         <span className="muted small">{timeAgo(card.last_activity_at ?? card.updated_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-          <ProjectLifecycleActions project={card} onChanged={onChanged} />
+          <ProjectLifecycleActions project={card} onChanged={onChanged} onRequestDelete={onRequestDelete} />
           {(card.purpose === "assistant" || !isDirectoryGroupProject(card)) && (
             <button
               type="button"

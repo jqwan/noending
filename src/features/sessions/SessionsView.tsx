@@ -36,7 +36,7 @@ export default function SessionsView({ navigate, scope }: {
   const [projects, setProjects] = useState<Project[]>(sessionsCache.projects);
   /** Workstream id → 标题：跟踪任务 ID 的标题在这里解析。 */
   const [workstreamTitleById, setWorkstreamTitleById] = useState<Map<string, string>>(sessionsCache.workstreamTitleById);
-  /** Session 来源只用来把"空"拆成两种真实情况：没启用来源 vs 启用了但还没发现。
+  /** Session 来源只用来把"空"拆成两种真实情况：未登记来源 vs 尚未发现会话。
    *  读失败时保持 null，文案退回中性说法，不把"读不到"说成"没启用"。 */
   const [sources, setSources] = useState<IngestSource[] | null>(sessionsCache.sources);
 
@@ -245,12 +245,11 @@ export default function SessionsView({ navigate, scope }: {
     setWsFilter("all");
   };
 
-  /** 空库的三种情况分开说话：没启用来源 / 启用的来源目录不在了 / 还没跑过。
-   *  来源读不到时退回中性说法，不宣称没被证实的事。 */
-  const noSourcesEnabled = sources !== null && sources.every((s) => !s.enabled);
-  const missingSourcePath = sources?.find((s) => s.enabled && !s.exists)?.path ?? "";
-  const emptyTitle = noSourcesEnabled ? "还没有启用任何会话来源" : "还没有发现本地会话";
-  const emptyHint = noSourcesEnabled ? "请启用会话来源。" : missingSourcePath
+  /** 来源读不到时保持中性提示；来源不存在时给出可定位的目录。 */
+  const noSources = sources !== null && sources.length === 0;
+  const missingSourcePath = sources?.find((source) => !source.exists)?.path ?? "";
+  const emptyTitle = noSources ? "还没有会话来源" : "还没有发现本地会话";
+  const emptyHint = noSources ? "请添加会话来源目录。" : missingSourcePath
     ? `来源目录不存在：${missingSourcePath}` : "新建会话，或检查会话来源。";
 
   const loadFailedState = (

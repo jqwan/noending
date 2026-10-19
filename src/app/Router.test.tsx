@@ -3,16 +3,16 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import Router from "./Router";
 import type { Agent } from "../types";
 
-const { detail, conversation, terminal, extension } = vi.hoisted(() => ({
+const { detail, conversation, terminal, skill } = vi.hoisted(() => ({
   detail: vi.fn(() => <div>detail</div>),
   conversation: vi.fn(() => <div>conversation</div>),
   terminal: vi.fn(() => <div>terminal</div>),
-  extension: vi.fn((_props: Record<string, unknown>) => <div>extension detail</div>),
+  skill: vi.fn((_props: Record<string, unknown>) => <div>skill detail</div>),
 }));
 vi.mock("../features/sessions/SessionDetailView", () => ({ default: detail, sessionDetailCache: new Map() }));
 vi.mock("../features/sessions/SessionConversationView", () => ({ default: conversation }));
 vi.mock("../features/sessions/SessionTerminalView", () => ({ default: terminal }));
-vi.mock("../features/extensions/ExtensionDetailView", () => ({ default: extension }));
+vi.mock("../features/skills/SkillDetailView", () => ({ default: skill }));
 vi.mock("../features/sessions/NewSessionView", () => ({
   default: ({ workstreamId, agent, projectId }: { workstreamId?: string; agent?: Agent; projectId?: string }) => (
     <div>
@@ -57,10 +57,10 @@ it("dispatches session overview, conversation and terminal routes with their ide
   await waitFor(() => expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1", navigate }), expect.anything()));
 });
 
-it("opens an extension detail with its resource and source workspace identities", async () => {
+it("opens an skill detail with its resource and source workspace identities", async () => {
   const navigate = vi.fn();
   const goBack = vi.fn();
-  render(<Router route={{ view: "extension", resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-  await waitFor(() => expect(extension).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "mcp1", kind: "mcp", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate }), expect.anything()));
-  expect(extension.mock.calls[0][0]).not.toHaveProperty("goBack");
+  render(<Router route={{ view: "skill", resourceId: "skill1", initialTitle: "docs", projectId: "p1", workspacePathId: "w1" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
+  await waitFor(() => expect(skill).toHaveBeenCalledWith(expect.objectContaining({ resourceId: "skill1", initialTitle: "docs", projectId: "p1", workspacePathId: "w1", navigate }), expect.anything()));
+  expect(skill.mock.calls[0][0]).not.toHaveProperty("goBack");
 });

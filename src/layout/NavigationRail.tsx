@@ -2,8 +2,9 @@ import { useEffect, useRef } from "react";
 import Icon, { type IconName } from "../components/Icon";
 import type { Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
+import { preloadAgentsCache } from "../features/agents/agentsCache";
 
-export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "extensions" | "settings";
+export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "skills" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
@@ -14,7 +15,7 @@ export function getRouteSection(route: Route): RailSection | null {
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
   if (route.view === "projects" || route.view === "project") return "projects";
   if (route.view === "agents") return "agents";
-  if (route.view === "extensions" || route.view === "extension") return "extensions";
+  if (route.view === "skills" || route.view === "skill") return "skills";
   if (route.view === "settings") return "settings";
   return null;
 }
@@ -29,8 +30,8 @@ export function getSectionRootRoute(section: RailSection): Route {
       return { view: "projects" };
     case "agents":
       return { view: "agents" };
-    case "extensions":
-      return { view: "extensions" };
+    case "skills":
+      return { view: "skills" };
     case "settings":
       return { view: "settings" };
   }
@@ -82,7 +83,7 @@ export default function NavigationRail({ route, navigate }: {
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
     { section: "agents", label: "Agent", icon: "bot", active: route.view === "agents" },
-    { section: "extensions", label: "扩展", icon: "extensions", active: currentSection === "extensions" },
+    { section: "skills", label: "技能", icon: "skill", active: currentSection === "skills" },
   ];
 
   return (
@@ -96,6 +97,11 @@ export default function NavigationRail({ route, navigate }: {
             title={item.label}
             aria-current={item.active ? "page" : undefined}
             onClick={() => handleSectionClick(item.section)}
+            onPointerEnter={() => {
+              if (item.section === "agents") {
+                void preloadAgentsCache();
+              }
+            }}
           >
             <Icon name={item.icon} />
           </button>

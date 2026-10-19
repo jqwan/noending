@@ -26,7 +26,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 ///
 /// No migrations and no backwards compatibility: a database whose generation
 /// differs must be discarded and rebuilt from Agent source data.
-pub const DATABASE_FORMAT_VERSION: i64 = 11;
+pub const DATABASE_FORMAT_VERSION: i64 = 12;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -65,13 +65,13 @@ pub fn open_or_create(conn: &Connection) -> Result<()> {
 /// format change to be picked up.
 ///
 /// Reconciliation, not migration: it inserts missing rows only, creates no
-/// schema, and never overwrites a user's decision (defaults start DISABLED).
+/// schema, and never overwrites registered custom sources.
 pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
     for agent in crate::domain::Agent::all() {
         for root in crate::platform::paths::agent_ingest_roots(*agent) {
             conn.execute(
-                "INSERT OR IGNORE INTO ingest_sources (id, agent, path, enabled, origin, created_at)
-                 VALUES (?1, ?2, ?3, 0, 'default', ?4)",
+                "INSERT OR IGNORE INTO ingest_sources (id, agent, path, origin, created_at)
+                 VALUES (?1, ?2, ?3, 'default', ?4)",
                 params![
                     crate::storage::new_id(),
                     agent.as_str(),
@@ -376,7 +376,6 @@ const CURRENT_SCHEMA: &str = r#"
       id TEXT PRIMARY KEY,
       agent TEXT NOT NULL,
       path TEXT NOT NULL,
-      enabled INTEGER NOT NULL DEFAULT 0,
       origin TEXT NOT NULL DEFAULT 'user',   -- default | user
       created_at TEXT NOT NULL,
       UNIQUE(agent, path)
@@ -535,7 +534,7 @@ mod tests {
 
     /// Default ingest sources cover every surface an Agent's conversations
     /// live on. Antigravity has two (IDE store + `agy` CLI store); the rows
-    /// start disabled, the `UNIQUE(agent, path)` guard keeps re-runs
+    /// use the `UNIQUE(agent, path)` guard to keep re-runs
     /// idempotent, and a collision of the two would surface here as 1 ≠ 2.
     #[test]
     fn reconcile_seeds_both_antigravity_stores() {
@@ -553,15 +552,18 @@ mod tests {
         };
         assert_eq!(count(&conn), 2, "IDE and agy CLI stores must both seed");
 
-        let (enabled, origin): (i64, String) = conn
+        let origin: String = conn.query_row(
+            "SELECT origin FROM ingest_sources WHERE agent = 'antigravity' AND path LIKE '%antigravity-cli'", [], |r|r.get(0)
+        ).unwrap();
+        assert_eq!(origin, "default");
+        let enabled_columns: i64 = conn
             .query_row(
-                "SELECT enabled, origin FROM ingest_sources WHERE agent = 'antigravity'
-                 AND path LIKE '%antigravity-cli'",
+                "SELECT COUNT(*) FROM pragma_table_info('ingest_sources') WHERE name='enabled'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!((enabled, origin.as_str()), (0, "default"));
+        assert_eq!(enabled_columns, 0);
 
         reconcile_runtime_defaults(&conn).unwrap();
         assert_eq!(count(&conn), 2, "re-run must not duplicate");

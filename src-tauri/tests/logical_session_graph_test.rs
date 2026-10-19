@@ -79,17 +79,141 @@ fn write_rollout(root: &Path, name: &str, lines: &[String]) -> PathBuf {
 
 fn open_db(tag: &str) -> Db {
     let dir = std::env::temp_dir().join(format!("noending-graph-db-{tag}-{}", new_id()));
-    Db::open(&dir.join("t.db")).unwrap()
+    let db = Db::open(&dir.join("t.db")).unwrap();
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
+    db
 }
 
-/// Enable exactly one Codex ingest source pointing at `root`.
-fn enable_codex_source(db: &Db, root: &Path) {
-    db.add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+/// Register exactly one Codex ingest source pointing at `root`.
+fn register_codex_source(db: &Db, root: &Path) {
+    db.add_ingest_source(Agent::Codex, &root.to_string_lossy())
         .unwrap();
 }
 
 fn reconcile(db: &Db) -> (usize, i64) {
     ingestion::reconcile_all(db, &|_| {}).unwrap()
+}
+
+/// Default and custom roots both participate in automatic incremental sync.
+#[test]
+fn all_registered_sources_sync_and_pick_up_appended_messages() {
+    use std::io::Write;
+    let root = temp_root("首次同步-用户");
+    let db = Db::open(&root.join("test.db")).unwrap();
+    // Isolate fixtures from the developer machine's default history roots.
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
+    let codex = root.join("codex");
+    let other = root.join("codex-other");
+    let pi = root.join("pi");
+    for dir in [&codex, &other, &pi] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let source = db
+        .add_ingest_source(Agent::Codex, &codex.to_string_lossy())
+        .unwrap();
+    db.add_ingest_source(Agent::Codex, &other.to_string_lossy())
+        .unwrap();
+    db.add_ingest_source(Agent::Pi, &pi.to_string_lossy())
+        .unwrap();
+    // A fresh computer normally has configured defaults for agents that have
+    // never written history. Missing roots must not block the valid sources.
+    for agent in Agent::all() {
+        if !matches!(agent, Agent::Codex | Agent::Pi) {
+            db.add_ingest_source(
+                *agent,
+                &root.join("absent").join(agent.as_str()).to_string_lossy(),
+            )
+            .unwrap();
+        }
+    }
+    let sessions = codex.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let first = write_rollout(
+        &sessions,
+        &rollout_name(ROOT_ID),
+        &[
+            meta_line(ROOT_ID, serde_json::json!({"cwd":codex})),
+            message_line(1, "m1", "user", "Codex first"),
+        ],
+    );
+    write_rollout(
+        &other,
+        &rollout_name(FORK_ID),
+        &[
+            meta_line(FORK_ID, serde_json::json!({"cwd":other})),
+            message_line(1, "other-m1", "user", "Other root"),
+        ],
+    );
+    let pi_path = pi.join("session.jsonl");
+    std::fs::write(&pi_path, format!("{}\n{}\n",
+        serde_json::json!({"type":"session","id":"pi-native","cwd":pi,"version":3,"timestamp":"2026-09-18T12:40:00Z"}),
+        serde_json::json!({"type":"message","id":"pi-m1","parentId":"pi-native","timestamp":"2026-09-18T12:40:03Z","message":{"role":"user","content":[{"type":"text","text":"Pi first"}]}})
+    )).unwrap();
+    db.write()
+        .execute(
+            "UPDATE ingest_sources SET origin = 'default' WHERE id = ?1",
+            [&source.id],
+        )
+        .unwrap();
+    let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.discovered, report.messages), (3, 3));
+    let codex_session = db
+        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .unwrap()
+        .unwrap();
+    let pi_session = db
+        .find_session_by_root_agent_id(Agent::Pi, "pi-native")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.get_messages(&codex_session.id, None, 10).unwrap()[0].content,
+        "Codex first"
+    );
+    assert_eq!(
+        db.get_messages(&pi_session.id, None, 10).unwrap()[0].content,
+        "Pi first"
+    );
+    for source in db.list_ingest_sources().unwrap() {
+        assert!(serde_json::to_value(source)
+            .unwrap()
+            .get("enabled")
+            .is_none());
+    }
+    assert_eq!(
+        ingestion::reconcile_all_report(&db, &|_| {})
+            .unwrap()
+            .messages,
+        0
+    );
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(first)
+            .unwrap(),
+        "{}",
+        message_line(2, "m2", "assistant", "Codex appended")
+    )
+    .unwrap();
+    writeln!(std::fs::OpenOptions::new().append(true).open(pi_path).unwrap(), "{}",serde_json::json!({"type":"message","id":"pi-m2","parentId":"pi-m1","timestamp":"2026-09-18T12:40:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Pi appended"}]}})).unwrap();
+    let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.messages, 2);
+    assert_eq!(db.message_count(&codex_session.id).unwrap(), 2);
+    assert_eq!(db.message_count(&pi_session.id).unwrap(), 2);
+    assert_eq!(
+        db.find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .unwrap()
+            .unwrap()
+            .id,
+        codex_session.id
+    );
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 const ROOT_ID: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
@@ -171,7 +295,7 @@ fn a_root_discovered_in_a_later_batch_still_becomes_the_session() {
         ],
     );
     let db = open_db("late-root");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
     assert!(db.list_sessions(Default::default()).unwrap().is_empty());
 
@@ -240,7 +364,7 @@ fn child_transcript_text_never_becomes_conversation() {
         ],
     );
     let db = open_db("child-text");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
 
     let sessions = db.list_sessions(Default::default()).unwrap();
@@ -273,7 +397,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
         ],
     );
     let db = open_db("missing-root");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
 
     let session = db
@@ -338,11 +462,11 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
         .find(|source| source.path == root_dir.to_string_lossy())
         .unwrap();
     assert!(ingestion::reconcile_source(&db, &source, &|_| {}).is_err());
-    db.set_ingest_source_enabled(&source.id, false).unwrap();
-    let disabled_report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    db.remove_ingest_source(&source.id).unwrap();
+    let removed_report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
     assert!(
-        disabled_report.failures.is_empty(),
-        "disabled sources must not be retried"
+        removed_report.failures.is_empty(),
+        "removed sources must not be retried"
     );
     assert_eq!(db.message_count(&session.id).unwrap(), 2);
 }
@@ -381,7 +505,7 @@ fn a_child_rollout_never_moves_the_session() {
         }],
     );
     let db = open_db("child-cwd");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
 
     let sessions = db.list_sessions(Default::default()).unwrap();
@@ -420,7 +544,7 @@ fn a_growing_child_transcript_touches_nothing() {
         )],
     );
     let db = open_db("child-activity");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
     let session_id = db.list_sessions(Default::default()).unwrap()[0].id.clone();
     let before = db.get_session(&session_id).unwrap().unwrap();
@@ -473,7 +597,7 @@ fn trash_does_not_freeze_discovery() {
         ],
     );
     let db = open_db("trash-freeze");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
     let session = db.list_sessions(Default::default()).unwrap()[0].clone();
     let before_cursor = db
@@ -561,7 +685,7 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
         ],
     );
     let db = open_db("fork");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
 
     let sessions = db.list_sessions(Default::default()).unwrap();
@@ -645,6 +769,31 @@ fn recent_turn_messages_keep_the_conversation_skeleton() {
     // A page of 1 takes only the newest turn message.
     let one = db.recent_turn_messages(&session.id, 1).unwrap();
     assert_eq!(one[0].content, "第三轮回答");
+
+    // The detail API and history reader share the window DTO. A replaced
+    // snapshot keeps internal sequences distinct from current ordinals.
+    let preview: Vec<_> = db
+        .message_window(&session.id, None, 4)
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(noending::commands::session_workspace::SessionWindowMessage::from)
+        .map(|m| serde_json::to_value(m).unwrap())
+        .collect();
+    assert_eq!(
+        preview
+            .iter()
+            .map(|m| m["ordinal"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [1, 3, 4, 6]
+    );
+    assert_eq!(
+        preview
+            .iter()
+            .map(|m| m["sequence"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, 4, 5, 7]
+    );
 }
 
 /// An append that continues the same turn demotes the formerly-final reply.
@@ -890,7 +1039,7 @@ fn a_stored_root_is_never_re_homed_as_a_child() {
         ],
     );
     let db = open_db("topo-guard");
-    enable_codex_source(&db, &root_dir);
+    register_codex_source(&db, &root_dir);
     reconcile(&db);
     let session_a = db
         .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
@@ -1006,7 +1155,7 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
     let compressed = plain.with_extension("jsonl.zst");
     std::fs::write(&plain, &body).unwrap();
     let db = open_db("compressed-roundtrip");
-    enable_codex_source(&db, &root);
+    register_codex_source(&db, &root);
     assert_eq!(reconcile(&db).1, 2);
     let before = db
         .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
@@ -1121,7 +1270,7 @@ fn compressed_codex_discovery_append_and_damage_preserve_current_history() {
     let body = [meta.to_string(), message_line(1, "m1", "user", "压缩历史")].join("\n") + "\n";
     std::fs::write(&compressed, zstd::encode_all(body.as_bytes(), 3).unwrap()).unwrap();
     let db = open_db("compressed-discovery");
-    enable_codex_source(&db, &root);
+    register_codex_source(&db, &root);
     assert_eq!(reconcile(&db).1, 1);
     let session = db
         .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
@@ -1179,7 +1328,7 @@ fn full_sync_rechecks_plain_and_compressed_content_even_when_metadata_is_unchang
         let root = temp_root("force-full-content");
         let db = open_db("force-full-content");
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
             .unwrap();
         let path = root.join(format!(
             "{}{}",
@@ -1276,7 +1425,7 @@ fn source_retries_cover_old_sessions_outside_a_bounded_preview() {
     let root = temp_root("retry-old-session");
     let db = open_db("retry-old-session");
     let source = db
-        .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+        .add_ingest_source(Agent::Codex, &root.to_string_lossy())
         .unwrap();
     let path = write_rollout(
         &root,
@@ -1332,7 +1481,7 @@ fn a_failed_full_sync_preserves_messages_and_cursor_after_discovery() {
         let root = temp_root("failed-full-after-discovery");
         let db = open_db("failed-full-after-discovery");
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
             .unwrap();
         let path = root.join(format!(
             "{}{}",

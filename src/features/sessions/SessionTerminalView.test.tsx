@@ -882,7 +882,7 @@ it("closes only the selected terminal and switches to another live instance", as
 it("uses the close result's verified identity for the final destination", async () => {
   const cases = [
     { sessionId: "new-native-session", expected: { view: "session", sessionId: "new-native-session" } },
-    { sessionId: null, expected: { view: "sessions" } },
+    { sessionId: null, expected: { view: "new-session" } },
   ];
 
   for (const { sessionId, expected } of cases) {

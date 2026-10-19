@@ -1117,7 +1117,7 @@ impl Db {
     pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
         let conn = self.read();
         let mut st = conn.prepare(
-            "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources ORDER BY agent, path",
+            "SELECT id, agent, path, origin, created_at FROM ingest_sources ORDER BY agent, path",
         )?;
         let rows = st
             .query_map([], row_ingest_source)?
@@ -1125,29 +1125,22 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn add_ingest_source(
-        &self,
-        agent: Agent,
-        path: &str,
-        enabled: bool,
-    ) -> Result<IngestSource> {
+    pub fn add_ingest_source(&self, agent: Agent, path: &str) -> Result<IngestSource> {
         let conn = self.write();
         let src = IngestSource {
             id: new_id(),
             agent,
             path: path.to_string(),
-            enabled,
             origin: "user".into(),
             created_at: now(),
         };
         conn.execute(
-            "INSERT INTO ingest_sources (id, agent, path, enabled, origin, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO ingest_sources (id, agent, path, origin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 src.id,
                 src.agent.as_str(),
                 src.path,
-                src.enabled as i64,
                 src.origin,
                 src.created_at
             ],
@@ -1166,36 +1159,14 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT id, agent, path, enabled, origin, created_at FROM ingest_sources WHERE id = ?1",
+                "SELECT id, agent, path, origin, created_at FROM ingest_sources WHERE id = ?1",
                 params![id],
                 row_ingest_source,
             )
             .optional()?)
     }
 
-    pub fn set_ingest_source_enabled(&self, id: &str, enabled: bool) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE ingest_sources SET enabled = ?2 WHERE id = ?1",
-            params![id, enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    /// Enable / disable EVERY source at once — the 全选 toggle behind the
-    /// sources page's checkbox. One statement, one write lock; the returned
-    /// count is how many rows changed, so the UI can skip its reload when the
-    /// state already matched.
-    pub fn set_all_ingest_sources_enabled(&self, enabled: bool) -> Result<usize> {
-        let conn = self.write();
-        let changed = conn.execute(
-            "UPDATE ingest_sources SET enabled = ?1 WHERE enabled != ?1",
-            params![enabled as i64],
-        )?;
-        Ok(changed)
-    }
-
-    /// Only user-added sources may be removed; defaults are toggled instead.
+    /// Only user-added sources may be removed; runtime defaults are registered on startup.
     pub fn remove_ingest_source(&self, id: &str) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -1203,18 +1174,6 @@ impl Db {
             params![id],
         )?;
         Ok(())
-    }
-
-    /// The directories reconcile is allowed to scan for this agent.
-    pub fn enabled_roots(&self, agent: Agent) -> Result<Vec<String>> {
-        let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT path FROM ingest_sources WHERE agent = ?1 AND enabled = 1 ORDER BY created_at",
-        )?;
-        let rows = st
-            .query_map(params![agent.as_str()], |r| r.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
     }
 
     // Settings
@@ -1962,9 +1921,8 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
         id: r.get(0)?,
         agent: Agent::parse(&r.get::<_, String>(1)?).unwrap_or(Agent::Codex),
         path: r.get(2)?,
-        enabled: r.get::<_, i64>(3)? != 0,
-        origin: r.get(4)?,
-        created_at: r.get(5)?,
+        origin: r.get(3)?,
+        created_at: r.get(4)?,
     })
 }
 

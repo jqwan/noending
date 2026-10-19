@@ -1,10 +1,8 @@
-//! Native customization inventory. Native files remain authoritative; listing never
-//! executes an Agent, connects an MCP server, or rewrites configuration.
+//! Skill discovery and management. Agent load directories remain authoritative.
 mod files;
 mod inventory;
-mod mcp_registry;
+mod operations;
 mod registry;
-mod skills;
 
 use crate::{
     domain::Agent,
@@ -13,33 +11,22 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub use inventory::{
-    detail, detail_in_catalog, list, list_catalog, location_revision, merge_inventories,
-    remove_mcp, save_mcp,
-};
-pub use mcp_registry::{
-    detail as detail_mcp_definition, disable_projects as disable_mcp_projects,
-    disable_user as disable_mcp_user, enable_projects as enable_mcp_projects,
-    enable_user as enable_mcp_user, find as find_mcp_definition, forget as forget_mcp_definition,
-    identity as mcp_identity, load as load_mcp_registry, merge as merge_mcp_definitions,
-    register as register_mcp_definition, remove as remove_mcp_definition,
-    revision as mcp_definition_revision, store as store_mcp_definition,
-    uninstall as uninstall_mcp_definition, McpDefinition, McpRegistry,
+pub use inventory::{detail, detail_in_catalog, list, list_catalog, merge_inventories};
+pub use operations::{
+    adopt_source, detail_project, detail_registered, disable_skill, disable_skill_all,
+    disable_skill_project, discover_library_sources, enable_skill, enable_skill_all,
+    enable_skill_project, find_source_path as find_skill_source, inherit_project_skills,
+    install_skill, link_skill, migrate_skill, prepare_source, preview_skill_migration,
+    preview_skill_registration, project_scopes_from_inventory, register_source_dir,
+    registered_uninstall_preview, skill_source_kind, uninstall_preview, uninstall_registered_skill,
+    uninstall_skill, unregister_skill, ProjectSkillScope, ProjectWorkspaceScope,
+    SkillDisableResult, SkillInstallResult, SkillMigrationPreview, SkillMigrationResult,
+    SkillScopeEntry, SkillSourceKind,
 };
 pub use registry::{
     find_source, load as load_skill_registry, merge as merge_skill_sources, register_source,
     remove_source, save as save_skill_registry, source_id, source_revision, SkillRegistry,
     SkillSource,
-};
-pub use skills::{
-    adopt_source, detail_project, detail_registered, disable_skill, disable_skill_all,
-    disable_skill_project, discover_library_sources, enable_skill, enable_skill_all,
-    enable_skill_project, find_source_path as find_skill_source, inherit_project_skills,
-    install_skill, link_skill, migrate_skill, preview_skill_migration,
-    project_scopes_from_inventory, register_source_dir, registered_uninstall_preview,
-    skill_source_kind, uninstall_preview, uninstall_registered_skill, uninstall_skill,
-    ProjectSkillScope, ProjectWorkspaceScope, SkillDisableResult, SkillInstallResult,
-    SkillMigrationPreview, SkillMigrationResult, SkillScopeEntry, SkillSourceKind,
 };
 
 pub(crate) static MUTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -77,24 +64,19 @@ impl Roots {
     }
 }
 
-/// A configuration destination: an Agent load directory or a native config
-/// file. Never a Skill source; NoEnding's source library is not a Location.
+/// An Agent load directory. Never a Skill source; NoEnding's source library is not a Location.
 #[derive(Debug, Clone, Serialize)]
 pub struct Location {
     pub id: String,
-    pub kind: String,
     pub agent: Option<Agent>,
     pub scope: String,
     pub path: String,
     pub label: String,
-    #[serde(skip)]
-    pub section: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Resource {
     pub id: String,
-    pub kind: String,
     pub name: String,
     pub description: String,
     /// Canonical source `SKILL.md` path. Configuration entries live in
@@ -110,8 +92,7 @@ pub struct Resource {
     /// whose removal would delete the Skill source instead of just unlinking it.
     pub entry_links: Vec<bool>,
     pub revision: String,
-    /// True when NoEnding owns this resource: a Skill whose source lives in the
-    /// library, or an MCP config backed by a saved definition.
+    /// True for an explicitly registered source or one in the NoEnding library.
     pub registered: bool,
     pub error: Option<String>,
 }
@@ -127,8 +108,9 @@ pub struct Inventory {
 pub struct ResourceDetail {
     pub resource: Resource,
     pub content: String,
-    pub config: Option<serde_json::Value>,
 }
+
+pub type ProjectPaths = Vec<(String, String, Vec<(String, PathBuf)>)>;
 
 /// One catalog scan answers everything the detail page renders.
 #[derive(Debug, Clone, Serialize)]
@@ -136,7 +118,6 @@ pub struct DetailBundle {
     pub detail: ResourceDetail,
     pub locations: Vec<Location>,
     pub scopes: Vec<ProjectSkillScope>,
-    /// Skill content source; `None` for MCP definitions/configs.
     pub source_kind: Option<SkillSourceKind>,
 }
 
@@ -157,22 +138,14 @@ pub(crate) fn key(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
 }
 
-pub(crate) fn location(
-    kind: &str,
-    agent: Option<Agent>,
-    scope: &str,
-    path: PathBuf,
-    label: &str,
-) -> Location {
+pub(crate) fn location(agent: Option<Agent>, scope: &str, path: PathBuf, label: &str) -> Location {
     let path = path.to_string_lossy().into_owned();
     Location {
-        id: key(format!("{kind}:{agent:?}:{scope}:{path}")),
-        kind: kind.into(),
+        id: key(format!("skill:{agent:?}:{scope}:{path}")),
         agent,
         scope: scope.into(),
         path,
         label: label.into(),
-        section: Vec::new(),
     }
 }
 

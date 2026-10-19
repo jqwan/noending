@@ -199,6 +199,40 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+describe("New session optional first message", () => {
+  it.each(["", "  \n\t"])("opens the terminal without a prompt for blank input %j", async (message) => {
+    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "empty-terminal", launched_via: "embedded", command_line: "codex", note: "" });
+    const navigate = vi.fn();
+    render(<NewSessionView navigate={navigate} />);
+    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: message } });
+    const openTerminal = screen.getByRole("button", { name: "打开终端" });
+    await waitFor(() => expect(openTerminal).toHaveProperty("disabled", false));
+    fireEvent.click(openTerminal);
+    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", undefined, NATIVE_RUNTIME));
+    expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "empty-terminal" });
+  });
+
+  it("keeps an over-limit paste intact, blocks submission, and allows editing back to the limit", async () => {
+    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "limit-terminal", launched_via: "embedded", command_line: "codex", note: "" });
+    render(<NewSessionView navigate={vi.fn()} />);
+    const input = screen.getByLabelText("首条消息");
+    const boundary = "中".repeat(1998) + "😀";
+    const tooLong = boundary + "!";
+    fireEvent.change(input, { target: { value: tooLong } });
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalled());
+    expect(input).toHaveProperty("value", tooLong);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(screen.getByRole("alert").textContent).toContain("2001");
+    expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", true);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: boundary } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", false));
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", boundary, NATIVE_RUNTIME));
+  });
+});
+
 describe("NewSessionView explicit agent resolution", () => {
   it("resolves explicitly specified agent over default agent and falls back without mutating global setting", async () => {
     vi.mocked(api.prepareNewSession).mockResolvedValueOnce({

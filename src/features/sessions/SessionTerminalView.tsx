@@ -117,7 +117,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
       const destination: Route = next ? terminalDestination(next)
         : closed.session_id ? { view: "session", sessionId: closed.session_id, ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
-        : { view: "sessions" };
+        : { view: "new-session" };
       if (mountedRef.current) navigate(destination);
       invalidateTargets({ terminalIds: [terminalId], replacement: destination });
     } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }

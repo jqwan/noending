@@ -15,7 +15,7 @@ import Icon from "../components/Icon";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, type Route } from "./routes";
 import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
-import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
+import { sessionDetailCache, sessionContextCache } from "../features/sessions/sessionDetailCache";
 import { clearSessionsCache } from "../features/sessions/sessionsCache";
 import { clearProjectDetailCache } from "../features/projects/projectDetailCache";
 import { clearProjectCardsCache } from "../features/projects/projectCardsCache";
@@ -176,7 +176,10 @@ export default function AppShell() {
   useEffect(() => {
     const removed = (event: Event) => {
       const targets = (event as CustomEvent<RemovedTargets>).detail;
-      for (const id of targets.sessionIds ?? []) sessionDetailCache.delete(id);
+      for (const id of targets.sessionIds ?? []) {
+        sessionDetailCache.delete(id);
+        sessionContextCache.delete(id);
+      }
       if (targets.sessionIds?.length) clearSessionsCache();
       if (targets.projectIds?.length) { clearProjectDetailCache(); clearProjectCardsCache(); }
       if (targets.workstreamIds?.length) { clearWorkstreamDetailCache(); clearWorkstreamCardsCache(); }

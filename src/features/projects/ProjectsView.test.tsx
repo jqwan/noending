@@ -294,6 +294,13 @@ describe("Projects Board", () => {
     expect((row("Occupied").getByRole("button", { name: "永久删除项目" }) as HTMLButtonElement).disabled).toBe(true);
     expect(row("Chat").queryByRole("button", { name: "永久删除项目" })).toBeNull();
     expect(row("Assistant").queryByRole("button", { name: "永久删除项目" })).toBeNull();
+    // Confirmation is required for single-item delete; delegates to root modal.
+    fireEvent.click(row("Empty").getByRole("button", { name: "永久删除项目" }));
+    expect(screen.getByText("确定永久删除 「Empty」？")).toBeTruthy();
+    expect(api.deleteProjectPermanently).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByText("确定永久删除 「Empty」？")).toBeNull();
+
     // Confirmation is required; bulk deletion excludes occupied and built-in projects.
     fireEvent.click(screen.getByRole("button", { name: "删除全部" }));
     expect(api.deleteProjectPermanently).not.toHaveBeenCalled();

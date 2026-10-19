@@ -17,16 +17,16 @@
 //! corpus:
 //! - 14 user turn: prompt at `payload.19.2` (fallback `19.3.1`), timestamp
 //!   `5.1`; CLI workspace URI at `19.12.12` when the summary/metadata lack it;
-//! - 15 agent turn: the turn's answer at `payload.20.1` per part, falling back
-//!   to the model's narration at `20.3` when a part has no answer (the two are
-//!   disjoint — see `agent_turn`); a `20.7` part only ANNOUNCES a tool call —
+//! - 15 agent turn: visible reply at `payload.20.1` per part; `20.3` is
+//!   thinking, NOT a reply (verified against native transcripts). A `20.7`
+//!   part only ANNOUNCES a tool call —
 //!   not counted (132 is the execution record, same call id, 827/828 ids in
 //!   both; counting both would double-count);
 //! - 132 tool call → tool_call count; 23/101 metadata and inter-agent notices
 //!   → ignored.
 //!
-//! Steps are appended once and never rewritten, so message identity is
-//! `step:<idx>` and the full replay dedups exactly.
+//! Message identity is `step:<idx>`. Generating/running message steps may
+//! change in place; unfinished message steps hold the incremental read cursor.
 //!
 //!
 //! The sibling `conversation_summaries.db` holds the title (empty → the
@@ -39,10 +39,11 @@
 //!
 //! `unchanged` is deliberately not consulted: WAL writes keep the main `.db`
 //! size/mtime identical, and the title/parent facts live in the second store
-//! the skipset never sees. Discovery re-reads every conversation; the replay
-//! dedup absorbs it. The read cursor (`sqlite_replay_cursor_update`) is in the
-//! conversation's OWN coordinates — MAX(step idx) as position, the newest
-//! step's time as activity — because the container's stats are noise: any
+//! the skipset never sees. Discovery refreshes metadata, using only new steps
+//! for missing workspace facts on known sessions. Ingestion reads steps after
+//! the committed idx, stopping before any unfinished message. First reads and
+//! explicit full syncs start from the beginning. Cursor coordinates are step
+//! indices and timestamps, not container stats, which are noise: any
 //! connection touching the conversation creates/touches a 0-byte `-wal`, and
 //! keyed on that mtime, an open would read as activity. A WAL-only step append
 //! still moves both facts, so `last_activity_at` keeps advancing.
@@ -215,13 +216,10 @@ fn user_text(payload: &[u8]) -> Option<String> {
 /// both, announcement immediately before execution) — counting both would
 /// double-count, and 132 alone covers the calls that have no 15 announcement.
 ///
-/// Each `20` part carries two disjoint prose slots: `20.1` is what the turn
-/// ANSWERS with, `20.3` is the model's running narration. Reading only `20.3`
-/// kept the narration and dropped every final answer. Verified over one real
-/// conversation (3273 steps, 1630 of them step 15): `20.1` non-empty in 20
-/// records, `20.3` non-empty in 137, both in none — so the two never describe
-/// the same turn and `20.1` is preferred per part. `20.8` mirrors `20.1` byte
-/// for byte and must not be read too.
+/// `20.1` is visible reply text; `20.3` is thinking, not user-facing narration.
+/// Verified against both IDE and CLI `transcript_full.jsonl`: these map to
+/// `content` and `thinking`, respectively. A thinking-only part must never
+/// become a reply. `20.8` mirrors `20.1` and must not be read too.
 fn agent_turn(payload: &[u8]) -> Vec<String> {
     let mut prose = Vec::new();
     for (fnum, val) in pb_fields(payload) {
@@ -229,7 +227,7 @@ fn agent_turn(payload: &[u8]) -> Vec<String> {
             continue;
         }
         let PbVal::Bytes(part) = val else { continue };
-        if let Some(text) = pb_text(part, 1).or_else(|| pb_text(part, 3)) {
+        if let Some(text) = pb_text(part, 1) {
             prose.push(text);
         }
     }
@@ -291,6 +289,7 @@ fn parse_member(
     db_path: &Path,
     summaries: Option<&Connection>,
     source_kind: &str,
+    previous: Option<&Session>,
 ) -> Result<Option<DiscoveredMember>> {
     let Some(conversation_id) = db_path.file_stem().and_then(|s| s.to_str()) else {
         return Ok(None);
@@ -360,33 +359,54 @@ fn parse_member(
 
     let parent = parent.filter(|p| !p.trim().is_empty());
     let is_root = parent.is_none();
+    let needs_prose = is_root && previous.is_none_or(|s| s.title.is_none());
+    cwd = cwd.or_else(|| previous.and_then(|s| s.cwd.clone()));
     let mut first_user_text = None;
     let mut first_agent_text = None;
-    // There is no fixed step cutoff: metadata and tool announcements may
-    // precede visible text, and the workspace may first appear on a later turn.
-    let mut stmt = conn.prepare(
-        "SELECT step_type, step_payload FROM steps WHERE step_type IN (14, 15) ORDER BY idx",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
-    for row in rows {
-        let (step_type, payload) = row?;
-        if step_type == 14 {
-            if cwd.is_none() {
-                cwd = user_workspace(&payload);
+    if is_root && (needs_prose || cwd.is_none()) {
+        // Children need no prose or step-derived workspace: they are not ingested.
+        // New sessions need visible-message proof and title fallbacks. Known
+        // sessions only need new user steps when their workspace is still unknown.
+        let after = if needs_prose {
+            -1
+        } else {
+            previous.map_or(-1, |s| s.source_byte_offset as i64)
+        };
+        let mut stmt = conn.prepare(
+            "SELECT step_type, status, step_payload FROM steps
+             WHERE idx > ?1 AND step_type IN (14, 15) ORDER BY idx",
+        )?;
+        let rows = stmt.query_map([after], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (step_type, status, payload) = row?;
+            if !step_is_terminal(status) {
+                continue;
             }
-            if is_root && first_user_text.is_none() {
-                first_user_text =
-                    user_text(&payload).map(|text| crate::adapters::truncate_text(&text, 400));
+            if step_type == 14 {
+                if cwd.is_none() {
+                    cwd = user_workspace(&payload);
+                }
+                if needs_prose && first_user_text.is_none() {
+                    first_user_text =
+                        user_text(&payload).map(|text| crate::adapters::truncate_text(&text, 400));
+                }
+            } else if needs_prose && first_agent_text.is_none() {
+                let text = agent_turn(&payload).join("\n\n");
+                if !text.trim().is_empty() {
+                    first_agent_text = Some(crate::adapters::truncate_text(text.trim(), 400));
+                }
             }
-        } else if is_root && first_agent_text.is_none() {
-            let text = agent_turn(&payload).join("\n\n");
-            if !text.trim().is_empty() {
-                first_agent_text = Some(crate::adapters::truncate_text(text.trim(), 400));
+            if cwd.is_some()
+                && (!needs_prose || (first_user_text.is_some() && first_agent_text.is_some()))
+            {
+                break;
             }
-        }
-        if cwd.is_some() && (!is_root || (first_user_text.is_some() && first_agent_text.is_some()))
-        {
-            break;
         }
     }
     let native_title = [title, preview]
@@ -420,6 +440,13 @@ fn parse_member(
         first_agent_text,
         metadata: serde_json::json!({}),
     }))
+}
+
+/// Native CortexStepStatus values, verified from the CLI protobuf descriptor:
+/// DONE=3, INVALID=4, CLEARED=5, CANCELED=6, ERROR=7, INTERRUPTED=12.
+/// Unspecified and unknown states are not assumed immutable.
+fn step_is_terminal(status: i64) -> bool {
+    matches!(status, 3..=7 | 12)
 }
 
 /// One step row's contribution: conversation text on the root only.
@@ -466,20 +493,16 @@ fn parsed_message(
         .with_ts(step_timestamp(payload))
 }
 
-impl crate::adapters::AgentAdapter for AntigravityAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Antigravity
-    }
-
-    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
-        crate::platform::exec_resolver::resolve_quiet(Agent::Antigravity)
-    }
-
-    fn discover_members_in(
+impl AntigravityAdapter {
+    fn discover_members_for_sessions(
         &self,
         roots: &[PathBuf],
-        _unchanged: &dyn Fn(&Path) -> bool,
+        sessions: &[Session],
     ) -> Result<Vec<DiscoveredMember>> {
+        let sessions: std::collections::HashMap<_, _> = sessions
+            .iter()
+            .map(|s| (Path::new(&s.source_path), s))
+            .collect();
         let mut out = Vec::new();
         for root in roots {
             let Some(dir) = conversations_dir(root) else {
@@ -526,7 +549,12 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             };
             paths.sort();
             for path in paths {
-                match parse_member(&path, summaries.as_ref(), source_kind) {
+                match parse_member(
+                    &path,
+                    summaries.as_ref(),
+                    source_kind,
+                    sessions.get(path.as_path()).copied(),
+                ) {
                     Ok(Some(m)) => out.push(m),
                     Ok(None) => {}
                     Err(e) => eprintln!("[discover] skip {}: {}", path.display(), e),
@@ -534,6 +562,34 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             }
         }
         Ok(out)
+    }
+}
+
+impl crate::adapters::AgentAdapter for AntigravityAdapter {
+    fn agent(&self) -> Agent {
+        Agent::Antigravity
+    }
+
+    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
+        crate::platform::exec_resolver::resolve_quiet(Agent::Antigravity)
+    }
+
+    fn discover_members_in(
+        &self,
+        roots: &[PathBuf],
+        _unchanged: &dyn Fn(&Path) -> bool,
+    ) -> Result<Vec<DiscoveredMember>> {
+        self.discover_members_for_sessions(roots, &[])
+    }
+
+    fn discover_batch_for_sessions(
+        &self,
+        roots: &[PathBuf],
+        _unchanged: &dyn Fn(&Path) -> bool,
+        sessions: &[Session],
+    ) -> Result<crate::adapters::DiscoveryBatch> {
+        self.discover_members_for_sessions(roots, sessions)
+            .map(crate::adapters::DiscoveryBatch::from_members)
     }
 
     fn read_session_delta(
@@ -545,48 +601,65 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         let identity = crate::adapters::file_identity(&path);
         let conn = open_read_only(&path)?;
         let tx = conn.unchecked_transaction()?;
-        let is_root = true; // every stored session is its root source
-
-        let mut stmt = tx.prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")?;
-        let rows = stmt.query_map([], |r| {
+        let max_idx: i64 =
+            tx.query_row("SELECT COALESCE(MAX(idx), 0) FROM steps", [], |r| r.get(0))?;
+        // Reuse the existing file-identity / shrink checks; no content fingerprint
+        // or parser-version machinery. Zero is also the explicit full-sync cursor.
+        let full = cursor.byte_offset == 0
+            || identity != cursor.source_file_identity
+            || (max_idx as u64) < cursor.last_seen_size;
+        let after = if full { -1 } else { cursor.byte_offset as i64 };
+        let mut stmt = tx.prepare(
+            "SELECT idx, step_type, status, step_payload FROM steps WHERE idx > ?1 ORDER BY idx",
+        )?;
+        let rows = stmt.query_map([after], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
             ))
         })?;
 
         let mut messages = Vec::new();
-        let mut max_idx: i64 = 0;
+        let mut committed_idx = if full { 0 } else { cursor.byte_offset };
         let mut max_step_secs: Option<f64> = None;
+        let mut saw_step = false;
         for row in rows {
-            let (idx, step_type, payload) = row?;
-            max_idx = max_idx.max(idx);
+            let (idx, step_type, status, payload) = row?;
+            saw_step = true;
             if let Some(secs) = step_epoch_secs(&payload) {
-                max_step_secs = Some(match max_step_secs {
-                    Some(m) => m.max(secs),
-                    None => secs,
-                });
+                max_step_secs = Some(max_step_secs.map_or(secs, |m| m.max(secs)));
             }
-            if let Some(parsed) = parse_step(idx, step_type, &payload, is_root) {
+            // A streamed reply can grow without a new idx. Do not persist a
+            // partial message or skip past it. Tool state can change too, but
+            // tools never contribute messages, so they need not block ingestion.
+            if matches!(step_type, 14 | 15) && !step_is_terminal(status) {
+                break;
+            }
+            committed_idx = idx as u64;
+            if let Some(parsed) = parse_step(idx, step_type, &payload, true) {
                 if let Some(m) = parsed.message {
-                    if m.content.trim().is_empty() {
-                        continue;
-                    }
                     messages.push(m);
                 }
             }
         }
         drop(stmt);
 
-        let source = crate::adapters::sqlite_replay_cursor_update(
+        let mut source = crate::adapters::sqlite_replay_cursor_update(
             &path,
             cursor,
             crate::adapters::SqliteMemberFacts {
                 position: max_idx,
-                activity_epoch_secs: max_step_secs,
+                activity_epoch_secs: if !full && !saw_step {
+                    cursor.mtime
+                } else {
+                    max_step_secs
+                },
             },
         )?;
+        source.byte_offset = committed_idx;
+        source.start_byte_offset = if full { 0 } else { cursor.byte_offset };
         if source.file_identity != identity {
             return Err(other("Antigravity 来源在读取期间被替换，请重试"));
         }
@@ -908,16 +981,25 @@ mod tests {
         }
     }
 
-    /// User turn 14 → `19.2`; agent turn 15 → its prose (`20.1`, else `20.3`);
-    /// tool calls (132) and API errors (17) are observations only.
+    /// User turn 14 → `19.2`; agent turn 15 → visible reply (`20.1`) only.
+    /// Thinking (`20.3`), tool calls (132) and API errors (17) are excluded.
     #[test]
     fn ingests_the_conversation_and_excludes_machine_traffic() {
         let root = temp_dir("parse");
         let user_turn = [timestamp(1_789_480_258), msg(19, &str(2, "把日报整理一下"))].concat();
         let agent_turn = [
             timestamp(1_789_480_261),
-            msg(20, &str(3, "正在整理日报。")),
-            msg(20, &str(1, "日报已整理好。")),
+            msg(20, &str(3, "先分析日报内容和整理策略。")),
+            msg(
+                20,
+                &[
+                    str(1, "日报已整理好。"),
+                    str(3, "接下来输出整理结果。"),
+                    str(8, "日报已整理好。"),
+                ]
+                .concat(),
+            ),
+            msg(20, &str(1, "请查收。")),
             msg(20, &msg(7, &str(2, "list_dir"))),
         ]
         .concat();
@@ -934,6 +1016,14 @@ mod tests {
                 (15, agent_turn),
                 (132, tool_call),
                 (17, api_error),
+                (15, msg(20, &str(3, "只有思考，没有回复。"))),
+                (
+                    15,
+                    msg(
+                        20,
+                        &[str(1, " \n"), str(3, "空回复也不能回退到思考。")].concat(),
+                    ),
+                ),
             ],
         );
         summaries(
@@ -961,11 +1051,7 @@ mod tests {
             roles,
             vec![
                 (SessionMessageRole::User, "把日报整理一下"),
-                // 同一轮里的叙述与最终回答都进：20.1 是回答，20.3 是叙述。
-                (
-                    SessionMessageRole::Assistant,
-                    "正在整理日报。\n\n日报已整理好。"
-                ),
+                (SessionMessageRole::Assistant, "日报已整理好。\n\n请查收。"),
             ]
         );
         assert_eq!(
@@ -983,6 +1069,7 @@ mod tests {
         let root = temp_dir("discover");
         // Timestamped native steps supply visible text independently of titles.
         let steps = [
+            (15, msg(20, &str(3, "内部思考不应成为会话预览。"))),
             (
                 14,
                 [timestamp(1_789_480_100), msg(19, &str(2, "分析代码性能"))].concat(),
@@ -1051,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn native_cli_notification_ingests_only_its_conversation_with_history_disabled() {
+    fn native_cli_notification_ingests_only_its_conversation() {
         let base = temp_dir("native-notice");
         let root = base.join("antigravity-cli");
         let wanted = "11111111-2222-4333-8444-555555555555";
@@ -1082,8 +1169,7 @@ mod tests {
             rusqlite::params![wanted, child],
         ).unwrap();
         let db = crate::storage::Db::open(&base.join("noending.db")).unwrap();
-        let source = db
-            .add_ingest_source(Agent::Antigravity, &root.to_string_lossy(), false)
+        db.add_ingest_source(Agent::Antigravity, &root.to_string_lossy())
             .unwrap();
         let transcript = root
             .join("brain")
@@ -1111,7 +1197,7 @@ mod tests {
         let payload = msg(19, &[str(2, "继续处理"), msg(12, &str(12, &uri))].concat());
         conversation
             .execute(
-                "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 14, ?1)",
+                "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (1, 14, 3, ?1)",
                 rusqlite::params![payload],
             )
             .unwrap();
@@ -1145,7 +1231,6 @@ mod tests {
                 .is_none(),
             "child notifications cannot create logical sessions"
         );
-        assert!(!db.get_ingest_source(&source.id).unwrap().unwrap().enabled);
         let one_file = AntigravityAdapter
             .discover_members_in(
                 &[root.join("conversations").join(format!("{wanted}.db"))],
@@ -1159,18 +1244,198 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    fn reconcile_store(db: &crate::storage::Db, root: &Path) -> i64 {
-        let source = crate::domain::IngestSource {
+    fn test_source(root: &Path) -> crate::domain::IngestSource {
+        crate::domain::IngestSource {
             id: "ag-test-source".into(),
             agent: Agent::Antigravity,
             path: root.to_string_lossy().into_owned(),
-            enabled: true,
             origin: crate::domain::ingest_origin::USER.into(),
             created_at: "2026-10-10T00:00:00Z".into(),
-        };
-        crate::ingestion::reconcile_source(db, &source, &|_| {})
+        }
+    }
+
+    fn reconcile_store(db: &crate::storage::Db, root: &Path) -> i64 {
+        crate::ingestion::reconcile_source(db, &test_source(root), &|_| {})
             .unwrap()
             .1
+    }
+
+    /// Incremental sync leaves committed history alone; explicit full sync repairs
+    /// messages polluted by the old thinking fallback, even with an unchanged source.
+    #[test]
+    fn full_sync_removes_previously_ingested_thinking() {
+        let root = temp_dir("thinking-repair");
+        let id = "55555555-6666-4777-8888-999999999999";
+        store(
+            &root,
+            id,
+            &[
+                (14, msg(19, &str(2, "整理日报"))),
+                (15, msg(20, &str(3, "内部分析"))),
+                (
+                    15,
+                    [
+                        msg(20, &str(3, "内部计划")),
+                        msg(20, &str(1, "日报已整理好。")),
+                    ]
+                    .concat(),
+                ),
+            ],
+        );
+        summaries(&root, &[(id, "日报", "", &repo_workspaces())]);
+        let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
+        assert_eq!(reconcile_store(&db, &root), 2);
+        let session = db
+            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .unwrap()
+            .unwrap();
+        let mut delta = AntigravityAdapter
+            .read_session_delta(&session, &SourceCursor::default())
+            .unwrap();
+        // Seed the messages emitted by the old parser, without changing the source.
+        delta.messages.insert(
+            1,
+            parsed_message(1, SessionMessageRole::Assistant, "内部分析".into(), &[]),
+        );
+        delta.messages[2].content = "内部计划\n\n日报已整理好。".into();
+        db.commit_ingest_snapshot(
+            &session.id,
+            &delta.messages,
+            delta.source.as_ref().unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_messages(&session.id, None, 10)
+                .unwrap()
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            ["整理日报", "内部分析", "内部计划\n\n日报已整理好。"]
+        );
+
+        assert_eq!(reconcile_store(&db, &root), 0);
+        assert_eq!(db.get_messages(&session.id, None, 10).unwrap().len(), 3);
+        crate::ingestion::reingest_source(&db, &test_source(&root), &|_| {}).unwrap();
+        let messages = db.get_messages(&session.id, None, 10).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            ["整理日报", "日报已整理好。"]
+        );
+        assert_eq!(messages[1].source_message_id.as_deref(), Some("step:2"));
+        assert_eq!(reconcile_store(&db, &root), 0);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A reply can change at the same idx, including when later steps already
+    /// exist. Commit only terminal message steps, in order, and resume that tail.
+    #[test]
+    fn incremental_sync_waits_for_streaming_messages() {
+        let root = temp_dir("streaming");
+        let id = "55555555-6666-4777-8888-999999999999";
+        let path = store(
+            &root,
+            id,
+            &[
+                (14, msg(19, &str(2, "整理日报"))),
+                (132, vec![]),
+                (15, msg(20, &str(1, "正在"))),
+                (15, msg(20, &str(1, "已取消的回复。"))),
+            ],
+        );
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+             UPDATE steps SET status = 2 WHERE idx = 1;
+             UPDATE steps SET status = 8 WHERE idx = 2;
+             UPDATE steps SET status = 6 WHERE idx = 3;",
+            )
+            .unwrap();
+        summaries(&root, &[(id, "日报", "", &repo_workspaces())]);
+        let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
+        assert_eq!(reconcile_store(&db, &root), 1);
+        let session = db
+            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.source_byte_offset, 1,
+            "running tools do not block messages"
+        );
+        assert_eq!(session.source_last_seen_size, 3);
+        assert_eq!(
+            db.get_messages(&session.id, None, 10).unwrap()[0].content,
+            "整理日报"
+        );
+
+        // Updating a partial reply without appending a new idx must not publish
+        // either the partial text or the later completed message out of order.
+        writer
+            .execute(
+                "UPDATE steps SET status = 2, step_payload = ?1 WHERE idx = 2",
+                rusqlite::params![msg(20, &str(1, "正在整理"))],
+            )
+            .unwrap();
+        assert_eq!(reconcile_store(&db, &root), 0);
+        assert_eq!(db.get_messages(&session.id, None, 10).unwrap().len(), 1);
+        let waiting = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(waiting.source_byte_offset, 1);
+
+        writer
+            .execute(
+                "UPDATE steps SET status = 3, step_payload = ?1 WHERE idx = 2",
+                rusqlite::params![msg(
+                    20,
+                    &[str(1, "日报已整理好。"), str(3, "内部分析")].concat()
+                )],
+            )
+            .unwrap();
+        assert_eq!(reconcile_store(&db, &root), 2);
+        let messages = db.get_messages(&session.id, None, 10).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            ["整理日报", "日报已整理好。", "已取消的回复。"]
+        );
+        let finished = db.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(finished.source_byte_offset, 3);
+        let idle = AntigravityAdapter
+            .read_session_delta(&finished, &finished.source_cursor())
+            .unwrap();
+        assert!(
+            idle.messages.is_empty(),
+            "idle reads must not replay old messages"
+        );
+        assert_eq!(idle.source.unwrap().start_byte_offset, 3);
+
+        writer
+            .execute(
+                "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (4, 14, 3, ?1)",
+                rusqlite::params![msg(19, &str(2, "继续"))],
+            )
+            .unwrap();
+        let delta = AntigravityAdapter
+            .read_session_delta(&finished, &finished.source_cursor())
+            .unwrap();
+        assert_eq!(delta.messages.len(), 1);
+        assert_eq!(delta.messages[0].content, "继续");
+        assert_eq!(
+            delta.messages[0].source_message_id.as_deref(),
+            Some("step:4")
+        );
+        assert_eq!(reconcile_store(&db, &root), 1);
+        assert_eq!(db.get_messages(&session.id, None, 10).unwrap().len(), 4);
+        assert_eq!(reconcile_store(&db, &root), 0);
+        drop(writer);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// CLI workspace facts can first appear after the first complete exchange.
@@ -1213,7 +1478,7 @@ mod tests {
         let uri = tauri::Url::from_file_path(&workspace).unwrap().to_string();
         let payload = msg(19, &[str(2, "继续分析"), msg(12, &str(12, &uri))].concat());
         conn.execute(
-            "INSERT INTO steps (idx, step_type, step_payload) VALUES (62, 14, ?1)",
+            "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (62, 14, 3, ?1)",
             rusqlite::params![payload],
         )
         .unwrap();
@@ -1228,7 +1493,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["分析代码性能", "已完成性能分析。", "继续分析"]
         );
+        // Metadata must still refresh even with no new steps to ingest.
+        Connection::open(root.join("conversation_summaries.db"))
+            .unwrap()
+            .execute(
+                "UPDATE conversation_summaries SET title = '性能排查完成'",
+                [],
+            )
+            .unwrap();
         assert_eq!(reconcile_store(&db, &root), 0);
+        assert_eq!(
+            db.get_session(&before.id)
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("性能排查完成")
+        );
         drop(conn);
         drop(db);
         std::fs::remove_dir_all(base).unwrap();
@@ -1248,13 +1529,21 @@ mod tests {
             .unwrap()
             .is_none());
 
-        // An assistant-only visible answer is sufficient; no user text is invented.
+        // An unspecified/unfinished answer must not create a visible session.
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 15, ?1)",
+            "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (1, 15, 0, ?1)",
             rusqlite::params![msg(20, &str(1, "可见回答"))],
         )
         .unwrap();
+        assert_eq!(reconcile_store(&db, &root), 0);
+        assert!(db
+            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .unwrap()
+            .is_none());
+        // An assistant-only completed answer is sufficient; no user text is invented.
+        conn.execute("UPDATE steps SET status = 3 WHERE idx = 1", [])
+            .unwrap();
         let found = AntigravityAdapter
             .discover_members_in(std::slice::from_ref(&root), &|_| false)
             .unwrap();

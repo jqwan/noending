@@ -45,6 +45,9 @@ fn unique_dir(tag: &str) -> PathBuf {
 fn temp_db(tag: &str) -> (PathBuf, Db) {
     let dir = unique_dir(tag);
     let db = Db::open(&dir.join("noending.db")).expect("temp db");
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
     (dir, db)
 }
 
@@ -109,7 +112,7 @@ fn codex_meta_line(session_id: &str, cwd: &str) -> String {
 }
 
 /// Write a discoverable Codex transcript under `root` and run one reconcile
-/// pass over the enabled ingest sources. Returns the stored session.
+/// pass over the registered ingest sources. Returns the stored session.
 fn discover_via_reconcile(
     db: &Db,
     root: &Path,
@@ -129,8 +132,13 @@ fn discover_via_reconcile(
     )
     .unwrap();
     let root_str = root.to_string_lossy().to_string();
-    if !db.enabled_roots(Agent::Codex).unwrap().contains(&root_str) {
-        db.add_ingest_source(Agent::Codex, &root_str, true).unwrap();
+    if !db
+        .list_ingest_sources()
+        .unwrap()
+        .iter()
+        .any(|s| s.agent == Agent::Codex && s.path == root_str)
+    {
+        db.add_ingest_source(Agent::Codex, &root_str).unwrap();
     }
     let _ = shared_attacher();
     reconcile_all(db, &|_| {}).unwrap();
@@ -510,6 +518,9 @@ fn reconcile_skips_unchanged_files_but_reparses_untitled_rows() {
     let dir = unique_dir("skip-unchanged");
     let root = dir.join("sessions");
     let db = Db::open(&dir.join("noending.db")).unwrap();
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
     // The global attacher is process state another test in this binary may
     // have registered; "p-repo" existing keeps that seam working here too.
     project(&db, "p-repo", "repo");

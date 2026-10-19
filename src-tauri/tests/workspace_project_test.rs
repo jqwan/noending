@@ -2119,7 +2119,7 @@ fn refresh_does_not_ingest_sessions() {
     std::fs::write(source.join("rollout-2026-10-09-external.jsonl"),
         concat!(r#"{"ordinal":0,"type":"session_meta","payload":{"id":"external-root","cwd":"/work/a"}}"#, "\n",
         r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"external transcript"}]}}"#, "\n")).unwrap();
-    db.add_ingest_source(Agent::Codex, &source.to_string_lossy(), true)
+    db.add_ingest_source(Agent::Codex, &source.to_string_lossy())
         .unwrap();
     assert_eq!(
         noending::adapters::adapter_for(Agent::Codex)

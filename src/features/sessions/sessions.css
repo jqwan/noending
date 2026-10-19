@@ -584,12 +584,14 @@ button.btn.conversation-jump:active {
 
 .session-list,
 .task-list,
-.project-list {
+.project-list,
+.agent-list {
   border-top: 1px solid var(--border-subtle);
 }
 .session-list-row,
 .task-list-row,
-.project-list-row {
+.project-list-row,
+.agent-list-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -605,12 +607,15 @@ button.btn.conversation-jump:active {
 .task-list-row:hover,
 .task-list-row:focus-within,
 .project-list-row:hover,
-.project-list-row:focus-within {
+.project-list-row:focus-within,
+.agent-list-row:hover,
+.agent-list-row:focus-within {
   background: var(--bg-panel);
 }
 .session-open,
 .task-open,
-.project-open {
+.project-open,
+.agent-open {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -626,7 +631,8 @@ button.btn.conversation-jump:active {
 }
 .session-list-title,
 .task-list-title,
-.project-list-title {
+.project-list-title,
+.agent-list-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -636,7 +642,8 @@ button.btn.conversation-jump:active {
 }
 .session-list-title > span,
 .task-list-title > span,
-.project-list-title > span {
+.project-list-title > span,
+.agent-list-title > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -644,7 +651,8 @@ button.btn.conversation-jump:active {
 }
 .session-list-meta,
 .task-list-meta,
-.project-list-meta {
+.project-list-meta,
+.agent-list-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -667,7 +675,8 @@ button.btn.conversation-jump:active {
   white-space: nowrap;
 }
 .task-list-actions,
-.project-list-actions {
+.project-list-actions,
+.agent-list-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -728,16 +737,7 @@ button.btn.conversation-jump:active {
   overflow-wrap: anywhere;
   word-break: break-all;
 }
-.agents-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.agent-card.agent-list-item {
-  width: 100%;
-  border-radius: var(--radius-md);
-  padding: 14px 16px;
-}
+
 .session-title-with-icon {
   display: inline-flex;
   align-items: center;

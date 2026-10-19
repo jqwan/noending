@@ -1,5 +1,5 @@
 import { api } from "../api";
-import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
+import { sessionDetailCache, sessionContextCache } from "../features/sessions/sessionDetailCache";
 import { sessionDisplayTitle } from "../features/sessions/sessionDisplay";
 import { projectDetailCache } from "../features/projects/projectDetailCache";
 import { workstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
@@ -16,6 +16,11 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     const seed = remembered && (remembered.view === "session" || remembered.view === "terminal") ? remembered : undefined;
     const initialTitle = route.initialTitle || (cached ? sessionDisplayTitle(cached.title) : seed?.initialTitle);
     const initialAgent = route.initialAgent ?? cached?.agent ?? seed?.initialAgent;
+    if (!sessionContextCache.has(route.sessionId)) {
+      void api.getSessionContext(route.sessionId).then(ctx => {
+        if (!isRemovedRoute(route)) sessionContextCache.set(route.sessionId, ctx);
+      }).catch(() => {});
+    }
     if (initialTitle && initialAgent) return { ...route, initialTitle, initialAgent };
     return api.getSessionDetail(route.sessionId).then(detail => {
       if (!isRemovedRoute(route)) sessionDetailCache.set(route.sessionId, detail);

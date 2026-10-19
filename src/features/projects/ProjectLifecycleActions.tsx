@@ -6,7 +6,7 @@ import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import type { Project, ProjectPurpose } from "../../types";
 
-type LifecycleProject = Pick<Project, "id" | "name" | "visibility"> & {
+export type LifecycleProject = Pick<Project, "id" | "name" | "visibility"> & {
   purpose?: ProjectPurpose | null;
   session_count: number;
 };
@@ -33,10 +33,11 @@ export function ProjectDeleteModal({ names, busy, onClose, onConfirm }: {
   );
 }
 
-export default function ProjectLifecycleActions({ project, onChanged, onDeleted }: {
+export default function ProjectLifecycleActions({ project, onChanged, onDeleted, onRequestDelete }: {
   project: LifecycleProject;
   onChanged: () => void;
   onDeleted?: () => void;
+  onRequestDelete?: (project: LifecycleProject) => void;
 }) {
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -75,11 +76,14 @@ export default function ProjectLifecycleActions({ project, onChanged, onDeleted 
       {archived && !project.purpose && (
         <button className="btn ghost icon-button danger" aria-label="永久删除项目"
           title={project.session_count > 0 ? "项目仍有关联会话，不能永久删除" : "永久删除项目"}
-          disabled={busy || !canDeleteProject(project)} onClick={() => setConfirmDelete(true)}>
+          disabled={busy || !canDeleteProject(project)} onClick={() => {
+            if (onRequestDelete) onRequestDelete(project);
+            else setConfirmDelete(true);
+          }}>
           <Icon name="trash" />
         </button>
       )}
-      {confirmDelete && <ProjectDeleteModal names={[project.name]} busy={busy}
+      {!onRequestDelete && confirmDelete && <ProjectDeleteModal names={[project.name]} busy={busy}
         onClose={() => setConfirmDelete(false)} onConfirm={() => void perform(true)} />}
     </>
   );

@@ -455,6 +455,7 @@
   stroke-linejoin: round;
 }
 .new-session-hint { margin: 12px 0 0; text-align: center; font-size: 11.5px; color: var(--text-muted); }
+.new-session-hint[role="alert"] { color: var(--danger); }
 .new-session-note { margin: 12px 8px 0; font-size: 12px; color: var(--warning); }
 .new-session-error { display: flex; align-items: center; gap: 12px; margin: 12px 8px 0; color: var(--danger); }
 .new-session-error > span { flex: 1; overflow-wrap: anywhere; }

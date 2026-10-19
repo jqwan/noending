@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import SessionDetailView, { sessionDetailCache } from "./SessionDetailView";
+import SessionDetailView, { sessionDetailCache, sessionContextCache } from "./SessionDetailView";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 import type {
@@ -9,6 +9,7 @@ import type {
   LocalDeletePreview,
   SessionDetail,
   SessionMessage,
+  SessionWindowMessage,
 
 } from "../../types";
 
@@ -72,6 +73,7 @@ afterEach(() => {
   // 「显示统计」这类开关活在模块级 view state 里，会跨用例残留。
   viewState.clear();
   sessionDetailCache.clear();
+  sessionContextCache.clear();
 });
 
 function session(id: string, over: Partial<Session> = {}): Session {
@@ -112,8 +114,9 @@ function message(
   sequence: number,
   role: SessionMessage["role"],
   content: string,
-): SessionMessage {
+): SessionWindowMessage {
   return {
+    ordinal: sequence,
     id: `m${sequence}`,
     session_id: sessionId,
     sequence,
@@ -229,12 +232,14 @@ it("shows only terminal continue button for terminal-only formats and desktop fo
 it("previews the newest messages and links to the whole conversation", async () => {
   const me = session("me");
   const { navigate } = await renderDetail(detail(me, {
-    messages: [message("me", 419, "user", "最近的一句话")],
+    messages: [{ ...message("me", 1173, "user", "最近的一句话"), ordinal: 419 }],
     ingested_message_sequence: 420,
   }));
 
   screen.getByText("最近消息");
   screen.getByText("最近的一句话");
+  expect(screen.getByText("#419")).toBeTruthy();
+  expect(screen.queryByText("#1173")).toBeNull();
   expect(screen.queryByText(/以上是最近/)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "查看全部历史消息（共 420 条）" }));
   expect(navigate).toHaveBeenCalledWith({
@@ -461,6 +466,24 @@ it("renders immediately from cache on remount without flashing 加载中", async
   await act(async () => {
     resolveDetail!(detail(me));
   });
+});
+
+it("renders cached summary immediately without flashing 暂无摘要", async () => {
+  const me = session("me", { title: "带摘要的会话" });
+  const d = detail(me);
+  sessionDetailCache.set("me", d);
+  sessionContextCache.set("me", contextView({
+    fields: {
+      summary: "这是已缓存的会话摘要",
+    },
+  }));
+  vi.mocked(api.getSessionDetail).mockResolvedValue(d);
+
+  render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
+
+  expect(screen.queryByText("暂无摘要")).toBeNull();
+  expect(screen.getByText("这是已缓存的会话摘要")).toBeDefined();
+  expect(screen.getByRole("button", { name: "复制摘要" })).toBeDefined();
 });
 
 it("renders copy icon buttons next to field labels and copies values on click", async () => {

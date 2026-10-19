@@ -2,14 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import type { ExtensionLocation, ExtensionResource, ProjectCardData } from "../../types";
-import { EXTENSION_AGENTS } from "./extensionAgents";
-import { locationSupportsAgent, under } from "./extensionPresentation";
-import "./extensions.css";
+import type { SkillLocation, SkillResource, ProjectCardData } from "../../types";
+import { SKILL_AGENTS } from "./skillAgents";
+import { locationSupportsAgent, under } from "./skillPresentation";
+import "./skills.css";
 
-function configuredIds(projects: ProjectCardData[], resource: ExtensionResource, locations: ExtensionLocation[]) {
+function configuredIds(projects: ProjectCardData[], resource: SkillResource, locations: SkillLocation[], physicalOnly = false) {
   const entries = resource.entry_paths.filter((_, index) =>
-    locations.find(location => location.id === resource.locations[index])?.scope === "project");
+    (!physicalOnly || resource.entry_links[index] === false)
+    && locations.find(location => location.id === resource.locations[index])?.scope === "project");
   return new Set(projects
     .filter(project => project.search_paths.some(root => entries.some(entry => under(entry, root))))
     .map(project => project.id));
@@ -18,8 +19,8 @@ function configuredIds(projects: ProjectCardData[], resource: ExtensionResource,
 const usable = (project: ProjectCardData) => project.path_count > project.missing_path_count;
 
 /** Scope set editor: all projects selected means user level, otherwise project level. */
-export default function ExtensionConfigDialog({ resource, locations, onClose, onDone }: {
-  resource: ExtensionResource; locations: ExtensionLocation[];
+export default function SkillConfigDialog({ resource, locations, onClose, onDone }: {
+  resource: SkillResource; locations: SkillLocation[];
   onClose: () => void; onDone: () => void;
 }) {
   const [projects, setProjects] = useState<ProjectCardData[] | null>(null);
@@ -32,8 +33,10 @@ export default function ExtensionConfigDialog({ resource, locations, onClose, on
     return location?.scope === "user" ? [{ location }] : [];
   });
   const userLevel = userEntries.length > 0;
-  const userFull = userLevel && EXTENSION_AGENTS.every(agent => userEntries.some(({ location }) =>
-    resource.kind === "mcp" ? location.agent === agent : locationSupportsAgent(location, agent)));
+  const physicalUser = resource.entry_links.some((link, index) => !link
+    && locations.find(location => location.id === resource.locations[index])?.scope === "user");
+  const userFull = userLevel && SKILL_AGENTS.every(agent => userEntries.some(({ location }) =>
+    locationSupportsAgent(location, agent)));
 
   useEffect(() => {
     let live = true;
@@ -50,6 +53,7 @@ export default function ExtensionConfigDialog({ resource, locations, onClose, on
 
   const usableIds = useMemo(() => (projects ?? []).filter(usable).map(project => project.id), [projects]);
   const configured = useMemo(() => configuredIds(projects ?? [], resource, locations), [projects, resource, locations]);
+  const physicalProjects = useMemo(() => configuredIds(projects ?? [], resource, locations, true), [projects, resource, locations]);
   const allSelected = usableIds.length > 0 && usableIds.every(id => selected.includes(id));
   const masterChecked = master || allSelected;
   const changed = masterChecked !== userLevel
@@ -61,26 +65,18 @@ export default function ExtensionConfigDialog({ resource, locations, onClose, on
     try {
       const messages: string[] = [];
       if (masterChecked) {
-        messages.push(resource.kind === "mcp"
-          ? (await api.enableMcpDefinitionUser(resource.id)).message
-          : (await api.enableExtensionSkillAll(resource.id)).message);
+        messages.push((await api.enableSkillAll(resource.id)).message);
       } else {
         if (userLevel) {
-          messages.push(resource.kind === "mcp"
-            ? (await api.disableMcpDefinitionUser(resource.id)).message
-            : (await api.disableExtensionSkillAll(resource.id)).message);
+          messages.push((await api.disableSkillAll(resource.id)).message);
         }
         const toEnable = selected.filter(id => !configured.has(id));
-        const toDisable = [...configured].filter(id => !selected.includes(id));
+        const toDisable = [...configured].filter(id => !selected.includes(id) && !physicalProjects.has(id));
         if (toEnable.length) {
-          messages.push(resource.kind === "mcp"
-            ? (await api.enableMcpDefinitionProjects(toEnable, resource.id)).message
-            : (await api.enableExtensionSkillProjects(toEnable, resource.id)).message);
+          messages.push((await api.enableSkillProjects(toEnable, resource.id)).message);
         }
         if (toDisable.length) {
-          messages.push(resource.kind === "mcp"
-            ? (await api.disableMcpDefinitionProjects(toDisable, resource.id)).message
-            : (await api.disableExtensionSkillProjects(toDisable, resource.id)).message);
+          messages.push((await api.disableSkillProjects(toDisable, resource.id)).message);
         }
       }
       showToast(messages.join("；") || "配置未变化");
@@ -91,38 +87,40 @@ export default function ExtensionConfigDialog({ resource, locations, onClose, on
     }
   };
 
-  return <Modal title="配置扩展" onClose={() => { if (!busy) onClose(); }}>
+  return <Modal title="配置技能" onClose={() => { if (!busy) onClose(); }}>
     <p className="small muted">全选代表用户级配置，对所有项目生效；否则只写入勾选项目的项目级配置。</p>
+    {(physicalUser || physicalProjects.size > 0) && <p className="small muted">物理入口会保持启用，不能直接取消；迁移源目录后可通过链接控制。</p>}
     {userLevel && !masterChecked && <p className="small muted">保存后停用用户级，改为所选项目的项目级配置。</p>}
     {projects === null
       ? <p className="small muted" role="status">正在读取项目…</p>
       : <>
-        <div className="extension-project-options">
-          <label className="extension-check extension-project-option">
-            <input type="checkbox" disabled={busy} checked={masterChecked}
-              onChange={e => { setMaster(e.target.checked); setSelected(e.target.checked ? usableIds : []); }} />
-            <span className="extension-project-name">全选</span>
+        <div className="skill-project-options">
+          <label className="skill-check skill-project-option">
+            <input type="checkbox" disabled={busy || physicalUser} checked={masterChecked}
+              onChange={e => { setMaster(e.target.checked); setSelected(e.target.checked ? usableIds : [...physicalProjects]); }} />
+            <span className="skill-project-name">全选</span>
             <span className="small muted">用户级 · 所有项目</span>
           </label>
           {projects.map(project => {
             const already = configured.has(project.id);
             const available = usable(project);
-            return <label className="extension-check extension-project-option" key={project.id}>
-              <input type="checkbox" disabled={busy || (!available && !already)} checked={masterChecked || selected.includes(project.id)}
+            return <label className="skill-check skill-project-option" key={project.id}>
+              <input type="checkbox" disabled={busy || physicalUser || physicalProjects.has(project.id) || (!available && !already)} checked={masterChecked || physicalProjects.has(project.id) || selected.includes(project.id)}
                 onChange={e => {
                   setMaster(false);
                   setSelected(current => e.target.checked ? [...current, project.id] : current.filter(id => id !== project.id));
                 }} />
-              <span className="extension-project-name">{project.name}</span>
+              <span className="skill-project-name">{project.name}</span>
               {project.visibility === "archived" && <span className="badge">已归档</span>}
+              {physicalProjects.has(project.id) && <span className="badge">物理入口</span>}
               {already ? <span className="small muted">已配置</span> : !available && <span className="small muted">没有可用目录</span>}
             </label>;
           })}
         </div>
         {!projects.length && <p className="small muted">还没有项目；仍可选择全选以启用用户级。</p>}
       </>}
-    {error && <div role="alert" className="extension-error">{error}</div>}
-    <div className="row extension-dialog-actions">
+    {error && <div role="alert" className="skill-error">{error}</div>}
+    <div className="row skill-dialog-actions">
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
       <button className="btn primary" disabled={busy || !changed} onClick={() => void submit()}>{busy ? "保存中…" : "保存"}</button>
     </div>

@@ -8,6 +8,8 @@ import { capsOf } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
 import { openSessionTerminal, terminalContinueState, terminalForContinue } from "../features/sessions/continueDesktop";
 import { preferredTerminal, sessionDestination, terminalDestination } from "../features/sessions/sessionNavigation";
+import { api } from "../api";
+import { sessionDetailCache, sessionContextCache } from "../features/sessions/sessionDetailCache";
 import TerminalActivityIndicator from "../features/sessions/TerminalActivityIndicator";
 import type { SidebarSession } from "./sidebarModel";
 
@@ -96,6 +98,14 @@ export default function SidebarSessionRow({
   const hasAction = Boolean(selected || caps.terminal || s.sessionId);
   const onMouseEnter = () => {
     setHovered(true);
+    if (s.sessionId) {
+      if (!sessionDetailCache.has(s.sessionId)) {
+        void api.getSessionDetail(s.sessionId).then(d => sessionDetailCache.set(s.sessionId!, d)).catch(() => {});
+      }
+      if (!sessionContextCache.has(s.sessionId)) {
+        void api.getSessionContext(s.sessionId).then(c => sessionContextCache.set(s.sessionId!, c)).catch(() => {});
+      }
+    }
     if (titleRef.current) {
       const actionsWidth = hasAction && onTogglePin ? 58 : hasAction || onTogglePin ? 34 : 0;
       const available = actionsWidth > 0 ? titleRef.current.clientWidth - actionsWidth : titleRef.current.clientWidth;

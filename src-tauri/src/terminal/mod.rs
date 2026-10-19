@@ -1354,6 +1354,9 @@ mod tests {
     fn binding_db() -> crate::storage::Db {
         let dir = std::env::temp_dir().join(format!("noending-term-binding-{}", new_id()));
         let db = crate::storage::Db::open(&dir.join("db.sqlite")).unwrap();
+        db.write()
+            .execute("DELETE FROM ingest_sources", [])
+            .unwrap();
         let p = crate::domain::Project {
             id: "native-project".into(),
             name: "Native".into(),
@@ -1586,9 +1589,8 @@ mod tests {
                 None,
                 Some(&second_task),
             );
-            registry
-                .report_native_identity(&db, &terminal, &native_event("native-a"))
-                .unwrap();
+            // An empty TUI may not report a native identity until the user
+            // submits inside it. Other sessions can be ingested meanwhile.
             let b = ingested_native(&db, agent, "native-b");
             attach_fixture_paths(&db);
             registry.bind_discovered(&db);
@@ -1608,6 +1610,17 @@ mod tests {
                     .as_deref(),
                 Some(b.id.as_str())
             );
+            assert_eq!(
+                registry
+                    .attach(&terminal)
+                    .unwrap()
+                    .summary
+                    .initial_workstream_ids,
+                vec![first_task.clone()]
+            );
+            registry
+                .report_native_identity(&db, &terminal, &native_event("native-a"))
+                .unwrap();
             let a = ingested_native(&db, agent, "native-a");
             assert_eq!(
                 owner(&db, &a),
@@ -1668,7 +1681,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("noending-owner-rollout-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), true)
+            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
             .unwrap();
         let meta = serde_json::json!({"ordinal": 0, "type": "session_meta", "timestamp": now(), "payload": {
             "id": native, "timestamp": now(), "cwd": fixture_cwd(),
@@ -1710,18 +1723,17 @@ mod tests {
     }
 
     #[test]
-    fn native_sync_binds_task_with_history_disabled_without_importing_neighbors() {
+    fn native_sync_binds_task_without_importing_neighbors() {
         let registry = registry();
         let db = binding_db();
-        let task = selected_task(&db, "Disabled history");
+        let task = selected_task(&db, "Native history");
         let native = new_id();
         let unrelated = new_id();
         let terminal =
             identity_terminal_with_owner(&registry, Agent::Codex, None, None, Some(&task));
         let root = std::env::temp_dir().join(format!("noending-native-sync-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
-        let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy(), false)
+        db.add_ingest_source(Agent::Codex, &root.to_string_lossy())
             .unwrap();
         let write_rollout = |id: &str, text: Option<&str>| {
             let path = root.join(format!("rollout-2026-10-10T12-00-00-{id}.jsonl"));
@@ -1732,12 +1744,6 @@ mod tests {
         };
         let path = write_rollout(&native, None);
         write_rollout(&unrelated, Some("unrelated history"));
-        assert!(
-            crate::ingestion::reconcile_all_report(&db, &|_| {})
-                .unwrap()
-                .discovered
-                == 0
-        );
         let event = native_event(&native);
         registry
             .report_native_identity(&db, &terminal, &event)
@@ -1790,7 +1796,6 @@ mod tests {
             .find_session_by_root_agent_id(Agent::Codex, &unrelated)
             .unwrap()
             .is_none());
-        assert!(!db.get_ingest_source(&source.id).unwrap().unwrap().enabled);
         assert_eq!(
             crate::ingestion::reconcile_native(&db, Agent::Codex, &native, None, &|_| {}).unwrap(),
             (1, 0)

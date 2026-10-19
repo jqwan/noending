@@ -5,7 +5,7 @@ import AppShell from "./AppShell";
 import { sessionPages, sessionTerminals } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
 import { api } from "../api";
-import { sessionDetailCache } from "../features/sessions/SessionDetailView";
+import { sessionDetailCache, sessionContextCache } from "../features/sessions/sessionDetailCache";
 import { useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useRefreshSignal } from "../components/common";
@@ -24,7 +24,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
-vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn() } }));
+vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn(), getSessionContext: vi.fn() } }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
 const pageNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
@@ -48,7 +48,12 @@ beforeEach(() => {
   Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(listen).mockClear();
   sessionDetailCache.clear();
+  sessionContextCache.clear();
   vi.mocked(api.getSessionDetail).mockReset();
+  vi.mocked(api.getSessionContext).mockReset().mockImplementation(async session_id => ({
+    session_id, fields: null, revision: 0, ingest_generation: 0,
+    processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false,
+  }));
   sessionPages.clear(); sessionTerminals.clear();
   localStorage.clear();
   appForeground.mockClear();
@@ -216,7 +221,7 @@ it.each([
   { route: { view: "session", sessionId: "deleted", initialTitle: "S", initialAgent: "codex" }, targets: { sessionIds: ["deleted"] }, replacement: { view: "sessions", scope: "archived" }, section: "会话" },
   { route: { view: "workstream", workstreamId: "deleted", initialTitle: "T" }, targets: { workstreamIds: ["deleted"] }, replacement: { view: "workstreams", scope: "archived" }, section: "任务" },
   { route: { view: "project", projectId: "deleted", initialTitle: "P" }, targets: { projectIds: ["deleted"] }, replacement: { view: "projects", scope: "archived" }, section: "项目" },
-  { route: { view: "extension", resourceId: "mcp1", kind: "mcp", projectId: "deleted", workspacePathId: "w1" }, targets: { projectIds: ["deleted"] }, replacement: { view: "extensions" }, section: "扩展" },
+  { route: { view: "skill", resourceId: "skill1", projectId: "deleted", workspacePathId: "w1" }, targets: { projectIds: ["deleted"] }, replacement: { view: "skills" }, section: "技能" },
   { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialAgent: "codex" }, section: "会话" },
 ] as const)("removes invalid $route.view routes from back/forward and section memory", ({ route, targets, replacement, section }) => {
   render(<AppShell />);

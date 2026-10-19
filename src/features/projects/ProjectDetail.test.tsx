@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
 import { api } from "../../api";
-import type { ExtensionInventory, ProjectDetailData } from "../../types";
+import type { SkillInventory, ProjectDetailData } from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
@@ -11,12 +11,10 @@ vi.mock("../../api", () => ({
     savePreference: vi.fn(),
     deletePreference: vi.fn(),
     getProjectDetail: vi.fn(),
-    listExtensionResources: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
-    listExtensionCatalog: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
-    enableExtensionSkillProjects: vi.fn(),
-    disableExtensionSkillProjects: vi.fn(),
-    enableMcpDefinitionProjects: vi.fn(),
-    disableMcpDefinitionProjects: vi.fn(),
+    listSkills: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
+    listSkillCatalog: vi.fn().mockResolvedValue({ resources: [], locations: [], warnings: [] }),
+    enableSkillProjects: vi.fn(),
+    disableSkillProjects: vi.fn(),
     listProjectCards: vi.fn(),
     createWorkstream: vi.fn(),
     renameProject: vi.fn(),
@@ -238,97 +236,93 @@ describe("ProjectDetail", () => {
     expect(screen.queryByRole("button", {name: "更新摘要"})).toBeNull();
   });
 
-  it("adds extensions to this project from the card", async () => {
+  it("adds skills to this project from the card", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
+    const inventory: SkillInventory = {
       locations: [],
       resources: [
-        { id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: [], entry_paths: [], entry_links: [], revision: "r", registered: true, error: null },
-        { id: "lint", kind: "skill" as const, name: "lint", description: "Lint", path: "/home/test/.agents/skills/lint/SKILL.md", locations: [], entry_paths: [], entry_links: [], revision: "r", registered: true, error: null },
-        { id: "mcp-docs", kind: "mcp" as const, name: "docs", description: "Docs", path: "", locations: [], entry_paths: [], entry_links: [], revision: "r", registered: true, error: null },
+        { id: "review", name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: [], entry_paths: [], entry_links: [], revision: "r", registered: true, error: null },
+        { id: "lint", name: "lint", description: "Lint", path: "/home/test/.agents/skills/lint/SKILL.md", locations: [], entry_paths: [], entry_links: [], revision: "r", registered: true, error: null },
       ],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockResolvedValue({ locations: [], resources: [], warnings: [] });
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
-    vi.mocked(api.enableExtensionSkillProjects).mockClear().mockResolvedValue({ message: "Enabled" });
-    vi.mocked(api.enableMcpDefinitionProjects).mockClear().mockResolvedValue({ message: "Enabled" });
+    vi.mocked(api.listSkills).mockResolvedValue({ locations: [], resources: [], warnings: [] });
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(inventory);
+    vi.mocked(api.enableSkillProjects).mockClear().mockResolvedValue({ message: "Enabled" });
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
-    expect(await within(section).findByText("当前项目还没有启用的扩展。")).toBeTruthy();
-    fireEvent.click(within(section).getByRole("button", { name: "配置扩展" }));
+    const section = await screen.findByLabelText("技能");
+    expect(await within(section).findByText("当前项目还没有启用的技能。")).toBeTruthy();
+    fireEvent.click(within(section).getByRole("button", { name: "配置技能" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /lint/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /docs/ }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(api.enableExtensionSkillProjects).toHaveBeenCalledWith(["p1"], "lint"));
-    await waitFor(() => expect(api.enableMcpDefinitionProjects).toHaveBeenCalledWith(["p1"], "mcp-docs"));
-    expect(api.enableExtensionSkillProjects).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.enableSkillProjects).toHaveBeenCalledWith(["p1"], "lint"));
+    expect(api.enableSkillProjects).toHaveBeenCalledTimes(1);
   });
 
-  it("opens an extension detail from the project card", async () => {
+  it("opens an skill detail from the project card", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
-      locations: [{ id: "shared", kind: "skill" as const, agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
-      resources: [{ id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
+    const inventory: SkillInventory = {
+      locations: [{ id: "shared", agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
+      resources: [{ id: "review", name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
       ? inventory
       : { locations: [], resources: [], warnings: [] });
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(inventory);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
+    const section = await screen.findByLabelText("技能");
     fireEvent.click(within(section).getByRole("button", { name: /review/ }));
-    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "extension", resourceId: "review", kind: "skill" }));
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "skill", resourceId: "review", }));
   });
 
-  it("removes a project extension by unchecking it in the dialog", async () => {
+  it("removes a project skill by unchecking it in the dialog", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
-      locations: [{ id: "shared", kind: "skill" as const, agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
-      resources: [{ id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
+    const inventory: SkillInventory = {
+      locations: [{ id: "shared", agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
+      resources: [{ id: "review", name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
       ? inventory
       : { locations: [], resources: [], warnings: [] });
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
-    vi.mocked(api.disableExtensionSkillProjects).mockClear().mockResolvedValue({ message: "Disabled" });
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(inventory);
+    vi.mocked(api.disableSkillProjects).mockClear().mockResolvedValue({ message: "Disabled" });
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
-    fireEvent.click(await within(section).findByRole("button", { name: "配置扩展" }));
+    const section = await screen.findByLabelText("技能");
+    fireEvent.click(await within(section).findByRole("button", { name: "配置技能" }));
     const checkbox = await screen.findByRole("checkbox", { name: /review/ }) as HTMLInputElement;
     expect(checkbox.checked).toBe(true);
     fireEvent.click(checkbox);
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(api.disableExtensionSkillProjects).toHaveBeenCalledWith(["p1"], "review"));
+    await waitFor(() => expect(api.disableSkillProjects).toHaveBeenCalledWith(["p1"], "review"));
   });
 
-  it("keeps the project extension list visible and other rows interactive after an action", async () => {
+  it("keeps the project skill list visible and other rows interactive after an action", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
-      locations: [{ id: "shared", kind: "skill" as const, agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
+    const inventory: SkillInventory = {
+      locations: [{ id: "shared", agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
       resources: [
-        { id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null },
-        { id: "lint", kind: "skill" as const, name: "lint", description: "Lint", path: "/home/test/.agents/skills/lint/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/lint/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null },
+        { id: "review", name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null },
+        { id: "lint", name: "lint", description: "Lint", path: "/home/test/.agents/skills/lint/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/lint/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null },
       ],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
       ? inventory
       : { locations: [], resources: [], warnings: [] });
-    let finish!: (value: ExtensionInventory) => void;
-    vi.mocked(api.listExtensionCatalog).mockClear()
+    let finish!: (value: SkillInventory) => void;
+    vi.mocked(api.listSkillCatalog).mockClear()
       .mockResolvedValueOnce(inventory)
       .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-    vi.mocked(api.enableExtensionSkillProjects).mockClear().mockResolvedValue({ message: "Enabled" });
+    vi.mocked(api.enableSkillProjects).mockClear().mockResolvedValue({ message: "Enabled" });
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
-    expect(within(section).getByRole("heading", { name: "扩展 (2)" })).toBeTruthy();
+    const section = await screen.findByLabelText("技能");
+    expect(within(section).getByRole("heading", { name: "技能 (2)" })).toBeTruthy();
     fireEvent.click((await within(section).findAllByRole("button", { name: "补齐" }))[0]);
-    await waitFor(() => expect(api.enableExtensionSkillProjects).toHaveBeenCalledWith(["p1"], "review"));
-    await waitFor(() => expect(api.listExtensionCatalog).toHaveBeenCalledTimes(2));
-    expect(within(section).queryByText("正在读取扩展配置…")).toBeNull();
+    await waitFor(() => expect(api.enableSkillProjects).toHaveBeenCalledWith(["p1"], "review"));
+    await waitFor(() => expect(api.listSkillCatalog).toHaveBeenCalledTimes(2));
+    expect(within(section).queryByText("正在读取技能配置…")).toBeNull();
     const buttons = within(section).getAllByRole("button", { name: "补齐" }) as HTMLButtonElement[];
     expect(buttons[0].disabled).toBe(true);
     expect(buttons[1].disabled).toBe(false);
@@ -337,20 +331,41 @@ describe("ProjectDetail", () => {
 
   it("keeps a user-level project Skill read-only", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const userInventory: ExtensionInventory = {
-      locations: [{ id: "u", kind: "skill" as const, agent: null, scope: "user" as const, path: "/home/test/.agents/skills", label: "共享 Skills" }],
-      resources: [{ id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["u"], entry_paths: ["/home/test/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
+    const userInventory: SkillInventory = {
+      locations: [{ id: "u", agent: null, scope: "user" as const, path: "/home/test/.agents/skills", label: "共享 Skills" }],
+      resources: [{ id: "review", name: "review", description: "Review", path: "/home/test/.agents/skills/review/SKILL.md", locations: ["u"], entry_paths: ["/home/test/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: true, error: null }],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
       ? { locations: [], resources: [], warnings: [] }
       : userInventory);
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(userInventory);
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(userInventory);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
+    const section = await screen.findByLabelText("技能");
     const row = await within(section).findByRole("button", { name: /review/ });
     expect(within(row).queryByRole("button", { name: /^(补齐|停用)$/ })).toBeNull();
-    fireEvent.click(within(section).getByRole("button", { name: "配置扩展" }));
+    fireEvent.click(within(section).getByRole("button", { name: "配置技能" }));
+    const fixed = await screen.findByRole("checkbox", { name: /review/ }) as HTMLInputElement;
+    expect(fixed.checked).toBe(true);
+    expect(fixed.disabled).toBe(true);
+  });
+
+  it("keeps a referenced project source enabled and unavailable for direct disable", async () => {
+    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
+    const userInventory: SkillInventory = {
+      locations: [{ id: "u", agent: null, scope: "project" as const, path: "/z/main/worktree/.claude/skills", label: "共享 Skills" }],
+      resources: [{ id: "review", name: "review", description: "Review", path: "/z/main/worktree/.claude/skills/review/SKILL.md", locations: ["u"], entry_paths: ["/z/main/worktree/.claude/skills/review/SKILL.md"], entry_links: [false], revision: "r", registered: true, error: null }],
+      warnings: [],
+    };
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
+      ? userInventory
+      : { locations: [], resources: [], warnings: [] });
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(userInventory);
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    const section = await screen.findByLabelText("技能");
+    const row = await within(section).findByRole("button", { name: /review/ });
+    expect(within(row).queryByRole("button", { name: "停用" })).toBeNull();
+    fireEvent.click(within(section).getByRole("button", { name: "配置技能" }));
     const fixed = await screen.findByRole("checkbox", { name: /review/ }) as HTMLInputElement;
     expect(fixed.checked).toBe(true);
     expect(fixed.disabled).toBe(true);
@@ -358,36 +373,21 @@ describe("ProjectDetail", () => {
 
   it("keeps an unregistered project Skill read-only", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
-      locations: [{ id: "shared", kind: "skill" as const, agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
-      resources: [{ id: "review", kind: "skill" as const, name: "review", description: "Review", path: "/home/test/external/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: false, error: null }],
+    const inventory: SkillInventory = {
+      locations: [{ id: "shared", agent: null, scope: "project" as const, path: "/z/main/worktree/.agents/skills", label: "共享 Skills" }],
+      resources: [{ id: "review", name: "review", description: "Review", path: "/home/test/external/review/SKILL.md", locations: ["shared"], entry_paths: ["/z/main/worktree/.agents/skills/review/SKILL.md"], entry_links: [true], revision: "r", registered: false, error: null }],
       warnings: [],
     };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
+    vi.mocked(api.listSkills).mockImplementation(async scope => scope.project_id
       ? inventory
       : { locations: [], resources: [], warnings: [] });
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
+    vi.mocked(api.listSkillCatalog).mockResolvedValue(inventory);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
+    const section = await screen.findByLabelText("技能");
     expect(await within(section).findByText("未托管")).toBeTruthy();
     expect(within(section).queryByRole("button", { name: /^(补齐|停用)$/ })).toBeNull();
   });
 
-  it("lists an enabled MCP definition for this project", async () => {
-    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    const inventory: ExtensionInventory = {
-      locations: [{ id: "mcp-project", kind: "mcp" as const, agent: "claude_code", scope: "project" as const, path: "/z/main/worktree/.mcp.json", label: "项目 MCP" }],
-      resources: [{ id: "mcp-docs", kind: "mcp" as const, name: "docs", description: "", path: "", locations: ["mcp-project"], entry_paths: ["/z/main/worktree/.mcp.json"], entry_links: [], revision: "r", registered: true, error: null }],
-      warnings: [],
-    };
-    vi.mocked(api.listExtensionResources).mockImplementation(async scope => scope.project_id
-      ? inventory
-      : { locations: [], resources: [], warnings: [] });
-    vi.mocked(api.listExtensionCatalog).mockResolvedValue(inventory);
-    render(<ProjectDetail projectId="p1" navigate={navigate} />);
-    const section = await screen.findByLabelText("扩展");
-    expect(await within(section).findByText("docs")).toBeTruthy();
-  });
 
   it("retains the current summary on extraction failure and does not show an old project's late result", async () => {
     vi.mocked(api.getProjectDetail).mockImplementation(async id => ({...mockDetail(), project: {...mockDetail().project, id, name: id}}));

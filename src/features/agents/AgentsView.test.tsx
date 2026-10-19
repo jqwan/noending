@@ -1,9 +1,9 @@
 import { viewState } from "../../hooks/useViewState";
 import { clearRuntimeCatalog } from "./useAgentRuntime";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeFixture } from "./runtimeFixtures";
-import AgentsView from "./AgentsView";
+import AgentsView, { clearAgentsCache } from "./AgentsView";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import type { AgentStatusEntry, IngestSource, IngestTaskStatus } from "../../types";
@@ -30,7 +30,6 @@ vi.mock("../../api", () => ({
     listIngestSources: vi.fn(),
     addIngestSource: vi.fn(),
     removeIngestSource: vi.fn(),
-    setIngestSourceEnabled: vi.fn(),
     reconcileSource: vi.fn(),
     reingestSource: vi.fn(),
     reconcileAll: vi.fn(),
@@ -76,6 +75,16 @@ const mockAgentStatus: Record<string, AgentStatusEntry> = {
     desktop_app: "Antigravity",
     desktop_app_present: true,
   },
+  pi: {
+    name: "Pi",
+    detected: false,
+    executable: null,
+    version: null,
+    terminal_cli: true,
+    launch_enabled: false,
+    desktop_app: null,
+    desktop_app_present: false,
+  },
 };
 
 const mockSources: IngestSource[] = [
@@ -83,7 +92,6 @@ const mockSources: IngestSource[] = [
     id: "src-1",
     agent: "claude_code",
     path: "~/.claude/projects",
-    enabled: true,
     origin: "default",
     exists: true,
     created_at: "2026-10-05T14:00:00Z",
@@ -92,7 +100,6 @@ const mockSources: IngestSource[] = [
     id: "src-2",
     agent: "antigravity",
     path: "~/.gemini/antigravity",
-    enabled: true,
     origin: "default",
     exists: true,
     created_at: "2026-10-05T14:00:00Z",
@@ -101,7 +108,6 @@ const mockSources: IngestSource[] = [
     id: "src-3",
     agent: "antigravity",
     path: "~/.gemini/antigravity-cli",
-    enabled: true,
     origin: "default",
     exists: true,
     created_at: "2026-10-05T14:00:00Z",
@@ -121,6 +127,7 @@ beforeEach(() => {
   viewState.clear();
   localStorage.clear();
   clearRuntimeCatalog();
+  clearAgentsCache();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
   vi.mocked(api.setAgentLaunchEnabled).mockReset().mockResolvedValue(undefined);
@@ -133,7 +140,6 @@ beforeEach(() => {
   vi.mocked(api.setDefaultAgent).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.listIngestSources).mockReset().mockResolvedValue(mockSources);
   vi.mocked(api.getIngestionStatus).mockReset().mockResolvedValue(mockIngestStatus);
-  vi.mocked(api.setIngestSourceEnabled).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.reconcileSource).mockReset().mockResolvedValue({ queued: true });
   vi.mocked(api.reingestSource).mockReset().mockResolvedValue({ queued: true });
   vi.mocked(api.reconcileAll).mockReset().mockResolvedValue({ queued: true });
@@ -154,7 +160,10 @@ describe("AgentsView", () => {
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
     expect(await screen.findByText(/同步发现 5 条记录 · 写入 12 条新消息/)).toBeTruthy();
 
-    expect(await screen.findByText(/共 3 个来源目录/)).toBeTruthy();
+    expect(await screen.findByRole("combobox", { name: "状态" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "全部" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "已就绪" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "未就绪" })).toBeTruthy();
 
     expect(screen.getByRole("button", { name: "查看 Antigravity Agent 详情" })).toBeTruthy();
     expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
@@ -184,7 +193,6 @@ describe("AgentsView", () => {
       id: "src-new",
       agent: "codex",
       path: "/custom/sessions/path",
-      enabled: true,
       origin: "user",
       exists: true,
       created_at: "2026-10-05T15:00:00Z",
@@ -201,23 +209,45 @@ describe("AgentsView", () => {
     });
   });
 
-  it("filters Agents by terminal and desktop availability", async () => {
+  it("filters Agents by terminal and desktop availability and readiness", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
-    // Tabs exist
-    expect(await screen.findByRole("tab", { name: /全部/ })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: /TUI/ })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: /桌面端/ })).toBeTruthy();
+    // Top-right surface buttons exist with TUI active by default
+    const tuiBtn = await screen.findByRole("button", { name: "TUI" });
+    const desktopBtn = screen.getByRole("button", { name: "桌面端" });
+    expect(tuiBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(desktopBtn.getAttribute("aria-pressed")).toBe("false");
 
+    // Readiness select exists with options
+    const statusSelect = screen.getByRole("combobox", { name: "状态" });
+    expect(statusSelect).toBeTruthy();
 
-    // Click TUI filter
-    fireEvent.click(screen.getByRole("tab", { name: /TUI/ }));
-    // Claude Code has terminal_cli: true -> visible
+    // Default TUI shows TUI agents
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(screen.getByText("Pi")).toBeTruthy();
+
+    // Filter by unready in TUI: Pi has detected: false
+    fireEvent.change(statusSelect, { target: { value: "unready" } });
+    expect(screen.getByText("Pi")).toBeTruthy();
+    expect(screen.queryByText("Claude Code")).toBeNull();
+
+    // Filter by ready in TUI: Claude Code and Codex are ready
+    fireEvent.change(statusSelect, { target: { value: "ready" } });
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(screen.queryByText("Pi")).toBeNull();
+
+    // Reset to all
+    fireEvent.change(statusSelect, { target: { value: "all" } });
     expect(screen.getByText("Claude Code")).toBeTruthy();
 
-    // Click 桌面端 filter
-    fireEvent.click(screen.getByRole("tab", { name: /桌面端/ }));
-    // Claude Code has desktop_app: null -> hidden in desktop filter
+    // Switch to desktop surface
+    fireEvent.click(desktopBtn);
+    expect(desktopBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(tuiBtn.getAttribute("aria-pressed")).toBe("false");
+
+    // Claude Code has desktop_app: null -> hidden in desktop surface
     expect(screen.queryByText("Claude Code")).toBeNull();
     // Codex has desktop_app: "ChatGPT" -> visible
     expect(screen.getByText("Codex")).toBeTruthy();
@@ -229,7 +259,6 @@ describe("AgentsView", () => {
         id: "src-user-1",
         agent: "claude_code",
         path: "/custom/path",
-        enabled: true,
         origin: "user",
         exists: true,
         created_at: "2026-10-05T14:00:00Z",
@@ -338,11 +367,18 @@ describe("AgentsView", () => {
 
     // Toggle to list view and back
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".ws-grid.board-grid")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
     expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector(".agent-list")).toBeTruthy();
+    expect(document.querySelector(".agent-list-row")).toBeTruthy();
+    expect(document.querySelector(".agent-open")).toBeTruthy();
+    expect(document.querySelector(".agent-list-title")).toBeTruthy();
+    expect(document.querySelector(".agent-list-meta")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".ws-grid.board-grid")).toBeTruthy();
   });
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {
@@ -360,8 +396,8 @@ describe("AgentsView", () => {
     };
     vi.mocked(api.getAgentStatus).mockResolvedValue(statusCopy);
     render(<AgentsView navigate={vi.fn()} />);
-    await screen.findByText("Codex");
-    expect(screen.getByText("未检测到CLI")).toBeTruthy();
+    const codexCard = await screen.findByRole("button", { name: "查看 Codex Agent 详情" });
+    expect(within(codexCard).getByText("未检测到CLI")).toBeTruthy();
     expect(screen.queryByTitle("来源目录")).toBeNull();
   });
 });
@@ -374,7 +410,7 @@ it("uses lookup aliases while keeping the selected capability filter", async () 
   await screen.findByRole("button", { name: "查看 Claude Code Agent 详情" });
   expect(screen.queryByRole("button", {name:"查看 Codex Agent 详情"})).toBeNull();
   expect(api.matchObjects).toHaveBeenCalledWith("agent","claude", expect.any(Array));
-  fireEvent.click(screen.getByRole("tab", {name:/桌面/}));
+  fireEvent.click(screen.getByRole("button", { name: "桌面端" }));
   expect(screen.queryByRole("button", { name: "查看 Claude Code Agent 详情" })).toBeNull();
 });
 
@@ -410,4 +446,41 @@ it("sorts agents by recent activity, name, and session count", async () => {
   const cardsByName = container.querySelectorAll(".agent-card");
   expect(cardsByName[0].getAttribute("aria-label")).toContain("Antigravity");
   expect(cardsByName[1].getAttribute("aria-label")).toContain("Claude Code");
+});
+
+it("syncs all registered sources and keeps the button busy while queued", async () => {
+  vi.mocked(api.listIngestSources).mockResolvedValue(mockSources);
+  vi.mocked(api.getAgentStatus).mockResolvedValue({});
+  render(<AgentsView navigate={vi.fn()} />);
+  const button = await screen.findByRole("button", { name: "增量同步全部" });
+  vi.mocked(api.getIngestionStatus).mockResolvedValue({ scope: "reconcile_all", started_at: null, finished_at: null, discovered: 0, messages: 0, error: null });
+  fireEvent.click(button);
+  await waitFor(() => expect(api.reconcileAll).toHaveBeenCalledWith());
+  await waitFor(() => expect(screen.getByText(/最近一次同步：增量扫描全部来源/)).toBeTruthy());
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  expect(api.reconcileSource).not.toHaveBeenCalled();
+});
+
+it("keeps the Agent detail's sync scoped to its own sources", async () => {
+  vi.mocked(api.listIngestSources).mockResolvedValue(mockSources);
+  render(<AgentsView navigate={vi.fn()} initialAgent="antigravity" />);
+  const button = await screen.findByRole("button", { name: "增量同步全部" });
+  await screen.findByText("~/.gemini/antigravity-cli");
+  fireEvent.click(button);
+  await waitFor(() => expect(api.reconcileSource).toHaveBeenCalledTimes(2));
+  expect(api.reconcileSource).toHaveBeenCalledWith("src-2");
+  expect(api.reconcileSource).toHaveBeenCalledWith("src-3");
+  expect(api.reconcileAll).not.toHaveBeenCalled();
+});
+
+it("renders immediately without flash when cached data is available", async () => {
+  const view1 = render(<AgentsView navigate={vi.fn()} />);
+  await screen.findByText("Claude Code CLI v1.0.0");
+  view1.unmount();
+
+  // Second render has data in cache immediately, rendering without delay or placeholder
+  const view2 = render(<AgentsView navigate={vi.fn()} />);
+  expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "状态" })).toBeTruthy();
+  view2.unmount();
 });

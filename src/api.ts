@@ -24,42 +24,32 @@ async function invokeWithPreferences<T>(command: string, args: Record<string, un
 }
 
 export const api = {
-  listExtensionResources: (scope: import("./types").ExtensionScope) =>
-    invoke<import("./types").ExtensionInventory>("list_extension_resources", { scope }),
-  listExtensionCatalog: () =>
-    invoke<import("./types").ExtensionInventory>("list_extension_catalog"),
-  getExtensionDetail: (id: string) =>
-    invoke<import("./types").ExtensionDetailBundle | null>("get_extension_detail", { id }),
-  registerExtensionSkillSource: (source: string) =>
-    invoke<import("./types").ExtensionOperationResult>("register_extension_skill_source", { source }),
-  disableExtensionSkillAll: (id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("disable_extension_skill_all", { id }),
-  enableExtensionSkillAll: (id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("enable_extension_skill_all", { id }),
-  enableExtensionSkillProjects: (projectIds: string[], id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("enable_extension_skill_projects", { projectIds, id }),
-  disableExtensionSkillProjects: (projectIds: string[], id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("disable_extension_skill_projects", { projectIds, id }),
-  extensionSkillUninstallPreview: (id: string) =>
-    invoke<import("./types").ExtensionUninstallPreview>("extension_skill_uninstall_preview", { id }),
-  uninstallExtensionSkill: (id: string, revision: string, deleteSource: boolean) =>
-    invoke<import("./types").ExtensionOperationResult>("uninstall_extension_skill", { id, revision, deleteSource }),
-  extensionSkillMigrationPreview: (id: string) =>
-    invoke<import("./types").ExtensionSkillMigrationPreview>("extension_skill_migration_preview", { id }),
-  migrateExtensionSkill: (id: string, deleteSource: boolean) =>
-    invoke<import("./types").ExtensionSkillMigrationResult>("migrate_extension_skill", { id, deleteSource }),
-  saveMcpDefinition: (name: string, description: string, config: Record<string, unknown>) =>
-    invoke<import("./types").ExtensionOperationResult>("save_mcp_definition", { name, description, config }),
-  enableMcpDefinitionUser: (id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("enable_mcp_definition_user", { id }),
-  disableMcpDefinitionUser: (id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("disable_mcp_definition_user", { id }),
-  enableMcpDefinitionProjects: (projectIds: string[], id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("enable_mcp_definition_projects", { projectIds, id }),
-  disableMcpDefinitionProjects: (projectIds: string[], id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("disable_mcp_definition_projects", { projectIds, id }),
-  uninstallMcpDefinition: (id: string) =>
-    invoke<import("./types").ExtensionOperationResult>("uninstall_mcp_definition", { id }),
+  listSkills: (scope: import("./types").SkillScope) =>
+    invoke<import("./types").SkillInventory>("list_skills", { scope }),
+  listSkillCatalog: () =>
+    invoke<import("./types").SkillInventory>("list_skill_catalog"),
+  getSkillDetail: (id: string) =>
+    invoke<import("./types").SkillDetailBundle | null>("get_skill_detail", { id }),
+  registerSkillSource: (source: string, migrateSource: boolean) =>
+    invoke<import("./types").SkillOperationResult>("register_skill_source", { source, migrateSource }),
+  unregisterSkill: (id: string, removeLinks: boolean) =>
+    invoke<import("./types").SkillOperationResult>("unregister_skill", { id, removeLinks }),
+  disableSkillAll: (id: string) =>
+    invoke<import("./types").SkillOperationResult>("disable_skill_all", { id }),
+  enableSkillAll: (id: string) =>
+    invoke<import("./types").SkillOperationResult>("enable_skill_all", { id }),
+  enableSkillProjects: (projectIds: string[], id: string) =>
+    invoke<import("./types").SkillOperationResult>("enable_skill_projects", { projectIds, id }),
+  disableSkillProjects: (projectIds: string[], id: string) =>
+    invoke<import("./types").SkillOperationResult>("disable_skill_projects", { projectIds, id }),
+  skillUninstallPreview: (id: string) =>
+    invoke<import("./types").SkillUninstallPreview>("skill_uninstall_preview", { id }),
+  uninstallSkill: (id: string, revision: string, deleteSource: boolean) =>
+    invoke<import("./types").SkillOperationResult>("uninstall_skill", { id, revision, deleteSource }),
+  skillRegistrationPreview: (id: string) =>
+    invoke<import("./types").SkillRegistrationPreview>("skill_registration_preview", { id }),
+  registerDiscoveredSkill: (id: string, migrateSource: boolean) =>
+    invoke<import("./types").SkillRegistrationResult>("register_discovered_skill", { id, migrateSource }),
   getSessionTerminalStates: (sessionIds: string[]) =>
     invoke<Record<string, import("./types").TerminalResumeState>>("get_session_terminal_states", { sessionIds }),
   // Project membership derives from paths; archive state is independent.
@@ -171,7 +161,7 @@ export const api = {
 
   // Ingestion: 两个显式更新按钮 + 纯读取。后台摄入只由三个显式入口排队
   // （高级维护页）与两个自动触发（启动 / 回到前台的 freshness 回落）；普通页面打开从不触发。
-  /** 高级维护：增量同步全部已启用来源。 */
+  /** 增量同步全部已登记来源，与启动/前台自动同步共用范围。 */
   reconcileAll: () => invoke<{ queued: boolean }>("reconcile_all"),
   /** 高级维护：增量同步单个来源。 */
   reconcileSource: (sourceId: string) => invoke<{ queued: boolean }>("reconcile_source", { sourceId }),
@@ -292,10 +282,6 @@ export const api = {
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),
   addIngestSource: (agent: Agent, path: string) =>
     invoke<import("./types").IngestSource>("add_ingest_source", { agent, path }),
-  setIngestSourceEnabled: (sourceId: string, enabled: boolean) =>
-    invoke<void>("set_ingest_source_enabled", { sourceId, enabled }),
-  setAllIngestSourcesEnabled: (enabled: boolean) =>
-    invoke<number>("set_all_ingest_sources_enabled", { enabled }),
   removeIngestSource: (sourceId: string) =>
     invoke<void>("remove_ingest_source", { sourceId }),
 

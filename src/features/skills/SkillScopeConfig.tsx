@@ -1,23 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
 import { showToast } from "../../components/Toast";
 import type { Route } from "../../app/routes";
-import type { ExtensionInventory, ExtensionLocation, ExtensionResource } from "../../types";
-import { EXTENSION_AGENTS } from "./extensionAgents";
-import { extensionDetailRoute, locationSupportsAgent } from "./extensionPresentation";
-import ProjectExtensionDialog from "./ProjectExtensionDialog";
-import "./extensions.css";
+import type { SkillInventory, SkillLocation, SkillResource } from "../../types";
+import { SKILL_AGENTS } from "./skillAgents";
+import { skillDetailRoute, locationSupportsAgent } from "./skillPresentation";
+import ProjectSkillDialog from "./ProjectSkillDialog";
+import "./skills.css";
 
-const EMPTY: ExtensionInventory = { resources: [], locations: [], warnings: [] };
+const EMPTY: SkillInventory = { resources: [], locations: [], warnings: [] };
 
-type ScopedEntry = { path: string; link: boolean; location: ExtensionLocation };
+type ScopedEntry = { path: string; link: boolean; location: SkillLocation };
 
-function entriesIn(inventory: ExtensionInventory, row: ExtensionResource, scope: "user" | "project"): ScopedEntry[] {
+function entriesIn(inventory: SkillInventory, row: SkillResource, scope: "user" | "project"): ScopedEntry[] {
   return row.entry_paths.flatMap((path, index) => {
     const location = inventory.locations.find(item => item.id === row.locations[index]);
     if (!location || location.scope !== scope) return [];
-    return [{ path, link: row.kind === "mcp" || row.entry_links[index] === true, location }];
+    return [{ path, link: row.entry_links[index] === true, location }];
   });
 }
 
@@ -26,13 +26,13 @@ function inside(path: string, root: string) {
   return path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}\\`);
 }
 
-/** Project configuration for Skill sources and MCP definitions. */
-export default function ExtensionScopeConfig({ projectId, workspacePaths = [], navigate }: {
+/** Project configuration for Skill sources. */
+export default function SkillScopeConfig({ projectId, workspacePaths = [], navigate }: {
   projectId: string; workspacePaths?: string[]; navigate: (route: Route) => void;
 }) {
-  const [inventory, setInventory] = useState<ExtensionInventory>(EMPTY);
-  const [catalog, setCatalog] = useState<ExtensionInventory>(EMPTY);
-  const [userInventory, setUserInventory] = useState<ExtensionInventory | null>(null);
+  const [inventory, setInventory] = useState<SkillInventory>(EMPTY);
+  const [catalog, setCatalog] = useState<SkillInventory>(EMPTY);
+  const [userInventory, setUserInventory] = useState<SkillInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [adding, setAdding] = useState(false);
@@ -46,9 +46,9 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
     setError("");
     try {
       const [scopeInventory, user, all] = await Promise.all([
-        api.listExtensionResources({ project_id: projectId }),
-        api.listExtensionResources({}),
-        api.listExtensionCatalog(),
+        api.listSkills({ project_id: projectId }),
+        api.listSkills({}),
+        api.listSkillCatalog(),
       ]);
       if (seq !== request.current || !alive.current) return;
       setInventory(scopeInventory);
@@ -68,19 +68,17 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
     return () => { alive.current = false; ++request.current; };
   }, [load]);
 
-  const rows = useMemo(() => catalog.resources.filter(row => row.kind === "skill" || (row.kind === "mcp" && row.registered)), [catalog]);
-  const projectEntries = (row: ExtensionResource) => entriesIn(inventory, row, "project");
-  const userEntries = (row: ExtensionResource) => userInventory ? entriesIn(userInventory, row, "user") : [];
+  const rows = catalog.resources;
+  const projectEntries = (row: SkillResource) => entriesIn(inventory, row, "project");
+  const userEntries = (row: SkillResource) => userInventory ? entriesIn(userInventory, row, "user") : [];
   const visibleRows = rows.filter(row => projectEntries(row).length > 0 || userEntries(row).length > 0);
-  const enabledIds = (pick: (row: ExtensionResource) => ScopedEntry[]) =>
+  const enabledIds = (pick: (row: SkillResource) => ScopedEntry[]) =>
     rows.filter(row => pick(row).length > 0).map(row => row.id);
 
-  const apply = async (row: ExtensionResource, enable: boolean) => {
+  const apply = async (row: SkillResource, enable: boolean) => {
     setBusy(row.id); setError("");
     try {
-      const result = row.kind === "mcp"
-        ? enable ? await api.enableMcpDefinitionProjects([projectId], row.id) : await api.disableMcpDefinitionProjects([projectId], row.id)
-        : enable ? await api.enableExtensionSkillProjects([projectId], row.id) : await api.disableExtensionSkillProjects([projectId], row.id);
+      const result = enable ? await api.enableSkillProjects([projectId], row.id) : await api.disableSkillProjects([projectId], row.id);
       showToast(result.message);
       await load(true);
     } catch (e) {
@@ -90,20 +88,20 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
     }
   };
 
-  return <section className="card detail-section" aria-label="扩展">
+  return <section className="card detail-section" aria-label="技能">
     <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
       <h2 className="detail-section-title">
-        <Icon name="extensions" />
-        <span>扩展 ({visibleRows.length})</span>
+        <Icon name="skill" />
+        <span>技能 ({visibleRows.length})</span>
       </h2>
-      <button type="button" className="btn ghost icon-button small" title="配置扩展" aria-label="配置扩展" disabled={loading} onClick={() => setAdding(true)}>
+      <button type="button" className="btn ghost icon-button small" title="配置技能" aria-label="配置技能" disabled={loading} onClick={() => setAdding(true)}>
         <Icon name="sliders" />
       </button>
     </div>
-    {error && <div role="alert" className="extension-error">{error}</div>}
-    {loading ? <p className="small muted" role="status">正在读取扩展配置…</p>
-      : !visibleRows.length ? <p className="small muted">当前项目还没有启用的扩展。</p>
-      : <div className="extension-config-list">
+    {error && <div role="alert" className="skill-error">{error}</div>}
+    {loading ? <p className="small muted" role="status">正在读取技能配置…</p>
+      : !visibleRows.length ? <p className="small muted">当前项目还没有启用的技能。</p>
+      : <div className="skill-config-list">
         {visibleRows.map(row => {
           const entries = projectEntries(row);
           const userScopeEntries = userEntries(row);
@@ -111,23 +109,23 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
           const physical = entries.some(entry => !entry.link);
           const full = workspacePaths.length > 0 && workspacePaths.every(path => {
             const inPath = entries.filter(entry => inside(entry.path, path));
-            return EXTENSION_AGENTS.every(agent => inPath.some(entry => row.kind === "mcp" ? entry.location.agent === agent : locationSupportsAgent(entry.location, agent)));
+            return SKILL_AGENTS.every(agent => inPath.some(entry => locationSupportsAgent(entry.location, agent)));
           });
           const userEffective = userScopeEntries.length > 0;
-          return <div className="extension-config-row" key={row.id} role="button" tabIndex={0}
-            onClick={() => navigate(extensionDetailRoute(row))}
+          return <div className="skill-config-row" key={row.id} role="button" tabIndex={0}
+            onClick={() => navigate(skillDetailRoute(row))}
             onKeyDown={e => {
               if (e.target !== e.currentTarget) return;
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                navigate(extensionDetailRoute(row));
+                navigate(skillDetailRoute(row));
               }
             }}>
-            <div className="extension-config-copy">
-              <span className="extension-config-name"><Icon name={row.kind === "mcp" ? "mcp" : "skill"} />{row.name}</span>
-              {row.error && <span className="small extension-config-error">{row.error}</span>}
+            <div className="skill-config-copy">
+              <span className="skill-config-name"><Icon name="skill" />{row.name}</span>
+              {row.error && <span className="small skill-config-error">{row.error}</span>}
             </div>
-            <div className="extension-config-actions">
+            <div className="skill-config-actions">
               {!row.registered && <span className="badge">未托管</span>}
               {physical && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 不停用该入口，迁移或卸载时才会处理">物理入口</span>}
               {!userEffective && row.registered && enabled && !full && <button className="btn small" disabled={busy === row.id} onClick={e => { e.stopPropagation(); void apply(row, true); }}>补齐</button>}
@@ -135,8 +133,9 @@ export default function ExtensionScopeConfig({ projectId, workspacePaths = [], n
           </div>;
         })}
       </div>}
-    {adding && <ProjectExtensionDialog projectId={projectId} resources={rows.filter(row => row.registered)}
+    {adding && <ProjectSkillDialog projectId={projectId} resources={rows.filter(row => row.registered)}
       enabledIds={enabledIds(projectEntries)} userEffectiveIds={enabledIds(userEntries)}
+      physicalIds={rows.filter(row => projectEntries(row).some(entry => !entry.link)).map(row => row.id)}
       onClose={() => setAdding(false)} onDone={async () => { await load(true); setAdding(false); }} />}
   </section>;
 }

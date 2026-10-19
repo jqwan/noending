@@ -335,6 +335,14 @@
   align-items: center;
   justify-content: center;
 }
+.page-head .actions .session-action-divider,
+.session-action-divider,
+.action-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border-subtle);
+  margin: 0 2px;
+}
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
 .divider { border: 0; border-top: 1px solid var(--border-subtle); margin: 26px 0; }
