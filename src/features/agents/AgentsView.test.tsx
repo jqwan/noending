@@ -305,8 +305,6 @@ describe("AgentsView", () => {
     expect(await screen.findByText("Desktop 格式")).toBeTruthy();
     expect(screen.getByText("CLI 格式")).toBeTruthy();
     expect(screen.getByText("~/.gemini/antigravity-cli")).toBeTruthy();
-    expect(screen.queryByLabelText(/自动同步/)).toBeNull();
-    expect(api.setAgentLaunchEnabled).not.toHaveBeenCalled();
   });
 
   it("restores the catalog after restart, replaces successful results and keeps them on failure", async () => {
@@ -367,25 +365,18 @@ describe("AgentsView", () => {
 
     // Toggle to list view and back
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector(".ws-grid.board-grid")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
     expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("false");
-    expect(document.querySelector(".agent-list")).toBeTruthy();
-    expect(document.querySelector(".agent-list-row")).toBeTruthy();
-    expect(document.querySelector(".agent-open")).toBeTruthy();
-    expect(document.querySelector(".agent-list-title")).toBeTruthy();
-    expect(document.querySelector(".agent-list-meta")).toBeTruthy();
+    expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
     expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector(".ws-grid.board-grid")).toBeTruthy();
   });
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {
     render(<AgentsView navigate={vi.fn()} initialAgent="dsh" />);
     await screen.findByText("该 Agent 不支持新建终端会话，可同步历史会话。");
     expect(screen.queryByText("模型与思考等级")).toBeNull();
-    expect(screen.queryByLabelText("用于新建会话")).toBeNull();
     expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();
   });
 

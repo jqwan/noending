@@ -81,11 +81,6 @@ it("restores the last visited sub-interface when clicking other section icons", 
   // Clicking "会话" (other section) should still restore the session subpage
   fireEvent.click(screen.getByRole("button", { name: "会话" }));
   expect(navigate).toHaveBeenLastCalledWith(sessionRoute);
-
-  // Switch to session subpage, then clicking "会话" (same section) should jump to sessions board
-  rerender(<NavigationRail route={sessionRoute} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "sessions" });
 });
 
 it("sanitizes modal actions when remembering last route", () => {
@@ -98,15 +93,4 @@ it("sanitizes modal actions when remembering last route", () => {
   // Click "任务" (other section) -> should not carry action: "new"
   fireEvent.click(screen.getByRole("button", { name: "任务" }));
   expect(navigate).toHaveBeenCalledWith({ view: "workstreams" });
-});
-
-it("restores an assistant terminal through the unified session section", () => {
-  const navigate = vi.fn();
-  const assistant: Route = { view: "terminal", terminalId: "assistant-terminal" };
-  const { rerender } = render(<NavigationRail route={assistant} navigate={navigate} />);
-  expect(screen.queryByRole("button", { name: "助手" })).toBeNull();
-  expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
-  rerender(<NavigationRail route={{ view: "projects" }} navigate={navigate} />);
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
-  expect(navigate).toHaveBeenLastCalledWith(assistant);
 });

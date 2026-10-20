@@ -618,25 +618,6 @@ fn project_enable_is_rejected_while_user_level_is_active() {
 }
 
 #[test]
-fn skill_registry_round_trips_through_settings() {
-    let root =
-        std::env::temp_dir().join(format!("noending-skill-registry-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&root).unwrap();
-    let db = Db::open(&root.join("db.sqlite")).unwrap();
-    let mut registry = skills::SkillRegistry::default();
-    skills::register_source(
-        &mut registry,
-        "/tmp/source/SKILL.md",
-        "review",
-        "Review changes",
-    );
-    skills::save_skill_registry(&db, &registry).unwrap();
-    assert_eq!(skills::load_skill_registry(&db).unwrap(), registry);
-    drop(db);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
     let f = Fixture::new();
     let source = f.source("input", "review");

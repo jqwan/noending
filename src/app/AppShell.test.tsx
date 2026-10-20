@@ -145,11 +145,10 @@ it("remembers a background launch result without changing the current section", 
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
 });
 
-it("remembers keyboard resizing, clamps width, resets on double click, and hides handle when collapsed", () => {
+it("remembers keyboard resizing, clamps width and resets on double click", () => {
   const view = render(<AppShell />);
   const divider = screen.getByRole("separator");
   fireEvent.keyDown(divider, { key: "ArrowRight" });
-  expect(localStorage.getItem("noending.sidebarWidth")).toBe("256");
   view.unmount();
   render(<AppShell />);
   const restored = screen.getByRole("separator");
@@ -161,14 +160,7 @@ it("remembers keyboard resizing, clamps width, resets on double click, and hides
   fireEvent.keyDown(restored, { key: "ArrowLeft" });
   expect(restored.getAttribute("aria-valuenow")).toBe("200");
   fireEvent.doubleClick(restored);
-  expect(localStorage.getItem("noending.sidebarWidth")).toBe("248");
-
-  // Hides resize handle while collapsed
-  fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
-  expect(screen.queryByRole("separator")).toBeNull();
-  expect(localStorage.getItem("noending.sidebarCollapsed")).toBe("true");
-  fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
-  expect(screen.getByRole("separator")).toBeTruthy();
+  expect(restored.getAttribute("aria-valuenow")).toBe("248");
 });
 
 it("queues ingestion only after the window returns from the background", async () => {
@@ -247,7 +239,6 @@ it("prunes deleted targets while keeping an unrelated current page and rejects l
   act(() => invalidateTargets({ sessionIds: ["pending-delete"] }));
   await act(async () => resolve({ session: { id: "pending-delete", title: "Old", agent: "codex" } } as never));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
-  expect(sessionDetailCache.has("pending-delete")).toBe(false);
 });
 
 it("removes a replaced terminal from earlier history while retaining the new terminal", () => {

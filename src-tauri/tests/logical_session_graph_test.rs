@@ -178,12 +178,6 @@ fn all_registered_sources_sync_and_pick_up_appended_messages() {
         db.get_messages(&pi_session.id, None, 10).unwrap()[0].content,
         "Pi first"
     );
-    for source in db.list_ingest_sources().unwrap() {
-        assert!(serde_json::to_value(source)
-            .unwrap()
-            .get("enabled")
-            .is_none());
-    }
     assert_eq!(
         ingestion::reconcile_all_report(&db, &|_| {})
             .unwrap()

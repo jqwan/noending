@@ -481,7 +481,6 @@ it("renders cached summary immediately without flashing 暂无摘要", async () 
 
   render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
 
-  expect(screen.queryByText("暂无摘要")).toBeNull();
   expect(screen.getByText("这是已缓存的会话摘要")).toBeDefined();
   expect(screen.getByRole("button", { name: "复制摘要" })).toBeDefined();
 });

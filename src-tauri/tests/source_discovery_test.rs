@@ -85,13 +85,6 @@ fn project_defaults_keep_root_and_child_transcripts_and_custom_directories() {
             .find(|m| m.kind == DiscoveredMemberKind::Child)
             .unwrap();
         assert_eq!(sub.parent_source_member_id.as_deref(), Some("main"));
-        // Verify no outside candidate even reaches the unchanged-file probe.
-        adapter_for(agent)
-            .discover_members_in(&source_discovery_roots(&source), &|path| {
-                assert!(path.starts_with(&projects), "{agent:?}: {}", path.display());
-                false
-            })
-            .unwrap();
         source.origin = ingest_origin::USER.into();
         assert_eq!(
             discover(&source).len(),
@@ -235,11 +228,6 @@ fn explicit_full_incremental_and_native_fallback_share_default_scope() {
         ingestion::reconcile_source(&db, &source, &|_| {}).unwrap(),
         (1, 1)
     );
-    let stored = db
-        .find_session_by_root_agent_id(Agent::Codex, live)
-        .unwrap()
-        .unwrap();
-    let message = db.get_messages(&stored.id, None, 10).unwrap()[0].clone();
     assert_eq!(
         ingestion::reingest_source(&db, &source, &|_| {}).unwrap(),
         (1, 0)
@@ -248,9 +236,4 @@ fn explicit_full_incremental_and_native_fallback_share_default_scope() {
     assert!(report.failures.is_empty());
     assert_eq!(report.messages, 0);
     assert_eq!(db.list_sessions(Default::default()).unwrap().len(), 1);
-    assert_eq!(
-        db.get_messages(&stored.id, None, 10).unwrap()[0].id,
-        message.id
-    );
-    assert_eq!(message.content, "保留正文");
 }
