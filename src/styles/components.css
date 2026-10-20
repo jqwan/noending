@@ -240,7 +240,7 @@
 }
 .board-grid,
 .ws-grid.board-grid {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 320px));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
   align-items: stretch;
   gap: 12px;
 }

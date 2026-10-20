@@ -787,9 +787,9 @@ export default function AgentsView({
                   }}
                 >
                   <header className="ws-card-head">
-                    <h3 className="ws-card-title">
+                    <h3 className="ws-card-title" title={AGENT_LABELS[agent]}>
                       <AgentIcon agent={agent} size={20} />
-                      <span className="card-title-link">{AGENT_LABELS[agent]}</span>
+                      <span className="truncate">{AGENT_LABELS[agent]}</span>
                     </h3>
                     <div className="ws-card-side">
                       {hasCli && (

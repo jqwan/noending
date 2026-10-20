@@ -520,13 +520,6 @@ button.btn.conversation-jump:active {
 .session-card .ws-card-head {
   align-items: center;
 }
-.session-card-title-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 1;
-}
 .session-card-body {
   display: flex;
   flex-direction: column;

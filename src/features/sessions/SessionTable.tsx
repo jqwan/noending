@@ -508,12 +508,10 @@ const SessionCardItem = memo(function SessionCardItem({
       }}
     >
       <header className="ws-card-head">
-        <div className="session-card-title-wrap session-list-title" title={sessionDisplayTitle(s.title)}>
+        <h3 className="ws-card-title" title={sessionDisplayTitle(s.title)}>
           <AgentIcon agent={s.agent} size={16} />
-          <h3 className="ws-card-title" style={{ minWidth: 0, flex: 1 }}>
-            <span className="card-title-link">{sessionDisplayTitle(s.title)}</span>
-          </h3>
-        </div>
+          <span className="truncate">{sessionDisplayTitle(s.title)}</span>
+        </h3>
         {s.archived_at && (
           <div className="ws-card-side">
             <span className="badge warn">已归档</span>
