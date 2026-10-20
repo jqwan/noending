@@ -140,10 +140,10 @@
 .agent-card-status-line {
   display: flex;
   align-items: center;
-  gap: 7px;
-  font-size: 12.5px;
+  gap: 6px;
+  font-size: 12px;
   line-height: 1.4;
-  min-height: 20px;
+  min-height: 18px;
 }
 
 .agent-card-status-line .ui-icon {
@@ -159,7 +159,7 @@
   justify-content: space-between;
   gap: 8px;
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--border-subtle);
 }
 

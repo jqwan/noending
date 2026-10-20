@@ -1092,7 +1092,10 @@ pub async fn assistant_workspace(
     let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 未初始化"))?;
     let db = state.db.clone();
     let layer = layer.inner().clone();
-    run_on_blocking_worker(move || crate::assistant::ensure_workspace(&db, &home, &layer)).await?
+    run_on_blocking_worker(move || {
+        crate::assistant::ensure_workspace(&db, &home, &layer, &crate::skills::Roots::current()?)
+    })
+    .await?
 }
 
 /// The async seam test: the refresh command's blocking CLI probe must run on

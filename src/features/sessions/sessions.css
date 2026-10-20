@@ -513,9 +513,9 @@ button.btn.conversation-jump:active {
 
 /* ---------- Session Cards (会话卡片网格) ---------- */
 .session-card {
-  min-height: 164px;
+  min-height: 132px;
   content-visibility: auto;
-  contain-intrinsic-size: auto 164px;
+  contain-intrinsic-size: auto 132px;
 }
 .session-card .ws-card-head {
   align-items: center;
@@ -585,13 +585,15 @@ button.btn.conversation-jump:active {
 .session-list,
 .task-list,
 .project-list,
-.agent-list {
+.agent-list,
+.skill-list {
   border-top: 1px solid var(--border-subtle);
 }
 .session-list-row,
 .task-list-row,
 .project-list-row,
-.agent-list-row {
+.agent-list-row,
+.skill-list-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -609,13 +611,16 @@ button.btn.conversation-jump:active {
 .project-list-row:hover,
 .project-list-row:focus-within,
 .agent-list-row:hover,
-.agent-list-row:focus-within {
+.agent-list-row:focus-within,
+.skill-list-row:hover,
+.skill-list-row:focus-within {
   background: var(--bg-panel);
 }
 .session-open,
 .task-open,
 .project-open,
-.agent-open {
+.agent-open,
+.skill-open {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -632,7 +637,8 @@ button.btn.conversation-jump:active {
 .session-list-title,
 .task-list-title,
 .project-list-title,
-.agent-list-title {
+.agent-list-title,
+.skill-list-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -643,7 +649,8 @@ button.btn.conversation-jump:active {
 .session-list-title > span,
 .task-list-title > span,
 .project-list-title > span,
-.agent-list-title > span {
+.agent-list-title > span,
+.skill-list-title > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -652,7 +659,8 @@ button.btn.conversation-jump:active {
 .session-list-meta,
 .task-list-meta,
 .project-list-meta,
-.agent-list-meta {
+.agent-list-meta,
+.skill-list-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -666,7 +674,8 @@ button.btn.conversation-jump:active {
   gap: 4px;
   color: var(--text-secondary);
 }
-.task-list-summary {
+.task-list-summary,
+.skill-list-desc {
   color: var(--text-muted);
   font-size: 12px;
   max-width: 100%;
@@ -676,7 +685,8 @@ button.btn.conversation-jump:active {
 }
 .task-list-actions,
 .project-list-actions,
-.agent-list-actions {
+.agent-list-actions,
+.skill-list-actions {
   display: flex;
   align-items: center;
   gap: 8px;

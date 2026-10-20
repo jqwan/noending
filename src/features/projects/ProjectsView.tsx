@@ -288,9 +288,9 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       {cards === null && listError === "" && (
         viewMode === "cards" ? (
           <div className="board-grid" role="status">
-            <div className="skeleton card" style={{ minHeight: 140 }} />
-            <div className="skeleton card" style={{ minHeight: 140 }} />
-            <div className="skeleton card" style={{ minHeight: 140 }} />
+            <div className="skeleton card" style={{ minHeight: 132 }} />
+            <div className="skeleton card" style={{ minHeight: 132 }} />
+            <div className="skeleton card" style={{ minHeight: 132 }} />
           </div>
         ) : (
           <div className="project-list" aria-busy="true">

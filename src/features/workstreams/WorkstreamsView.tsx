@@ -280,9 +280,9 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           {cards === null && !loadError && (
             viewMode === "cards" ? (
               <div className="ws-grid board-grid" role="status">
-                <div className="skeleton card" style={{ minHeight: 140 }} />
-                <div className="skeleton card" style={{ minHeight: 140 }} />
-                <div className="skeleton card" style={{ minHeight: 140 }} />
+                <div className="skeleton card" style={{ minHeight: 132 }} />
+                <div className="skeleton card" style={{ minHeight: 132 }} />
+                <div className="skeleton card" style={{ minHeight: 132 }} />
               </div>
             ) : (
               <div className="task-list" aria-busy="true">
@@ -358,7 +358,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                     </button>
                     {(
                       <div className="task-list-actions" onClick={(e) => e.stopPropagation()}>
-                        {c.visibility !== "archived" && <button
+                        {c.visibility !== "archived" && c.projects.length > 0 && <button
                           className="btn small ws-btn ghost icon-button"
                           aria-label="新建会话"
                           title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}

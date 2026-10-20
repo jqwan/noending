@@ -57,7 +57,7 @@ export default function NewSessionView({
   const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
   const [trackedWorkstreamIds, setTrackedWorkstreamIds] = useState<string[]>(
-    workstreamId && workstreamId !== STANDALONE ? [workstreamId] : []
+    workstreamId && workstreamId !== STANDALONE ? [workstreamId] : savedPreferences.workstreamIds
   );
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
@@ -90,6 +90,11 @@ export default function NewSessionView({
   const messageChanged = useRef(false);
   const [projectError, setProjectError] = useState("");
   const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
+
+  const selectWorkstreams = (next: string[]) => {
+    setTrackedWorkstreamIds(next);
+    updateNewSessionPreferences(current => ({ ...current, workstreamIds: next }));
+  };
 
   useEffect(() => {
     mounted.current = true;
@@ -136,7 +141,7 @@ export default function NewSessionView({
         const targetWs = normal.find((w) => w.id === workstreamId);
         let projectId = initialProjectId && initialProjectId !== "none" ? initialProjectId : "";
         let defaultDir = "";
-        if (!projectId && targetWs?.projects.length === 1) {
+        if (!projectId && targetWs?.projects.length) {
           projectId = targetWs.projects[0].id;
         }
         if (projectId && !cards.some(p => p.id === projectId)) projectId = "";
@@ -159,8 +164,26 @@ export default function NewSessionView({
         if (cancelled) return;
         setProjects(cards);
         setWorkstreams(normal);
+        const presetProject = Boolean(
+          (initialProjectId && initialProjectId !== "none" && cards.some(p => p.id === initialProjectId))
+          || (targetWs && targetWs.projects.some(p => p.id === projectId)),
+        );
+        // An entry preset must stay selected even when it belongs to another
+        // project, so the page can ask the user to pick one of its projects.
+        const presetWorkstreams = workstreamId && workstreamId !== STANDALONE ? [workstreamId] : null;
+        const tracked = presetWorkstreams ?? preferences.workstreamIds
+          .filter(id => normal.some(w => w.id === id && w.projects.some(p => p.id === projectId)));
+        if (initialAgent && allowedAgents.includes(initialAgent) && !agentChanged.current) {
+          updateNewSessionPreferences(current => ({ ...current, agent: initialAgent }));
+        }
         if (!projectChanged.current) {
           setSelectedProjectId(projectId);
+          setTrackedWorkstreamIds(tracked);
+          updateNewSessionPreferences(current => ({
+            ...current,
+            workstreamIds: tracked,
+            projectId: presetProject ? projectId : current.projectId,
+          }));
           const project = cards.find(p => p.id === projectId);
           const directories = project?.search_paths.length ? project.search_paths : (project?.representative_paths ?? []);
           const rememberedDir = preferences.directories[projectId];
@@ -176,7 +199,6 @@ export default function NewSessionView({
               return { ...current, drafts };
             });
           }
-          if (workstreamId && workstreamId !== STANDALONE && !targetWs) setTrackedWorkstreamIds([]);
         }
       })
       .catch((reason) => {
@@ -321,7 +343,9 @@ export default function NewSessionView({
 
   const toggleTask = (id: string) => {
     releasePrepared();
-    setTrackedWorkstreamIds(current => current.includes(id) ? current.filter(task => task !== id) : [...current, id]);
+    selectWorkstreams(trackedWorkstreamIds.includes(id)
+      ? trackedWorkstreamIds.filter(task => task !== id)
+      : [...trackedWorkstreamIds, id]);
   };
 
   const handleProjectChange = (next: string) => {
@@ -334,8 +358,9 @@ export default function NewSessionView({
     setSelectedDirPath(preferences.directories[next] ?? "");
     setMessage(preferences.drafts[next] ?? "");
     messageChanged.current = false;
-    updateNewSessionPreferences(current => ({ ...current, projectId: next }));
-    setTrackedWorkstreamIds(current => current.filter(id => workstreams.find(w=>w.id===id)?.projects.some(p=>p.id===next)));
+    const tracked = trackedWorkstreamIds.filter(id => workstreams.find(w => w.id === id)?.projects.some(p => p.id === next));
+    updateNewSessionPreferences(current => ({ ...current, projectId: next, workstreamIds: tracked }));
+    setTrackedWorkstreamIds(tracked);
   };
 
   const handleDirChange = (next: string) => {
@@ -409,7 +434,6 @@ export default function NewSessionView({
       const r = await api.launchEmbeddedNew(selectedAgent, trackedWorkstreamIds, launchCwd, hasMessage ? message : undefined, runtimeOverride);
       announceLaunch("启动", r);
       if (r.terminal_id) {
-        rememberNewSessionRuntime(selectedAgent, runtimeOverride);
         updateNewSessionPreferences(current => {
           const drafts = { ...current.drafts };
           // Do not erase a newer draft written while this launch was in flight.
@@ -763,6 +787,7 @@ export default function NewSessionView({
                   onChange={(v) => {
                     releasePrepared();
                     setRuntimeOverride(v);
+                    rememberNewSessionRuntime(selectedAgent, v);
                   }}
                 />
                 <button
@@ -782,7 +807,13 @@ export default function NewSessionView({
             </div>
           </div>
 
-          {!eligibleTask && <p className="new-session-note">请先选择该任务关联的项目。</p>}
+          {!eligibleTask && (
+            <p className="new-session-note">
+              {trackedWorkstreamIds.some(id => workstreams.find(w => w.id === id)?.projects.length === 0)
+                ? "该任务未关联项目，无法新建会话；请先在任务中关联项目。"
+                : "请先选择该任务关联的项目。"}
+            </p>
+          )}
           {prepared?.cwd_resolution?.fallback && (
             <p className="new-session-note" role="status">
               {prepared.cwd_resolution.note || "未从默认工作目录启动"}
@@ -813,7 +844,8 @@ export default function NewSessionView({
               setWorkstreams(cards);
               const created=cards.find(w=>w.id===newWs.id);
               if(created?.visibility==="normal" && created.projects.some(p=>p.id===selectedProjectId)) {
-                releasePrepared();setTrackedWorkstreamIds(current => [...new Set([...current, created.id])]);
+                releasePrepared();
+                selectWorkstreams([...new Set([...trackedWorkstreamIds, created.id])]);
               }
             } catch(e) { showToast(`读取任务失败：${String(e)}`); }
             setShowNewWorkstreamModal(false);

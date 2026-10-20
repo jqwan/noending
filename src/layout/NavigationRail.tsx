@@ -82,7 +82,7 @@ export default function NavigationRail({ route, navigate }: {
     { section: "sessions", label: "会话", icon: "chat", active: currentSection === "sessions" },
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
-    { section: "agents", label: "Agent", icon: "bot", active: route.view === "agents" },
+    { section: "agents", label: "Agent", icon: "agent", active: route.view === "agents" },
     { section: "skills", label: "技能", icon: "skill", active: currentSection === "skills" },
   ];
 

@@ -24,7 +24,6 @@ vi.mock("../../api", () => ({
     refreshAgentRuntimeOptions: vi.fn(),
     setAgentLaunchEnabled: vi.fn(),
     redetectAgent: vi.fn(),
-    terminalList: vi.fn(),
     getDefaultAgent: vi.fn(),
     setDefaultAgent: vi.fn(),
     listIngestSources: vi.fn(),
@@ -132,7 +131,6 @@ beforeEach(() => {
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
   vi.mocked(api.setAgentLaunchEnabled).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.redetectAgent).mockReset().mockResolvedValue(runtimeFixture());
-  vi.mocked(api.terminalList).mockReset().mockResolvedValue([]);
   vi.mocked(api.addIngestSource).mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
@@ -447,7 +445,8 @@ it("syncs all registered sources and keeps the button busy while queued", async 
   vi.mocked(api.getIngestionStatus).mockResolvedValue({ scope: "reconcile_all", started_at: null, finished_at: null, discovered: 0, messages: 0, error: null });
   fireEvent.click(button);
   await waitFor(() => expect(api.reconcileAll).toHaveBeenCalledWith());
-  await waitFor(() => expect(screen.getByText(/最近一次同步：增量扫描全部来源/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/最近一次同步：增量扫描全部来源 · 正在同步中/)).toBeTruthy());
+  expect(screen.queryByText("后台处理中…")).toBeNull();
   expect((button as HTMLButtonElement).disabled).toBe(true);
   expect(api.reconcileSource).not.toHaveBeenCalled();
 });

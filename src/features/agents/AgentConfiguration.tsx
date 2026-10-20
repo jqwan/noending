@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, EVT_TERMINALS, type Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import type { Agent, AgentStatusEntry, SessionListItem, TerminalSummary } from "../../types";
+import type { Agent, AgentStatusEntry, SessionListItem } from "../../types";
 import { AGENT_LABELS } from "../../types";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { CatalogStatus } from "./RuntimeFields";
@@ -25,7 +25,6 @@ export default function AgentConfiguration({
   const runtime = useAgentRuntime(agent, Boolean(entry?.terminal_cli));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
 
   useEffect(() => {
@@ -53,23 +52,6 @@ export default function AgentConfiguration({
     );
   }, [sessions]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      api.terminalList().then((v) => {
-        if (!cancelled) setTerminals(v.filter((t) => t.agent === agent));
-      }).catch((e) => {
-        if (!cancelled) setError(String(e));
-      });
-    };
-    load();
-    const off = onEvent(EVT_TERMINALS, load);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [agent]);
-
   const action = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError("");
@@ -93,33 +75,6 @@ export default function AgentConfiguration({
       <div className="agent-detail-layout">
         <div className="agent-detail-main">
           {sourcesSection}
-
-          {terminals.length > 0 && (
-            <section className="card agent-settings-section">
-              <h2>
-                <Icon name="terminal" />
-                <span>终端会话</span>
-              </h2>
-              <div className="agent-terminal-list">
-                {terminals.map((t) => (
-                  <div className="agent-terminal-status" key={t.terminal_id}>
-                    <div className="agent-terminal-info">
-                      <span className={`dot ${t.live ? "running" : "exited"}`} />
-                      <span>
-                        {t.session_id ? "已绑定" : "等待会话身份或消息落盘"} · {t.live ? "运行中" : "已退出"}
-                      </span>
-                    </div>
-                    <button
-                      className="btn small ghost"
-                      onClick={() => navigate({ view: "terminal", terminalId: t.terminal_id })}
-                    >
-                      {t.session_title ?? "查看终端"}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
 
           <section className="card agent-settings-section">
             <div className="row between" style={{ alignItems: "center" }}>

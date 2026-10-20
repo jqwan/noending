@@ -260,7 +260,9 @@ describe("NewSessionView explicit agent resolution", () => {
     expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
     unmount();
 
-    // Fallback when no agent specified
+    // Fallback when nothing is remembered and no agent is specified.
+    localStorage.clear();
+    viewState.clear();
     render(<NewSessionView navigate={vi.fn()} />);
     await waitFor(() => {
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
@@ -503,14 +505,21 @@ describe("NewSessionView task and project selection", () => {
 
     render(<NewSessionView workstreamId="ws-1" navigate={vi.fn()} />);
 
-    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
-
     await waitFor(() => {
-      expect(projectSelect.value).toBe("p-1");
+      expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1");
       expect(api.prepareNewSession).toHaveBeenCalledWith("codex", ["ws-1"], "/repo/project-1", NATIVE_RUNTIME);
     });
 
-    fireEvent.change(projectSelect, { target: { value: "chat" } });
+    // The task preset also selects its project, and both are remembered.
+    cleanup();
+    viewState.clear();
+    render(<NewSessionView navigate={vi.fn()} />);
+    await waitFor(() => {
+      expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1");
+      expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", ["ws-1"], "/repo/project-1", NATIVE_RUNTIME);
+    });
+
+    fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "chat" } });
     await waitFor(() => {
       expect((screen.getByLabelText("项目目录") as HTMLSelectElement).value).toBe("/tmp/workspace");
       expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME);
@@ -606,7 +615,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
   expect(api.prepareNewSession).toHaveBeenCalledTimes(prepareCount);
 });
 
-it("does not designate the first project of a multi-project task as its default", async () => {
+it("uses the first project of a multi-project task as its default", async () => {
   vi.mocked(api.listProjectCards).mockResolvedValue([chatProject,{id:"p-1",name:"甲",search_paths:["/repo/project-1"],representative_paths:["/repo/project-1"]}] as never);
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
     id: "multi", title: "跨项目任务", description: "", visibility: "normal" as const,
@@ -616,17 +625,29 @@ it("does not designate the first project of a multi-project task as its default"
   }]);
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
 
-  await waitFor(() => expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("chat"));
-  expect(screen.queryByRole("checkbox", {name:"跨项目任务"})).toBeNull();
-  fireEvent.change(screen.getByLabelText("首条消息"), {target:{value:"开始"}});
-  expect((screen.getByRole("button", {name:"发送"}) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("所属项目"), {target:{value:"p-1"}});
+  await waitFor(() => expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1"));
   expect(screen.getByRole("checkbox", {name:"跨项目任务"})).toHaveProperty("checked", true);
   await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", ["multi"], "/repo/project-1", NATIVE_RUNTIME));
 });
 
+it("blocks starting from a task that has no associated projects", async () => {
+  vi.mocked(api.listProjectCards).mockResolvedValue([chatProject]);
+  vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
+    id: "orphan", title: "无项目任务", description: "", visibility: "normal" as const,
+    projects: [],
+    created_at: "", updated_at: "", summary: null,
+    last_activity_at: null, session_count: 0, latest_session: null,
+  }]);
+  render(<NewSessionView workstreamId="orphan" navigate={vi.fn()} />);
+
+  expect(await screen.findByText("该任务未关联项目，无法新建会话；请先在任务中关联项目。")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
+  expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
+});
+
 describe("NewSessionView runtime selection", () => {
-  it("remembers successful runtime per agent across restart without changing global overrides", async () => {
+  it("remembers runtime per agent as soon as it changes without changing global overrides", async () => {
     vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
       ...runtimeFixture(agent),
       models: [{ id: "one-time-model", display_name: "One Time Model", provider: null, supported_efforts: ["low", "high"] }],
@@ -655,6 +676,14 @@ describe("NewSessionView runtime selection", () => {
 
     const expected = { model: "one-time-model", provider: null, effort: "high" };
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalledWith("codex", [], "/tmp/workspace", expected));
+
+    // The choice survives a restart even though nothing was launched yet.
+    cleanup();
+    viewState.clear();
+    render(<NewSessionView navigate={vi.fn()} />);
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", expected));
+    expect(screen.getByRole("button", { name: "模型与推理设置" }).textContent).toContain("high");
+
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始工作" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
@@ -669,7 +698,7 @@ describe("NewSessionView runtime selection", () => {
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "codex" } });
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", expected));
 
-    // A rejected launch must not replace the last successful choice.
+    // The latest choice stays remembered even when its launch fails.
     fireEvent.click(screen.getByRole("button", { name: "模型与推理设置" }));
     fireEvent.click(screen.getByText("模型"));
     fireEvent.click(await screen.findByRole("button", { name: "Agent 默认" }));
@@ -681,7 +710,7 @@ describe("NewSessionView runtime selection", () => {
     cleanup();
     viewState.clear();
     render(<NewSessionView navigate={vi.fn()} />);
-    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", expected));
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME));
   });
 
   it("excludes agents when detected or launch_enabled is false", async () => {
@@ -763,7 +792,7 @@ describe("NewSessionView saved choices and drafts", () => {
     render(<NewSessionView navigate={vi.fn()} {...props} />);
   }
 
-  it("restores manual choices and project drafts, while entry presets win and tasks remain transient", async () => {
+  it("restores manual choices and project drafts, and remembers entry presets", async () => {
     vi.mocked(api.listProjectCards).mockResolvedValue([chatProject, project]);
     vi.mocked(api.listWorkstreamCards).mockResolvedValue([
       { id: "task", title: "开发任务", visibility: "normal", projects: [{ id: "repo", name: "代码项目" }] },
@@ -776,23 +805,26 @@ describe("NewSessionView saved choices and drafts", () => {
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", ["task"], "/repo/worktree", NATIVE_RUNTIME));
 
     restart();
-    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", [], "/repo/worktree", NATIVE_RUNTIME));
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", ["task"], "/repo/worktree", NATIVE_RUNTIME));
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "代码草稿\n保留换行");
-    expect(screen.getByRole("checkbox", { name: "开发任务" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "开发任务" })).toHaveProperty("checked", true);
 
     restart({ projectId: "chat", agent: "claude_code" });
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("claude_code", [], "/tmp/workspace", NATIVE_RUNTIME));
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "");
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "聊天草稿" } });
 
+    // Project and Agent presets become the choices remembered without a preset.
     restart();
-    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", [], "/repo/worktree", NATIVE_RUNTIME));
-    expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "代码草稿\n保留换行");
-    await act(async () => { fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "chat" } }); });
+    await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("claude_code", [], "/tmp/workspace", NATIVE_RUNTIME));
+    expect(screen.getByLabelText("所属项目")).toHaveProperty("value", "chat");
+    expect(screen.getByLabelText("Agent")).toHaveProperty("value", "claude_code");
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "聊天草稿");
+
     await act(async () => { fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "repo" } }); });
     expect(screen.getByLabelText("项目目录")).toHaveProperty("value", "/repo/worktree");
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "代码草稿\n保留换行");
+    expect(screen.getByRole("checkbox", { name: "开发任务" })).toHaveProperty("checked", false);
     expect(api.setDefaultAgent).not.toHaveBeenCalled();
   });
 

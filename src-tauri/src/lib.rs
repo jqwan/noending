@@ -109,7 +109,7 @@ pub fn run() {
 
             {
                 let state: tauri::State<commands::AppState> = app.state();
-                if let Err(error) = assistant::ensure_workspace(&state.db, &home, &layer) {
+                if let Err(error) = skills::Roots::current().and_then(|roots| assistant::ensure_workspace(&state.db, &home, &layer, &roots)) {
                     eprintln!("[noending] Assistant workspace unavailable: {error}");
                 }
             }

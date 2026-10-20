@@ -68,7 +68,7 @@ export default function WorkstreamCard({ card, mode, navigate, defaultAgent, onA
           {timeAgo(card.last_activity_at ?? card.updated_at)}
         </span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
-          {!archived && <button
+          {!archived && card.projects.length > 0 && <button
             className="btn small ws-btn ghost icon-button"
             aria-label="新建会话"
             title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}

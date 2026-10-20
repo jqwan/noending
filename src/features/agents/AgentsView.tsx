@@ -663,15 +663,6 @@ export default function AgentsView({
               />
             </div>
 
-            {running && (
-              <div className="agents-stat-badges">
-                <span className="agents-stat-pill active">
-                  <span className="dot" style={{ background: "var(--accent)" }} />
-                  后台处理中…
-                </span>
-              </div>
-            )}
-
             <div className="ws-control">
               <span className="muted small">排序</span>
               <CustomSelect
@@ -728,11 +719,20 @@ export default function AgentsView({
           </div>
         </div>
 
-        {status && (
+        {(status || running) && (
           <div className="muted small agents-sync-status-strip" style={{ overflowWrap: "anywhere" }}>
-            最近一次同步：{scopeLabel(status.scope, sources)} · 同步发现 {status.discovered} 条记录 · 写入 {status.messages} 条新消息
-            {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
-            {status.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+            {running || !status?.finished_at ? (
+              <>
+                最近一次同步：{status ? scopeLabel(status.scope, sources) : "刷新单个会话"} · 正在同步中
+                {status?.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+              </>
+            ) : (
+              <>
+                最近一次同步：{scopeLabel(status.scope, sources)} · 同步发现 {status.discovered} 条记录 · 写入 {status.messages} 条新消息
+                {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
+                {status.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -750,7 +750,7 @@ export default function AgentsView({
             viewMode === "cards" ? (
               <div className="ws-grid board-grid" key="agents-skeleton-cards" role="status" aria-busy="true">
                 {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="skeleton card" style={{ minHeight: 140 }} />
+                  <div key={i} className="skeleton card" style={{ minHeight: 132 }} />
                 ))}
               </div>
             ) : (

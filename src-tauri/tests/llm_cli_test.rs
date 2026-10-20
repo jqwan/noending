@@ -74,7 +74,13 @@ fn real_codex_assistant_queries_workspace_through_cli() {
     })
     .unwrap();
     fixture.server = Some(cli::start(db.clone(), home.clone(), layer.clone(), || {}).unwrap());
-    let workspace = assistant::ensure_workspace(&db, &home, &layer).unwrap();
+    let workspace = assistant::ensure_workspace(
+        &db,
+        &home,
+        &layer,
+        &noending::skills::Roots::current().unwrap(),
+    )
+    .unwrap();
     cli::install_workspace_entry(
         &std::path::Path::new(&workspace.directory).join("bin"),
         &home.runtime_dir.join("cli.json"),

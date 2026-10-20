@@ -20,10 +20,10 @@ export const SIDEBAR_GROUP_OPTIONS: Array<{
   key: SidebarGroupBy;
   label: string;
   fullLabel: string;
-  icon: "tasks" | "project" | "bot" | "chat";
+  icon: "tasks" | "project" | "agent" | "chat";
 }> = [
   { key: "project", label: "项目", fullLabel: "按项目归类", icon: "project" },
-  { key: "agent", label: "Agent", fullLabel: "按 Agent 归类", icon: "bot" },
+  { key: "agent", label: "Agent", fullLabel: "按 Agent 归类", icon: "agent" },
   { key: "none", label: "会话", fullLabel: "不分组（全部会话）", icon: "chat" },
 ];
 

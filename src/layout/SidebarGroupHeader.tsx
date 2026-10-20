@@ -16,7 +16,7 @@ export default function SidebarGroupHeader({
   isCollapsed: boolean;
   isUnassignedGroup: boolean;
   isKnownAgent: boolean;
-  iconName: "tasks" | "tasksExpanded" | "project" | "projectOpen" | "bot" | "minus" | "inbox" | "chevronRight" | "chevronDown";
+  iconName: "tasks" | "tasksExpanded" | "project" | "projectOpen" | "agent" | "minus" | "inbox" | "chevronRight" | "chevronDown";
   onToggle: () => void;
 }) {
   const titleRef = useRef<HTMLSpanElement>(null);

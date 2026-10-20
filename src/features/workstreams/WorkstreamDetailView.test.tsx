@@ -86,6 +86,13 @@ it("opens the new-session page with the current task selected", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+it("hides the new-session entry when the task has no associated projects", async () => {
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), projects: [] });
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByText("任务概览");
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+});
+
 it("renders the returned task sessions and navigates to the selected session", async () => {
   const ctx = context();
   ctx.sessions = [{

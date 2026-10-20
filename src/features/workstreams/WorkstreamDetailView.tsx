@@ -411,8 +411,8 @@ export default function WorkstreamDetailView({
           <WorkstreamSessions
             sessions={sessions}
             navigate={navigate}
-            onNewSession={archived ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
-            allowActions={!archived}
+            onNewSession={archived || projectRows.length === 0 ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
+            allowActions={!archived && projectRows.length > 0}
           />
 
           <section className="card detail-section">

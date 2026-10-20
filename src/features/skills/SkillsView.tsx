@@ -142,34 +142,153 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
         const userEntries = locations.filter(l => l.scope === "user");
         const enabled = userEntries.length > 0 || projectEntriesOf(locations).length > 0;
         const canConfigure = row.registered;
-        return <div key={row.id} role="button" tabIndex={0} className={`skill-row skill-${viewMode}`}
-          onClick={() => navigate(skillDetailRoute(row))}
-          onPointerEnter={() => {
-            if (!skillDetailCache.has(row.id)) {
-              api.getSkillDetail(row.id).then(bundle => {
-                if (bundle) skillDetailCache.set(row.id, bundle);
-              }).catch(() => {});
-            }
-          }}
-          onKeyDown={e => {
-            if (e.target !== e.currentTarget) return;
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              navigate(skillDetailRoute(row));
-            }
-          }}>
-          <span className="skill-row-heading">
-            <Icon name="skill" /><strong>{row.name}</strong>
-            <span className="skill-row-badges">{row.error && <span className="badge warn">配置异常</span>}{!enabled && <span className="badge">未启用</span>}</span>
-          </span>
-          {row.description && <span className="skill-description">{row.description}</span>}
-          <span className="skill-row-actions">
-            {canConfigure
-              ? <button className="btn ghost icon-button small" aria-label="配置" title="配置" onClick={e => { e.stopPropagation(); setConfiguring(row); }}><Icon name="sliders" /></button>
-              : <button className="btn ghost icon-button small" aria-label="托管" title="托管到 NoEnding 后才能在用户级和项目中配置" onClick={e => { e.stopPropagation(); setRegisteringSkill(row); }}><Icon name="adopt" /></button>}
 
-          </span>
-        </div>;
+        if (viewMode === "cards") {
+          return (
+            <article
+              key={`card-${row.id}`}
+              className="ws-card full skill-card"
+              tabIndex={0}
+              role="button"
+              onClick={() => navigate(skillDetailRoute(row))}
+              onPointerEnter={() => {
+                if (!skillDetailCache.has(row.id)) {
+                  api.getSkillDetail(row.id).then(bundle => {
+                    if (bundle) skillDetailCache.set(row.id, bundle);
+                  }).catch(() => {});
+                }
+              }}
+              onKeyDown={e => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  navigate(skillDetailRoute(row));
+                }
+              }}
+            >
+              <header className="ws-card-head">
+                <h3 className="ws-card-title" title={row.name}>
+                  <Icon name="skill" />
+                  <span className="truncate">{row.name}</span>
+                </h3>
+                <div className="ws-card-side">
+                  {row.error && <span className="badge warn">配置异常</span>}
+                  {!enabled && <span className="badge">未启用</span>}
+                </div>
+              </header>
+
+              <div className="ws-card-body">
+                {row.description && (
+                  <p className="ws-card-desc skill-description" title={row.description}>
+                    {row.description}
+                  </p>
+                )}
+              </div>
+
+              <footer className="ws-card-meta">
+                <span className="muted small">
+                  {row.registered ? "已托管" : "本地发现"}
+                </span>
+                <div className="ws-card-actions" onClick={e => e.stopPropagation()}>
+                  {canConfigure ? (
+                    <button
+                      type="button"
+                      className="btn small ghost icon-button"
+                      aria-label="配置"
+                      title="配置"
+                      onClick={e => {
+                        e.stopPropagation();
+                        setConfiguring(row);
+                      }}
+                    >
+                      <Icon name="sliders" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn small ghost icon-button"
+                      aria-label="托管"
+                      title="托管到 NoEnding 后才能在用户级和项目中配置"
+                      onClick={e => {
+                        e.stopPropagation();
+                        setRegisteringSkill(row);
+                      }}
+                    >
+                      <Icon name="adopt" />
+                    </button>
+                  )}
+                </div>
+              </footer>
+            </article>
+          );
+        }
+
+        return (
+          <article
+            key={`list-${row.id}`}
+            className="skill-list-row"
+          >
+            <button
+              type="button"
+              className="skill-open"
+              onClick={() => navigate(skillDetailRoute(row))}
+              onPointerEnter={() => {
+                if (!skillDetailCache.has(row.id)) {
+                  api.getSkillDetail(row.id).then(bundle => {
+                    if (bundle) skillDetailCache.set(row.id, bundle);
+                  }).catch(() => {});
+                }
+              }}
+            >
+              <div className="skill-list-title" title={row.name}>
+                <Icon name="skill" />
+                <span>{row.name}</span>
+                {row.error && <span className="badge warn">配置异常</span>}
+                {!enabled && <span className="badge">未启用</span>}
+              </div>
+              <div className="skill-list-meta">
+                <span>{row.registered ? "已托管" : "本地发现"}</span>
+                {row.description && (
+                  <>
+                    <span>·</span>
+                    <span className="skill-list-desc truncate" title={row.description}>
+                      {row.description}
+                    </span>
+                  </>
+                )}
+              </div>
+            </button>
+            <div className="skill-list-actions" onClick={e => e.stopPropagation()}>
+              {canConfigure ? (
+                <button
+                  type="button"
+                  className="btn small ghost icon-button"
+                  aria-label="配置"
+                  title="配置"
+                  onClick={e => {
+                    e.stopPropagation();
+                    setConfiguring(row);
+                  }}
+                >
+                  <Icon name="sliders" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn small ghost icon-button"
+                  aria-label="托管"
+                  title="托管到 NoEnding 后才能在用户级和项目中配置"
+                  onClick={e => {
+                    e.stopPropagation();
+                    setRegisteringSkill(row);
+                  }}
+                >
+                  <Icon name="adopt" />
+                </button>
+              )}
+            </div>
+          </article>
+        );
       })}
     </section>
     {adding && <SkillSourceDialog onClose={() => setAdding(false)} onDone={() => { setAdding(false); void refresh(); }} />}

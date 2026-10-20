@@ -238,7 +238,12 @@
   height: 34px;
   font-size: 13px;
 }
-.board-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); align-items: stretch; gap: 16px; }
+.board-grid,
+.ws-grid.board-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 320px));
+  align-items: stretch;
+  gap: 12px;
+}
 .project-card,
 button.project-card { font: inherit; text-align: left; color: var(--text-primary); }
 .project-card .ws-card-head { align-items: center; gap: 8px; }
@@ -280,7 +285,7 @@ button.project-card { font: inherit; text-align: left; color: var(--text-primary
   white-space: nowrap;
   border-width: 0;
 }
-.task-card.full { min-height: 164px; }
+.task-card.full { min-height: 132px; }
 .card-title-link {
   display: inline-flex;
   align-items: center;
@@ -486,22 +491,6 @@ button.icon-button.small .ui-icon,
 }
 .agent-catalog-status { margin: 6px 0 10px; overflow-wrap: anywhere; line-height: 1.5; }
 .agent-overview-summary { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-.agent-terminal-list { display: flex; flex-direction: column; gap: 8px; }
-.agent-terminal-status {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-}
-.agent-terminal-info { display: flex; align-items: center; gap: 8px; font-size: 12.5px; min-width: 0; }
-.agent-terminal-info .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.agent-terminal-info .dot.running { background: var(--success); }
-.agent-terminal-info .dot.exited { background: var(--text-muted); }
-
 /* ---------- Segmented Control (.settings-seg, .icon-seg) ---------- */
 .settings-seg {
   display: inline-flex;

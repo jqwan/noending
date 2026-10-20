@@ -187,7 +187,7 @@ export default function Sidebar({
               ? isCollapsed
                 ? "project"
                 : "projectOpen"
-              : "bot";
+              : "agent";
 
             return (
               <div className="sidebar-recent-group" key={group.id}>

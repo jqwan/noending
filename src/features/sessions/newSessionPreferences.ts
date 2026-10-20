@@ -5,28 +5,38 @@ import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 interface NewSessionPreferences {
   projectId: string;
   agent: Agent | null;
+  workstreamIds: string[];
   directories: Record<string, string>;
   drafts: Record<string, string>;
 }
 
+/** Older rows predate `workstreamIds`; keep their drafts and choices readable. */
+type StoredPreferences = Omit<NewSessionPreferences, "workstreamIds"> & { workstreamIds?: string[] };
+
 const KEY = "new-session.preferences";
-const DEFAULTS: NewSessionPreferences = { projectId: "", agent: null, directories: {}, drafts: {} };
+const DEFAULTS: StoredPreferences = { projectId: "", agent: null, workstreamIds: [], directories: {}, drafts: {} };
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     && Object.values(value).every(item => typeof item === "string");
 }
 
-function isPreferences(value: unknown): value is NewSessionPreferences {
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+function isPreferences(value: unknown): value is StoredPreferences {
   if (typeof value !== "object" || value === null) return false;
-  const prefs = value as NewSessionPreferences;
+  const prefs = value as StoredPreferences;
   return typeof prefs.projectId === "string"
     && (prefs.agent === null || Object.keys(AGENT_LABELS).includes(prefs.agent))
+    && (prefs.workstreamIds === undefined || isStringList(prefs.workstreamIds))
     && isStringRecord(prefs.directories) && isStringRecord(prefs.drafts);
 }
 
-export function readNewSessionPreferences() {
-  return readViewPreference(KEY, DEFAULTS, isPreferences);
+export function readNewSessionPreferences(): NewSessionPreferences {
+  const preferences = readViewPreference(KEY, DEFAULTS, isPreferences);
+  return { ...preferences, workstreamIds: preferences.workstreamIds ?? [] };
 }
 
 /** Write immediately, including when an async launch succeeds after this page unmounts. */

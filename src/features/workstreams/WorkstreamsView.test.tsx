@@ -69,6 +69,7 @@ it("shows and filters every related project in both board views", () => {
   fireEvent.change(projectFilter, { target: { value: "p-b" } });
   expect(document.querySelectorAll(".task-card")).toHaveLength(1);
   screen.getByRole("button", { name: "跨项目任务" });
+  screen.getByRole("button", { name: "新建会话" });
   expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
   const task = document.querySelector(".task-card")!;
   expect(task.textContent).toContain("2 个项目");
@@ -79,6 +80,7 @@ it("shows and filters every related project in both board views", () => {
   expect(row.textContent).toContain("项目乙");
   fireEvent.change(projectFilter, { target: { value: "none" } });
   screen.getByText("无项目任务");
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   expect(screen.queryByText("跨项目任务")).toBeNull();
 });
 

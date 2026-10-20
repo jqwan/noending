@@ -1116,14 +1116,7 @@ fn install(
     let temp = root.join(format!(".noending-{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         if link {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&source, &temp)?;
-            #[cfg(windows)]
-            std::os::windows::fs::symlink_dir(&source, &temp).map_err(|e| {
-                other(format!(
-                    "创建目录链接失败：{e}；可改用复制安装，或检查 Windows 开发者模式/链接权限"
-                ))
-            })?;
+            create_dir_link(&source, &temp)?;
         } else {
             copy_tree(&source, &temp, 0)?;
         }
@@ -2111,11 +2104,51 @@ fn create_dir_link(source: &Path, dest: &Path) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(source, dest)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(source, dest).map_err(|e| {
-        other(format!(
-            "创建目录链接失败：{e}；可检查 Windows 开发者模式/链接权限"
+    match std::os::windows::fs::symlink_dir(source, dest) {
+        Ok(()) => {}
+        // Directory junctions do not require the symbolic-link privilege.
+        Err(error) if error.raw_os_error() == Some(1314) => create_dir_junction(source, dest)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_dir_junction(source: &Path, dest: &Path) -> Result<()> {
+    use base64::Engine;
+    use std::os::windows::process::CommandExt;
+    // PowerShell receives paths as quoted data, including apostrophes and shell
+    // metacharacters. Normalize away canonicalize's Windows API-only prefix.
+    let quote_path = |path: &Path| -> Result<String> {
+        let path = crate::workspace::normalize_path(&path.to_string_lossy())
+            .ok_or_else(|| other("Skill 链接路径无效"))?;
+        Ok(crate::platform::launcher::ps_quote(
+            &path.replace('/', "\\"),
         ))
-    })?;
+    };
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path {} -Value ([System.Management.Automation.WildcardPattern]::Escape({})) | Out-Null",
+        quote_path(dest)?, quote_path(source)?,
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encoded,
+        ])
+        .creation_flags(0x08000000)
+        .output()?;
+    if !output.status.success() || !is_link(dest) {
+        return Err(other(format!(
+            "创建目录链接失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
     Ok(())
 }
 
@@ -2165,6 +2198,30 @@ fn replace_wrapper_dir(dir: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_fallback_handles_literal_paths_and_unlink_preserves_source_files() {
+        let root = std::env::temp_dir().join(format!("noending-junction-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source [one] ' & $data");
+        let link = root.join("link [two] ' & $data");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "original skill content").unwrap();
+        create_dir_junction(&fs::canonicalize(&source).unwrap(), &link)
+            .expect("Windows PowerShell and an NTFS/ReFS temporary directory are required");
+        assert_eq!(
+            fs::read_to_string(link.join("SKILL.md")).unwrap(),
+            "original skill content"
+        );
+        assert!(entry_is_removable(&link.join("SKILL.md")));
+        remove_entry_dir(&link).unwrap();
+        assert!(!link.exists());
+        assert_eq!(
+            fs::read_to_string(source.join("SKILL.md")).unwrap(),
+            "original skill content"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cross_device_move_keeps_the_complete_copy_when_source_cleanup_partially_fails() {
