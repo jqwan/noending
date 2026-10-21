@@ -78,6 +78,16 @@ pub(super) enum Command {
     Summary {
         kind: Kind,
         id: String,
+        item: Option<usize>,
+        revision: Option<i64>,
+    },
+    SearchSummaries {
+        query: String,
+        kind: Option<String>,
+        project: Option<String>,
+        scope: String,
+        cursor: Option<String>,
+        limit: usize,
     },
     EditSummary {
         kind: Kind,
@@ -377,7 +387,58 @@ impl Service {
                 to,
                 limit,
             ),
-            Command::Summary { kind, id } => self.summary(kind, &id),
+            Command::Summary {
+                kind,
+                id,
+                item,
+                revision,
+            } => {
+                if item.is_some() != revision.is_some() {
+                    return Err(CliError::new(
+                        "invalid_arguments",
+                        "按事项读取时需要同时提供 --item 与 --revision",
+                    ));
+                }
+                if let (Some(number), Some(revision)) = (item, revision) {
+                    if number == 0 || revision < 0 {
+                        return Err(CliError::new(
+                            "invalid_arguments",
+                            "事项序号从 1 开始，摘要版本不能为负数",
+                        ));
+                    }
+                    self.require(kind, &id)?;
+                    let item =
+                        context::items::read_item(&self.db, kind.name(), &id, revision, number)?;
+                    Ok(
+                        json!({"kind":kind,"id":id,"revision":revision,"item_number":number,"item":item}),
+                    )
+                } else {
+                    self.summary(kind, &id)
+                }
+            }
+            Command::SearchSummaries {
+                query,
+                kind,
+                project,
+                scope,
+                cursor,
+                limit,
+            } => {
+                if let Some(id) = &project {
+                    self.require(Kind::Project, id)?;
+                }
+                super::summaries::page(
+                    &self.db,
+                    &query,
+                    context::items::SummaryFilter {
+                        kind,
+                        project,
+                        scope,
+                    },
+                    cursor.as_deref(),
+                    limit,
+                )
+            }
             Command::EditSummary {
                 kind,
                 id,

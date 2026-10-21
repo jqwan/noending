@@ -10,7 +10,7 @@ const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi
 vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
 vi.mock("../../api", () => ({ api: { matchObjects: vi.fn().mockResolvedValue([]), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
-const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "", summary: null, last_activity_at: null, latest_session: null });
+const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "",  last_activity_at: null, latest_session: null });
 beforeEach(() => { Object.values(removedTargets).forEach(ids => ids.clear()); vi.clearAllMocks(); viewState.clear(); localStorage.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 
@@ -45,20 +45,19 @@ it("delete all covers archived tasks even when the board is filtered", async () 
 
 it("keeps card and list views available in both archive scopes", async () => {
   const navigate = vi.fn();
-  const { container, rerender } = render(<WorkstreamsView navigate={navigate} actionSeq={0} />);
-  expect(container.querySelector(".task-card")).toBeTruthy();
+  const { rerender } = render(<WorkstreamsView navigate={navigate} actionSeq={0} />);
+  expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-  expect(container.querySelector(".task-list-row")).toBeTruthy();
-  expect(container.querySelector(".task-card")).toBeNull();
+  expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "归档普通任务" }));
   await waitFor(() => expect(api.archiveWorkstream).toHaveBeenCalledWith("普通任务"));
   rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
-  expect(container.querySelectorAll(".task-list-row")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "列表视图" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   screen.getByRole("button", { name: "取消归档归档甲" });
   screen.getByRole("button", { name: "永久删除归档甲" });
   fireEvent.click(screen.getByRole("button", { name: "卡片视图" }));
-  expect(container.querySelectorAll(".task-card")).toHaveLength(2);
+  expect(screen.getByRole("button", { name: "卡片视图" }).getAttribute("aria-pressed")).toBe("true");
 });
 
 it("shows and filters every related project in both board views", () => {
@@ -67,17 +66,15 @@ it("shows and filters every related project in both board views", () => {
   render(<WorkstreamsView navigate={() => {}} actionSeq={0} />);
   const projectFilter = screen.getByText("全部项目").closest("select")!;
   fireEvent.change(projectFilter, { target: { value: "p-b" } });
-  expect(document.querySelectorAll(".task-card")).toHaveLength(1);
   screen.getByRole("button", { name: "跨项目任务" });
   screen.getByRole("button", { name: "新建会话" });
   expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
-  const task = document.querySelector(".task-card")!;
-  expect(task.textContent).toContain("2 个项目");
-  expect(task.querySelector(".task-project")?.getAttribute("title")).toBe("项目甲、项目乙");
+  expect(screen.getByText("2 个项目")).toBeTruthy();
+  expect(screen.getByTitle("项目甲、项目乙")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-  const row = document.querySelector(".task-list-row")!;
-  expect(row.textContent).toContain("项目甲");
-  expect(row.textContent).toContain("项目乙");
+  const listTask = screen.getByRole("button", { name: /跨项目任务.*项目甲.*项目乙/ });
+  expect(within(listTask).getByText("项目甲")).toBeTruthy();
+  expect(within(listTask).getByText("项目乙")).toBeTruthy();
   fireEvent.change(projectFilter, { target: { value: "none" } });
   screen.getByText("无项目任务");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();

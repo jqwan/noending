@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import WorkstreamCard from "./WorkstreamCard";
 import type { WorkstreamCardData } from "../../types";
 afterEach(cleanup);
-const card = { id: "w1", projects: [{ id: "p1", name: "主项目" }], description: "", created_at: "", updated_at: "", summary: null, last_activity_at: null,  title: "优化看板", visibility: "normal", session_count: 1, latest_session: { id: "s1", agent: "codex" } } as WorkstreamCardData;
+const card = { id: "w1", projects: [{ id: "p1", name: "主项目" }], description: "", created_at: "", updated_at: "",  last_activity_at: null,  title: "优化看板", visibility: "normal", session_count: 1, latest_session: { id: "s1", agent: "codex" } } as WorkstreamCardData;
 it("keeps card navigation separate from the new-session action", () => {
   const navigate = vi.fn();
   render(<WorkstreamCard card={card} mode="full" navigate={navigate} defaultAgent="codex" />);
@@ -38,11 +38,10 @@ it("hides the new-session action when the task has no projects", () => {
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
 });
 
-it("displays task overview and project count while omitting summary and individual project names", () => {
+it("displays task overview and project count without individual project names", () => {
   const cardData = {
     ...card,
     description: "这是任务概览内容",
-    summary: "这是任务摘要内容",
     projects: [
       { id: "p1", name: "前端项目" },
       { id: "p2", name: "后端服务" },
@@ -50,7 +49,6 @@ it("displays task overview and project count while omitting summary and individu
   };
   render(<WorkstreamCard card={cardData} mode="full" navigate={vi.fn()} defaultAgent="codex" />);
   expect(screen.getByText("这是任务概览内容")).toBeTruthy();
-  expect(screen.queryByText("这是任务摘要内容")).toBeNull();
   expect(screen.getByText("2 个项目")).toBeTruthy();
   expect(screen.queryByText("前端项目")).toBeNull();
   expect(screen.queryByText("后端服务")).toBeNull();

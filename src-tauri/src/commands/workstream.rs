@@ -9,6 +9,7 @@
 //! temp DB with a scripted [`crate::workspace::WorkspaceAttaching`]. No
 //! invariant is implemented twice.
 
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use tauri::State;
 
@@ -145,7 +146,6 @@ pub struct WorkstreamCardView {
     #[serde(flatten)]
     pub workstream: Workstream,
     pub projects: Vec<workstream::WorkstreamProject>,
-    pub summary: Option<String>,
     /// max(session activity, context edit, workstream update).
     pub last_activity_at: Option<String>,
     pub session_count: i64,
@@ -195,8 +195,15 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
     let mut cards = Vec::new();
     for w in db.list_workstreams(None)? {
         let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
-        let context = db.get_workstream_context_state(&w.id)?;
-        let summary_activity = context.updated_at;
+        let summary_activity: Option<String> = db
+            .read()
+            .query_row(
+                "SELECT updated_at FROM workstream_context_state WHERE workstream_id=?1",
+                [&w.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
         let projects = workstream::projects_for_workstream(db, &w.id)?;
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
@@ -208,7 +215,6 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         }
         cards.push(WorkstreamCardView {
             projects,
-            summary: (!context.summary.is_empty()).then_some(context.summary),
             last_activity_at,
             session_count,
             latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),

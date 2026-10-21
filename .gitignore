@@ -3,7 +3,8 @@ node_modules/
 dist/
 docs/*
 !docs/cli.md
-!docs/database-v11-upgrade.md
+!docs/database-v12-upgrade.md
+!docs/ui-copy.md
 
 # Rust / Tauri
 src-tauri/target/

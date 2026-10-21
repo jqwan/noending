@@ -20,6 +20,7 @@ pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
 mod session_queries;
+mod summary;
 pub mod workspace;
 pub mod workstream_projects;
 

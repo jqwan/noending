@@ -900,7 +900,7 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
     conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT workstream_id,?1 FROM workstream_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
     let old = crate::storage::project_context_repo::state(conn, &loser.id)?;
     let current = crate::storage::project_context_repo::state(conn, &survivor.id)?;
-    if current.summary.trim().is_empty() && !old.summary.trim().is_empty() {
+    if current.summary.is_empty() && !old.summary.is_empty() {
         // Carry the only available summary, but leave its inputs pending for
         // the user's next explicit update. Never overwrite B's valid summary.
         crate::storage::project_context_repo::commit(conn, &survivor.id, "", &old.summary, &[])?;

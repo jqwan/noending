@@ -277,7 +277,7 @@ pub fn commit_session_context_conn(
 pub fn commit_workstream_summary_conn(
     conn: &Connection,
     workstream_id: &str,
-    summary: &str,
+    summary: &crate::domain::Summary,
 ) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
     conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3,
@@ -315,7 +315,7 @@ pub fn get_workstream_context_state_conn(
             context_revision: 0,
             input_revision: 0,
             consumed_input_revision: 0,
-            summary: String::new(),
+            summary: Default::default(),
             updated_at: None,
         }))
 }

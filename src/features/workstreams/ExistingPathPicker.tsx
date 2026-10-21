@@ -68,7 +68,7 @@ export default function ExistingPathPicker({ exclude, onClose, onSelect }: {
       </div>
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn" onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={!selected.length} onClick={() => onSelect(selected)}>添加{selected.length ? ` (${selected.length})` : ""}</button>
+        <button className="btn primary" disabled={!selected.length} onClick={() => onSelect(selected)}>添加{selected.length ? `（${selected.length}）` : ""}</button>
       </div>
     </Modal>
   );

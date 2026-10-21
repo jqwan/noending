@@ -59,7 +59,7 @@ pub enum BatchReply {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SummaryResult {
-    summary: String,
+    summary: crate::domain::Summary,
 }
 
 pub fn parse_session_reply(raw: &str) -> Result<SessionReply> {
@@ -217,10 +217,7 @@ impl ExtractionFiles {
     }
     pub fn read_result(&self, path: &Path) -> Result<SessionContextFields> {
         let result: SummaryResult = serde_json::from_str(&self.read_text_result(path)?)?;
-        let summary = result.summary.trim().to_string();
-        if summary.is_empty() {
-            return Err(other("摘要不能为空"));
-        }
+        let summary = result.summary.validated()?;
         Ok(SessionContextFields { summary })
     }
     pub(super) fn read_text_result(&self, path: &Path) -> Result<String> {

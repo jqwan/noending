@@ -434,9 +434,9 @@ fn navigation_lookup_matches_objects_and_paths_but_excludes_content() {
         noending::storage::workspace::insert_workspace_path_conn(tx,"/work/100%_done",&project.id)?;
         tx.execute("UPDATE sessions SET title='Needle Session',cwd='/work/100%_done',archived_at='now' WHERE id=?1",[&session.id])?;
         tx.execute("UPDATE workstreams SET visibility='archived' WHERE id=?1",[&task.id])?;
-        tx.execute("INSERT INTO project_context_state(project_id,summary) VALUES(?1,'contentonly')",[&project.id])?;
-        tx.execute("UPDATE workstream_context_state SET summary='contentonly' WHERE workstream_id=?1",[&task.id])?;
-        tx.execute("INSERT INTO session_contexts(session_id,summary,updated_at) VALUES(?1,'contentonly','now')",[&session.id])?;
+        tx.execute("INSERT INTO project_context_state(project_id,summary) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}')",[&project.id])?;
+        tx.execute("UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}' WHERE workstream_id=?1",[&task.id])?;
+        tx.execute("INSERT INTO session_contexts(session_id,summary,updated_at) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}','now')",[&session.id])?;
 
 
         Ok(())

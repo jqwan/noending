@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectContextView {
     pub project_id: String,
-    pub summary: Option<String>,
+    pub summary: Option<crate::domain::Summary>,
     pub context_revision: i64,
     pub updated_at: Option<String>,
     pub pending: bool,

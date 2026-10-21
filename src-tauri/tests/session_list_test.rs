@@ -27,7 +27,7 @@ fn session_lists_keep_old_rows_without_loading_source_metadata_and_counts_are_co
             Ok(())
         }).unwrap();
         db.write().execute(
-            "INSERT INTO session_contexts(session_id,summary,updated_at) VALUES('s0628','仅详情显示的摘要','now')",
+            "INSERT INTO session_contexts(session_id,summary,updated_at) VALUES('s0628','{\"items\":[{\"title\":\"仅详情显示的摘要\",\"description\":\"\",\"details\":[]}]}','now')",
             [],
         ).unwrap();
         let rows = db
@@ -48,7 +48,7 @@ fn session_lists_keep_old_rows_without_loading_source_metadata_and_counts_are_co
                 .unwrap()
                 .fields
                 .summary,
-            "仅详情显示的摘要"
+            noending_lib::domain::Summary::single("仅详情显示的摘要")
         );
         assert_eq!(json["root_agent_session_id"], "s0628");
         assert_eq!(json["latest_message_seq"], 0);

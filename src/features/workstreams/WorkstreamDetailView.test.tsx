@@ -61,7 +61,7 @@ function context(): WorkstreamContext {
 function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
   return {
     workstream_id: "w1",
-    summary: "**当前进展**：接口设计已确定。",
+    summary: { items: [{ title: "任务状态", description: "**当前进展**：接口设计已确定。", details: [] }] },
     updated_at: null,
     context_revision: 1,
     pending: false,
@@ -118,7 +118,7 @@ it("renders the returned task sessions and navigates to the selected session", a
 
   await screen.findByText("任务概览");
   // 只有跟踪此任务的会话会出现在这里。
-  screen.getByRole("heading", { name: "关联会话 (1)" });
+  screen.getByRole("heading", { name: "关联会话（1）" });
   fireEvent.click(screen.getByText("归属于本任务的会话"));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
   expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
@@ -189,7 +189,7 @@ it("offers a copyable operation id after a structured Context update failure", a
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
 });
 
-it("renders Markdown and regenerates through the separate action even when up to date", async () => {
+it("renders structured topics and regenerates through the separate action even when up to date", async () => {
   vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0, preference_error: null });
   await renderDetail();
   expect(screen.getByText("当前进展").tagName).toBe("STRONG");
@@ -205,6 +205,7 @@ it("keeps the task summary visible and reports failed sessions after a partial u
   await screen.findByRole("button", { name: "更新摘要" });
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await screen.findByText("s-failed：无法完整读取消息");
+  screen.getByRole("heading", { name: "任务摘要（1）" });
   expect(screen.getByText("当前进展")).toBeTruthy();
   expect((screen.getByRole("button", { name: "更新摘要" }) as HTMLButtonElement).disabled).toBe(false);
 });

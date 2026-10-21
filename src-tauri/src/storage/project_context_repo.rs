@@ -7,7 +7,7 @@ use std::collections::HashMap;
 pub struct ProjectContextState {
     pub revision: i64,
     pub input_fingerprint: String,
-    pub summary: String,
+    pub summary: crate::domain::Summary,
     pub updated_at: Option<String>,
 }
 pub fn state(conn: &Connection, id: &str) -> Result<ProjectContextState> {
@@ -24,7 +24,7 @@ pub fn commit(
     conn: &Connection,
     id: &str,
     fingerprint: &str,
-    summary: &str,
+    summary: &crate::domain::Summary,
     consumed: &[(String, i64)],
 ) -> Result<i64> {
     conn.execute("INSERT INTO project_context_state(project_id,context_revision,input_fingerprint,summary,updated_at) VALUES (?1,1,?2,?3,?4) ON CONFLICT(project_id) DO UPDATE SET context_revision=context_revision+1,input_fingerprint=?2,summary=?3,updated_at=?4",params![id,fingerprint,summary,super::now()])?;

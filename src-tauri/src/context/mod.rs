@@ -2,6 +2,7 @@
 //! Agent; model replies and files validate before a snapshot-guarded transaction.
 pub(crate) mod diagnostics;
 mod edit;
+pub mod items;
 pub use edit::edit_summary;
 mod preferences;
 mod project;
@@ -39,7 +40,7 @@ pub struct SessionContextView {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkstreamContextView {
     pub workstream_id: String,
-    pub summary: Option<String>,
+    pub summary: Option<crate::domain::Summary>,
     pub context_revision: i64,
     pub updated_at: Option<String>,
     pub pending: bool,
@@ -577,7 +578,7 @@ struct BatchOutput {
     // Hold the locks and files until the transaction finishes.
     _files: ExtractionFiles,
     results: HashMap<String, SessionContextFields>,
-    summary: String,
+    summary: crate::domain::Summary,
     failed: Vec<SessionFailure>,
     skipped: Vec<String>,
     target_skipped: bool,

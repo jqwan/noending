@@ -210,7 +210,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
             <div className="row between" style={{ alignItems: "center" }}>
               <h2 className="detail-section-title">
                 <Icon name="chat" />
-                <span>会话 ({detail.sessions.length})</span>
+                <span>会话（{detail.sessions.length}）</span>
               </h2>
               {(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
                 <button
@@ -277,7 +277,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
             <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
               <h2 className="detail-section-title">
                 <Icon name="tasks" />
-                <span>关联任务 ({detail.workstreams.length})</span>
+                <span>关联任务（{detail.workstreams.length}）</span>
               </h2>
               <button type="button" className="btn ghost icon-button small"
                 title="新建任务"
@@ -321,7 +321,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           <section className="card detail-section project-workspace-paths">
             <h2 className="detail-section-title">
               <Icon name="folder" />
-              <span>工作目录 ({sortedWorkspacePaths.length})</span>
+              <span>工作目录（{sortedWorkspacePaths.length}）</span>
             </h2>
             {sortedWorkspacePaths.length === 0 && (
               <div className="l1-none">

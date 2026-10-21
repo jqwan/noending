@@ -111,7 +111,7 @@ fn empty_preferences(dir: &Path) {
 fn result(dir: &Path, prefix: &str, id: &str, summary: &str) {
     std::fs::write(
         dir.join(format!("{prefix}-{id}.result.json")),
-        json!({"summary":summary}).to_string(),
+        json!({"summary":crate::domain::Summary::single(summary)}).to_string(),
     )
     .unwrap();
 }
@@ -158,7 +158,7 @@ pub(super) fn seed(f: &ServiceFixture, id: &str, body: &str) {
                 tx,
                 id,
                 &SessionContextFields {
-                    summary: body.into(),
+                    summary: crate::domain::Summary::single(body),
                 },
                 0,
                 generation,
@@ -175,7 +175,7 @@ fn code<T: std::fmt::Debug>(result: Result<T>) -> String {
 }
 
 #[test]
-fn session_full_input_increment_regeneration_and_long_markdown() {
+fn session_full_input_increment_regeneration_and_long_summary() {
     let f = ServiceFixture::new();
     let home = f.home();
     let id = f.add_session(50, 6000);
@@ -218,7 +218,7 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     std::fs::create_dir_all(&fixed).unwrap();
     std::fs::write(
         fixed.join(format!("session-{id}.result.json")),
-        r#"{"summary":"stale"}"#,
+        r#"{"summary":{"items":[{"title":"stale","description":"","details":[]}]}}"#,
     )
     .unwrap();
     let long = "**结论**：".repeat(500);
@@ -258,7 +258,10 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     append(&f, &id, "验证完成", false);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
-        assert_eq!(input[0]["current_summary"], long);
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single(long.clone()))
+        );
         assert_eq!(input[0]["from_sequence"], 51);
         assert_eq!(input[0]["message_count"], 1);
         assert_eq!(input[0]["summary_through_at"], "2026-10-01T00:00:00Z");
@@ -281,7 +284,10 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
     extract_session(f.db(), &id, Some(&home), true, &mut runner).unwrap();
     let ctx = f.db().get_session_context(&id).unwrap().unwrap();
     assert_eq!(ctx.revision, 3);
-    assert_eq!(ctx.fields.summary, "重新整理");
+    assert_eq!(
+        ctx.fields.summary,
+        crate::domain::Summary::single("重新整理")
+    );
     append(&f, &id, "改写后唯一保留的对话", true);
     assert_eq!(
         f.db()
@@ -290,7 +296,7 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
             .unwrap()
             .fields
             .summary,
-        "重新整理"
+        crate::domain::Summary::single("重新整理")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
@@ -310,7 +316,7 @@ fn session_full_input_increment_regeneration_and_long_markdown() {
             .unwrap()
             .fields
             .summary,
-        "仅根据当前对话生成的新摘要"
+        crate::domain::Summary::single("仅根据当前对话生成的新摘要")
     );
     assert_eq!(
         f.db()
@@ -340,7 +346,10 @@ fn skip_advances_progress_preserves_valid_summary_and_avoids_repeat_calls() {
     assert_eq!(out.status, ContextUpdateStatus::Skipped);
     let view = session_context_view(f.db(), &id).unwrap();
     assert!(!view.pending);
-    assert_eq!(view.fields.unwrap().summary, "有效旧摘要");
+    assert_eq!(
+        view.fields.unwrap().summary,
+        crate::domain::Summary::single("有效旧摘要")
+    );
     assert_eq!(view.processed_through_seq, 2);
     let mut never =
         |_: &CliExtractor, _: &str, _: &Path| panic!("no increment must not launch an Agent");
@@ -366,9 +375,8 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
         calls += 1;
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(input[0]["current_summary"], Value::Null);
-        assert!(input
-            .iter()
-            .any(|r| r["session_id"] == b && r["current_summary"] == "旧的可用结论"));
+        assert!(input.iter().any(|r| r["session_id"] == b
+            && r["current_summary"] == json!(crate::domain::Summary::single("旧的可用结论"))));
         result(dir, "session", &a, "会话 A 新结论");
         result(dir, "task", &ws.id, "结合 A 与 B 的旧结论");
         empty_preferences(dir);
@@ -386,7 +394,7 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
             .unwrap()
             .fields
             .summary,
-        "旧的可用结论"
+        crate::domain::Summary::single("旧的可用结论")
     );
     assert!(session_context_view(f.db(), &b).unwrap().pending);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
@@ -398,7 +406,10 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
         ));
         assert!(!records(&dir.join(format!("session-{b}.jsonl"))).is_empty());
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
-        assert_eq!(input[0]["current_summary"], "结合 A 与 B 的旧结论");
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single("结合 A 与 B 的旧结论"))
+        );
         result(dir, "session", &b, "B 新结论");
         result(dir, "task", &ws.id, "完整最新结论");
         empty_preferences(dir);
@@ -441,7 +452,7 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
             .unwrap()
             .fields
             .summary,
-        "旧摘要"
+        crate::domain::Summary::single("旧摘要")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
@@ -457,7 +468,8 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
         workstream_context_view(f.db(), &ws.id)
             .unwrap()
             .summary
-            .as_deref(),
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
         Some("任务当前结论")
     );
 }
@@ -485,11 +497,14 @@ fn task_changes_keep_summaries_until_update_and_rebuild_rewritten_sessions() {
             .fields
             .unwrap()
             .summary,
-        "A"
+        crate::domain::Summary::single("A")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
-        assert_eq!(input[0]["current_summary"], "旧任务摘要");
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single("旧任务摘要"))
+        );
         assert!(!input.iter().any(|r| r["session_id"] == b));
         let session = records(&dir.join(format!("session-{a}.jsonl")));
         assert_eq!(session[0]["current_summary"], Value::Null);
@@ -515,11 +530,11 @@ fn malformed_or_missing_batch_outputs_roll_back_all_summaries() {
     for (reply, task_body) in [
         (
             r#"{"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[]}"#,
-            r#"{"summary":"valid"}"#,
+            r#"{"summary":{"items":[{"title":"valid","description":"","details":[]}]}}"#,
         ),
         (
             r#"{"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":["unknown"]}"#,
-            r#"{"summary":"valid"}"#,
+            r#"{"summary":{"items":[{"title":"valid","description":"","details":[]}]}}"#,
         ),
         (
             r#"{"status":"completed","preferences":{"status":"completed"},"skipped_session_ids":[]}"#,
@@ -527,7 +542,7 @@ fn malformed_or_missing_batch_outputs_roll_back_all_summaries() {
         ),
         (
             r#"{"status":"partial","preferences":{"status":"completed"},"failed_sessions":[{"session_id":"unknown","error":"error"}],"skipped_session_ids":[]}"#,
-            r#"{"summary":"valid"}"#,
+            r#"{"summary":{"items":[{"title":"valid","description":"","details":[]}]}}"#,
         ),
     ] {
         let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
@@ -691,9 +706,9 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
     seed(&f, &id, "valid summary");
     append(&f, &id, "new material", false);
     for body in [
-        r#"{"summary":" "}"#,
-        r#"{"summary":"a","summary":"b"}"#,
-        r#"{"summary":"a","revision":10}"#,
+        r#"{"summary":{"items":[{"title":" ","description":"","details":[]}]}}"#,
+        r#"{"summary":{"items":[]},"summary":{"items":[]}}"#,
+        r#"{"summary":{"items":[{"title":"事项","description":"","details":[]}]},"revision":10}"#,
         r#"{"error":"failure"}"#,
     ] {
         let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
@@ -712,7 +727,10 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
             "invalid_output"
         );
         let stored = f.db().get_session_context(&id).unwrap().unwrap();
-        assert_eq!(stored.fields.summary, "valid summary");
+        assert_eq!(
+            stored.fields.summary,
+            crate::domain::Summary::single("valid summary")
+        );
         assert_eq!(stored.processed_through_seq, 1);
         assert_eq!(stored.revision, 1);
     }
@@ -734,7 +752,11 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
     #[cfg(unix)]
     {
         let outside = f.root.join("outside.json");
-        std::fs::write(&outside, r#"{"summary":"outside"}"#).unwrap();
+        std::fs::write(
+            &outside,
+            r#"{"summary":{"items":[{"title":"outside","description":"","details":[]}]}}"#,
+        )
+        .unwrap();
         let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             std::os::unix::fs::symlink(&outside, dir.join(format!("session-{id}.result.json")))
                 .unwrap();
@@ -882,9 +904,8 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         assert!(!tools::input_available(
             &dir.join(format!("session-{outside}.jsonl"))
         ));
-        assert!(input
-            .iter()
-            .any(|r| r["session_id"] == b && r["current_summary"] == "已有 B 摘要"));
+        assert!(input.iter().any(|r| r["session_id"] == b
+            && r["current_summary"] == json!(crate::domain::Summary::single("已有 B 摘要"))));
         let b_record = input.iter().find(|r| r["session_id"] == b).unwrap();
         assert_eq!(b_record["summary_through_at"], "2026-09-01T00:00:00Z");
         assert_eq!(b_record["last_message_at"], "2026-10-01T00:00:00Z");
@@ -919,7 +940,10 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
-        assert_eq!(input[0]["current_summary"], "项目当前结论");
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single("项目当前结论"))
+        );
         assert!(input
             .iter()
             .any(|r| r["session_id"] == a && r["need_update"] == false));
@@ -949,7 +973,8 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         project_context_view(f.db(), &p.id)
             .unwrap()
             .summary
-            .as_deref(),
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
         Some("project searchable conclusion")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
@@ -968,7 +993,8 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         project_context_view(f.db(), &p.id)
             .unwrap()
             .summary
-            .as_deref(),
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
         Some("重新生成的项目摘要")
     );
 }
@@ -998,11 +1024,19 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
         .unwrap();
     let view = project_context_view(f.db(), &p.id).unwrap();
     assert!(view.pending);
-    assert_eq!(view.summary.as_deref(), Some("旧项目摘要"));
+    assert_eq!(
+        view.summary
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
+        Some("旧项目摘要")
+    );
     assert_eq!(view.context_revision, 1);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
-        assert_eq!(input[0]["current_summary"], "旧项目摘要");
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single("旧项目摘要"))
+        );
         assert_eq!(input[0]["name"], "用户重命名");
         assert_eq!(input.iter().filter(|r| r["type"] == "session").count(), 0);
         empty_preferences(dir);
@@ -1013,7 +1047,8 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
         project_context_view(f.db(), &p.id)
             .unwrap()
             .summary
-            .as_deref(),
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
         Some("旧项目摘要")
     );
     assert!(!project_context_view(f.db(), &p.id).unwrap().pending);
@@ -1185,7 +1220,12 @@ fn project_merge_preserves_survivor_summary_and_cascades_retired_summary_state()
         .any(|v| v.id == preference.id && v.locked && v.content == "合并后仍保留"));
     assert!(f.db().get_project(&q.id).unwrap().is_none());
     let view = project_context_view(f.db(), &p.id).unwrap();
-    assert_eq!(view.summary.as_deref(), Some("survivor current summary"));
+    assert_eq!(
+        view.summary
+            .as_ref()
+            .map(|summary| summary.items[0].title.as_str()),
+        Some("survivor current summary")
+    );
     assert_eq!(view.context_revision, 1);
     assert!(view.pending);
     assert_eq!(view.pending_sessions, 1);
@@ -1202,7 +1242,10 @@ fn project_merge_preserves_survivor_summary_and_cascades_retired_summary_state()
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
-        assert_eq!(input[0]["current_summary"], "survivor current summary");
+        assert_eq!(
+            input[0]["current_summary"],
+            json!(crate::domain::Summary::single("survivor current summary"))
+        );
         assert_eq!(input.iter().filter(|r| r["type"] == "session").count(), 2);
         assert!(input
             .iter()
@@ -1459,7 +1502,7 @@ fn invalid_preference_files_and_changes_preserve_summaries_without_partial_write
                 .fields
                 .unwrap()
                 .summary,
-            "有效摘要"
+            crate::domain::Summary::single("有效摘要")
         );
     }
     for malformed in [
@@ -1484,7 +1527,7 @@ fn invalid_preference_files_and_changes_preserve_summaries_without_partial_write
                 .fields
                 .unwrap()
                 .summary,
-            "仍然有效"
+            crate::domain::Summary::single("仍然有效")
         );
     }
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
@@ -1595,7 +1638,7 @@ fn preference_changes_use_current_locks_without_rejecting_concurrent_edits() {
                     .fields
                     .unwrap()
                     .summary,
-                "摘要可保存"
+                crate::domain::Summary::single("摘要可保存")
             );
         }
     }
@@ -1661,13 +1704,16 @@ fn task_and_project_calls_each_emit_one_preference_result_for_their_project_scop
             .unwrap()
             .summary
             .unwrap(),
-        "项目摘要"
+        crate::domain::Summary::single("项目摘要")
     );
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         let session = input.iter().find(|r| r["session_id"] == a).unwrap();
         assert_eq!(session["need_update"], false);
-        assert_eq!(session["current_summary"], "A 更新");
+        assert_eq!(
+            session["current_summary"],
+            json!(crate::domain::Summary::single("A 更新"))
+        );
         let raw = records(Path::new(
             session["preference_input_file"].as_str().unwrap(),
         ));
@@ -1690,10 +1736,58 @@ fn task_and_project_calls_each_emit_one_preference_result_for_their_project_scop
             .unwrap()
             .fields
             .summary,
-        "A 更新"
+        crate::domain::Summary::single("A 更新")
     );
     assert!(repo::list_items(f.db(), Some(&p.id))
         .unwrap()
         .iter()
         .any(|p| p.content == "从原始消息重试的准则"));
+}
+
+#[test]
+fn structured_summary_updates_can_reorganize_all_fields_without_changing_extraction_frontiers() {
+    let f = ServiceFixture::new();
+    let home = f.home();
+    let id = f.add_session(2, 10);
+    let first = json!({"items":[
+        {"title":"旧方案","description":"待验证","details":["保留目录","还有重复内容"]},
+        {"title":"相关事项","description":"补充背景","details":["重复内容"]}
+    ]});
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        assert_eq!(
+            records(&dir.join(format!("session-{id}.jsonl")))[0]["current_summary"],
+            Value::Null
+        );
+        std::fs::write(
+            dir.join(format!("session-{id}.result.json")),
+            json!({"summary":first}).to_string(),
+        )
+        .unwrap();
+        empty_preferences(dir);
+        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+    };
+    extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
+    append(&f, &id, "合并两项，调整结论并删去重复细则", false);
+    let merged = json!({"items":[{"title":"最终方案","description":"已确认合并","details":["保留目录并统一说明"]}]});
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let input = records(&dir.join(format!("session-{id}.jsonl")));
+        assert_eq!(input[0]["current_summary"], first);
+        assert_eq!(input[0]["message_count"], 1);
+        std::fs::write(
+            dir.join(format!("session-{id}.result.json")),
+            json!({"summary":merged}).to_string(),
+        )
+        .unwrap();
+        empty_preferences(dir);
+        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+    };
+    extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
+    let view = session_context_view(f.db(), &id).unwrap();
+    assert_eq!(
+        serde_json::to_value(view.fields.unwrap().summary).unwrap(),
+        merged
+    );
+    assert_eq!(view.revision, 2);
+    assert_eq!(view.processed_through_seq, 3);
+    assert!(!view.pending);
 }

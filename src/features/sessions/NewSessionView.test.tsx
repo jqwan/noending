@@ -351,7 +351,7 @@ describe("NewSessionView task and project selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "新建跟踪任务" }));
     fireEvent.click(await screen.findByRole("button", {name:"移除项目 Project 1"}));
     fireEvent.change(screen.getByRole("textbox", {name:"标题"}), {target:{value:"独立任务"}});
-    vi.mocked(api.listWorkstreamCards).mockResolvedValue([{...created,projects:[],summary:null,last_activity_at:null,session_count:0,latest_session:null}]);
+    vi.mocked(api.listWorkstreamCards).mockResolvedValue([{...created,projects:[],last_activity_at:null,session_count:0,latest_session:null}]);
     fireEvent.submit(screen.getByRole("textbox", {name:"标题"}).closest("form")!);
     await waitFor(()=>expect(api.createWorkstream).toHaveBeenCalledWith("独立任务","",[]));
     await waitFor(()=>expect(screen.queryByRole("dialog")).toBeNull());
@@ -494,7 +494,7 @@ describe("NewSessionView task and project selection", () => {
         created_at: "2026-10-01T00:00:00Z",
         updated_at: "2026-10-01T00:00:00Z",
         projects: [{ id: "p-1", name: "Project 1" }],
-        summary: null,
+
         last_activity_at: null,
         session_count: 1,
         latest_session: null,
@@ -620,7 +620,7 @@ it("uses the first project of a multi-project task as its default", async () => 
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
     id: "multi", title: "跨项目任务", description: "", visibility: "normal" as const,
     projects: [{ id: "p-1", name: "甲" }, { id: "p-2", name: "乙" }],
-    created_at: "", updated_at: "", summary: null,
+    created_at: "", updated_at: "",
     last_activity_at: null, session_count: 0, latest_session: null,
   }]);
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
@@ -635,7 +635,7 @@ it("blocks starting from a task that has no associated projects", async () => {
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([{
     id: "orphan", title: "无项目任务", description: "", visibility: "normal" as const,
     projects: [],
-    created_at: "", updated_at: "", summary: null,
+    created_at: "", updated_at: "",
     last_activity_at: null, session_count: 0, latest_session: null,
   }]);
   render(<NewSessionView workstreamId="orphan" navigate={vi.fn()} />);

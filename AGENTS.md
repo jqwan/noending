@@ -67,8 +67,14 @@ Documents under `docs/` may include current design, implementation plans, or his
   changed code and coverage numbers alone do not justify a test.
 * Exercise the actual scenario and assert independent expected results; avoid
   self-comparisons, vacuous checks and assertions that mirror the implementation.
+  Assert through roles, accessible names and visible state (persistence: a
+  remount); no write counts, private columns or storage keys — call counts only
+  when the IPC call itself is the contract.
+* A negative assertion needs a positive counterpart and must reference something
+  that exists in source; the test name states the invariant its assertions prove.
 * Extend existing coverage before adding tests. Merge equivalent cases, but keep
-  distinct behavioral, platform and protocol boundaries.
+  distinct behavioral, platform and protocol boundaries — the two sides of one
+  invariant (inside/outside, enabled/disabled) are boundaries, not duplicates.
 * Avoid pinning incidental copy, icons, pixels or private structure; test UI
   details when they affect meaning, navigation or action availability.
 * Isolate mocks, caches and persistent state. Declare external prerequisites;

@@ -48,7 +48,7 @@ pub(super) fn target_summary(
     kind: &str,
     id: &str,
     revision: i64,
-) -> Result<Option<String>> {
+) -> Result<Option<crate::domain::Summary>> {
     let sql = match kind {
         "session" => "SELECT revision,summary FROM session_contexts WHERE session_id=?1",
         "task" => {
@@ -59,7 +59,7 @@ pub(super) fn target_summary(
         }
         _ => return Err(other("未知提取目标")),
     };
-    let row: Option<(i64, String)> = conn
+    let row: Option<(i64, crate::domain::Summary)> = conn
         .query_row(sql, [id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
     if row.as_ref().map_or(0, |r| r.0) != revision {

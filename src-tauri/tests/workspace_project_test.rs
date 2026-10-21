@@ -1010,7 +1010,7 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     }
     db.tx(|tx| {
         tx.execute(
-            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'summary')",
+            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'{\"items\":[{\"title\":\"summary\",\"description\":\"\",\"details\":[]}]}')",
             [&path.project_id],
         )?;
         Ok(())

@@ -81,7 +81,7 @@ export default function Sidebar({
               className={`sidebar-recent-group-header sidebar-pinned-header ${pinnedCollapsed ? "collapsed" : ""}`}
               onClick={() => setPinnedCollapsed((prev) => !prev)}
               aria-expanded={!pinnedCollapsed}
-              title={`置顶 (${pinnedSessions.length})`}
+              title={`置顶（${pinnedSessions.length}）`}
             >
               <span className="sidebar-header-icon pinned-group-icon">
                 <Icon name="pin" />

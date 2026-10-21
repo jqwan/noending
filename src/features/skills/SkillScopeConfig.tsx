@@ -92,7 +92,7 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
     <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
       <h2 className="detail-section-title">
         <Icon name="skill" />
-        <span>技能 ({visibleRows.length})</span>
+        <span>技能（{visibleRows.length}）</span>
       </h2>
       <button type="button" className="btn ghost icon-button small" title="配置技能" aria-label="配置技能" disabled={loading} onClick={() => setAdding(true)}>
         <Icon name="sliders" />

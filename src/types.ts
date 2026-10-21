@@ -184,7 +184,6 @@ export interface WorkstreamCardData {
   visibility: WorkstreamVisibility;
   created_at: string;
   updated_at: string;
-  summary: string | null;
   last_activity_at: string | null;
   session_count: number;
   latest_session: LatestSessionInfo | null;
@@ -316,9 +315,19 @@ export interface WorkstreamContext {
 // 两个显式 AI 更新入口：Session 摘要与 Workstream 状态。读命令纯读取
 // （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 Agent。
 
-/** Session 的 Markdown 摘要（后端 `SessionContextFields`）。 */
+export interface SummaryItem {
+  title: string;
+  description: string;
+  details: string[];
+}
+
+export interface SummaryDocument {
+  items: SummaryItem[];
+}
+
+/** Session 的事项摘要（后端 `SessionContextFields`）。 */
 export interface SessionContextFields {
-  summary: string;
+  summary: SummaryDocument;
 }
 
 /** `get_session_context`：Session 摘要 + 待更新状态。纯读取。 */
@@ -345,7 +354,7 @@ export interface ProjectUpdateOutcome extends Omit<WorkstreamUpdateOutcome, "wor
 
 export interface WorkstreamContextView {
   workstream_id: string;
-  summary: string | null;
+  summary: SummaryDocument | null;
   context_revision: number;
   updated_at: string | null;
   pending: boolean;

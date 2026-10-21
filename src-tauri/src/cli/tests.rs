@@ -186,8 +186,12 @@ fn cli_preferences_respect_current_lock_and_summary_edits_preserve_pending_messa
         "说明要点"
     );
     let sid = f.session();
-    let file = f.root.join("summary.md");
-    std::fs::write(&file, "### 主题\n\n- 人工修正。\n").unwrap();
+    let file = f.root.join("summary.json");
+    std::fs::write(
+        &file,
+        r#"{"items":[{"title":"主题","description":"","details":["人工修正。"]}]}"#,
+    )
+    .unwrap();
     let path = file.to_str().unwrap();
     assert_eq!(
         f.call(&[
@@ -221,7 +225,7 @@ fn cli_preferences_respect_current_lock_and_summary_edits_preserve_pending_messa
         .code,
         "stale_result"
     );
-    assert!(view["summary"].as_str().unwrap().contains("人工修正"));
+    assert_eq!(view["summary"]["items"][0]["details"][0], "人工修正。");
     crate::storage::preferences::save_item(f.db(), Some(id), None, "说明要点", false).unwrap();
     f.call(&["preference", "delete", id]).unwrap();
     assert_eq!(
@@ -485,8 +489,12 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             json!([])
         );
     }
-    let file = f.root.join("summary.md");
-    std::fs::write(&file, "### 项目进展\n\n- 已建立任务。\n").unwrap();
+    let file = f.root.join("summary.json");
+    std::fs::write(
+        &file,
+        r#"{"items":[{"title":"项目进展","description":"","details":["已建立任务。"]}]}"#,
+    )
+    .unwrap();
     for (kind, id) in [("task", tid), ("project", pid.as_str())] {
         f.call(&[
             "summary",
@@ -852,4 +860,172 @@ fn link_project(f: &Fixture, task: &str, session: &str) {
         .project_id
         .unwrap();
     crate::workspace::workstream::set_workstream_projects(f.db(), task, &[project]).unwrap();
+}
+
+#[test]
+fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revision() {
+    let f = Fixture::new();
+    let sid = f.session();
+    let pid = f.db().list_workspace_paths().unwrap()[0].project_id.clone();
+    let task = f
+        .call(&["task", "create", "--title", "同步任务", "--project", &pid])
+        .unwrap();
+    let tid = task["task"]["id"].as_str().unwrap();
+    let session = json!({"items":[
+        {"title":"路径同步","description":"保留目录","details":["literal_% 的文件保持不变"]},
+        {"title":"窗口修复","description":"路径同步后的行为","details":[]}
+    ]});
+    let topic = json!({"items":[{"title":"项目与任务","description":"路径同步","details":["CaseSensitiveWord"]}]});
+    for (kind, id, body) in [
+        ("session", sid.as_str(), &session),
+        ("task", tid, &topic),
+        ("project", pid.as_str(), &topic),
+    ] {
+        crate::context::edit_summary(f.db(), kind, id, 0, &body.to_string()).unwrap();
+    }
+    let first = f
+        .call(&["summary", "search", "--query", "路径同步", "--limit", "1"])
+        .unwrap();
+    assert_eq!(first["items"].as_array().unwrap().len(), 1);
+    let mut hits = first["items"].as_array().unwrap().clone();
+    let mut page = first;
+    while let Some(cursor) = page["next_cursor"].as_str() {
+        page = f
+            .call(&[
+                "summary",
+                "search",
+                "--query",
+                "路径同步",
+                "--limit",
+                "1",
+                "--cursor",
+                cursor,
+            ])
+            .unwrap();
+        hits.extend(page["items"].as_array().unwrap().clone());
+    }
+    assert_eq!(hits.len(), 4);
+    assert_eq!(
+        hits.iter().filter(|hit| hit["kind"] == "session").count(),
+        2
+    );
+    let detail = f
+        .call(&["session", "summary", &sid, "--item", "2", "--revision", "1"])
+        .unwrap();
+    assert_eq!(detail["item"]["title"], "窗口修复");
+    assert!(detail.get("summary").is_none());
+    assert_eq!(
+        f.call(&["summary", "search", "--query", "literal_%"])
+            .unwrap()["items"][0]["item_number"],
+        1
+    );
+    assert_eq!(
+        f.call(&[
+            "summary",
+            "search",
+            "--query",
+            "casesensitiveword",
+            "--kind",
+            "task",
+            "--project",
+            &pid
+        ])
+        .unwrap()["items"][0]["id"],
+        tid
+    );
+    assert_eq!(
+        f.call(&["summary", "search", "--query", "details"])
+            .unwrap()["items"],
+        json!([])
+    );
+    f.call(&["task", "archive", tid]).unwrap();
+    assert_eq!(
+        f.call(&["summary", "search", "--query", "路径同步", "--kind", "task"])
+            .unwrap()["items"],
+        json!([])
+    );
+    assert_eq!(
+        f.call(&[
+            "summary",
+            "search",
+            "--query",
+            "路径同步",
+            "--kind",
+            "task",
+            "--scope",
+            "archived"
+        ])
+        .unwrap()["items"][0]["id"],
+        tid
+    );
+    let cursor = f
+        .call(&["summary", "search", "--query", "路径同步", "--limit", "1"])
+        .unwrap()["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::context::edit_summary(
+        f.db(),
+        "session",
+        &sid,
+        1,
+        &json!({"items":[{"title":"合并后的路径事项","description":"已精简","details":[]}]})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        f.call(&[
+            "summary",
+            "search",
+            "--query",
+            "路径同步",
+            "--cursor",
+            &cursor
+        ])
+        .unwrap_err()
+        .code,
+        "stale_cursor"
+    );
+    assert_eq!(
+        f.call(&["session", "summary", &sid, "--item", "2", "--revision", "1"])
+            .unwrap_err()
+            .code,
+        "stale_result"
+    );
+    assert_eq!(
+        f.call(&["session", "summary", &sid, "--item", "1", "--revision", "2"])
+            .unwrap()["item"]["title"],
+        "合并后的路径事项"
+    );
+}
+
+#[test]
+fn summary_edits_reject_legacy_text_and_invalid_items_without_changing_revision_or_progress() {
+    let f = Fixture::new();
+    let sid = f.session();
+    let valid =
+        json!({"items":[{"title":"保留事项","description":"原始描述","details":["原始细则"]}]});
+    crate::context::edit_summary(f.db(), "session", &sid, 0, &valid.to_string()).unwrap();
+    let before = f.call(&["session", "summary", &sid]).unwrap();
+    for invalid in [
+        "### 旧 Markdown",
+        r#"{"items":[]}"#,
+        r#"{"items":[{"title":" ","description":"","details":[]}]}"#,
+        r#"{"items":[{"title":"事项","description":"","details":[""]}]}"#,
+        r#"{"items":[{"id":"fixed","title":"事项","description":"","details":[]}]}"#,
+    ] {
+        assert!(crate::context::edit_summary(f.db(), "session", &sid, 1, invalid).is_err());
+    }
+    assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
+    for invalid in ["old markdown", "{}", "[]", r#"{"items":{}}"#] {
+        assert!(f
+            .db()
+            .read()
+            .execute(
+                "UPDATE session_contexts SET summary=?2 WHERE session_id=?1",
+                rusqlite::params![sid, invalid]
+            )
+            .is_err());
+    }
+    assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
 }

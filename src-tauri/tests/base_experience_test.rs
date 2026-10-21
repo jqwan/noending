@@ -118,7 +118,7 @@ fn an_empty_replacement_generation_preserves_the_current_session_summary() {
             tx,
             &session.id,
             &SessionContextFields {
-                summary: "summary of old transcript".into(),
+                summary: noending_lib::domain::Summary::single("summary of old transcript"),
                 ..Default::default()
             },
             0,
@@ -162,7 +162,7 @@ fn an_empty_replacement_generation_preserves_the_current_session_summary() {
     assert!(!view.pending);
     assert_eq!(
         view.fields.as_ref().unwrap().summary,
-        "summary of old transcript"
+        noending_lib::domain::Summary::single("summary of old transcript")
     );
     assert_eq!(view.ingest_generation, initial_generation + 1);
 }
@@ -178,7 +178,7 @@ fn context_footprint(db: &Db) -> (i64, i64, i64) {
     let summaries = db
         .read()
         .query_row(
-            "SELECT COUNT(*) FROM workstream_context_state WHERE summary != ''",
+            "SELECT COUNT(*) FROM workstream_context_state WHERE json_array_length(summary,'$.items') > 0",
             [],
             |r| r.get(0),
         )

@@ -453,11 +453,11 @@ pub struct SessionMessage {
     pub source_identity_hash: String,
 }
 
-/// A system-derived Markdown summary. Extra fields are rejected at the model
+/// A system-derived structured summary. Extra fields are rejected at the model
 /// boundary; revisions and processing positions remain backend-owned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SessionContextFields {
-    pub summary: String,
+    pub summary: super::Summary,
 }
 
 /// The current Session Context plus its CAS/frontier state. No row means the
@@ -486,7 +486,7 @@ pub struct WorkstreamContextState {
     /// The `input_revision` the last successful AI update consumed. A
     /// Workstream is pending when `input_revision > consumed_input_revision`.
     pub consumed_input_revision: i64,
-    pub summary: String,
+    pub summary: super::Summary,
     pub updated_at: Option<String>,
 }
 

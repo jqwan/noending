@@ -239,6 +239,14 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     "summary" => Command::Summary {
                         kind,
                         id: id(&words)?,
+                        item: options
+                            .take("item")
+                            .map(|s| s.parse().map_err(|_| invalid("--item 无效")))
+                            .transpose()?,
+                        revision: options
+                            .take("revision")
+                            .map(|s| s.parse().map_err(|_| invalid("--revision 无效")))
+                            .transpose()?,
                     },
                     "messages" | "search" if kind == Kind::Session => Command::Messages {
                         id: id(&words)?,
@@ -271,6 +279,14 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => return Err(invalid("命令无效，使用 --help 查看用法")),
                 }
             }
+            "summary" if action == "search" && words.len() == 2 => Command::SearchSummaries {
+                query: options.required("query")?,
+                kind: options.take("kind"),
+                project: options.take("project"),
+                scope: options.take("scope").unwrap_or_else(|| "unarchived".into()),
+                cursor: options.take("cursor"),
+                limit: options.number("limit", 20)?,
+            },
             "summary" => {
                 if words.len() != 4 {
                     return Err(invalid(
@@ -362,10 +378,10 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
         None => vec!["ne status", "ne search --help", "ne session/task/project --help", "ne preference --help", "ne summary --help", "ne job --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
-        Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
-        Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
-        Some("project") => vec!["ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID"],
-        Some("summary") => vec!["ne summary update session|task|project ID [--wait] [--timeout 600]", "ne summary regenerate session|task|project ID [--wait] [--timeout 600]", "ne summary set session|task|project ID --file FILE --revision REVISION"],
+        Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item NUMBER --revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
+        Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item NUMBER --revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
+        Some("project") => vec!["ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item NUMBER --revision REVISION]"],
+        Some("summary") => vec!["ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID [--wait] [--timeout 600]", "ne summary regenerate session|task|project ID [--wait] [--timeout 600]", "ne summary set session|task|project ID --file FILE --revision REVISION"],
         Some("preference") => vec!["ne preference list --scope user|project [--project ID]", "ne preference add --scope user|project [--project ID] --content TEXT", "ne preference update ID --content TEXT", "ne preference delete ID"],
         Some("job") => vec!["ne job list", "ne job show ID", "ne job wait ID [--timeout 600]"],
         Some("search")=>vec!["ne search --query TEXT [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
@@ -377,6 +393,6 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         _=>return Err(invalid("未知命令")),
     };
     Ok(
-        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","connection":"默认连接正在运行的 NoEnding；--connection 指定连接。提取连接只允许 extraction 查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary_jobs":"update/regenerate 返回 job_id，通过 job show/wait 查询后端确认的最终结果；--wait 等待完成，失败返回非零退出码，等待超时保留作业。set 必须提供当前摘要版本，保留消息处理进度。"}),
+        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","connection":"默认连接正在运行的 NoEnding；--connection 指定连接。提取连接只允许 extraction 查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary_jobs":"update/regenerate 返回 job_id，通过 job show/wait 查询后端确认的最终结果；--wait 等待完成，失败返回非零退出码，等待超时保留作业。set 的 FILE 必须是 {items:[{title,description,details}]} JSON，并提供当前摘要版本，保留消息处理进度。摘要读取返回事项列表；按事项读取需同时提供 --item 与 --revision。"}),
     )
 }

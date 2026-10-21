@@ -35,6 +35,7 @@ ne project list --path /absolute/path
 ne search --query "关键词" --project <id>
 ne session show <id>
 ne session summary <id>
+ne session summary <id> --item 2 --revision 3
 ne session messages <id> --limit 8
 ne session search <id> --query "关键词"
 ne task list
@@ -91,6 +92,22 @@ path register 要求目录已存在且为绝对路径，不创建磁盘目录，
 
 ## 摘要
 
+摘要以 `summary.items` 列表返回，每个事项包含 `title`、`description`、`details`。标题、描述、细则都可以调整，事项可合并、拆分、增删和排序。版本号仍属于整份摘要，事项没有固定 ID。
+
+```sh
+ne summary search --query "关键词" --project <id> --scope all
+ne summary search --query "关键词" --kind task --limit 8
+ne session summary <id> --item 2 --revision 3
+ne task summary <id> --item 1 --revision 4
+ne project summary <id> --item 1 --revision 2
+```
+
+`summary search` 按事项匹配标题、描述和细则，匹配为字面子串（ASCII 不区分大小写），返回命中事项及所属 `kind`、`id`、对象 `title`、`revision` 和从 1 开始的 `item_number`。支持 `--kind session|task|project`、`--project`、`--scope unarchived|archived|all`（默认 unarchived）和 `--cursor`，默认每页 20 项、最多 50 项。检索不读取原始消息，顶部查找范围也不受影响。
+
+按序号读取时必须同时提供 `--item` 和检索结果中的 `--revision`，避免摘要重组后读取错位内容。摘要版本变化返回 `stale_result`；分页范围或摘要版本变化返回 `stale_cursor`，需要重新检索。事项序号仅在对应摘要版本内有效。
+
+`summary set` 文件使用 UTF-8 JSON，格式为 `{"items":[{"title":"事项标题","description":"简短描述","details":["细则"]}]}`，一次替换完整列表。至少包含一个事项，标题必须是非空单行文字，描述允许为空字符串，细则允许为空数组；每条细则必须非空。旧 Markdown 正文不再接受。默认提取提示词要求会话最多 15 个事项，任务和项目最多 10 个事项，并建议标题不超过 20 字符、描述不超过 60 字符、每条细则不超过 80 字符、整个事项不超过 300 字符；这些数量和篇幅要求用于指导模型整理，后端不据此拒绝或截断提取及手动编辑结果。
+
 ```sh
 ne summary update session <id>
 ne summary regenerate task <id>
@@ -99,7 +116,7 @@ ne summary update session <id> --wait --timeout 600
 ne job show <job_id>
 ne job wait <job_id> --timeout 600
 ne job list
-ne summary set session <id> --file summary.md --revision <当前版本>
+ne summary set session <id> --file summary.json --revision <当前版本>
 ```
 
 更新或重新生成立即返回 job_id，由后端调用配置的 Agent。作业完成后，result 返回后端确认的更新结果，包括部分失败或偏好错误；启动成功不代表已入库。作业记录只在本次应用运行中保留。`update` 沿用旧摘要，`regenerate` 忽略目标旧摘要，遵守现有提取和并发规则。

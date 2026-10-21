@@ -1,6 +1,6 @@
 //! Workstream card stats must follow the real sources: session count /
-//! latest session come from the single Owner Workstream link, card text from
-//! the active current_state revision, and a zero-session Workstream stays a
+//! latest session come from the single Owner Workstream link, activity from
+//! the current summary timestamp, and a zero-session Workstream stays a
 //! legal card with no Resume target.
 
 mod support;
@@ -70,7 +70,7 @@ fn card_stats_follow_sessions_and_active_state() {
             noending::storage::context_repo::commit_workstream_summary_conn(
                 tx,
                 &w.id,
-                "修复 source-driven identity migration",
+                &noending_lib::domain::Summary::single("修复 source-driven identity migration"),
             )
         })
         .unwrap();
@@ -81,10 +81,6 @@ fn card_stats_follow_sessions_and_active_state() {
     let latest = card.latest_session.as_ref().unwrap();
     assert_eq!(latest.id, newer.id, "latest session = most recent activity");
     assert_eq!(latest.agent, "codex");
-    assert_eq!(
-        card.summary.as_deref(),
-        Some("修复 source-driven identity migration")
-    );
     // the context edit is the newest work signal, later than both sessions
     assert_eq!(
         card.last_activity_at.as_deref(),
@@ -104,7 +100,6 @@ fn zero_session_workstream_is_a_legal_card_without_resume_target() {
     let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
     assert_eq!(card.session_count, 0);
     assert!(card.latest_session.is_none());
-    assert!(card.summary.is_none());
     // no work signal yet → no "Last active"; sorting still surfaces the
     // card via the updated_at fallback
     assert!(card.last_activity_at.is_none());
@@ -166,30 +161,4 @@ fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstall
         source: "test".into(),
         last_verified_at: now(),
     }
-}
-
-#[test]
-fn replacing_summary_updates_the_current_card() {
-    let database = db("replacement");
-    let w = workstream(&database, "Initial UI Redesign");
-    database
-        .tx(|tx| {
-            noending::storage::context_repo::commit_workstream_summary_conn(
-                tx,
-                &w.id,
-                "obsolete_fact",
-            )
-        })
-        .unwrap();
-    database
-        .tx(|tx| {
-            noending::storage::context_repo::commit_workstream_summary_conn(
-                tx,
-                &w.id,
-                "current_fact",
-            )
-        })
-        .unwrap();
-    let cards = noending::commands::workstream_cards(&database).unwrap();
-    assert_eq!(cards[0].summary.as_deref(), Some("current_fact"));
 }

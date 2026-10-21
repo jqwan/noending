@@ -238,8 +238,20 @@ fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_dup
     let task = f.task("Shared", &["a", "b"]);
     f.db()
         .tx(|tx| {
-            noending::storage::project_context_repo::commit(tx, "a", "old", "A summary", &[])?;
-            noending::storage::project_context_repo::commit(tx, "b", "old", "B summary", &[])?;
+            noending::storage::project_context_repo::commit(
+                tx,
+                "a",
+                "old",
+                &noending_lib::domain::Summary::single("A summary"),
+                &[],
+            )?;
+            noending::storage::project_context_repo::commit(
+                tx,
+                "b",
+                "old",
+                &noending_lib::domain::Summary::single("B summary"),
+                &[],
+            )?;
             Ok(())
         })
         .unwrap();
@@ -266,7 +278,7 @@ fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_dup
         noending::storage::project_context_repo::state(&f.db().read(), "b")
             .unwrap()
             .summary,
-        "B summary"
+        noending_lib::domain::Summary::single("B summary")
     );
     let items = preferences::list_items(f.db(), Some("b")).unwrap();
     assert_eq!(items.len(), 2);
@@ -291,14 +303,22 @@ fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_dup
 fn project_merge_adopts_a_summary_only_when_b_has_none() {
     let f = Fixture::new();
     f.db()
-        .tx(|tx| noending::storage::project_context_repo::commit(tx, "a", "old", "A summary", &[]))
+        .tx(|tx| {
+            noending::storage::project_context_repo::commit(
+                tx,
+                "a",
+                "old",
+                &noending_lib::domain::Summary::single("A summary"),
+                &[],
+            )
+        })
         .unwrap();
     project::merge_projects(f.db(), "a", "b").unwrap();
     assert_eq!(
         noending::storage::project_context_repo::state(&f.db().read(), "b")
             .unwrap()
             .summary,
-        "A summary"
+        noending_lib::domain::Summary::single("A summary")
     );
     assert!(
         noending::context::project_context_view(f.db(), "b")
@@ -315,7 +335,7 @@ fn archive_restore_and_stale_object_edits_preserve_task_memberships_and_summary(
     f.db()
         .write()
         .execute(
-            "UPDATE workstream_context_state SET summary='Retained summary' WHERE workstream_id=?1",
+            "UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"Retained summary\",\"description\":\"\",\"details\":[]}]}' WHERE workstream_id=?1",
             [&task],
         )
         .unwrap();
@@ -334,7 +354,7 @@ fn archive_restore_and_stale_object_edits_preserve_task_memberships_and_summary(
         noending::storage::get_workstream_context_state_conn(&f.db().read(), &task)
             .unwrap()
             .summary,
-        "Retained summary"
+        noending_lib::domain::Summary::single("Retained summary")
     );
     assert!(workstream::create_workstream(f.db(), " ", "", &[]).is_err());
 }

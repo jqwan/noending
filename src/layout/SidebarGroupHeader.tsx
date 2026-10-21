@@ -53,7 +53,7 @@ export default function SidebarGroupHeader({
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       aria-expanded={!isCollapsed}
-      title={`${group.title} (${group.sessions.length})`}
+      title={`${group.title}（${group.sessions.length}）`}
     >
       <span className={`sidebar-group-icon${isKnownAgent ? " agent-group-icon" : ""}`}>
         {isKnownAgent ? (

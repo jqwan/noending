@@ -4,6 +4,7 @@ mod installation;
 mod messages;
 mod search;
 mod service;
+mod summaries;
 pub(crate) mod transport;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

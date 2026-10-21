@@ -123,7 +123,11 @@ fn scoped_database_pages_and_cross_part_search_require_complete_reading() {
     .unwrap();
     assert_eq!(next["records"][0]["record"]["content"], "乙".repeat(2000));
     assert_eq!(next["end"], true);
-    std::fs::write(files.session_result(&id), r#"{"summary":"结果"}"#).unwrap();
+    std::fs::write(
+        files.session_result(&id),
+        r#"{"summary":{"items":[{"title":"结果","description":"","details":[]}]}}"#,
+    )
+    .unwrap();
     std::fs::write(files.preference_result(), r#"{"changes":[]}"#).unwrap();
     let reply = json!({"status":"completed","preferences":{"status":"completed"}});
     assert!(b.validate(&reply).is_err());
@@ -142,7 +146,7 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     f.db()
         .write()
         .execute(
-            "UPDATE session_contexts SET summary='查询时摘要' WHERE session_id=?1",
+            "UPDATE session_contexts SET summary='{\"items\":[{\"title\":\"查询时摘要\",\"description\":\"\",\"details\":[]}]}' WHERE session_id=?1",
             [&id],
         )
         .unwrap();
@@ -160,7 +164,7 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     .unwrap();
     assert_eq!(
         page["records"][0]["record"]["current_summary"],
-        "查询时摘要"
+        json!(crate::domain::Summary::single("查询时摘要"))
     );
     assert_eq!(page["records"][0]["record"]["through_sequence"], 2);
     assert_eq!(page["records"][1]["record"]["content"], "本次消息");
@@ -257,7 +261,10 @@ fn cli_is_read_only_reply_is_required_and_connection_expires() {
         ])
         .is_err());
         read_all_for_test(&files.dir);
-        std::fs::write(files.session_result(&id), r#"{"summary":"结果"}"#)?;
+        std::fs::write(
+            files.session_result(&id),
+            r#"{"summary":{"items":[{"title":"结果","description":"","details":[]}]}}"#,
+        )?;
         std::fs::write(files.preference_result(), r#"{"changes":[]}"#)?;
         Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
     })
@@ -286,8 +293,16 @@ fn batch_partial_only_accepts_failed_ids_within_pending_scope() {
     }
     files.add_preferences(&[]);
     files.add_batch("task", "t", json!({"type":"task"}), 0, false, sessions);
-    std::fs::write(files.batch_result("task", "t"), r#"{"summary":"任务结果"}"#).unwrap();
-    std::fs::write(files.session_result(&a), r#"{"summary":"A"}"#).unwrap();
+    std::fs::write(
+        files.batch_result("task", "t"),
+        r#"{"summary":{"items":[{"title":"任务结果","description":"","details":[]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        files.session_result(&a),
+        r#"{"summary":{"items":[{"title":"A","description":"","details":[]}]}}"#,
+    )
+    .unwrap();
     let bridge = bridge(&f, &files);
     read_all(&bridge);
     let reply = |id: &str| json!({"status":"partial","failed_sessions":[{"session_id":id,"error":"无法读取"}],"skipped_session_ids":[],"preferences":{"status":"failed","error":"无偏好"}});

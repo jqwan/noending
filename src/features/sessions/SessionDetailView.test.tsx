@@ -173,7 +173,7 @@ it("renders session message stats and tracked tasks in aside", async () => {
   expect(screen.getByText("会话统计")).toBeTruthy();
   expect(screen.getByText("用户消息 5")).toBeTruthy();
   expect(screen.getByText("Agent 回复 8")).toBeTruthy();
-  expect(screen.getByText("跟踪任务 (1)")).toBeTruthy();
+  expect(screen.getByText("跟踪任务（1）")).toBeTruthy();
   expect(screen.getByText("测试任务")).toBeTruthy();
   expect(screen.queryByText("任务描述")).toBeNull();
 
@@ -355,7 +355,7 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
 it("renders summary, supports copying, and updates context on pending increment", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
+      summary: { items: [{ title: "前端入口重构", description: "**正在重构前端入口**，删掉 Context Intelligence 开关。", details: ["下一步补测试。"] }] },
     },
     pending: true,
     revision: 3,
@@ -364,12 +364,13 @@ it("renders summary, supports copying, and updates context on pending increment"
     messages: [message("me", 1, "user", "继续")],
   }));
 
+  screen.getByText("会话摘要（1）");
   expect(screen.getByText("正在重构前端入口").tagName).toBe("STRONG");
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   fireEvent.click(screen.getByRole("button", { name: "复制摘要" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
-    "**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n下一步补测试。",
+    "### 前端入口重构\n\n**正在重构前端入口**，删掉 Context Intelligence 开关。\n\n- 下一步补测试。",
   ));
   screen.getByText(/删掉 Context Intelligence 开关/);
   screen.getByText(/补测试/);
@@ -381,7 +382,7 @@ it("renders summary, supports copying, and updates context on pending increment"
 it("allows regenerating a current summary without pending messages", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: "已完成",
+      summary: { items: [{ title: "已完成", description: "", details: [] }] },
     },
     pending: false,
     revision: 1,
@@ -474,7 +475,7 @@ it("renders cached summary immediately without flashing 暂无摘要", async () 
   sessionDetailCache.set("me", d);
   sessionContextCache.set("me", contextView({
     fields: {
-      summary: "这是已缓存的会话摘要",
+      summary: { items: [{ title: "这是已缓存的会话摘要", description: "", details: [] }] },
     },
   }));
   vi.mocked(api.getSessionDetail).mockResolvedValue(d);

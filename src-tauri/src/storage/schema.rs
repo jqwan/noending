@@ -26,7 +26,7 @@ pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
 ///
 /// No migrations and no backwards compatibility: a database whose generation
 /// differs must be discarded and rebuilt from Agent source data.
-pub const DATABASE_FORMAT_VERSION: i64 = 12;
+pub const DATABASE_FORMAT_VERSION: i64 = 13;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -300,14 +300,15 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projection_parts
       ON session_message_projection(session_id, part_end);
     -- The Logical Session's Context: system-derived, read-only, one current
-    -- row per Session. No row means "never generated". Summary is Markdown;
+    -- row per Session. No row means "never generated". Summary is a structured JSON object;
     -- revision is the CAS guard, and
     -- (ingest_generation, processed_through_seq) is the Session frontier in
     -- CURRENT-message-projection ordinals.
     CREATE TABLE IF NOT EXISTS session_contexts (
       session_id TEXT PRIMARY KEY
         REFERENCES sessions(id) ON DELETE CASCADE,
-      summary TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '{"items":[]}'
+        CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
       revision INTEGER NOT NULL DEFAULT 0,
       ingest_generation INTEGER NOT NULL DEFAULT 0,
       processed_through_seq INTEGER NOT NULL DEFAULT 0,
@@ -325,7 +326,8 @@ const CURRENT_SCHEMA: &str = r#"
       context_revision INTEGER NOT NULL DEFAULT 0,
       input_revision INTEGER NOT NULL DEFAULT 0,
       consumed_input_revision INTEGER NOT NULL DEFAULT 0,
-      summary TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '{"items":[]}'
+        CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
       updated_at TEXT
     );
     -- What the Workstream has already consumed from each tracked Session.
@@ -343,7 +345,8 @@ const CURRENT_SCHEMA: &str = r#"
       project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
       context_revision INTEGER NOT NULL DEFAULT 0,
       input_fingerprint TEXT NOT NULL DEFAULT '',
-      summary TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '{"items":[]}'
+        CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
       updated_at TEXT
     );
     CREATE TABLE IF NOT EXISTS project_session_frontiers (

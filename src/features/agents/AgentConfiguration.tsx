@@ -80,7 +80,7 @@ export default function AgentConfiguration({
             <div className="row between" style={{ alignItems: "center" }}>
               <h2>
                 <Icon name="chat" />
-                <span>会话 ({sessions.length})</span>
+                <span>会话（{sessions.length}）</span>
               </h2>
               {Boolean(entry?.terminal_cli && entry?.detected) && (
                 <button

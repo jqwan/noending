@@ -16,7 +16,7 @@ import {
   type WorkstreamContextView,
 } from "../../types";
 import type { Route } from "../../app/routes";
-import SummaryMarkdown from "../sessions/SummaryMarkdown";
+import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "../sessions/SummaryContent";
 import WorkstreamSessions from "./WorkstreamSessions";
 
 /** Task organization and the current Markdown summary. All reads are pure. */
@@ -47,6 +47,7 @@ export default function WorkstreamDetailView({
   const showSkeleton = useLoadingDelay(!ctx && loadError === "");
   /** Context 状态（只读）：当前投影 + revision + 待更新。 */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
+  const summaryExpansion = useSummaryExpansion(ctxState?.summary);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
   const [ctxUpdating, setCtxUpdating] = useState<"update" | "regenerate" | false>(false);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
@@ -159,7 +160,7 @@ export default function WorkstreamDetailView({
 
   /** Copy the current summary as Markdown. */
   const copyContext = async () => {
-    const ok = await copyToClipboard(ctxState?.summary ?? "");
+    const ok = await copyToClipboard(ctxState?.summary ? summaryMarkdown(ctxState.summary) : "");
     showToast(ok ? "已复制摘要" : "复制失败");
   };
 
@@ -350,9 +351,10 @@ export default function WorkstreamDetailView({
             <div className="row between" style={{ alignItems: "center" }}>
               <h2 className="detail-section-title">
                 <Icon name="spark" />
-                <span>任务摘要</span>
+                <span>任务摘要{ctxState?.summary ? `（${ctxState?.summary.items.length}）` : ""}</span>
               </h2>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
+                <SummaryControls expansion={summaryExpansion} />
                 {ctxState?.summary && (
                   <button
                     type="button"
@@ -389,7 +391,7 @@ export default function WorkstreamDetailView({
               </div>
             </div>
             {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
-            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryMarkdown>{ctxState.summary}</SummaryMarkdown></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
+            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}>{ctxState.summary}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
             {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
             {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
             {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
@@ -419,7 +421,7 @@ export default function WorkstreamDetailView({
             <div className="row between" style={{ alignItems: "center" }}>
               <h2 className="detail-section-title">
                 <Icon name="project" />
-                <span>关联项目 ({projectRows.length})</span>
+                <span>关联项目（{projectRows.length}）</span>
               </h2>
               {!archived && (
                 <button

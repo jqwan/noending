@@ -1166,7 +1166,7 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
             tx,
             &before.id,
             &SessionContextFields {
-                summary: "已有摘要".into(),
+                summary: noending_lib::domain::Summary::single("已有摘要"),
                 ..Default::default()
             },
             0,
@@ -1192,7 +1192,10 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
     assert_eq!(cold.last_activity_at, before.last_activity_at);
     assert_eq!(cold.last_conversation_at, before.last_conversation_at);
     let summary = db.get_session_context(&before.id).unwrap().unwrap();
-    assert_eq!(summary.fields.summary, "已有摘要");
+    assert_eq!(
+        summary.fields.summary,
+        noending_lib::domain::Summary::single("已有摘要")
+    );
     assert_eq!(summary.ingest_generation, before.fact_generation);
     assert_eq!(summary.processed_through_seq, 2);
     // A completed raw-byte cursor means the unchanged archive is not decoded again.

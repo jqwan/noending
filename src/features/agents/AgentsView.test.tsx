@@ -339,7 +339,7 @@ describe("AgentsView", () => {
     const navigate = vi.fn();
     render(<AgentsView navigate={navigate} initialAgent="codex" />);
     expect(await screen.findByText("模型与思考等级")).toBeTruthy();
-    expect(screen.getByText("会话 (0)")).toBeTruthy();
+    expect(screen.getByText("会话（0）")).toBeTruthy();
     expect(screen.getByText("该 Agent 下还没有会话。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", agent: "codex" });

@@ -1,5 +1,5 @@
 import { removedTargets } from "../../app/removedTargets";
-import SummaryMarkdown from "./SummaryMarkdown";
+import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "./SummaryContent";
 import Icon from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./sessions.css";
@@ -55,6 +55,7 @@ export default function SessionDetailView({
   const showSkeleton = useLoadingDelay(!detail && !failed);
   /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(() => sessionContextCache.get(sessionId) ?? null);
+  const summaryExpansion = useSummaryExpansion(sessionCtx?.fields?.summary);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
@@ -196,7 +197,7 @@ export default function SessionDetailView({
   /** 复制当前摘要：保留 Markdown 原文。 */
   const copyContext = async () => {
     if (!sessionCtx?.fields) return;
-    const ok = await copyToClipboard(sessionCtx.fields.summary);
+    const ok = await copyToClipboard(summaryMarkdown(sessionCtx.fields.summary));
     showToast(ok ? "已复制会话摘要" : "复制失败");
   };
 
@@ -299,9 +300,10 @@ export default function SessionDetailView({
             <div className="row between" style={{ alignItems: "center" }}>
               <div className="detail-section-title">
                 <Icon name="spark" />
-                <span>会话摘要</span>
+                <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
               </div>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
+                <SummaryControls expansion={summaryExpansion} />
                 {sessionCtx?.fields?.summary && (
                   <button
                     type="button"
@@ -363,9 +365,9 @@ export default function SessionDetailView({
             )}
             {sessionCtx?.fields ? (
               <div className="md-body" style={{ overflowWrap: "anywhere" }}>
-                <SummaryMarkdown>
+                <SummaryContent expansion={summaryExpansion}>
                   {sessionCtx.fields.summary}
-                </SummaryMarkdown>
+                </SummaryContent>
               </div>
             ) : sessionCtx === null ? (
               <div className="skeleton" style={{ height: 48, borderRadius: "var(--radius-md)" }} />
@@ -648,7 +650,7 @@ export default function SessionDetailView({
             <div className="row between" style={{ alignItems: "center" }}>
               <div className="detail-section-title">
                 <Icon name="tasks" />
-                <span>跟踪任务 ({detail.tracked_workstreams.length})</span>
+                <span>跟踪任务（{detail.tracked_workstreams.length}）</span>
               </div>
               <button
                 type="button"
