@@ -1354,3 +1354,26 @@ bare
         assert_eq!(sanitize_remote_url("/local/path"), "/local/path");
     }
 }
+
+/// A possible repository boundary. A broken/inaccessible marker is still a
+/// boundary: callers must not silently assign its descendants to an outer repo.
+pub fn has_repository_marker(canonical: &str) -> bool {
+    let path = Path::new(canonical);
+    match std::fs::symlink_metadata(path.join(".git")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Bare repositories have no .git entry.
+            path.join("HEAD").is_file()
+                && path.join("objects").is_dir()
+                && path.join("config").is_file()
+        }
+        Err(_) => true,
+    }
+}
+
+/// Physical spelling for read-only alias lookup; persisted path identity stays lexical.
+pub fn physical_directory(canonical: &str) -> Option<String> {
+    std::fs::canonicalize(canonical)
+        .ok()
+        .and_then(|path| identity::normalize_path(&path.to_string_lossy()))
+}

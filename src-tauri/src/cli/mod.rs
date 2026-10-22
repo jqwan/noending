@@ -1,15 +1,19 @@
-//! Console entry and app-owned business commands. CLI clients never open SQLite.
+//! Standalone console commands sharing the desktop business modules.
+mod agents;
 mod arguments;
+pub(crate) mod extraction_settings;
 mod installation;
 mod messages;
+mod receipts;
 mod search;
-mod service;
+pub(crate) mod service;
 mod summaries;
 pub(crate) mod transport;
+mod watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-pub use service::{start, Server};
 use std::path::{Path, PathBuf};
+pub use watcher::{watch_changes, ChangeWatcher};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliError {
@@ -53,6 +57,7 @@ impl From<crate::error::AppError> for CliError {
             }
             AppError::Context(crate::domain::ContextUpdateError::Storage(_)) => "storage_error",
             AppError::Db(_) => "database_error",
+            AppError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => "cancelled",
             AppError::Io(_) => "io_error",
             AppError::Json(_) => "invalid_json",
             AppError::Other(_) => "operation_rejected",
@@ -62,7 +67,14 @@ impl From<crate::error::AppError> for CliError {
 }
 impl From<std::io::Error> for CliError {
     fn from(e: std::io::Error) -> Self {
-        Self::new("io_error", e)
+        Self::new(
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                "cancelled"
+            } else {
+                "io_error"
+            },
+            e,
+        )
     }
 }
 impl From<serde_json::Error> for CliError {
@@ -81,54 +93,70 @@ pub(crate) fn envelope(result: CliResult<Value>) -> Value {
         Err(error) => json!({"schema_version":1,"ok":false,"error":error}),
     }
 }
-fn discovery_path() -> CliResult<PathBuf> {
+pub(crate) fn resolve_home(
+    explicit: Option<&Path>,
+) -> CliResult<crate::workspace::home::NoEndingHome> {
     use crate::workspace::home::{BootstrapPointer, HomeRequest, NoEndingHome, StartupInputs};
     let inputs = StartupInputs::from_environment();
-    let pointer = inputs
-        .pointer_path
-        .as_ref()
-        .map(|p| BootstrapPointer::load(p).0);
+    let pointer = inputs.pointer_path.as_ref().map(|p| {
+        let (pointer, note) = BootstrapPointer::load(p);
+        if let Some(note) = note {
+            eprintln!("[noending] {note}");
+        }
+        pointer
+    });
+    // CLI follows the current Home; only desktop startup applies a pending relocation.
     let home = NoEndingHome::resolve(&HomeRequest {
-        explicit: inputs.explicit.as_deref(),
+        explicit: explicit.or(inputs.explicit.as_deref()),
         bootstrap: pointer.as_ref().and_then(|p| p.current_home.as_deref()),
         user_home: inputs.user_home.as_deref(),
         style: None,
     })?;
-    Ok(home.runtime_dir.join("cli.json"))
+    home.ensure_dirs()?;
+    Ok(home)
 }
 pub fn run(args: Vec<String>) -> i32 {
-    let result = execute(&args);
+    // A stdio server owns stdout for the lifetime of its connection; never
+    // print the one-shot CLI envelope after it closes, including on errors.
+    let invocation = crate::platform::cancellation::install()
+        .map_err(CliError::from)
+        .and_then(|_| arguments::parse(&args));
+    let result = match invocation {
+        Ok(arguments::Invocation::Mcp { home }) => return crate::mcp::run(home.as_deref()),
+        other => other.and_then(execute_invocation),
+    };
     let code = if result.is_ok() { 0 } else { 1 };
     println!("{}", envelope(result));
     code
 }
+#[cfg(test)]
 pub(crate) fn execute(args: &[String]) -> CliResult<Value> {
-    arguments::parse(args).and_then(|invocation| match invocation {
+    arguments::parse(args).and_then(execute_invocation)
+}
+fn execute_invocation(invocation: arguments::Invocation) -> CliResult<Value> {
+    match invocation {
         arguments::Invocation::Help(value) => Ok(value),
+        arguments::Invocation::Mcp { .. } => Err(CliError::new(
+            "invalid_arguments",
+            "MCP 必须通过独立进程运行",
+        )),
         arguments::Invocation::Install { directory, action } => {
             installation::run(&directory, &action)
         }
         arguments::Invocation::Request {
+            home,
             connection,
             command,
-            wait,
             request_id,
         } => {
-            let connection = connection.map(Ok).unwrap_or_else(discovery_path)?;
-            let result = transport::request(&connection, command).map_err(|mut error| {
-                if let Some(id) = &request_id {
-                    error.details.get_or_insert_with(|| json!({}))["request_id"] = json!(id);
+            let result = (|| {
+                if let Some(connection) = connection {
+                    return transport::request(&connection, command);
                 }
-                error
-            })?;
-            let result = if let Some(timeout) = wait {
-                let id = result["job_id"]
-                    .as_str()
-                    .ok_or_else(|| CliError::new("invalid_response", "缺少作业 ID"))?;
-                wait_job(&connection, id, timeout)
-            } else {
-                Ok(result)
-            };
+                let home = resolve_home(home.as_deref())?;
+                let service = service::Service::open(home)?;
+                service.dispatch(serde_json::from_value(command)?)
+            })();
             result
                 .map(|mut value| {
                     if let Some(id) = &request_id {
@@ -143,36 +171,6 @@ pub(crate) fn execute(args: &[String]) -> CliResult<Value> {
                     error
                 })
         }
-    })
-}
-fn wait_job(connection: &Path, id: &str, timeout: std::time::Duration) -> CliResult<Value> {
-    let started = std::time::Instant::now();
-    loop {
-        let job = transport::request(connection, json!({"action":"job","id":id})).map_err(
-            |mut error| {
-                error.details.get_or_insert_with(|| json!({}))["job_id"] = json!(id);
-                error
-            },
-        )?;
-        match job["status"].as_str() {
-            Some("completed") => return Ok(job),
-            Some("failed") => {
-                let mut error: CliError = serde_json::from_value(job["error"].clone())?;
-                error.details = Some(job);
-                return Err(error);
-            }
-            Some("running") => {}
-            _ => return Err(CliError::new("invalid_response", "作业状态无效")),
-        }
-        if started.elapsed() >= timeout {
-            let mut error =
-                CliError::new("wait_timeout", "等待超时，作业仍可通过 job show/wait 查询");
-            error.details = Some(job);
-            return Err(error);
-        }
-        std::thread::sleep(
-            std::time::Duration::from_millis(200).min(timeout.saturating_sub(started.elapsed())),
-        );
     }
 }
 pub fn run_if_requested() -> Option<i32> {
@@ -225,11 +223,11 @@ pub(crate) fn shell_quote(path: &Path) -> String {
 #[cfg(test)]
 mod tests;
 
-/// Managed private entry tied to this running Home, without changing PATH.
+/// Managed private entry tied to this Home, without changing PATH.
 pub fn install_workspace_entry(
     directory: &std::path::Path,
-    connection: &std::path::Path,
+    home: &std::path::Path,
     exe: &std::path::Path,
 ) -> CliResult<serde_json::Value> {
-    installation::run_connected(directory, "update", Some(connection), Some(exe))
+    installation::run_for_home(directory, "update", Some(home), Some(exe))
 }

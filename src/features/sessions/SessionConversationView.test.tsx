@@ -98,9 +98,6 @@ function message(
     content,
     ts: null,
     turn_final: true,
-    source_message_id: null,
-    source_generation: 0,
-    source_position: "",
     source_identity_hash: "",
     ...over,
   };

@@ -1,4 +1,4 @@
-//! The v1 Context + ingest-state repository.
+//! Current summaries and conversation ingestion state.
 //!
 //! Two shapes of state, deliberately kept apart:
 //!

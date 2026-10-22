@@ -131,6 +131,20 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
 
 // ---------------- Explicit Context update ----------------
 
+#[tauri::command]
+pub fn set_summary_title_lock(
+    state: State<AppState>,
+    kind: String,
+    id: String,
+    revision: i64,
+    item_number: usize,
+    locked: bool,
+) -> Result<crate::context::SummaryLockResult> {
+    with_db(&state, |db| {
+        crate::context::set_summary_title_lock(db, &kind, &id, revision, item_number, locked)
+    })
+}
+
 /// Read the Session's summary + pending state. A pure read: no ingestion, no AI.
 #[tauri::command]
 pub fn get_session_context(
@@ -253,40 +267,6 @@ pub async fn regenerate_project_context(
         crate::context::regenerate_project(&db, &project_id, home.as_ref())
     })
     .await?
-}
-
-#[tauri::command]
-pub fn list_preferences(
-    state: State<AppState>,
-    project_id: Option<String>,
-) -> Result<Vec<crate::storage::preferences::Preference>> {
-    with_db(&state, |db| {
-        crate::storage::preferences::list_items(db, project_id.as_deref())
-    })
-}
-#[tauri::command]
-pub fn save_preference(
-    state: State<AppState>,
-    id: Option<String>,
-    project_id: Option<String>,
-    content: String,
-    locked: bool,
-) -> Result<crate::storage::preferences::Preference> {
-    with_db(&state, |db| {
-        crate::storage::preferences::save_item(
-            db,
-            id.as_deref(),
-            project_id.as_deref(),
-            &content,
-            locked,
-        )
-    })
-}
-#[tauri::command]
-pub fn delete_preference(state: State<AppState>, id: String) -> Result<()> {
-    with_db(&state, |db| {
-        crate::storage::preferences::delete_item(db, &id)
-    })
 }
 
 /// Summary templates and previews are pure reads; previews never invoke an Agent.
@@ -896,11 +876,22 @@ pub async fn match_objects(
 
 #[tauri::command]
 pub async fn lookup_navigation(
+    app: AppHandle,
     state: State<'_, AppState>,
     query: String,
 ) -> Result<crate::search::navigation::NavigationResults> {
     let db = state.db.clone();
-    run_on_blocking_worker(move || crate::search::navigation::lookup(&db, &query)).await?
+    let managed_root = noending_home(&app).map(|h| h.root.join("skills"));
+    run_on_blocking_worker(move || {
+        let roots = crate::skills::Roots::current().ok();
+        crate::search::navigation::lookup_with_context(
+            &db,
+            &query,
+            roots.as_ref(),
+            managed_root.as_deref(),
+        )
+    })
+    .await?
 }
 
 /// Presence-aware surface label for Settings: what this Agent's Continue can
@@ -1159,14 +1150,4 @@ mod agent_runtime_refresh_seam_tests {
             assert!(err.to_string().contains("http"), "{bad}: {err}");
         }
     }
-}
-
-#[tauri::command]
-pub fn promote_preference(
-    state: State<AppState>,
-    id: String,
-) -> Result<crate::storage::preferences::Preference> {
-    with_db(&state, |db| {
-        crate::storage::preferences::promote_item(db, &id)
-    })
 }

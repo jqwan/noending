@@ -5,7 +5,6 @@ import { api } from "../../api";
 import PageHeader from "../../layout/PageHeader";
 import { submitsOnEnter, timeAgo, useRefreshSignal, Modal, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError, PathText } from "../workstreams/WorkspacePaths";
-import PreferenceList from "../preferences/PreferenceList";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
@@ -204,7 +203,6 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       <div className="detail-layout project-detail-layout">
         <div className="detail-main project-detail-main">
           <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
-          <PreferenceList key={`preferences-${projectId}`} projectId={projectId} />
 
           <section className="card detail-section project-sessions-section">
             <div className="row between" style={{ alignItems: "center" }}>

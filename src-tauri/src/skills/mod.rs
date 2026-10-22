@@ -11,7 +11,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub use inventory::{detail, detail_in_catalog, list, list_catalog, merge_inventories};
+pub use inventory::{
+    catalog, detail, detail_in_catalog, invalidate_catalog, list, list_catalog, merge_inventories,
+};
 pub use operations::{
     adopt_source, detail_project, detail_registered, disable_skill, disable_skill_all,
     disable_skill_project, discover_library_sources, enable_skill, enable_skill_all,

@@ -105,62 +105,43 @@ impl Bridge<'_> {
     }
 
     fn validate(&self, reply: &Value) -> Result<()> {
-        let dir_name = self.files.dir.file_name().unwrap().to_string_lossy();
-        let (kind, id) = dir_name
+        let (kind, id) = self
+            .files
+            .target
             .split_once('-')
             .ok_or_else(|| other("提取目标无效"))?;
         let raw = serde_json::to_string(reply)?;
         let mut excluded = HashSet::new();
         let mut skipped = HashSet::new();
         let mut failed = false;
-        let (target_skipped, preference_failed) = if kind == "session" {
+        let target_skipped = if kind == "session" {
             match summary::parse_session_reply(&raw)? {
-                SessionReply::Completed { preferences } => (
-                    false,
-                    matches!(
-                        preferences,
-                        super::preferences::PreferenceReply::Failed { .. }
-                    ),
-                ),
-                SessionReply::Skipped { preferences, .. } => {
+                SessionReply::Completed {} => false,
+                SessionReply::Skipped { .. } => {
                     skipped.insert(id.to_string());
-                    (
-                        true,
-                        matches!(
-                            preferences,
-                            super::preferences::PreferenceReply::Failed { .. }
-                        ),
-                    )
+                    true
                 }
                 SessionReply::Failed { .. } => {
                     failed = true;
-                    (false, true)
+                    false
                 }
             }
         } else {
-            let (errors, ids, target_skipped, pref) = match summary::parse_batch_reply(&raw)? {
+            let (errors, ids, target_skipped) = match summary::parse_batch_reply(&raw)? {
                 BatchReply::Completed {
                     skipped_session_ids,
-                    preferences,
-                } => (vec![], skipped_session_ids, false, Some(preferences)),
+                } => (vec![], skipped_session_ids, false),
                 BatchReply::Partial {
                     failed_sessions,
                     skipped_session_ids,
-                    preferences,
-                } => (
-                    failed_sessions,
-                    skipped_session_ids,
-                    false,
-                    Some(preferences),
-                ),
+                } => (failed_sessions, skipped_session_ids, false),
                 BatchReply::Skipped {
                     skipped_session_ids,
-                    preferences,
                     ..
-                } => (vec![], skipped_session_ids, true, Some(preferences)),
+                } => (vec![], skipped_session_ids, true),
                 BatchReply::Failed { .. } => {
                     failed = true;
-                    (vec![], vec![], false, None)
+                    (vec![], vec![], false)
                 }
             };
             for item in errors {
@@ -173,12 +154,7 @@ impl Bridge<'_> {
                     return Err(other("跳过会话重复"));
                 }
             }
-            (
-                target_skipped,
-                pref.is_none_or(|p| {
-                    matches!(p, super::preferences::PreferenceReply::Failed { .. })
-                }),
-            )
+            target_skipped
         };
         let inputs = self.files.inputs.lock().unwrap();
         let targets: HashSet<_> = inputs
@@ -214,13 +190,9 @@ impl Bridge<'_> {
             for (name, input) in inputs.iter() {
                 let failed_input = excluded.iter().any(|sid| {
                     name == &format!("session-{sid}.jsonl")
-                        || name == &format!("preferences-session-{sid}.jsonl")
+                        || name == &format!("history-session-{sid}.jsonl")
                 });
-                if failed_input
-                    || (preference_failed
-                        && (name == "preferences.input.json"
-                            || name.starts_with("preferences-session-")))
-                {
+                if failed_input {
                     continue;
                 }
                 if delivered.get(name).map_or(0, HashSet::len) != input.count(&self.db.read())? {

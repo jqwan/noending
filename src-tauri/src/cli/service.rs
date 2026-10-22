@@ -1,24 +1,18 @@
-use super::{transport, CliError, CliResult};
+use super::{CliError, CliResult};
 use crate::{
     context,
-    storage::{self, Db},
+    storage::Db,
     workspace::{home::NoEndingHome, wiring::WorkspaceLayer},
 };
+use rmcp::schemars;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Session,
     Task,
     Project,
@@ -34,7 +28,7 @@ impl Kind {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum Command {
+pub(crate) enum Command {
     ExecuteOnce {
         request_id: String,
         command: Box<Command>,
@@ -43,6 +37,19 @@ pub(super) enum Command {
         id: String,
     },
     Status,
+    Agents,
+    ResolveProject {
+        path: String,
+    },
+    ExtractionSettings,
+    ConfigureExtraction {
+        patch: super::extraction_settings::Patch,
+    },
+    Sources,
+    Sync {
+        source: Option<String>,
+        session: Option<String>,
+    },
     List {
         kind: Kind,
         project: Option<String>,
@@ -100,20 +107,6 @@ pub(super) enum Command {
         id: String,
         regenerate: bool,
     },
-    Preferences {
-        project: Option<String>,
-    },
-    AddPreference {
-        project: Option<String>,
-        content: String,
-    },
-    UpdatePreference {
-        id: String,
-        content: String,
-    },
-    DeletePreference {
-        id: String,
-    },
     CreateTask {
         title: String,
         description: String,
@@ -151,20 +144,15 @@ pub(super) enum Command {
         task: String,
         session: String,
     },
-    Jobs,
-    Job {
-        id: String,
-    },
 }
 impl Command {
-    pub(super) fn is_write(&self) -> bool {
+    pub(crate) fn is_write(&self) -> bool {
         matches!(
             self,
-            Self::EditSummary { .. }
+            Self::ConfigureExtraction { .. }
+                | Self::Sync { .. }
+                | Self::EditSummary { .. }
                 | Self::Extract { .. }
-                | Self::AddPreference { .. }
-                | Self::UpdatePreference { .. }
-                | Self::DeletePreference { .. }
                 | Self::CreateTask { .. }
                 | Self::UpdateTask { .. }
                 | Self::Archive { .. }
@@ -188,88 +176,25 @@ fn existing_directory(path: &str) -> CliResult<&str> {
     Ok(raw)
 }
 
-struct Receipt {
-    command_hash: [u8; 32],
-    result: Option<CliResult<Value>>,
-    size: usize,
-}
-pub struct Server {
-    stop: Arc<AtomicBool>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
-    connection: transport::Connection,
-    discovery: PathBuf,
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-impl Server {
-    pub fn shutdown(&self) {
-        self.stop.store(true, Ordering::Release);
-        self.connection.deactivate();
-        if let Some(worker) = self.worker.lock().unwrap().take() {
-            let _ = worker.join();
-        }
-        if std::fs::read_to_string(&self.discovery)
-            .ok()
-            .and_then(|s| serde_json::from_str::<transport::Connection>(&s).ok())
-            .is_some_and(|c| c.token == self.connection.token)
-        {
-            let _ = std::fs::remove_file(&self.discovery);
-        }
-        let _ = std::fs::remove_dir_all(&self.connection.directory);
-    }
-}
-pub(super) struct Service {
+pub(crate) struct Service {
     pub db: Arc<Db>,
     pub home: NoEndingHome,
     pub layer: Arc<WorkspaceLayer>,
-    jobs: Mutex<BTreeMap<String, Value>>,
-    receipts: Mutex<BTreeMap<String, Receipt>>,
-    changed: Arc<dyn Fn() + Send + Sync>,
-}
-pub fn start(
-    db: Arc<Db>,
-    home: NoEndingHome,
-    layer: Arc<WorkspaceLayer>,
-    changed: impl Fn() + Send + Sync + 'static,
-) -> CliResult<Server> {
-    let discovery = home.runtime_dir.join("cli.json");
-    let directory = home.runtime_dir.join("cli").join(storage::new_id());
-    let connection = transport::Connection::create(directory)?;
-    connection.publish(&discovery)?;
-    let service = Arc::new(Service {
-        db,
-        home,
-        layer,
-        jobs: Mutex::default(),
-        receipts: Mutex::default(),
-        changed: Arc::new(changed),
-    });
-    let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = stop.clone();
-    let worker_connection = connection.clone();
-    let worker = std::thread::spawn(move || {
-        while !worker_stop.load(Ordering::Acquire) {
-            transport::serve_pending(&worker_connection, |value| {
-                let command = serde_json::from_value(value)
-                    .map_err(|e| CliError::new("invalid_command", e))?;
-                service.dispatch(command)
-            });
-            // This listener is idle for most of the app's lifetime. Extraction
-            // has its own faster, short-lived listener for repeated Agent reads.
-            std::thread::park_timeout(std::time::Duration::from_millis(100));
-        }
-    });
-    Ok(Server {
-        stop,
-        worker: Mutex::new(Some(worker)),
-        connection,
-        discovery,
-    })
+    _access: crate::workspace::home::HomeAccess,
 }
 impl Service {
+    pub(crate) fn open(home: NoEndingHome) -> CliResult<Arc<Self>> {
+        let access = home.acquire_access()?;
+        let db = Arc::new(Db::open(&home.db_path)?);
+        let layer = Arc::new(WorkspaceLayer::new(&home));
+        Ok(Arc::new(Self {
+            db,
+            home,
+            layer,
+            _access: access,
+        }))
+    }
+
     fn require(&self, kind: Kind, id: &str) -> CliResult<()> {
         let exists = match kind {
             Kind::Session => self.db.get_session(id)?.is_some(),
@@ -285,24 +210,56 @@ impl Service {
             ))
         }
     }
-    pub(super) fn dispatch(self: &Arc<Self>, command: Command) -> CliResult<Value> {
+    pub(crate) fn dispatch(self: &Arc<Self>, command: Command) -> CliResult<Value> {
         match command {
             Command::ExecuteOnce {
                 request_id,
                 command,
             } => self.execute_once(&request_id, *command),
-            Command::Receipt { id } => {
-                let receipts = self.receipts.lock().unwrap();
-                let receipt = receipts.get(&id).ok_or_else(|| {
-                    CliError::new("not_found", "请求不存在（请求记录仅在本次应用运行中保留）")
-                })?;
-                Ok(
-                    json!({"request_id":id,"status":if receipt.result.is_some(){"completed"}else{"running"},"response":receipt.result.clone().map(super::envelope)}),
-                )
-            }
+            Command::Receipt { id } => super::receipts::show(&self.home, &id),
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","preference","summary","job","request"],"running_jobs":self.jobs.lock().unwrap().values().filter(|j|j["status"]=="running").count()}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","sync","source","agent","request"]}),
             ),
+            Command::Agents => Ok(super::agents::list()),
+            Command::ExtractionSettings => Ok(serde_json::to_value(
+                crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
+            )?),
+            Command::ConfigureExtraction { patch } => Ok(serde_json::to_value(
+                super::extraction_settings::update(&self.db, patch)?,
+            )?),
+            Command::ResolveProject { path } => {
+                existing_directory(&path)?;
+                let projection = self.layer.projection();
+                Ok(serde_json::to_value(
+                    crate::workspace::probe::resolve_project(
+                        &self.db,
+                        projection.observer(),
+                        projection.policy(),
+                        &path,
+                    )?,
+                )?)
+            }
+            Command::Sources => Ok(json!({"items":self.db.list_ingest_sources()?})),
+            Command::Sync { source, session } => {
+                if source.is_some() && session.is_some() {
+                    return Err(CliError::new(
+                        "invalid_arguments",
+                        "source 与 session 不能同时指定",
+                    ));
+                }
+                self.sync(source.as_deref(), session.as_deref())
+                    .map_err(|error| {
+                        if crate::platform::cancellation::requested() {
+                            CliError {
+                                code: "cancelled".into(),
+                                message: "同步已取消，已提交的会话数据保留".into(),
+                                details: error.details,
+                            }
+                        } else {
+                            error
+                        }
+                    })
+            }
             Command::List {
                 kind,
                 project,
@@ -448,7 +405,6 @@ impl Service {
                 self.require(kind, &id)?;
                 let revision =
                     context::edit_summary(&self.db, kind.name(), &id, revision, &content)?;
-                (self.changed)();
                 Ok(json!({"kind":kind,"id":id,"revision":revision}))
             }
             Command::Extract {
@@ -457,79 +413,8 @@ impl Service {
                 regenerate,
             } => {
                 self.require(kind, &id)?;
-                let job = storage::new_id();
-                {
-                    let mut jobs = self.jobs.lock().unwrap();
-                    if jobs.values().any(|j| {
-                        j["kind"] == kind.name() && j["target_id"] == id && j["status"] == "running"
-                    }) {
-                        return Err(CliError::new("busy", "此目标正在提取"));
-                    }
-                    // Keep at most 100 completed jobs, never evict a running job.
-                    if jobs.len() >= 100 {
-                        if let Some(old) = jobs
-                            .iter()
-                            .filter(|(_, v)| v["status"] != "running")
-                            .min_by_key(|(_, v)| v["finished_at"].as_str().unwrap_or(""))
-                            .map(|(k, _)| k.clone())
-                        {
-                            jobs.remove(&old);
-                        } else {
-                            return Err(CliError::new("busy", "当前提取作业过多"));
-                        }
-                    }
-                    jobs.insert(job.clone(),json!({"job_id":job,"kind":kind,"target_id":id,"regenerate":regenerate,"status":"running","started_at":storage::now()}));
-                }
-                let service = self.clone();
-                let worker_job = job.clone();
-                std::thread::spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        service.extract(kind, &id, regenerate)
-                    }))
-                    .unwrap_or_else(|_| Err(CliError::new("internal_error", "摘要提取异常终止")));
-                    let mut jobs = service.jobs.lock().unwrap();
-                    if let Some(job) = jobs.get_mut(&worker_job) {
-                        job["finished_at"] = json!(storage::now());
-                        match result {
-                            Ok(value) => {
-                                job["status"] = json!("completed");
-                                job["result"] = value;
-                            }
-                            Err(error) => {
-                                job["status"] = json!("failed");
-                                job["error"] = json!(error);
-                            }
-                        }
-                    }
-                    drop(jobs);
-                    (service.changed)();
-                });
-                Ok(json!({"job_id":job,"status":"running"}))
+                self.extract(kind, &id, regenerate)
             }
-            Command::Preferences { project } => {
-                if let Some(id) = &project {
-                    self.require(Kind::Project, id)?;
-                }
-                Ok(json!({"items":storage::preferences::list_items(&self.db,project.as_deref())?}))
-            }
-            Command::AddPreference { project, content } => {
-                if let Some(id) = &project {
-                    self.require(Kind::Project, id)?;
-                }
-                let value = storage::preferences::save_item(
-                    &self.db,
-                    None,
-                    project.as_deref(),
-                    &content,
-                    false,
-                )?;
-                (self.changed)();
-                Ok(json!(value))
-            }
-            Command::UpdatePreference { id, content } => {
-                self.change_preference(&id, Some(&content))
-            }
-            Command::DeletePreference { id } => self.change_preference(&id, None),
             Command::CreateTask {
                 title,
                 description,
@@ -541,7 +426,6 @@ impl Service {
                     &description,
                     &projects,
                 )?;
-                (self.changed)();
                 Ok(json!({"task":task}))
             }
             Command::UpdateTask {
@@ -549,6 +433,12 @@ impl Service {
                 title,
                 description,
             } => {
+                if title.is_none() && description.is_none() {
+                    return Err(CliError::new(
+                        "invalid_arguments",
+                        "需要提供 title 或 description",
+                    ));
+                }
                 self.require(Kind::Task, &id)?;
                 let task = crate::workspace::workstream::update_workstream_fields(
                     &self.db,
@@ -556,7 +446,6 @@ impl Service {
                     title.as_deref(),
                     description.as_deref(),
                 )?;
-                (self.changed)();
                 Ok(json!({"task":task}))
             }
             Command::Archive { kind, id, archived } => {
@@ -582,19 +471,16 @@ impl Service {
                         json!({"project":crate::workspace::project::set_project_archived(&self.db, &id, archived)?})
                     }
                 };
-                (self.changed)();
                 Ok(value)
             }
             Command::RenameProject { id, name } => {
                 self.require(Kind::Project, &id)?;
                 let project = crate::workspace::project::rename_project(&self.db, &id, &name)?;
-                (self.changed)();
                 Ok(json!({"project":project}))
             }
             Command::RegisterPath { path } => {
                 let path = self.register_path(&path)?;
                 let project = self.db.get_project(&path.project_id)?;
-                (self.changed)();
                 Ok(json!({"path":path,"project":project}))
             }
             Command::TaskProjects { id } => {
@@ -605,7 +491,6 @@ impl Service {
             }
             Command::SetTaskProjects { id, projects } => {
                 crate::workspace::workstream::set_workstream_projects(&self.db, &id, &projects)?;
-                (self.changed)();
                 Ok(
                     json!({"items":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?}),
                 )
@@ -616,22 +501,14 @@ impl Service {
                 let session = crate::workspace::session::set_session_tracking(
                     &self.db, &session, &task, true,
                 )?;
-                (self.changed)();
                 Ok(session_value(&session))
             }
             Command::Detach { task, session } => {
                 self.require(Kind::Task, &task)?;
                 self.require(Kind::Session, &session)?;
                 crate::workspace::session::set_session_tracking(&self.db, &session, &task, false)?;
-                (self.changed)();
                 Ok(json!({"session_id":session,"task_id":task,"tracked":false}))
             }
-            Command::Jobs => {
-                Ok(json!({"items":self.jobs.lock().unwrap().values().cloned().collect::<Vec<_>>()}))
-            }
-            Command::Job { id } => self.jobs.lock().unwrap().get(&id).cloned().ok_or_else(|| {
-                CliError::new("not_found", "作业不存在（作业记录仅在本次应用运行中保留）")
-            }),
         }
     }
     fn register_path(&self, path: &str) -> CliResult<crate::domain::WorkspacePath> {
@@ -645,67 +522,37 @@ impl Service {
         .path)
     }
     fn execute_once(self: &Arc<Self>, id: &str, command: Command) -> CliResult<Value> {
-        if !command.is_write()
-            || id.is_empty()
-            || id.len() > 128
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(CliError::new(
-                "invalid_arguments",
-                "请求编号需为 1～128 个字母、数字、短横线或下划线，且只支持写操作",
-            ));
+        if !command.is_write() {
+            return Err(CliError::new("invalid_arguments", "请求编号只支持写操作"));
         }
-        use sha2::{Digest, Sha256};
-        let payload: [u8; 32] = Sha256::digest(serde_json::to_vec(&command)?).into();
-        {
-            let mut receipts = self.receipts.lock().unwrap();
-            if let Some(receipt) = receipts.get(id) {
-                if receipt.command_hash != payload {
-                    return Err(CliError::new(
-                        "request_conflict",
-                        "此请求编号已用于其他操作",
-                    ));
-                }
-                return receipt.result.clone().unwrap_or_else(|| {
-                    Err(CliError::new(
-                        "request_running",
-                        "请求仍在执行，请查询 request show",
-                    ))
-                });
-            }
-            // Never evict a receipt and risk executing a reused ID twice.
-            if receipts.len() >= 1000
-                || receipts.values().map(|r| r.size).sum::<usize>() >= 64 * 1024 * 1024
-            {
-                return Err(CliError::new(
-                    "request_limit",
-                    "本次运行的写请求记录已满，请重启应用后继续",
-                ));
-            }
-            receipts.insert(
-                id.into(),
-                Receipt {
-                    command_hash: payload,
-                    result: None,
-                    size: 0,
-                },
-            );
+        let payload = serde_json::to_vec(&command)?;
+        super::receipts::execute(&self.home, id, &payload, || self.dispatch(command))
+    }
+    fn sync(&self, source: Option<&str>, session: Option<&str>) -> CliResult<Value> {
+        // Production CLI owns one Home per process, like the desktop startup.
+        let _ = crate::workspace::session::register_workspace_attacher(self.layer.clone());
+        if let Some(id) = session {
+            self.require(Kind::Session, id)?;
+            let messages = crate::ingestion::refresh_session(&self.db, id)?;
+            return Ok(json!({"discovered":0,"messages":messages,"failures":[]}));
         }
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(command)))
-                .unwrap_or_else(|_| {
-                    Err(CliError::new(
-                        "internal_error",
-                        "操作异常终止，请查询业务状态",
-                    ))
-                });
-        let mut receipts = self.receipts.lock().unwrap();
-        let receipt = receipts.get_mut(id).unwrap();
-        receipt.size = serde_json::to_vec(&super::envelope(result.clone()))?.len();
-        receipt.result = Some(result.clone());
-        result
+        if let Some(id) = source {
+            let source = self
+                .db
+                .get_ingest_source(id)?
+                .ok_or_else(|| CliError::new("not_found", "同步来源不存在"))?;
+            let (discovered, messages) =
+                crate::ingestion::reconcile_source(&self.db, &source, &|_| {})?;
+            return Ok(json!({"discovered":discovered,"messages":messages,"failures":[]}));
+        }
+        let report = crate::ingestion::reconcile_all_report(&self.db, &|_| {})?;
+        let value = json!({"discovered":report.discovered,"messages":report.messages,"failures":report.failures});
+        if !report.failures.is_empty() {
+            let mut error = CliError::new("sync_partial_failure", "部分会话来源同步失败");
+            error.details = Some(value);
+            return Err(error);
+        }
+        Ok(value)
     }
     fn summary(&self, kind: Kind, id: &str) -> CliResult<Value> {
         self.require(kind, id)?;
@@ -747,25 +594,6 @@ impl Service {
                 json!(context::regenerate_project(&self.db, id, Some(&self.home))?)
             }
         })
-    }
-    fn change_preference(&self, id: &str, content: Option<&str>) -> CliResult<Value> {
-        let mut conn = self.db.write();
-        let tx = conn.transaction()?;
-        let current = storage::preferences::get(&tx, id)?
-            .ok_or_else(|| CliError::new("not_found", "偏好不存在"))?;
-        if current.locked {
-            return Err(CliError::new("locked", "偏好已锁定，请在界面解锁后编辑"));
-        }
-        let result = if let Some(content) = content {
-            json!(storage::preferences::update(&tx, id, content, false)?)
-        } else {
-            tx.execute("DELETE FROM preferences WHERE id=?1", [id])?;
-            json!({"deleted":id})
-        };
-        tx.commit()?;
-        drop(conn);
-        (self.changed)();
-        Ok(result)
     }
     fn list(
         &self,

@@ -678,9 +678,6 @@ fn parsed_jsonl_message(
     if message.content.trim().is_empty() {
         return None;
     }
-    if message.source_position.is_empty() {
-        message.source_position = format!("line:{}", index + 1);
-    }
     if message.ts.is_none() {
         message.ts = match value.get("timestamp") {
             Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -1159,7 +1156,6 @@ pub fn parsed_message(
 ) -> ParsedSessionMessage {
     ParsedSessionMessage {
         source_message_id,
-        source_position: String::new(),
         ts: None,
         role,
         content,
@@ -1236,7 +1232,7 @@ mod jsonl_integrity_tests {
     }
 
     #[test]
-    fn streaming_append_keeps_byte_hashes_line_positions_and_retries_a_partial_tail() {
+    fn streaming_append_keeps_byte_hashes_and_retries_a_partial_tail() {
         use std::cell::Cell;
         let line = |text: &str| serde_json::json!({"text":text}).to_string() + "\n";
         // A Unicode prefix larger than the streaming chunk, with a blank line.
@@ -1268,12 +1264,12 @@ mod jsonl_integrity_tests {
         calls.set(0);
         let partial = read_jsonl_delta(&path, &cursor, &parse).unwrap();
         assert!(!partial.complete_snapshot);
+        assert_eq!(partial.messages[0].content, "new turn");
         assert_eq!(
             calls.get(),
             1,
             "the old prefix is validated without parsing old JSON"
         );
-        assert_eq!(partial.messages[0].source_position, "line:3");
         let source = partial.source.unwrap();
         assert_eq!(source.byte_offset, next.len() as u64);
         assert_eq!(source.prefix_hash, sha256_hex(next.as_bytes()));
@@ -1283,7 +1279,6 @@ mod jsonl_integrity_tests {
         assert!(repaired.complete_snapshot);
         assert_eq!(calls.get(), 1);
         assert_eq!(repaired.messages[0].content, "repaired tail");
-        assert_eq!(repaired.messages[0].source_position, "line:4");
         assert_eq!(
             repaired.source.unwrap().prefix_hash,
             sha256_hex((next + &line("repaired tail")).as_bytes())
@@ -1326,8 +1321,6 @@ mod context_extraction_command_tests {
             agent,
             executable_path: "/usr/bin/agent-cli".into(),
             version: None,
-            source: "test".into(),
-            last_verified_at: "test".into(),
         };
         let cwd = Path::new("/custom/noending/runtime/context-extraction");
         let prompt = "do not persist this prompt";

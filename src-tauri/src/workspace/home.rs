@@ -216,6 +216,20 @@ impl NoEndingHome {
         ))
     }
 
+    pub(crate) fn access_lock_path(&self) -> Result<PathBuf> {
+        let directory = self.root.join(".access");
+        std::fs::create_dir_all(&directory)?;
+        Ok(directory.join("lock"))
+    }
+
+    /// Held by desktop and standalone CLI while they access this Home. The
+    /// lock lives outside movable directories so Windows can move them later.
+    pub(crate) fn acquire_access(&self) -> Result<HomeAccess> {
+        Ok(HomeAccess {
+            _file: crate::platform::file_lock::shared(&self.access_lock_path()?)?,
+        })
+    }
+
     /// Create `<root>`, `data/`, `runtime/`, `logs/` and `workspace/`.
     ///
     /// `workspace/` is not optional: it is handed to Agents as a
@@ -249,6 +263,10 @@ impl NoEndingHome {
     pub fn db_path_str(&self) -> String {
         self.db_path.to_string_lossy().to_string()
     }
+}
+
+pub(crate) struct HomeAccess {
+    _file: std::fs::File,
 }
 
 /// Result of [`NoEndingHome::resolve_reported`].
@@ -294,7 +312,7 @@ pub fn resolve_explicit_override() -> Option<PathBuf> {
 /// * the Home **root** is reserved by *equality* only — its non-reserved
 ///   children (`workspace/`) are ordinary paths, so treating the root as a
 ///   container would reserve the whole Home and contradict that;
-/// * `data/`, `runtime/`, `logs/` are reserved by *containment*, segment-wise via
+/// * `data/`, `runtime/`, `logs/`, `.access/` are reserved by *containment*, segment-wise via
 ///   [`identity::is_within`], so `~/.noending/datax` is an ordinary directory
 ///   and `~/.noending/data/noending.db` is not.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -311,6 +329,7 @@ impl ReservedPaths {
                 home.data_dir.to_string_lossy().to_string(),
                 home.runtime_dir.to_string_lossy().to_string(),
                 home.logs_dir.to_string_lossy().to_string(),
+                home.root.join(".access").to_string_lossy().to_string(),
             ],
         }
     }
@@ -603,6 +622,23 @@ pub fn migrate_data_root(migration: &PendingMigration) -> Result<MigrationReport
     }
 
     std::fs::create_dir_all(&to_home.root)?;
+    let _source_access = if from_home.root.is_dir() {
+        Some(
+            crate::platform::file_lock::exclusive(&from_home.access_lock_path()?).map_err(|e| {
+                other(format!(
+                    "当前数据目录仍被桌面应用或 CLI 使用，迁移未执行：{e}"
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
+    let _target_access = crate::platform::file_lock::exclusive(&to_home.access_lock_path()?)
+        .map_err(|e| {
+            other(format!(
+                "目标数据目录仍被桌面应用或 CLI 使用，迁移未执行：{e}"
+            ))
+        })?;
     for dir in MIGRATABLE_DIRS {
         let (outcome, note) = relocate_dir(&from_home.root, &to_home.root, dir)?;
         report.dirs.push((dir.to_string(), outcome));
@@ -1007,6 +1043,8 @@ mod tests {
         assert!(reserved.contains("/Users/me/.noending/data/noending.db"));
         assert!(reserved.contains("/Users/me/.noending/runtime/context-bundles"));
         assert!(reserved.contains("/Users/me/.noending/logs"));
+        assert!(reserved.contains("/Users/me/.noending/.access/lock"));
+        assert!(!reserved.contains("/Users/me/.noending/.access-other"));
         assert!(
             !reserved.contains("/Users/me/.noending/workspace"),
             "the default workspace is an ordinary path"

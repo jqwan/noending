@@ -9,7 +9,7 @@
 
 use noending::domain::{GitDetection, GitWorktreeKind, WorkspaceObservation};
 use noending::storage::workspace::insert_workspace_path_conn;
-use noending::storage::{new_id, now, Db};
+use noending::storage::{new_id, Db};
 use noending::workspace::home::NoEndingHome;
 use noending::workspace::project::{
     ensure_workspace_path, registry_is_consistent, UnrestrictedWorkspace,
@@ -93,10 +93,9 @@ fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     db.write()
         .execute(
             "INSERT INTO workspace_paths
-               (id, canonical_path, project_id, git_state, git_kind, exists_on_disk,
-                first_seen_at, last_seen_at)
-             VALUES ('path-not-derived-from-this-path', ?1, 'p1', 'none', NULL, 1, ?2, ?2)",
-            rusqlite::params![canon("/identity-integrity/other"), now()],
+               (id, canonical_path, project_id, git_state, git_kind, exists_on_disk)
+             VALUES ('path-not-derived-from-this-path', ?1, 'p1', 'none', NULL, 1)",
+            rusqlite::params![canon("/identity-integrity/other")],
         )
         .unwrap();
     let err = registry_is_consistent(&db).expect_err("a lying id must be reported");

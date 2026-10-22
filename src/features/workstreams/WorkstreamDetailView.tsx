@@ -50,7 +50,6 @@ export default function WorkstreamDetailView({
   const summaryExpansion = useSummaryExpansion(ctxState?.summary);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
   const [ctxUpdating, setCtxUpdating] = useState<"update" | "regenerate" | false>(false);
-  const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -72,7 +71,6 @@ export default function WorkstreamDetailView({
     }
     setLoadError("");
     setCtxUpdateError(null);
-    setPreferenceError(null);
     setFailedSessions([]);
     setCtxUpdating(false);
     setEditing(false);
@@ -135,13 +133,11 @@ export default function WorkstreamDetailView({
     if (ctxUpdating) return;
     setCtxUpdating(regenerate ? "regenerate" : "update");
     setCtxUpdateError(null);
-    setPreferenceError(null);
     setFailedSessions([]);
     try {
       const out = await (regenerate ? api.regenerateWorkstreamContext(workstreamId) : api.updateWorkstreamContext(workstreamId));
       if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setFailedSessions(out.failed_sessions);
-      setPreferenceError(out.preference_error);
       showToast(
         out.status === "no_change"
           ? "摘要无变化"
@@ -391,9 +387,19 @@ export default function WorkstreamDetailView({
               </div>
             </div>
             {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
-            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}>{ctxState.summary}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
+            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
+              target={{kind:"task",id:workstreamId,revision:ctxState.context_revision}}
+              onChange={result => {
+                if (currentWorkstreamId.current !== workstreamId) return;
+                setCtxState(previous => {
+                  if (!previous || previous.context_revision > result.revision) return previous;
+                  const next = {...previous,context_revision:result.revision,summary:result.summary};
+                  const cached = workstreamDetailCache.get(workstreamId);
+                  if (cached) workstreamDetailCache.set(workstreamId,{...cached,ctxState:next});
+                  return next;
+                });
+              }}>{ctxState.summary}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
             {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
-            {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
             {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
           </section>
         </div>

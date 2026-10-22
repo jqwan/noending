@@ -82,8 +82,6 @@ export interface WorkspacePath {
   git_state: WorkspaceGitState;
   git_kind: string | null;
   exists: boolean;
-  first_seen_at: string;
-  last_seen_at: string;
 }
 
 export interface AddProjectPathResult {
@@ -191,7 +189,7 @@ export interface WorkstreamCardData {
 
 /** Global lookup opens existing objects; it never returns message/summary content. */
 export interface NavigationItem {
-  kind: "project" | "workstream" | "session" | "agent";
+  kind: "project" | "workstream" | "session" | "agent" | "skill";
   ref_id: string;
   title: string;
   hint: string;
@@ -266,9 +264,6 @@ export interface SessionMessage {
   ts: string | null;
   /** 仅 Assistant 有意义：是否该轮的最终回复（下一条投影消息不再是 Agent 回复）。 */
   turn_final: boolean;
-  source_message_id: string | null;
-  source_generation: number;
-  source_position: string;
   source_identity_hash: string;
 }
 
@@ -300,7 +295,6 @@ export interface IngestSource {
   agent: Agent;
   path: string;
   origin: "default" | "user";
-  created_at: string;
   exists: boolean;
 }
 
@@ -319,10 +313,16 @@ export interface SummaryItem {
   title: string;
   description: string;
   details: string[];
+  title_locked: boolean;
 }
 
 export interface SummaryDocument {
   items: SummaryItem[];
+}
+
+export interface SummaryLockResult {
+  revision: number;
+  summary: SummaryDocument;
 }
 
 /** Session 的事项摘要（后端 `SessionContextFields`）。 */
@@ -368,7 +368,6 @@ export interface SessionUpdateOutcome {
   session_id: string;
   status: ContextUpdateStatus;
   revision: number;
-  preference_error: string | null;
 }
 
 export interface WorkstreamUpdateOutcome {
@@ -380,7 +379,6 @@ export interface WorkstreamUpdateOutcome {
   failed_sessions: { session_id: string; error: string }[];
   /** 本次调用后仍待更新的 Session 数。 */
   remaining_pending: number;
-  preference_error: string | null;
 }
 
 /** `get_ingestion_status`：最近一次后台摄入任务；两个时间都为空表示已排队。 */
@@ -658,17 +656,9 @@ export interface AgentStatusEntry {
 }
 
 /** Summary requirements are editable; file/response protocols are fixed. */
-export type SummaryPromptKind = "session" | "task" | "project" | "preferences";
+export type SummaryPromptKind = "session" | "task" | "project";
 export type SummaryPromptTemplates = Record<SummaryPromptKind, string>;
 export interface SummaryPromptSettings {
   templates: SummaryPromptTemplates;
   defaults: SummaryPromptTemplates;
-}
-
-/** Current rules; lock restricts Agent writes only. */
-export interface Preference {
-  id: string;
-  project_id: string | null;
-  content: string;
-  locked: boolean;
 }

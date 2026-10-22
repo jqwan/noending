@@ -489,7 +489,6 @@ fn parsed_message(
     payload: &[u8],
 ) -> crate::domain::ParsedSessionMessage {
     crate::adapters::parsed_message(Some(format!("step:{idx}")), role, text)
-        .with_position(format!("step:{idx}"))
         .with_ts(step_timestamp(payload))
 }
 
@@ -793,8 +792,6 @@ mod tests {
             agent: Agent::Antigravity,
             executable_path: "/Users/x/.local/bin/agy".into(),
             version: None,
-            source: "test".into(),
-            last_verified_at: "test".into(),
         };
         let adapter = AntigravityAdapter;
         let opts = ExecOptions {
@@ -1250,7 +1247,6 @@ mod tests {
             agent: Agent::Antigravity,
             path: root.to_string_lossy().into_owned(),
             origin: crate::domain::ingest_origin::USER.into(),
-            created_at: "2026-10-10T00:00:00Z".into(),
         }
     }
 
@@ -1325,8 +1321,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["整理日报", "日报已整理好。"]
         );
-        assert_eq!(messages[1].source_message_id.as_deref(), Some("step:2"));
+        let ids: Vec<_> = messages.iter().map(|message| message.id.clone()).collect();
         assert_eq!(reconcile_store(&db, &root), 0);
+        assert_eq!(
+            db.get_messages(&session.id, None, 10)
+                .unwrap()
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
     }

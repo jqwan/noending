@@ -27,7 +27,7 @@ fn batch_quote_path(path: &Path) -> String {
 
 fn launchers(
     directory: &Path,
-    connection: Option<&Path>,
+    home: Option<&Path>,
     exe: Option<&Path>,
 ) -> CliResult<Vec<(PathBuf, String)>> {
     let exe = exe
@@ -45,8 +45,7 @@ fn launchers(
                     format!(
                         "{MARKER}exec {} --cli{} \"$@\"\n",
                         shell_quote(&exe),
-                        connection
-                            .map(|p| format!(" --connection {}", shell_quote(p)))
+                        home.map(|p| format!(" --home {}", shell_quote(p)))
                             .unwrap_or_default()
                     ),
                 )
@@ -58,8 +57,7 @@ fn launchers(
                     format!(
                         "{MARKER}{} --cli{} %*\r\n",
                         batch_quote_path(&exe),
-                        connection
-                            .map(|p| format!(" --connection {}", batch_quote_path(p)))
+                        home.map(|p| format!(" --home {}", batch_quote_path(p)))
                             .unwrap_or_default()
                     ),
                 )
@@ -69,16 +67,16 @@ fn launchers(
 }
 
 pub(super) fn run(directory: &Path, action: &str) -> CliResult<Value> {
-    run_connected(directory, action, None, None)
+    run_for_home(directory, action, None, None)
 }
 
-pub(super) fn run_connected(
+pub(super) fn run_for_home(
     directory: &Path,
     action: &str,
-    connection: Option<&Path>,
+    home: Option<&Path>,
     exe: Option<&Path>,
 ) -> CliResult<Value> {
-    let launchers = launchers(directory, connection, exe)?;
+    let launchers = launchers(directory, home, exe)?;
     let mut existing = Vec::new();
     let mut statuses = Vec::new();
     for (path, script) in &launchers {

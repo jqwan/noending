@@ -21,7 +21,6 @@ impl Fixture {
             agent,
             path: self.0.to_string_lossy().into_owned(),
             origin: ingest_origin::DEFAULT.into(),
-            created_at: "now".into(),
         }
     }
 }

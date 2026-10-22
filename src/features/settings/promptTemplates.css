@@ -56,14 +56,3 @@
   margin-top: 14px;
   min-height: 32px;
 }
-
-.preference-section { margin: 24px 0; }
-.preference-section .rail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.preference-section h3 { margin: 0; }
-.preference-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
-.preference-row .grow { min-width: 0; flex: 1; }
-.preference-row .badge { margin-left: 8px; }
-.preference-content { white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 600px) {
-  .preference-row { align-items: flex-start; flex-wrap: wrap; }
-}

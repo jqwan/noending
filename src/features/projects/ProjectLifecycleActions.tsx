@@ -24,7 +24,7 @@ export function ProjectDeleteModal({ names, busy, onClose, onConfirm }: {
   return (
     <Modal title="永久删除项目？" onClose={() => { if (!busy) onClose(); }}>
       <p>确定永久删除 {names.length === 1 ? `「${names[0]}」` : `${names.length} 个项目`}？</p>
-      <p className="muted small">项目摘要、偏好和目录登记会被删除，所有任务关联会解除。任务和磁盘目录会保留。此操作无法撤销。</p>
+      <p className="muted small">项目摘要和目录登记会被删除，所有任务关联会解除。任务和磁盘目录会保留。此操作无法撤销。</p>
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <button className="btn" disabled={busy} onClick={onClose}>取消</button>
         <button className="btn danger" disabled={busy} onClick={onConfirm}>{busy ? "删除中…" : "永久删除"}</button>

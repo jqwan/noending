@@ -195,8 +195,6 @@ describe("Projects Board", () => {
         git_state: "detected",
         git_kind: "repo",
         exists: true,
-        first_seen_at: "",
-        last_seen_at: "",
       },
       project_id: "proj-new",
       project_name: "new-project",

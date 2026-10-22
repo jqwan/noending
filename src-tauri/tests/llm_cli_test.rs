@@ -33,12 +33,10 @@ fn real_pi_local_qwen_headless() {
 
 struct AssistantFixture {
     root: std::path::PathBuf,
-    server: Option<noending::cli::Server>,
     db: Option<std::sync::Arc<noending::storage::Db>>,
 }
 impl Drop for AssistantFixture {
     fn drop(&mut self) {
-        drop(self.server.take());
         drop(self.db.take());
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -57,9 +55,8 @@ fn real_codex_assistant_queries_workspace_through_cli() {
     home.ensure_dirs().unwrap();
     let db = std::sync::Arc::new(Db::open(&home.db_path).unwrap());
     let layer = std::sync::Arc::new(WorkspaceLayer::new(&home));
-    let mut fixture = AssistantFixture {
+    let _fixture = AssistantFixture {
         root,
-        server: None,
         db: Some(db.clone()),
     };
     let task_id = new_id();
@@ -73,7 +70,6 @@ fn real_codex_assistant_queries_workspace_through_cli() {
         updated_at: now(),
     })
     .unwrap();
-    fixture.server = Some(cli::start(db.clone(), home.clone(), layer.clone(), || {}).unwrap());
     let workspace = assistant::ensure_workspace(
         &db,
         &home,
@@ -83,7 +79,7 @@ fn real_codex_assistant_queries_workspace_through_cli() {
     .unwrap();
     cli::install_workspace_entry(
         &std::path::Path::new(&workspace.directory).join("bin"),
-        &home.runtime_dir.join("cli.json"),
+        &home.root,
         std::path::Path::new(env!("CARGO_BIN_EXE_ne")),
     )
     .unwrap();

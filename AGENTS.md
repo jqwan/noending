@@ -52,14 +52,28 @@ Key areas:
 * Keep changes small and scoped.
 * Follow the existing module boundaries and reuse existing APIs where practical.
 * Add or extend regression tests for schema or behavior changes using the rules below.
-* No database migrations: `storage/schema.rs` is the only schema source, and a
-  breaking change bumps `DATABASE_FORMAT_VERSION` and rebuilds the local
-  database. Never add an old-format compatibility branch.
+* `storage/schema.rs` is the current schema source. Database versioning and
+  compatibility changes must preserve existing data and include regression
+  tests. Do not use database deletion/rebuilding as an upgrade path or retain
+  disposable one-off migration tools as maintained product code.
+* The database compatibility baseline is version 1. Keep `application_id` stable
+  and increment the schema version for persisted format changes. Add ordered,
+  transactional forward migrations for published versions; desktop, CLI and
+  MCP must use the same storage opening path. Preserve existing domain data,
+  verify upgrade/fresh-schema equivalence and rollback, and refuse unsupported
+  newer databases without modifying them. Keep migration steps immutable.
+* Keep current schema documentation focused on the supported format. Temporary
+  conversion tools, development-format fixtures, obsolete object inventories
+  and historical schema commentary do not belong in maintained source or docs.
 * Consider both macOS and Windows for platform-sensitive code.
 
 For domain-specific behavior, inspect the current code, tests, and relevant documentation before making changes.
 
-Documents under `docs/` may include current design, implementation plans, or historical records. Do not assume every document is an active specification.
+Use `docs/README.md` to find maintained usage guides (`guides/`).
+Temporary plans, investigations and work records
+belong in ignored `.tmp/docs/`, not in committed documentation. Promote only
+reviewed, reusable conclusions into `docs/`; local research and old plans are
+not active specifications.
 
 ## Test design
 

@@ -1,6 +1,6 @@
 //! Scoped database reads. Guards contain only identities and progress; bodies
 //! are selected when the Agent requests a page, never exported or cached.
-use super::{preferences, stale, summary::ExtractionFiles, SessionSnapshot};
+use super::{stale, summary::ExtractionFiles, SessionSnapshot};
 use crate::error::{other, Result};
 use crate::storage::Db;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -21,7 +21,6 @@ pub(super) enum Input {
         regenerate: bool,
         sessions: Vec<SessionSnapshot>,
     },
-    Preferences(Vec<String>),
 }
 
 pub(super) fn message_time(conn: &Connection, id: &str, ordinal: i64) -> Result<Option<String>> {
@@ -86,7 +85,6 @@ impl Input {
                 )? + 2)
             }
             Self::Batch { sessions, .. } => Ok(sessions.len() + 2),
-            Self::Preferences(_) => Ok(1),
         }
     }
     pub fn page(
@@ -120,19 +118,6 @@ impl Input {
                 search,
                 total,
             )?,
-            Self::Preferences(projects) => {
-                if search.is_some() {
-                    return Err(other("搜索仅用于消息输入"));
-                }
-                let records = if cursor == 0 {
-                    vec![
-                        json!({"cursor":0,"record":preferences::Snapshot::read_conn(&tx,projects.clone())?}),
-                    ]
-                } else {
-                    vec![]
-                };
-                json!({"records":records,"next_cursor":null,"end":true,"total_records":1})
-            }
             Self::Batch {
                 kind,
                 id,
@@ -158,16 +143,22 @@ impl Input {
                         } else {
                             json!(summary)
                         };
+                        header["locked_titles"] = json!(summary
+                            .as_ref()
+                            .map(|s| s.locked_titles())
+                            .unwrap_or_default());
                         header
                     } else if position == total - 1 {
                         json!({"type":"end","marker":format!("END_OF_{}_INPUT",kind.to_uppercase())})
                     } else {
                         let s = &sessions[position - 1];
                         let need_update = s.latest > s.from;
+                        let current = target_summary(&tx, "session", &s.session.id, s.revision())?;
                         json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
                             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at,
-                            "need_update":need_update,"current_summary":target_summary(&tx,"session",&s.session.id,s.revision())?,
-                            "preference_input_file":regenerate.then(||files.preference_session_input(&s.session.id)),
+                            "need_update":need_update,"current_summary":current,
+                            "locked_titles":current.as_ref().map(|summary| summary.locked_titles()).unwrap_or_default(),
+                            "history_input_file":regenerate.then(||files.history_session_input(&s.session.id)),
                             "input_file":need_update.then(||files.session_input(&s.session.id)),
                             "result_file":need_update.then(||files.session_result(&s.session.id))})
                     };
@@ -194,8 +185,10 @@ fn session_page(
     let from = if full_history { 0 } else { s.from };
     let mut records = Vec::new();
     if search.is_none() && cursor == 0 {
+        let current = target_summary(conn, "session", &s.session.id, s.revision())?;
         records.push(json!({"cursor":0,"record":{"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
-            "working_directory":s.session.cwd,"agent":s.session.agent,"current_summary":if include_summary {target_summary(conn,"session",&s.session.id,s.revision())?} else {None},
+            "working_directory":s.session.cwd,"agent":s.session.agent,"current_summary":if include_summary {current.as_ref()} else {None},
+            "locked_titles":current.as_ref().map(|summary|summary.locked_titles()).unwrap_or_default(),
             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":if full_history {None} else {s.summary_through_at.as_deref()},
             "from_sequence":from+1,"through_sequence":s.latest,"message_count":s.latest-from}}));
     }

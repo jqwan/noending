@@ -10,7 +10,6 @@ fn fixture(f: &ServiceFixture, id: &str) -> ExtractionFiles {
     let snapshot =
         SessionSnapshot::read(f.db(), f.db().get_session(id).unwrap().unwrap(), false).unwrap();
     files.add_session(&snapshot, true, false);
-    files.add_preferences(&[]);
     files
 }
 fn bridge<'a>(f: &'a ServiceFixture, files: &'a ExtractionFiles) -> Bridge<'a> {
@@ -128,8 +127,7 @@ fn scoped_database_pages_and_cross_part_search_require_complete_reading() {
         r#"{"summary":{"items":[{"title":"结果","description":"","details":[]}]}}"#,
     )
     .unwrap();
-    std::fs::write(files.preference_result(), r#"{"changes":[]}"#).unwrap();
-    let reply = json!({"status":"completed","preferences":{"status":"completed"}});
+    let reply = json!({"status":"completed"});
     assert!(b.validate(&reply).is_err());
     read_all(&b);
     assert!(b.validate(&reply).is_ok());
@@ -146,11 +144,10 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     f.db()
         .write()
         .execute(
-            "UPDATE session_contexts SET summary='{\"items\":[{\"title\":\"查询时摘要\",\"description\":\"\",\"details\":[]}]}' WHERE session_id=?1",
+            "UPDATE session_contexts SET summary='{\"items\":[{\"title\":\"查询时摘要\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}' WHERE session_id=?1",
             [&id],
         )
         .unwrap();
-    crate::storage::preferences::save_item(f.db(), None, None, "查询时偏好", false).unwrap();
     append(&f, &id, "截止位置之外", false);
     let name = format!("session-{id}.jsonl");
     let page = send(
@@ -169,36 +166,6 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     assert_eq!(page["records"][0]["record"]["through_sequence"], 2);
     assert_eq!(page["records"][1]["record"]["content"], "本次消息");
     assert_eq!(page["records"].as_array().unwrap().len(), 3);
-    let prefs = send(
-        &b,
-        Command::Read {
-            name: "preferences.input.json".into(),
-            cursor: 0,
-            limit: 8,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        prefs["records"][0]["record"]["user"][0]["content"],
-        "查询时偏好"
-    );
-    let item = crate::storage::preferences::list_items(f.db(), None)
-        .unwrap()
-        .remove(0);
-    crate::storage::preferences::save_item(f.db(), Some(&item.id), None, "更新偏好", true).unwrap();
-    let prefs = send(
-        &b,
-        Command::Read {
-            name: "preferences.input.json".into(),
-            cursor: 0,
-            limit: 8,
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        prefs["records"][0]["record"]["user"][0]["content"],
-        "更新偏好"
-    );
     append(&f, &id, "改写后的历史", true);
     assert!(send(
         &b,
@@ -247,8 +214,10 @@ fn cli_is_read_only_reply_is_required_and_connection_expires() {
             crate::cli::execute(&args).map_err(other)?["inputs"]
                 .as_array()
                 .unwrap()
-                .len(),
-            2
+                .iter()
+                .map(|input| input["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![format!("session-{id}.jsonl")]
         );
         let mut invalid = args.clone();
         invalid.extend(["--sql".into(), "DELETE FROM sessions".into()]);
@@ -265,8 +234,7 @@ fn cli_is_read_only_reply_is_required_and_connection_expires() {
             files.session_result(&id),
             r#"{"summary":{"items":[{"title":"结果","description":"","details":[]}]}}"#,
         )?;
-        std::fs::write(files.preference_result(), r#"{"changes":[]}"#)?;
-        Ok(r#"{"status":"completed","preferences":{"status":"completed"}}"#.into())
+        Ok(r#"{"status":"completed"}"#.into())
     })
     .unwrap();
     assert_eq!(
@@ -291,7 +259,6 @@ fn batch_partial_only_accepts_failed_ids_within_pending_scope() {
     for s in &sessions {
         files.add_session(s, true, false);
     }
-    files.add_preferences(&[]);
     files.add_batch("task", "t", json!({"type":"task"}), 0, false, sessions);
     std::fs::write(
         files.batch_result("task", "t"),
@@ -305,7 +272,7 @@ fn batch_partial_only_accepts_failed_ids_within_pending_scope() {
     .unwrap();
     let bridge = bridge(&f, &files);
     read_all(&bridge);
-    let reply = |id: &str| json!({"status":"partial","failed_sessions":[{"session_id":id,"error":"无法读取"}],"skipped_session_ids":[],"preferences":{"status":"failed","error":"无偏好"}});
+    let reply = |id: &str| json!({"status":"partial","failed_sessions":[{"session_id":id,"error":"无法读取"}],"skipped_session_ids":[]});
     assert!(bridge.validate(&reply("outside")).is_err());
     assert!(bridge.validate(&reply(&b)).is_ok());
 }

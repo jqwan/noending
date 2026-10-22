@@ -58,7 +58,6 @@ export default function SessionDetailView({
   const summaryExpansion = useSummaryExpansion(sessionCtx?.fields?.summary);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
-  const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const currentSessionId = useRef(sessionId);
   // 已归档动作（Session Lifecycle & Deletion）：执行中的 busy、
@@ -75,7 +74,6 @@ export default function SessionDetailView({
 
   useEffect(() => {
     setCtxError(null);
-    setPreferenceError(null);
     setCtxReadError(null);
     setCtxBusy(false);
     if (currentSessionId.current !== sessionId) {
@@ -167,13 +165,11 @@ export default function SessionDetailView({
     setCtxBusy(regenerate ? "regenerate" : "update");
     setCtxReadError(null);
     setCtxError(null);
-    setPreferenceError(null);
     try {
       const out = regenerate
         ? await api.regenerateSessionContext(updateSessionId)
         : await api.updateSessionContext(updateSessionId);
       if (currentSessionId.current !== updateSessionId) return;
-      setPreferenceError(out.preference_error);
       showToast(
         out.status === "no_change"
           ? "没有新内容，摘要保持不变"
@@ -351,7 +347,6 @@ export default function SessionDetailView({
                 {ctxReadError.message}
               </div>
             )}
-            {preferenceError && <p role="alert" className="danger">摘要已处理，偏好未保存：{preferenceError}</p>}
             {ctxError && (
               <div className="badge warn" style={{ overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
                 <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
@@ -365,7 +360,17 @@ export default function SessionDetailView({
             )}
             {sessionCtx?.fields ? (
               <div className="md-body" style={{ overflowWrap: "anywhere" }}>
-                <SummaryContent expansion={summaryExpansion}>
+                <SummaryContent expansion={summaryExpansion}
+                  target={{kind:"session",id:sessionId,revision:sessionCtx.revision}}
+                  onChange={result => {
+                    if (currentSessionId.current !== sessionId) return;
+                    setSessionCtx(previous => {
+                      if (!previous || previous.revision > result.revision) return previous;
+                      const next = {...previous,revision:result.revision,fields:{summary:result.summary}};
+                      sessionContextCache.set(sessionId,next);
+                      return next;
+                    });
+                  }}>
                   {sessionCtx.fields.summary}
                 </SummaryContent>
               </div>

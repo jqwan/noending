@@ -20,7 +20,7 @@ vi.mock("../../api", () => ({
       updated_sessions: [],
       skipped_session_ids: [],
       failed_sessions: [],
-      remaining_pending: 0, preference_error: null,
+      remaining_pending: 0,
     }),
     getDefaultAgent: vi.fn().mockResolvedValue(null),
     updateWorkstream: vi.fn(),
@@ -61,7 +61,7 @@ function context(): WorkstreamContext {
 function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
   return {
     workstream_id: "w1",
-    summary: { items: [{ title: "任务状态", description: "**当前进展**：接口设计已确定。", details: [] }] },
+    summary: { items: [{ title: "任务状态", description: "**当前进展**：接口设计已确定。", title_locked: false, details: [] }] },
     updated_at: null,
     context_revision: 1,
     pending: false,
@@ -151,7 +151,7 @@ it("shows 更新摘要 with the pending-session count and calls the explicit upd
     updated_sessions: ["s1", "s2"],
     skipped_session_ids: [],
     failed_sessions: [],
-    remaining_pending: 0, preference_error: null,
+    remaining_pending: 0,
   });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务概览");
@@ -190,9 +190,10 @@ it("offers a copyable operation id after a structured Context update failure", a
 });
 
 it("renders structured topics and regenerates through the separate action even when up to date", async () => {
-  vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0, preference_error: null });
+  vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0 });
   await renderDetail();
   expect(screen.getByText("当前进展").tagName).toBe("STRONG");
+  screen.getByRole("button",{name:"锁定标题：任务状态"});
   fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
   await waitFor(() => expect(api.regenerateWorkstreamContext).toHaveBeenCalledWith("w1"));
   expect(api.updateWorkstreamContext).not.toHaveBeenCalled();
@@ -200,7 +201,7 @@ it("renders structured topics and regenerates through the separate action even w
 
 it("keeps the task summary visible and reports failed sessions after a partial update", async () => {
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
-  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1, preference_error: null });
+  vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1 });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByRole("button", { name: "更新摘要" });
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));

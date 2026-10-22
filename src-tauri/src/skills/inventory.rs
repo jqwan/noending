@@ -6,6 +6,8 @@ use crate::{
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
@@ -79,6 +81,70 @@ pub fn list_catalog(roots: &Roots, cwds: &[PathBuf]) -> Inventory {
     let mut inventories = vec![list(roots, None)];
     inventories.extend(cwds.iter().map(|cwd| list_project_skills(roots, cwd)));
     merge_inventories(inventories)
+}
+
+/// Board and detail are separate routes, so entering a resource immediately
+/// after the board scans the same directories again. Keep the merged scan for a
+/// few seconds; every mutation below invalidates it explicitly.
+const CATALOG_TTL: Duration = Duration::from_secs(10);
+
+struct CachedCatalog {
+    key: String,
+    at: Instant,
+    inventory: Inventory,
+}
+
+static CATALOG: OnceLock<Mutex<Option<CachedCatalog>>> = OnceLock::new();
+
+fn catalog_cache() -> &'static Mutex<Option<CachedCatalog>> {
+    CATALOG.get_or_init(|| Mutex::new(None))
+}
+
+pub fn invalidate_catalog() {
+    *catalog_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+fn catalog_key(roots: &Roots, cwds: &[PathBuf]) -> String {
+    let mut paths: Vec<String> = cwds
+        .iter()
+        .map(|path| path.to_string_lossy().into())
+        .collect();
+    paths.sort();
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        roots.home.display(),
+        roots.codex.display(),
+        roots.claude.display(),
+        roots.pi.display(),
+        paths.join("\0")
+    )
+}
+
+pub fn catalog(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    skill_registry: &super::SkillRegistry,
+    managed_root: &Path,
+) -> Inventory {
+    let key = catalog_key(roots, cwds);
+    let mut cache = catalog_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = cache.as_ref() {
+        if cached.key == key && cached.at.elapsed() < CATALOG_TTL {
+            return cached.inventory.clone();
+        }
+    }
+    let mut inventory = list_catalog(roots, cwds);
+    super::registry::merge(skill_registry, &mut inventory, true, managed_root);
+    *cache = Some(CachedCatalog {
+        key,
+        at: Instant::now(),
+        inventory: inventory.clone(),
+    });
+    inventory
 }
 
 pub fn list(roots: &Roots, cwd: Option<&Path>) -> Inventory {

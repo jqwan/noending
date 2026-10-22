@@ -5,7 +5,11 @@ use crate::domain::Agent;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-/// Dedicated runtime for all summary and accompanying preference extraction.
+pub fn supports_extraction(agent: Agent) -> bool {
+    matches!(agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi)
+}
+
+/// Dedicated runtime for all summary extraction.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExtractionSettings {
     pub agent: String,
@@ -37,7 +41,7 @@ impl ExtractionSettings {
         }
         let agent = Agent::parse(&self.agent)
             .ok_or_else(|| other(format!("未知的 Agent: {}", self.agent)))?;
-        if !matches!(agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi) {
+        if !supports_extraction(agent) {
             return Err(other("摘要提取仅支持 Codex、Claude Code 和 Pi"));
         }
         crate::agent_runtime::validate_runtime_overrides(agent, &self.runtime)?;
@@ -78,6 +82,7 @@ pub enum ContextCallFailureKind {
     Wait,
     Exit,
     Timeout,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +138,7 @@ impl CliExtractor {
         prompt: &str,
         runtime_dir: &std::path::Path,
     ) -> std::result::Result<String, ContextCallFailure> {
-        if !matches!(self.agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi) {
+        if !supports_extraction(self.agent) {
             return Err(ContextCallFailure {
                 kind: ContextCallFailureKind::UnsupportedAgent,
                 spawned: false,
@@ -171,6 +176,9 @@ impl CliExtractor {
                 kind: match failure.kind {
                     crate::platform::exec_runner::ContextExecFailureKind::Start => {
                         ContextCallFailureKind::Start
+                    }
+                    crate::platform::exec_runner::ContextExecFailureKind::Cancelled => {
+                        ContextCallFailureKind::Cancelled
                     }
                     crate::platform::exec_runner::ContextExecFailureKind::Wait => {
                         ContextCallFailureKind::Wait

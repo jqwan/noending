@@ -8,7 +8,6 @@ import { useAgentRuntime } from "../agents/useAgentRuntime";
 import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
 import { TemplateEditor } from "./SummaryPromptSettings";
-import PreferenceList from "../preferences/PreferenceList";
 
 const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "none"] as const;
 
@@ -116,10 +115,10 @@ export default function ContextSettings() {
         <div>
           <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
             <Icon name="spark" />
-            <span>摘要与偏好</span>
+            <span>摘要</span>
           </h3>
           <p className="muted small" style={{ margin: "4px 0 0" }}>
-            会话、任务与项目摘要提取运行配置、提示词模板、全局用户偏好与更新诊断。设置自动生效。
+            会话、任务与项目摘要提取运行配置、提示词模板与更新诊断。设置自动生效。
           </p>
         </div>
       </div>
@@ -230,7 +229,7 @@ export default function ContextSettings() {
 
           {settings.agent === "none" && (
             <div className="muted small">
-              已停用提取，将不会为会话、任务和项目提取摘要与偏好。
+              已停用提取，将不会为会话、任务和项目提取摘要。
             </div>
           )}
 
@@ -249,7 +248,7 @@ export default function ContextSettings() {
               <Icon name="edit" />
               <span>摘要提取提示词</span>
             </span>
-            <span className="muted small">调整写作与偏好提取要求，预览完整提示词</span>
+            <span className="muted small">调整摘要写作要求，预览完整提示词</span>
           </div>
           <button
             type="button"
@@ -278,7 +277,6 @@ export default function ContextSettings() {
         </div>
       </div>
 
-      <PreferenceList projectId={null} embedded />
 
       {promptEditorOpen && (
         <TemplateEditor onClose={() => setPromptEditorOpen(false)} />

@@ -502,7 +502,6 @@ fn session_ingestion_alone_does_not_change_a_project() {
         .unwrap()
         .unwrap();
     assert_eq!(path_after.project_id, path_before.project_id);
-    assert_eq!(path_after.last_seen_at, path_before.last_seen_at);
 }
 
 // product-level discovery

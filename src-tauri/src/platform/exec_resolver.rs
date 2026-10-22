@@ -20,8 +20,6 @@ pub struct AgentInstallation {
     pub agent: Agent,
     pub executable_path: String,
     pub version: Option<String>,
-    pub source: String,
-    pub last_verified_at: String,
 }
 
 /// Extra directories to probe beyond the inherited PATH, because GUI apps
@@ -180,12 +178,6 @@ pub fn resolve_executable(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// The directory a resolved executable came from, for `AgentInstallation::source`.
-fn resolution_source(candidate: &Path) -> String {
-    let dir = candidate.parent().unwrap_or(candidate);
-    format!("resolved:{}", dir.display())
-}
-
 fn is_executable_file(p: &Path) -> bool {
     p.is_file() && (cfg!(target_os = "windows") || is_executable_unix(p))
 }
@@ -227,15 +219,12 @@ pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
             agent.display_name()
         )));
     }
-    let now = chrono::Utc::now().to_rfc3339();
     for name in names {
         if let Some(candidate) = resolve_executable(name) {
             return Ok(AgentInstallation {
                 agent,
                 executable_path: candidate.to_string_lossy().to_string(),
                 version: probe_version(&candidate),
-                source: resolution_source(&candidate),
-                last_verified_at: now,
             });
         }
     }

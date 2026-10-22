@@ -1,8 +1,10 @@
+pub mod cancellation;
 #[cfg(windows)]
 pub mod conpty;
 pub mod desktop;
 pub mod exec_resolver;
 pub mod exec_runner;
+pub mod file_lock;
 pub mod launcher;
 pub mod paths;
 #[cfg(target_os = "macos")]

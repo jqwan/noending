@@ -59,7 +59,7 @@ use crate::storage::workspace::{
     ensure_git_identity_conn, get_project_conn, get_workspace_path_conn,
     insert_workspace_path_conn, list_workspace_paths_for_project_conn, project_by_git_id_conn,
     reassign_workspace_path_project_conn, scan_workspace_paths_conn, set_project_name_conn,
-    touch_git_identity_conn, update_workspace_path_observation_conn,
+    update_workspace_path_observation_conn,
 };
 use crate::storage::{new_id, now, upsert_project_conn, Db};
 use crate::workspace::identity::{
@@ -320,7 +320,7 @@ pub fn ensure_workspace_path_conn(
                             .transpose()?
                             .flatten();
                         if paths.len() == 1 {
-                            // Preserve this project's name, summary and preferences. If
+                            // Preserve this project's name and summary. If
                             // its directory group exists, fold the two non-Git projects.
                             clear_git_identity_conn(conn, &mine.id)?;
 
@@ -439,7 +439,6 @@ pub fn ensure_workspace_path_conn(
     // only writer of the observed facts even on the create path.
     update_workspace_path_observation_conn(conn, &id, observation.exists, &state, kind.as_deref())?;
     if let Some(f) = &family {
-        touch_git_identity_conn(conn, &f.git_id)?;
         let path =
             get_workspace_path_conn(conn, &id)?.ok_or_else(|| other("WorkspacePath 写入后消失"))?;
         discovered = adopt_sibling_worktrees(conn, &path, f, policy)?;
@@ -905,7 +904,6 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         // the user's next explicit update. Never overwrite B's valid summary.
         crate::storage::project_context_repo::commit(conn, &survivor.id, "", &old.summary, &[])?;
     }
-    crate::storage::preferences::merge_project_items(conn, &loser.id, &survivor.id)?;
     // Preserve the canonical Git owner's lifecycle during identity merges.
     delete_merged_project_conn(conn, &loser.id)?;
     Ok(MergeOutcome {
@@ -954,8 +952,7 @@ impl ProjectProjection<'_> {
 /// discipline by construction: read the registry, drop the lock, observe each
 /// path, re-take it for one short transaction, repeat.
 ///
-/// * Ordered by `path_id` and capped by `limit`, so a restart cannot reshuffle the
-///   pass and move `last_seen_at` across the whole table at once.
+/// * Ordered by `path_id` and capped by `limit` for deterministic refreshes.
 /// * Updates availability without removing missing or unreferenced paths.
 /// * Writes `workspace_paths` / `projects` / the derived Session cache and the FTS
 ///   parents, nothing else. It never writes task project associations and never
@@ -1257,8 +1254,6 @@ mod tests {
             git_state: state.into(),
             git_kind: kind.map(String::from),
             exists: true,
-            first_seen_at: "2026-10-13T00:00:00Z".into(),
-            last_seen_at: "2026-10-13T00:00:00Z".into(),
         };
 
         // First sight, no evidence: `none`. Nothing in our history would make

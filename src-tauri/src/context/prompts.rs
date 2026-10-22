@@ -11,7 +11,6 @@ const TASK_REQUIREMENTS: &str = include_str!("../../prompts/summary/task.md");
 const PROJECT_REQUIREMENTS: &str = include_str!("../../prompts/summary/project.md");
 const SUMMARY_SYNTHESIS: &str = include_str!("../../prompts/summary/synthesis.md");
 const SUMMARY_LAYOUT: &str = include_str!("../../prompts/summary/layout.md");
-const PREFERENCE_REQUIREMENTS: &str = include_str!("../../prompts/summary/preferences.md");
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,7 +18,6 @@ pub enum PromptKind {
     Session,
     Task,
     Project,
-    Preferences,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +26,6 @@ pub struct PromptTemplates {
     pub session: String,
     pub task: String,
     pub project: String,
-    pub preferences: String,
 }
 impl Default for PromptTemplates {
     fn default() -> Self {
@@ -36,7 +33,6 @@ impl Default for PromptTemplates {
             session: default_summary(SESSION_REQUIREMENTS),
             task: default_summary(TASK_REQUIREMENTS),
             project: default_summary(PROJECT_REQUIREMENTS),
-            preferences: PREFERENCE_REQUIREMENTS.trim_end().into(),
         }
     }
 }
@@ -47,7 +43,7 @@ fn default_summary(requirements: &str) -> String {
 }
 impl PromptTemplates {
     pub fn validate(&self) -> Result<()> {
-        for text in [&self.session, &self.task, &self.project, &self.preferences] {
+        for text in [&self.session, &self.task, &self.project] {
             if text.trim().is_empty() {
                 return Err(other("摘要要求模板不能为空"));
             }
@@ -59,7 +55,6 @@ impl PromptTemplates {
             PromptKind::Session => &self.session,
             PromptKind::Task => &self.task,
             PromptKind::Project => &self.project,
-            PromptKind::Preferences => &self.preferences,
         }
     }
 }
@@ -72,8 +67,6 @@ struct Overrides {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    preferences: Option<String>,
 }
 impl Overrides {
     fn effective(self) -> PromptTemplates {
@@ -82,7 +75,6 @@ impl Overrides {
             session: self.session.unwrap_or(default.session),
             task: self.task.unwrap_or(default.task),
             project: self.project.unwrap_or(default.project),
-            preferences: self.preferences.unwrap_or(default.preferences),
         }
     }
 }
@@ -129,9 +121,8 @@ pub fn save(db: &Db, kind: PromptKind, template: Option<&str>) -> Result<PromptS
             PromptKind::Session => overrides.session = custom,
             PromptKind::Task => overrides.task = custom,
             PromptKind::Project => overrides.project = custom,
-            PromptKind::Preferences => overrides.preferences = custom,
         }
-        if overrides.session.is_none() && overrides.task.is_none() && overrides.project.is_none() && overrides.preferences.is_none() {
+        if overrides.session.is_none() && overrides.task.is_none() && overrides.project.is_none() {
             tx.execute("DELETE FROM settings WHERE key=?1", [SETTINGS_KEY])?;
         } else {
             tx.execute(

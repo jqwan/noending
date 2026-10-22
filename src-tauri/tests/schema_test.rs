@@ -1,21 +1,4 @@
-//! Database format contract (Logical Session refactor).
-//!
-//! Exactly one SQLite format generation is supported at a time, identified by the
-//! header pair (`application_id`, `user_version`) that creation stamps. An empty
-//! file is created in that format; a database carrying the pair must also have
-//! the full structure; anything else — a foreign SQLite file, an older
-//! generation, or an incomplete current-format database — is refused instead of
-//! migrated or repaired.
-//!
-//! The current format keys `sessions` by the root source's Resume identity and
-//! carries the root source, its cursor and the fact frontier as SESSION columns.
-//! The RAW conversation is
-//! `session_messages` (current effective rows), the CURRENT order is
-//! `session_message_projection`, the Session summary frontier is
-//! `session_contexts`, and the Workstream
-//! revision pair is `workstream_context_state` / `workstream_session_frontiers`.
-//! The retired objects must stay absent.
-//!
+//! Database creation, identity checks, structural integrity and durable reopening.
 
 use noending::storage::{Db, DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 use noending_lib as noending;
@@ -49,18 +32,6 @@ fn db_path(tag: &str) -> TempDb {
         path: dir.join("noending.db"),
         dir,
     }
-}
-
-fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
-    let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .unwrap();
-    let names: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .map(|name| name.unwrap())
-        .collect();
-    names.iter().any(|name| name == column)
 }
 
 fn user_version(conn: &Connection) -> i64 {
@@ -100,188 +71,20 @@ fn open_error(path: &Path) -> String {
     }
 }
 
-/// A brand-new database carries the current format identity, the current
-/// generation and the current structure — not an older shape that startup then
-/// has to reconcile.
 #[test]
-fn fresh_database_uses_current_format_generation() {
+fn fresh_database_has_the_current_identity_and_valid_structure() {
     let path = db_path("current");
     let db = Db::open(path.path()).unwrap();
     assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
     assert_eq!(user_version(&db.read()), DATABASE_FORMAT_VERSION);
-
-    let conn = db.read();
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('workstreams') WHERE name = 'lifecycle'",
-            [],
-            |r| r.get(0),
-        )
+    let integrity: String = db
+        .read()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(count, 0, "tasks have only archive state");
-    for table in [
-        "session_contexts",
-        "workstream_context_state",
-        "project_context_state",
-    ] {
-        assert!(has_column(&conn, table, "summary"));
-        for obsolete in [
-            "summary_current_state",
-            "decisions",
-            "open_questions",
-            "next_steps",
-        ] {
-            assert!(
-                !has_column(&conn, table, obsolete),
-                "{table} stores only Markdown"
-            );
-        }
-    }
-    assert!(!object_exists(&conn, "session_context_revisions"));
-    drop(conn);
-
-    // the old-generation tables are gone, not carried
-    // forward: one conversation store, one session-owned cursor, and no
-    // deletion job machinery (NoEnding never deletes an Agent-owned source).
-    for table in [
-        "session_events",
-        "assistant_sessions",
-        "assistant_messages",
-        "session_cursors",
-        "session_deletion_jobs",
-        "project_resources",
-        "project_affinity_evidence",
-        "workstream_paths",
-        "session_workstream_bindings",
-        "session_binding_removals",
-        // 统计功能退役（2026-09-29）：连用量快照与事件账本一起退场。
-        "session_member_stats",
-        "usage_events",
-        "ingest_usage_claims",
-        "session_member_usage",
-        // 会话扁平化（2026-10-05）：成员图四表并入 sessions 的列。
-        "session_members",
-        "session_member_cursors",
-        "session_ingest_state",
-        "ingestion_diagnostics",
-        "launch_intents",
-        "context_items",
-        "context_item_revisions",
-        "context_conflicts",
-        "context_conflict_events",
-        "workstream_review_state",
-    ] {
-        assert!(
-            !object_exists(&db.read(), table),
-            "retired table remains: {table}"
-        );
-    }
-    for (table, column) in [
-        ("sessions", "agent_session_id"),
-        ("sessions", "raw_path"),
-        ("sessions", "project_id"),
-        ("projects", "description"),
-        ("session_messages", "raw_ref"),
-        ("sessions", "parent_agent_session_id"),
-        ("projects", "archived"),
-        ("workstreams", "project_id"),
-        ("workstreams", "default_cwd"),
-        ("sessions", "owner_workstream_id"),
-    ] {
-        assert!(
-            !has_column(&db.read(), table, column),
-            "retired column remains: {table}.{column}"
-        );
-    }
-
-    for index in [
-        "idx_session_messages_session",
-        "idx_workspace_paths_canonical",
-        "idx_workstream_paths_ws",
-        "idx_sessions_project",
-    ] {
-        assert!(
-            !object_exists(&db.read(), index),
-            "redundant/cache index remains: {index}"
-        );
-    }
-
-    assert!(!has_column(
-        &db.read(),
-        "workstream_session_frontiers",
-        "ingest_generation"
-    ));
-
-    // The Logical Session model is the replacement: every table of the new
-    // shape exists, and the session row carries the flattened source, cursor
-    // and fact-frontier columns.
-    for object in [
-        "session_workstreams",
-        "workstream_projects",
-        "session_messages",
-        "session_message_projection",
-        "session_contexts",
-        "workstream_context_state",
-        "workstream_session_frontiers",
-        "project_context_state",
-        "project_session_frontiers",
-        "idx_sessions_workspace_path",
-        "idx_sessions_activity",
-        "idx_sessions_unarchived_activity",
-        "idx_sessions_fork_parent",
-        "idx_project_frontiers_session",
-        "idx_projection_message",
-    ] {
-        assert!(
-            object_exists(&db.read(), object),
-            "Logical Session object is missing: {object}"
-        );
-    }
-    for column in [
-        "source_kind",
-        "source_path",
-        "metadata",
-        "source_file_identity",
-        "source_generation",
-        "source_byte_offset",
-        "source_last_seen_size",
-        "source_mtime",
-        "source_prefix_hash",
-        "source_tail_hash",
-        "fact_generation",
-        "latest_message_seq",
-    ] {
-        assert!(
-            has_column(&db.read(), "sessions", column),
-            "flattened session column is missing: sessions.{column}"
-        );
-    }
-
-    // A Session is keyed by (agent, root_agent_session_id) — the root source's
-    // real Resume identity — and carries fork provenance only as a self-FK.
-    {
-        let conn = db.read();
-        let on_delete: String = conn
-            .query_row(
-                "SELECT \"table\" || '|' || on_delete FROM pragma_foreign_key_list('sessions')
-                  WHERE \"from\" = 'forked_from_session_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap();
-        assert_eq!(
-            on_delete, "sessions|SET NULL",
-            "fork provenance must be sessions(id) ON DELETE SET NULL"
-        );
-        assert!(
-            has_column(&conn, "sessions", "archived_at"),
-            "sessions.archived_at is the single lifecycle authority"
-        );
-        assert!(
-            has_column(&conn, "sessions", "workspace_path_id"),
-            "sessions.workspace_path_id is missing"
-        );
-    }
+    assert_eq!(integrity, "ok");
+    let sources = db.list_ingest_sources().unwrap();
+    assert!(!sources.is_empty());
+    assert!(sources.iter().all(|source| source.origin == "default"));
 }
 
 /// The integrity rules the Logical Session tables promise are actually
@@ -438,8 +241,8 @@ fn a_refused_database_is_never_switched_to_wal() {
     );
 
     // The same holds for our own identity in a generation this build refuses.
-    let old = db_path("old-generation-journal");
-    let db = Db::open(old.path()).unwrap();
+    let newer = db_path("newer-version-journal");
+    let db = Db::open(newer.path()).unwrap();
     let objects = object_count(&db.read());
     db.write()
         .pragma_update(None, "user_version", DATABASE_FORMAT_VERSION + 1)
@@ -447,8 +250,8 @@ fn a_refused_database_is_never_switched_to_wal() {
     let wal = journal_mode(&db.read());
     drop(db);
 
-    assert!(Db::open(old.path()).is_err());
-    let conn = Connection::open(old.path()).unwrap();
+    assert!(Db::open(newer.path()).is_err());
+    let conn = Connection::open(newer.path()).unwrap();
     assert_eq!(journal_mode(&conn), wal);
     assert_eq!(
         object_count(&conn),
@@ -602,25 +405,27 @@ fn version_marker_without_the_database_identity_is_refused() {
     );
 }
 
-/// Another NoEnding generation is refused, never upgraded. The error names both
-/// sides so the log says exactly what was found.
+/// Invalid and newer version markers cannot bypass the supported-schema gate.
 #[test]
-fn other_generation_of_this_database_is_refused() {
-    let unsupported = DATABASE_FORMAT_VERSION + 1;
-    let path = db_path("unsupported");
-    let db = Db::open(path.path()).unwrap();
-    assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
-    db.write()
-        .pragma_update(None, "user_version", unsupported)
-        .unwrap();
-    drop(db);
-
-    let err = open_error(path.path());
-    assert!(
-        err.contains(&format!("database_format={unsupported}"))
-            && err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
-        "refusal must name the found and required formats, got: {err}"
-    );
+fn unsupported_version_markers_preserve_the_database() {
+    for unsupported in [DATABASE_FORMAT_VERSION - 1, DATABASE_FORMAT_VERSION + 1] {
+        let path = db_path("unsupported");
+        let db = Db::open(path.path()).unwrap();
+        assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
+        db.write()
+            .pragma_update(None, "user_version", unsupported)
+            .unwrap();
+        db.set_setting("preserved", "keep").unwrap();
+        drop(db);
+        let bytes = std::fs::read(path.path()).unwrap();
+        let err = open_error(path.path());
+        assert_eq!(std::fs::read(path.path()).unwrap(), bytes);
+        assert!(
+            err.contains(&format!("database_format={unsupported}"))
+                && err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
+            "refusal must name the found and required formats, got: {err}"
+        );
+    }
 }
 
 /// The environment-dependent defaults are reconciled on EVERY start, not only
@@ -638,8 +443,8 @@ fn runtime_defaults_are_reconciled_on_every_start() {
     // A source the user added: reconciliation must never touch it.
     db.write()
         .execute(
-            "INSERT INTO ingest_sources (id, agent, path, origin, created_at)
-             VALUES ('user-src', 'codex', '/mine', 'user', '2026-01-01T00:00:00Z')",
+            "INSERT INTO ingest_sources (id, agent, path, origin)
+             VALUES ('user-src', 'codex', '/mine', 'user')",
             [],
         )
         .unwrap();

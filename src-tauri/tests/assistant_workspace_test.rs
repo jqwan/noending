@@ -155,12 +155,20 @@ fn assistant_project_keeps_identity_after_rename_and_empty_registry_sweep() {
 }
 
 #[test]
-fn assistant_cli_access_does_not_grant_access_to_application_data_or_other_workspaces() {
+fn assistant_cli_access_covers_its_data_without_granting_other_workspaces() {
     let f = Fixture::new();
     let workspace = assistant::ensure_workspace(f.db(), &f.home, &f.layer, &f.roots).unwrap();
     assert_eq!(
         assistant::cli_writable_directories(&f.home.runtime_dir, Some(&workspace.directory)),
-        vec![f.home.runtime_dir.join("cli").to_string_lossy().to_string()]
+        vec![
+            &f.home.data_dir,
+            &f.home.runtime_dir,
+            &f.home.logs_dir,
+            &f.home.root.join(".access")
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
     );
     for cwd in [
         None,

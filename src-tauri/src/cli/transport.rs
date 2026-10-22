@@ -1,4 +1,4 @@
-//! Local file IPC shared by the desktop CLI and run-scoped extraction tools.
+//! Local file IPC for run-scoped extraction tools. Business commands run locally.
 use super::{CliError, CliResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -100,7 +100,7 @@ pub(crate) fn serve_pending(connection: &Connection, dispatch: impl Fn(Value) ->
 
 pub(crate) fn request(path: &Path, command: Value) -> CliResult<Value> {
     let text = std::fs::read_to_string(path)
-        .map_err(|_| CliError::new("app_unavailable", "NoEnding 未运行或连接不可用"))?;
+        .map_err(|_| CliError::new("connection_unavailable", "提取连接不可用或已结束"))?;
     let connection: Connection = serde_json::from_str(&text)?;
     if connection.version != 1 {
         return Err(CliError::new("protocol_mismatch", "CLI 连接协议版本不匹配"));

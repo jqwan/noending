@@ -254,6 +254,7 @@ pub fn cli_failure(
 ) -> (&'static str, &'static str) {
     use crate::sync::extractor::ContextCallFailureKind as K;
     match kind {
+        K::Cancelled => ("cancelled", "摘要提取已取消。"),
         K::AgentUnavailable => (
             "cli_unavailable",
             "找不到所选 Agent CLI，请检查 Agent 是否已安装。",

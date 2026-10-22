@@ -11,7 +11,7 @@ import Icon from "../../components/Icon";
 import type { WorkspaceSettings } from "../../types";
 import type { Route, SettingsSection, LegacySettingsSection } from "../../app/routes";
 
-/** Settings：设置页合并为统一平铺视图，聚焦于主题外观、摘要偏好与本地存储数据。 */
+/** Settings：设置页合并为统一平铺视图，聚焦于主题外观、摘要提取与本地存储数据。 */
 export default function SettingsView({ section: _section, navigate: _navigate }: {
   section?: SettingsSection | LegacySettingsSection;
   navigate?: (r: Route) => void;
@@ -20,7 +20,7 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
     <div className="main settings-page">
       <PageHeader
         title="设置"
-        sub="配置主题外观、摘要提取、偏好与本地存储数据。"
+        sub="配置主题外观、摘要提取与本地存储数据。"
       />
       <div className="settings-pane" style={{ marginTop: 18 }}>
         <AppearanceSettings />

@@ -359,9 +359,7 @@ fn ensuring_the_same_path_twice_is_idempotent() {
     assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
     assert_eq!(db.list_projects().unwrap().len(), 1);
 
-    // Replaying the whole run changes nothing a caller can observe except
-    // `last_seen_at`, which is what makes a retried Sync converge instead of
-    // oscillate.
+    // Replaying the same observation preserves the path and its project.
     ensure(&db, &plain("/work/alpha", true));
     assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
     let projects = db.list_projects().unwrap();
@@ -1010,19 +1008,11 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     }
     db.tx(|tx| {
         tx.execute(
-            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'{\"items\":[{\"title\":\"summary\",\"description\":\"\",\"details\":[]}]}')",
+            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'{\"items\":[{\"title\":\"summary\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}')",
             [&path.project_id],
         )?;
         Ok(())
     })
-    .unwrap();
-    noending::storage::preferences::save_item(
-        &db,
-        None,
-        Some(&path.project_id),
-        "Keep concise",
-        false,
-    )
     .unwrap();
     set_project_archived(&db, &path.project_id, true).unwrap();
     delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).unwrap();
@@ -1040,7 +1030,7 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     assert!(db.get_project(&path.project_id).unwrap().is_none());
     assert!(db.get_workspace_path(&path.id).unwrap().is_none());
     assert!(db.get_project(&other.project_id).unwrap().is_some());
-    for table in ["project_context_state", "preferences"] {
+    for table in ["project_context_state"] {
         let count: i64 = db
             .read()
             .query_row(

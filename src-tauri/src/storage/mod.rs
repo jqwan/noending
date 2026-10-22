@@ -14,7 +14,6 @@ use crate::error::{other, Result};
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
 pub mod message_query;
-pub mod preferences;
 pub mod project_context_repo;
 pub mod schema;
 pub mod session_lifecycle;
@@ -216,6 +215,10 @@ impl Db {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let _opening = crate::platform::file_lock::exclusive_wait(
+            &path.with_extension("open.lock"),
+            std::time::Duration::from_secs(5),
+        )?;
         let writer = Connection::open(path)?;
         // Connection-local settings first, then the format gate: nothing that
         // outlives the connection may touch the file until we know it is ours.
@@ -676,9 +679,8 @@ impl Db {
             {
                 let mut ins = tx.prepare(
                     "INSERT INTO session_messages
-                     (id, session_id, sequence, source_message_id, source_generation,
-                      source_position, source_identity_hash, ts, role, content)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     (id, session_id, sequence, source_identity_hash, ts, role, content)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(session_id, source_identity_hash) DO NOTHING",
                 )?;
                 for (index, m) in messages.iter().enumerate() {
@@ -707,9 +709,6 @@ impl Db {
                         id,
                         session_id,
                         next_seq,
-                        m.source_message_id,
-                        source.generation,
-                        m.source_position,
                         hash,
                         m.ts,
                         m.role.as_str(),
@@ -728,9 +727,6 @@ impl Db {
                             ts: m.ts.clone(),
                             // Derived from the projection after it moves.
                             turn_final: false,
-                            source_message_id: m.source_message_id.clone(),
-                            source_generation: source.generation,
-                            source_position: m.source_position.clone(),
                             source_identity_hash: hash,
                         });
                         next_seq += 1;
@@ -1117,9 +1113,8 @@ impl Db {
 
     pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
         let conn = self.read();
-        let mut st = conn.prepare(
-            "SELECT id, agent, path, origin, created_at FROM ingest_sources ORDER BY agent, path",
-        )?;
+        let mut st = conn
+            .prepare("SELECT id, agent, path, origin FROM ingest_sources ORDER BY agent, path")?;
         let rows = st
             .query_map([], row_ingest_source)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1133,18 +1128,11 @@ impl Db {
             agent,
             path: path.to_string(),
             origin: "user".into(),
-            created_at: now(),
         };
         conn.execute(
-            "INSERT INTO ingest_sources (id, agent, path, origin, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                src.id,
-                src.agent.as_str(),
-                src.path,
-                src.origin,
-                src.created_at
-            ],
+            "INSERT INTO ingest_sources (id, agent, path, origin)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![src.id, src.agent.as_str(), src.path, src.origin],
         )
         .map_err(|e| {
             if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
@@ -1160,7 +1148,7 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT id, agent, path, origin, created_at FROM ingest_sources WHERE id = ?1",
+                "SELECT id, agent, path, origin FROM ingest_sources WHERE id = ?1",
                 params![id],
                 row_ingest_source,
             )
@@ -1214,10 +1202,10 @@ impl Db {
     ) -> Result<()> {
         let conn = self.write();
         conn.execute(
-            "INSERT INTO agent_installations (agent, executable_path, version, source, last_verified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(agent) DO UPDATE SET executable_path = ?2, version = ?3, source = ?4, last_verified_at = ?5",
-            params![i.agent.as_str(), i.executable_path, i.version, i.source, i.last_verified_at],
+            "INSERT INTO agent_installations (agent, executable_path, version)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(agent) DO UPDATE SET executable_path = ?2, version = ?3",
+            params![i.agent.as_str(), i.executable_path, i.version],
         )?;
         Ok(())
     }
@@ -1229,7 +1217,7 @@ impl Db {
         let conn = self.read();
         Ok(conn
             .query_row(
-                "SELECT agent, executable_path, version, source, last_verified_at
+                "SELECT agent, executable_path, version
                  FROM agent_installations WHERE agent = ?1",
                 params![agent.as_str()],
                 |r| {
@@ -1237,8 +1225,6 @@ impl Db {
                         agent: Agent::parse(&r.get::<_, String>(0)?).unwrap_or(Agent::Codex),
                         executable_path: r.get(1)?,
                         version: r.get(2)?,
-                        source: r.get(3)?,
-                        last_verified_at: r.get(4)?,
                     })
                 },
             )
@@ -1901,9 +1887,6 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
         id: r.get("id")?,
         session_id: r.get("session_id")?,
         sequence: r.get("sequence")?,
-        source_message_id: r.get("source_message_id")?,
-        source_generation: r.get("source_generation")?,
-        source_position: r.get("source_position")?,
         source_identity_hash: r.get("source_identity_hash")?,
         ts: r.get("ts")?,
         // The CHECK constraint only lets 'user' | 'assistant' through.
@@ -1923,7 +1906,6 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
         agent: Agent::parse(&r.get::<_, String>(1)?).unwrap_or(Agent::Codex),
         path: r.get(2)?,
         origin: r.get(3)?,
-        created_at: r.get(4)?,
     })
 }
 

@@ -32,8 +32,6 @@ fn install(agent: Agent) -> AgentInstallation {
         agent,
         executable_path: format!("/usr/local/bin/{}", agent.as_str()),
         version: Some("test".into()),
-        source: "test".into(),
-        last_verified_at: String::new(),
     }
 }
 

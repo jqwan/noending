@@ -231,6 +231,7 @@ fn ingest_session_mode(
     force_full: bool,
     prepared: Option<PreparedRead>,
 ) -> Result<i64> {
+    crate::platform::cancellation::check()?;
     // A purge that raced this pass leaves nothing to attach the facts to.
     let Some(current) = db.get_session(&session.id)? else {
         return Ok(0);
@@ -324,6 +325,7 @@ fn ingest_session_mode(
     // The bytes frontier travels with the commit: same transaction, same
     // lifetime as the messages it covers. `complete_snapshot` tells the
     // projection maintenance whether a full re-scan is whole.
+    crate::platform::cancellation::check()?;
     let stored = db.commit_ingest_guarded(
         &session.id,
         &delta.messages,
@@ -463,6 +465,7 @@ where
     let mut failures = Vec::new();
 
     for adapter in &adapters {
+        crate::platform::cancellation::check()?;
         let roots: Vec<PathBuf> = sources
             .iter()
             .filter(|source| source.agent == adapter.agent())

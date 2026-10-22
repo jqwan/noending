@@ -292,3 +292,137 @@ pub fn list_recent_workspace_paths(
     out.truncate(limit);
     Ok(out)
 }
+
+/// Lookup of an existing Project, never the picker's "would create" hint.
+#[derive(Debug, Serialize)]
+pub struct ProjectResolution {
+    pub found: bool,
+    pub query_path: String,
+    pub project: Option<crate::domain::Project>,
+    pub matched_path: Option<String>,
+    pub matched_by: Option<&'static str>,
+    pub reason: Option<&'static str>,
+}
+
+/// Match the nearest registered directory, stopping at independent repository
+/// boundaries. New worktrees may resolve through an existing Git family, but
+/// lookup never registers them or changes any stored ownership.
+pub fn resolve_project(
+    db: &Db,
+    observing: &dyn WorkspaceObserving,
+    policy: &dyn WorkspacePolicy,
+    raw: &str,
+) -> Result<ProjectResolution> {
+    use super::{identity, resolver};
+    let canonical =
+        identity::normalize_path(raw).ok_or_else(|| crate::error::other("需要绝对目录路径"))?;
+    if !exists_on_disk(&canonical) {
+        return Err(crate::error::other("目录不存在或不可访问"));
+    }
+    let mut answer = ProjectResolution {
+        found: false,
+        query_path: canonical.clone(),
+        project: None,
+        matched_path: None,
+        matched_by: None,
+        reason: Some("not_registered"),
+    };
+    if policy.is_reserved(&canonical) {
+        answer.reason = Some("reserved");
+        return Ok(answer);
+    }
+    let mut physical_paths = None;
+    for ancestor in std::path::Path::new(&canonical).ancestors() {
+        crate::platform::cancellation::check()?;
+        let path = ancestor.to_string_lossy();
+        match observing.probe_rejection(&path) {
+            ProbeRejection::Reserved => {
+                answer.reason = Some("reserved");
+                return Ok(answer);
+            }
+            ProbeRejection::Home => {
+                answer.reason = Some("home");
+                return Ok(answer);
+            }
+            _ => {}
+        }
+        let exact = db.get_workspace_path(&identity::path_identity(&path))?;
+        let registered = if exact.is_some() {
+            exact
+        } else {
+            if physical_paths.is_none() {
+                physical_paths = Some(
+                    db.list_workspace_paths()?
+                        .into_iter()
+                        .filter_map(|registered| {
+                            resolver::physical_directory(&registered.canonical_path)
+                                .map(|physical| (registered, physical))
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let candidates = physical_paths.as_ref().unwrap();
+            let physical = resolver::physical_directory(&path);
+            let matches: Vec<_> = candidates
+                .iter()
+                .filter(|(_, stored)| {
+                    physical
+                        .as_ref()
+                        .is_some_and(|p| identity::same_location(p, stored))
+                })
+                .map(|(registered, _)| registered)
+                .collect();
+            if matches
+                .first()
+                .is_some_and(|first| matches.iter().any(|row| row.project_id != first.project_id))
+            {
+                answer.reason = Some("ambiguous_paths");
+                return Ok(answer);
+            }
+            matches.first().map(|row| (*row).clone())
+        };
+        if let Some(registered) = registered {
+            answer.project = db.get_project(&registered.project_id)?;
+            if answer.project.is_some() {
+                answer.found = true;
+                answer.matched_by = Some(if !identity::same_location(&path, &canonical) {
+                    "ancestor_path"
+                } else if identity::same_location(&path, &registered.canonical_path) {
+                    "exact_path"
+                } else {
+                    "physical_path"
+                });
+                answer.matched_path = Some(registered.canonical_path);
+                answer.reason = None;
+                return Ok(answer);
+            }
+        }
+        // Plain ancestors need only a metadata check, not a Git subprocess.
+        if !resolver::has_repository_marker(&path) {
+            continue;
+        }
+        let probe = probe_workspace_path(db, observing, policy, &path)?;
+        if probe.git_state.as_deref() == Some("detected") {
+            if let Some(id) = probe.project.and_then(|hint| hint.id) {
+                answer.project = db.get_project(&id)?;
+                if answer.project.is_some() {
+                    answer.found = true;
+                    answer.matched_by = Some("git_family");
+                    answer.matched_path = Some(path.into_owned());
+                    answer.reason = None;
+                    return Ok(answer);
+                }
+            }
+            answer.reason = Some("unregistered_repository");
+        } else {
+            answer.reason = Some(if probe.git_state.as_deref() == Some("unavailable") {
+                "git_unavailable"
+            } else {
+                "unregistered_repository"
+            });
+        }
+        // An unknown or uninspectable repository cannot inherit its outer Project.
+        return Ok(answer);
+    }
+    Ok(answer)
+}

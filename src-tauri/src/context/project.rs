@@ -22,7 +22,6 @@ pub struct ProjectUpdateOutcome {
     pub skipped_session_ids: Vec<String>,
     pub failed_sessions: Vec<SessionFailure>,
     pub remaining_pending: usize,
-    pub preference_error: Option<String>,
 }
 
 struct ProjectInput {
@@ -147,7 +146,6 @@ pub(super) fn extract_project(
                     skipped_session_ids: vec![],
                     failed_sessions: vec![],
                     remaining_pending: 0,
-                    preference_error: None,
                 },
                 "no_change",
             ));
@@ -167,7 +165,7 @@ pub(super) fn extract_project(
             runner,
         )?;
         operation.set_stage("database_commit");
-        let (revision, updated, preference_error) = db.tx(|tx| {
+        let (revision, updated) = db.tx(|tx| {
             if get_project_conn(tx, id)?.is_none()
                 || repo::state(tx, id)?.revision != state.revision
                 || ProjectInput::read(tx, id)?.fingerprint != input.fingerprint
@@ -200,7 +198,7 @@ pub(super) fn extract_project(
                 consumed.push((s.session.id.clone(), revision));
             }
             let revision = repo::commit(tx, id, &input.fingerprint, &batch.summary, &consumed)?;
-            Ok((revision, updated, batch.preferences.apply(tx)?))
+            Ok((revision, updated))
         })?;
         let status = if !batch.failed.is_empty() {
             ContextUpdateStatus::Partial
@@ -218,7 +216,6 @@ pub(super) fn extract_project(
                 skipped_session_ids: batch.skipped,
                 failed_sessions: batch.failed,
                 remaining_pending: project_context_view(db, id)?.pending_sessions,
-                preference_error,
             },
             match status {
                 ContextUpdateStatus::Partial => "partial",

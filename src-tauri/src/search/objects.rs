@@ -10,6 +10,7 @@ pub enum ObjectKind {
     Project,
     Session,
     Workstream,
+    Skill,
 }
 
 pub(super) struct ObjectQuery {
@@ -46,6 +47,25 @@ impl ObjectQuery {
             None
         }
     }
+    pub fn skill_rank(&self, name: &str, id: &str, description: &str) -> Option<i64> {
+        if self.lower.is_empty() {
+            return None;
+        }
+        let name_lower = name.to_lowercase();
+        let id_lower = id.to_lowercase();
+        if name_lower == self.lower || id_lower == self.lower {
+            Some(0)
+        } else if name_lower.starts_with(&self.lower) || id_lower.starts_with(&self.lower) {
+            Some(1)
+        } else if name_lower.contains(&self.lower)
+            || id_lower.contains(&self.lower)
+            || description.to_lowercase().contains(&self.lower)
+        {
+            Some(2)
+        } else {
+            None
+        }
+    }
 }
 
 /// Aliases are fixed by the query builders: p=projects, w=workstreams,
@@ -56,6 +76,7 @@ pub(super) fn predicate(kind: ObjectKind) -> &'static str {
         ObjectKind::Workstream=>"w.title LIKE ?1 ESCAPE '!'",
         ObjectKind::Session=>"(s.title LIKE ?1 ESCAPE '!' OR s.cwd LIKE ?1 ESCAPE '!' OR s.id LIKE ?2 ESCAPE '!' OR s.root_agent_session_id LIKE ?2 ESCAPE '!')",
         ObjectKind::Agent=>unreachable!("Agent names come from the roster"),
+        ObjectKind::Skill=>unreachable!("Skill names come from the catalog"),
     }
 }
 
@@ -82,11 +103,21 @@ pub fn matching_ids(
             .map(|a| a.as_str().to_string())
             .collect());
     }
+    if kind == ObjectKind::Skill {
+        return Ok(candidate_ids
+            .iter()
+            .filter(|id| {
+                let id_lower = id.to_lowercase();
+                parsed.lower.is_empty() || id_lower.contains(&parsed.lower)
+            })
+            .cloned()
+            .collect());
+    }
     let (table, alias) = match kind {
         ObjectKind::Project => ("projects", "p"),
         ObjectKind::Workstream => ("workstreams", "w"),
         ObjectKind::Session => ("sessions", "s"),
-        ObjectKind::Agent => unreachable!(),
+        ObjectKind::Agent | ObjectKind::Skill => unreachable!(),
     };
     let empty = query.trim().is_empty();
     let mut values = Vec::<Value>::new();

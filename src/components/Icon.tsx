@@ -12,7 +12,6 @@ const paths = {
   minus: "M4 9h10",
   chevronRight: "M7 4l5 5-5 5",
   chevronDown: "M4.5 7l4.5 4.5 4.5-4.5",
-  promote: "M9 14V3M5 7l4-4 4 4M3 12v4h12v-4",
   // 收入托盘的箭头，用于把外部 Skill 收进 NoEnding。
   adopt: "M9 2v8M5.5 6.5L9 10l3.5-3.5M3 12v3h12v-3",
   arrowDown: "M9 3.5v11M4.5 10l4.5 4.5 4.5-4.5",

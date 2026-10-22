@@ -30,6 +30,15 @@ struct RankedItem {
 }
 
 pub fn lookup(db: &Db, query: &str) -> Result<NavigationResults> {
+    lookup_with_context(db, query, None, None)
+}
+
+pub fn lookup_with_context(
+    db: &Db,
+    query: &str,
+    roots: Option<&crate::skills::Roots>,
+    managed_root: Option<&std::path::Path>,
+) -> Result<NavigationResults> {
     let query = query.trim();
     let parsed = ObjectQuery::new(query);
     let sql = if query.is_empty() {
@@ -113,6 +122,56 @@ pub fn lookup(db: &Db, query: &str) -> Result<NavigationResults> {
                 rank,
                 activity: String::new(),
             });
+        }
+    }
+    if !query.is_empty() {
+        let skill_items: Vec<(String, String, String)> = if let Some(roots) = roots {
+            let cwds = db
+                .list_workspace_paths()?
+                .into_iter()
+                .map(|p| std::path::PathBuf::from(p.canonical_path))
+                .filter(|p| p.is_dir())
+                .collect::<Vec<_>>();
+            let registry = crate::skills::load_skill_registry(db)?;
+            let inventory = crate::skills::catalog(
+                roots,
+                &cwds,
+                &registry,
+                managed_root.unwrap_or_else(|| std::path::Path::new("")),
+            );
+            inventory
+                .resources
+                .into_iter()
+                .map(|r| (r.id, r.name, r.description))
+                .collect()
+        } else {
+            let registry = crate::skills::load_skill_registry(db)?;
+            registry
+                .sources
+                .into_iter()
+                .map(|s| (s.id, s.name, s.description))
+                .collect()
+        };
+
+        for (id, name, description) in skill_items {
+            if let Some(rank) = parsed.skill_rank(&name, &id, &description) {
+                candidates.push(RankedItem {
+                    item: NavigationItem {
+                        kind: ObjectKind::Skill,
+                        ref_id: id.clone(),
+                        title: if name.is_empty() { id } else { name },
+                        hint: if !description.is_empty() {
+                            description.lines().next().unwrap_or("").trim().to_string()
+                        } else {
+                            "技能".into()
+                        },
+                        agent: None,
+                        archived: false,
+                    },
+                    rank,
+                    activity: String::new(),
+                });
+            }
         }
     }
     candidates.sort_by(|a, b| {

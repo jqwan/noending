@@ -733,7 +733,6 @@ fn recent_turn_messages_keep_the_conversation_skeleton() {
     let (session, _) = seed_root(&db);
     let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
         source_message_id: Some(id.into()),
-        source_position: String::new(),
         ts: None,
         role,
         content: text.into(),
@@ -797,7 +796,6 @@ fn appending_to_a_turn_demotes_the_formerly_final_reply() {
     let (session, _) = seed_root(&db);
     let msg = |id: &str, role: SessionMessageRole, text: &str| ParsedSessionMessage {
         source_message_id: Some(id.into()),
-        source_position: String::new(),
         ts: None,
         role,
         content: text.into(),
@@ -853,14 +851,12 @@ fn older_history_from_a_rescan_cannot_move_conversation_time_backwards() {
             &[
                 ParsedSessionMessage {
                     source_message_id: Some("m1".into()),
-                    source_position: "line:1".into(),
                     ts: Some("2026-09-20T13:01:48Z".into()),
                     role: SessionMessageRole::User,
                     content: "第一次的提问".into(),
                 },
                 ParsedSessionMessage {
                     source_message_id: Some("old".into()),
-                    source_position: "line:0".into(),
                     ts: Some("2020-01-01T00:00:00Z".into()),
                     role: SessionMessageRole::Assistant,
                     content: "旧历史".into(),
@@ -892,14 +888,12 @@ fn a_new_untimestamped_message_uses_the_source_mtime_for_conversation_time() {
             &[
                 ParsedSessionMessage {
                     source_message_id: Some("m2".into()),
-                    source_position: "line:2".into(),
                     ts: Some("2027-01-01T00:00:00Z".into()),
                     role: SessionMessageRole::Assistant,
                     content: "带时间戳的新回复".into(),
                 },
                 ParsedSessionMessage {
                     source_message_id: Some("m3".into()),
-                    source_position: "line:3".into(),
                     ts: None,
                     role: SessionMessageRole::Assistant,
                     content: "没有时间戳的新回复".into(),
@@ -991,7 +985,6 @@ fn seed_root(
             &session_id,
             &[ParsedSessionMessage {
                 source_message_id: Some("m1".into()),
-                source_position: "line:1".into(),
                 ts: Some("2026-09-20T13:01:48Z".into()),
                 role: SessionMessageRole::User,
                 content: "第一次的提问".into(),

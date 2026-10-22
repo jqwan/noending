@@ -40,16 +40,16 @@ fn open_db(tag: &str) -> Db {
 
 /// Inspect persisted rows independently of the current-message query so tests
 /// detect obsolete messages that would otherwise remain invisible.
-fn raw_rows(db: &Db, session_id: &str) -> Vec<(i64, String, i64)> {
+fn raw_rows(db: &Db, session_id: &str) -> Vec<(i64, String)> {
     let conn = db.read();
     let mut stmt = conn
         .prepare(
-            "SELECT sequence, content, source_generation FROM session_messages
+            "SELECT sequence, content FROM session_messages
              WHERE session_id = ?1 ORDER BY sequence",
         )
         .unwrap();
     stmt.query_map(rusqlite::params![session_id], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        Ok((r.get(0)?, r.get(1)?))
     })
     .unwrap()
     .collect::<std::result::Result<Vec<_>, _>>()
@@ -106,7 +106,6 @@ fn msg(
 ) -> ParsedSessionMessage {
     ParsedSessionMessage {
         source_message_id: Some(source_message_id.into()),
-        source_position: String::new(),
         ts: Some("2026-09-13T10:00:00Z".into()),
         role,
         content: content.into(),
@@ -278,7 +277,6 @@ macro_rules! identity_suite {
                 vec![1, 2, 3],
                 "sequences are app-assigned and dense on first ingest"
             );
-            assert!(all.iter().all(|e| e.source_generation == 0));
             assert!(
                 all.iter().all(|e| !e.id.is_empty()),
                 "every message has a stable id"
@@ -347,11 +345,10 @@ macro_rules! identity_suite {
                 "retired history is removed after a complete snapshot"
             );
             assert_eq!(
-                raw.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
+                raw.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
                 vec![6, 7],
                 "new messages keep the storage sequence assigned before retirement"
             );
-            assert_eq!(raw.iter().filter(|(_, _, g)| *g == 1).count(), 2);
             // The CURRENT conversation is the rewritten source only.
             let conv = db.get_messages(&s.id, None, 100).unwrap();
             assert_eq!(
@@ -488,7 +485,6 @@ fn same_size_rewrite_is_detected() {
         1,
         "the current conversation is the rewritten text"
     );
-    assert_eq!(conv[0].source_generation, 1);
     assert_eq!(
         raw_rows(&db, &s.id).len(),
         1,
@@ -515,16 +511,14 @@ fn identity_dedup_follows_chain_semantics() {
         &dir.join("x.jsonl"),
     );
 
-    let mk = |pos: &str, text: &str| ParsedSessionMessage {
+    let mk = |text: &str| ParsedSessionMessage {
         source_message_id: None,
-        source_position: pos.into(),
         ts: Some("t".into()),
         role: SessionMessageRole::User,
         content: text.into(),
     };
-    let mk_native = |pos: &str, id: &str| ParsedSessionMessage {
+    let mk_native = |id: &str| ParsedSessionMessage {
         source_message_id: Some(id.into()),
-        source_position: pos.into(),
         ts: Some("t".into()),
         role: SessionMessageRole::User,
         content: "same text".into(),
@@ -532,13 +526,13 @@ fn identity_dedup_follows_chain_semantics() {
 
     // first sight of the content
     let first = db
-        .commit_ingest(&s.id, &[mk("line:1", "same text")], &rescan(0))
+        .commit_ingest(&s.id, &[mk("same text")], &rescan(0))
         .unwrap();
     assert_eq!(first.len(), 1);
 
     // identical re-scan (same chain position, later generation) → dedup
     let again = db
-        .commit_ingest(&s.id, &[mk("line:9", "same text")], &rescan(1))
+        .commit_ingest(&s.id, &[mk("same text")], &rescan(1))
         .unwrap();
     assert_eq!(again.len(), 0, "identical rescan never duplicates");
 
@@ -547,23 +541,23 @@ fn identity_dedup_follows_chain_semantics() {
     // the session's identity tail, so the second occurrence links to a
     // different predecessor.
     let second_msg = db
-        .commit_ingest(&s.id, &[mk("line:2", "same text")], &append(0))
+        .commit_ingest(&s.id, &[mk("same text")], &append(0))
         .unwrap();
     assert_eq!(second_msg.len(), 1, "repeated user message stays distinct");
 
     // native agent message ids dedup regardless of chain position
     let native1 = db
-        .commit_ingest(&s.id, &[mk_native("line:3", "native-1")], &append(0))
+        .commit_ingest(&s.id, &[mk_native("native-1")], &append(0))
         .unwrap();
     assert_eq!(native1.len(), 1);
     let native2 = db
-        .commit_ingest(&s.id, &[mk_native("line:4", "native-1")], &append(0))
+        .commit_ingest(&s.id, &[mk_native("native-1")], &append(0))
         .unwrap();
     assert_eq!(native2.len(), 0, "native id dedups across positions");
 
     // genuinely new content still inserts
     let third = db
-        .commit_ingest(&s.id, &[mk("line:5", "different text")], &append(0))
+        .commit_ingest(&s.id, &[mk("different text")], &append(0))
         .unwrap();
     assert_eq!(third.len(), 1);
 }
@@ -622,7 +616,6 @@ fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
             &s.id,
             &[ParsedSessionMessage {
                 source_message_id: None,
-                source_position: String::new(),
                 ts: Some("2026-09-13T10:00:00Z".into()),
                 role: SessionMessageRole::User,
                 content: "hello".into(),

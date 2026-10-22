@@ -3,38 +3,11 @@
 use super::AppState;
 use crate::{
     error::{other, Result},
-    skills::{self, Scope},
+    skills::{self, catalog, invalidate_catalog, Scope},
     storage::Db,
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
 use tauri::State;
-
-/// Board and detail are separate routes, so entering a resource immediately
-/// after the board scans the same directories again. Keep the merged scan for a
-/// few seconds; every mutation below invalidates it explicitly.
-const CATALOG_TTL: Duration = Duration::from_secs(10);
-
-struct CachedCatalog {
-    key: String,
-    at: Instant,
-    inventory: skills::Inventory,
-}
-
-static CATALOG: OnceLock<Mutex<Option<CachedCatalog>>> = OnceLock::new();
-
-fn catalog_cache() -> &'static Mutex<Option<CachedCatalog>> {
-    CATALOG.get_or_init(|| Mutex::new(None))
-}
-
-fn invalidate_catalog() {
-    *catalog_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-}
 
 /// Clears the catalog again when a mutation finishes so a read that ran while
 /// files were changing cannot leave its pre-mutation snapshot cached.
@@ -44,22 +17,6 @@ impl Drop for CatalogReset {
     fn drop(&mut self) {
         invalidate_catalog();
     }
-}
-
-fn catalog_key(roots: &skills::Roots, cwds: &[PathBuf]) -> String {
-    let mut paths: Vec<String> = cwds
-        .iter()
-        .map(|path| path.to_string_lossy().into())
-        .collect();
-    paths.sort();
-    format!(
-        "{}\0{}\0{}\0{}\0{}",
-        roots.home.display(),
-        roots.codex.display(),
-        roots.claude.display(),
-        roots.pi.display(),
-        paths.join("\0")
-    )
 }
 
 /// The NoEnding library is NoEnding-owned, so a Skill dropped into it is
@@ -72,31 +29,6 @@ fn sync_library_sources(db: &Db, managed_root: &Path) -> Result<()> {
         invalidate_catalog();
     }
     Ok(())
-}
-
-fn catalog(
-    roots: &skills::Roots,
-    cwds: &[PathBuf],
-    skill_registry: &skills::SkillRegistry,
-    managed_root: &Path,
-) -> skills::Inventory {
-    let key = catalog_key(roots, cwds);
-    let mut cache = catalog_cache()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(cached) = cache.as_ref() {
-        if cached.key == key && cached.at.elapsed() < CATALOG_TTL {
-            return cached.inventory.clone();
-        }
-    }
-    let mut inventory = skills::list_catalog(roots, cwds);
-    skills::merge_skill_sources(skill_registry, &mut inventory, true, managed_root);
-    *cache = Some(CachedCatalog {
-        key,
-        at: Instant::now(),
-        inventory: inventory.clone(),
-    });
-    inventory
 }
 
 fn cwd(db: &Db, scope: &Scope) -> Result<Option<PathBuf>> {

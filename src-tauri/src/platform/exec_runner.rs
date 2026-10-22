@@ -44,6 +44,7 @@ pub enum ContextExecFailureKind {
     Wait,
     Exit,
     Timeout,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,54 @@ enum ProcessFailure {
     Spawn(std::io::Error),
     Wait(std::io::Error),
     Pipe,
+    Cancelled,
+}
+
+struct ChildGuard(Child);
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl ChildGuard {
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            unsafe extern "C" {
+                fn kill(pid: i32, signal: i32) -> i32;
+            }
+            // Every headless command owns its process group, including shell descendants.
+            kill(-(self.0.id() as i32), 9);
+        }
+        #[cfg(windows)]
+        {
+            let taskkill = std::env::var_os("SystemRoot")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| r"C:\Windows".into())
+                .join("System32/taskkill.exe");
+            let _ = Command::new(taskkill)
+                .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
+                .creation_flags(0x08000000)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            self.terminate();
+        }
+    }
 }
 
 fn drain(mut reader: impl Read, buf: &mut String) {
@@ -111,6 +160,9 @@ pub fn run_with_env(
         ProcessFailure::Spawn(e) => other(format!("启动 {} 失败: {}", program.display(), e)),
         ProcessFailure::Wait(e) => other(format!("等待进程失败: {}", e)),
         ProcessFailure::Pipe => other("no process output pipe"),
+        ProcessFailure::Cancelled => {
+            std::io::Error::new(std::io::ErrorKind::Interrupted, "操作已取消").into()
+        }
     })
 }
 
@@ -121,7 +173,15 @@ fn run_process(
     timeout_secs: u64,
     env: &[(&str, &str)],
 ) -> std::result::Result<HeadlessOutput, ProcessFailure> {
+    if super::cancellation::requested() {
+        return Err(ProcessFailure::Cancelled);
+    }
     let mut command = Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     // Headless CLI shims must not inherit the dev terminal's console:
     // cmd `title` and Node process.title can otherwise rename its tab.
     #[cfg(windows)]
@@ -138,7 +198,7 @@ fn run_process(
         command.env(key, value);
     }
 
-    let mut child: Child = command.spawn().map_err(ProcessFailure::Spawn)?;
+    let mut child = ChildGuard(command.spawn().map_err(ProcessFailure::Spawn)?);
 
     let mut stdout_pipe = child.stdout.take().ok_or(ProcessFailure::Pipe)?;
     let mut stderr_pipe = child.stderr.take().ok_or(ProcessFailure::Pipe)?;
@@ -154,13 +214,18 @@ fn run_process(
     });
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut cancelled = false;
     let status = loop {
+        if super::cancellation::requested() {
+            cancelled = true;
+            child.terminate();
+            break None;
+        }
         match child.try_wait() {
             Ok(Some(st)) => break Some(st),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    child.terminate();
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(150));
@@ -171,6 +236,9 @@ fn run_process(
 
     let stdout = out_handle.join().unwrap_or_default();
     let stderr = err_handle.join().unwrap_or_default();
+    if cancelled {
+        return Err(ProcessFailure::Cancelled);
+    }
 
     Ok(match status {
         Some(st) => HeadlessOutput {
@@ -211,6 +279,7 @@ pub fn run_context_extraction(
                 Some(safe_io_error_kind(error.kind())),
             ),
             ProcessFailure::Pipe => (ContextExecFailureKind::Start, true, Some("broken_pipe")),
+            ProcessFailure::Cancelled => (ContextExecFailureKind::Cancelled, true, None),
             ProcessFailure::Wait(error) => (
                 ContextExecFailureKind::Wait,
                 true,

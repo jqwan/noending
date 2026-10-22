@@ -434,9 +434,9 @@ fn navigation_lookup_matches_objects_and_paths_but_excludes_content() {
         noending::storage::workspace::insert_workspace_path_conn(tx,"/work/100%_done",&project.id)?;
         tx.execute("UPDATE sessions SET title='Needle Session',cwd='/work/100%_done',archived_at='now' WHERE id=?1",[&session.id])?;
         tx.execute("UPDATE workstreams SET visibility='archived' WHERE id=?1",[&task.id])?;
-        tx.execute("INSERT INTO project_context_state(project_id,summary) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}')",[&project.id])?;
-        tx.execute("UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}' WHERE workstream_id=?1",[&task.id])?;
-        tx.execute("INSERT INTO session_contexts(session_id,summary,updated_at) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[]}]}','now')",[&session.id])?;
+        tx.execute("INSERT INTO project_context_state(project_id,summary) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}')",[&project.id])?;
+        tx.execute("UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}' WHERE workstream_id=?1",[&task.id])?;
+        tx.execute("INSERT INTO session_contexts(session_id,summary,updated_at) VALUES(?1,'{\"items\":[{\"title\":\"contentonly\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}','now')",[&session.id])?;
 
 
         Ok(())
@@ -628,4 +628,134 @@ fn board_matches_are_complete_and_exclude_non_identity_fields() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn navigation_lookup_searches_skills_by_name_id_and_description_while_default_remains_clean() {
+    use noending::search::{
+        navigation::lookup,
+        objects::{matching_ids, ObjectKind},
+    };
+    use noending::skills::{self, SkillSource};
+
+    let db = open_db("navigation-skills");
+
+    // Empty query returns only agents/recent sessions, never skills.
+    let initial = lookup(&db, "").unwrap();
+    assert!(initial.items.iter().all(|h| h.kind != ObjectKind::Skill));
+
+    let mut registry = skills::load_skill_registry(&db).unwrap();
+    registry.sources.push(SkillSource {
+        id: "git-commit-helper".into(),
+        name: "Git Commit".into(),
+        description: "Assists with generating conventional commit messages".into(),
+        path: "/mock/git-commit/SKILL.md".into(),
+    });
+    registry.sources.push(SkillSource {
+        id: "deploy-pipeline".into(),
+        name: "Deploy Cloud".into(),
+        description: "CI/CD deployment utilities".into(),
+        path: "/mock/deploy/SKILL.md".into(),
+    });
+    skills::save_skill_registry(&db, &registry).unwrap();
+
+    // Default suggestions still never return skills.
+    assert!(lookup(&db, "")
+        .unwrap()
+        .items
+        .iter()
+        .all(|h| h.kind != ObjectKind::Skill));
+
+    // Match by name
+    let by_name = lookup(&db, "Git Commit").unwrap();
+    let hit = by_name
+        .items
+        .iter()
+        .find(|h| h.kind == ObjectKind::Skill)
+        .expect("found by name");
+    assert_eq!(hit.ref_id, "git-commit-helper");
+    assert_eq!(hit.title, "Git Commit");
+    assert_eq!(
+        hit.hint,
+        "Assists with generating conventional commit messages"
+    );
+    assert_eq!(hit.agent, None);
+    assert!(!hit.archived);
+
+    // Match by id
+    let by_id = lookup(&db, "deploy-pipeline").unwrap();
+    let hit_id = by_id
+        .items
+        .iter()
+        .find(|h| h.kind == ObjectKind::Skill)
+        .expect("found by id");
+    assert_eq!(hit_id.ref_id, "deploy-pipeline");
+    assert_eq!(hit_id.title, "Deploy Cloud");
+
+    // Match by description substring
+    let by_desc = lookup(&db, "conventional commit").unwrap();
+    let hit_desc = by_desc
+        .items
+        .iter()
+        .find(|h| h.kind == ObjectKind::Skill)
+        .expect("found by description");
+    assert_eq!(hit_desc.ref_id, "git-commit-helper");
+
+    // Ranking: exact name/id match is rank 0, ahead of description match
+    let rank_test = lookup(&db, "Deploy").unwrap();
+    let hit_rank = rank_test
+        .items
+        .iter()
+        .find(|h| h.kind == ObjectKind::Skill)
+        .expect("found by prefix");
+    assert_eq!(hit_rank.ref_id, "deploy-pipeline");
+
+    // Matching IDs helper
+    let matches = matching_ids(
+        &db,
+        ObjectKind::Skill,
+        "commit",
+        &["git-commit-helper".into(), "deploy-pipeline".into()],
+    )
+    .unwrap();
+    assert_eq!(matches, vec!["git-commit-helper"]);
+}
+
+#[test]
+fn navigation_lookup_with_context_discovers_disk_skills() {
+    use noending::search::navigation::lookup_with_context;
+    use noending::search::objects::ObjectKind;
+    use noending::skills::Roots;
+
+    let db = open_db("navigation-disk-skills");
+    let temp_root = std::env::temp_dir().join(format!(
+        "noending-test-roots-{}",
+        noending::storage::new_id()
+    ));
+    let home = temp_root.join("home");
+    let skill_dir = home.join(".agents/skills/formatter");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: Code Formatter\ndescription: Formats codebase according to rules\n---\n",
+    )
+    .unwrap();
+
+    let roots = Roots {
+        codex: home.join(".codex"),
+        claude: home.join(".claude"),
+        pi: home.join(".pi/agent"),
+        home: home.clone(),
+    };
+
+    let result = lookup_with_context(&db, "Formatter", Some(&roots), None).unwrap();
+    let skill = result
+        .items
+        .iter()
+        .find(|h| h.kind == ObjectKind::Skill)
+        .expect("skill found on disk");
+    assert_eq!(skill.title, "Code Formatter");
+    assert_eq!(skill.hint, "Formats codebase according to rules");
+
+    let _ = std::fs::remove_dir_all(&temp_root);
 }

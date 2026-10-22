@@ -64,8 +64,6 @@ pub struct WorkspacePath {
     pub git_state: String,        // none | detected | missing
     pub git_kind: Option<String>, // main | linked | unknown
     pub exists: bool,
-    pub first_seen_at: String,
-    pub last_seen_at: String,
 }
 
 impl WorkspacePath {
@@ -82,8 +80,6 @@ impl WorkspacePath {
             git_state: git_state::NONE.into(),
             git_kind: None,
             exists: true,
-            first_seen_at: String::new(),
-            last_seen_at: String::new(),
         }
     }
 }
@@ -107,8 +103,6 @@ pub mod git_state {
 pub struct GitIdentity {
     pub id: Id,
     pub common_dir: String,
-    pub first_seen_at: String,
-    pub last_seen_at: String,
     pub metadata: serde_json::Value,
 }
 
@@ -299,7 +293,7 @@ pub struct Session {
     /// When this Session is an independently continuable fork, the Logical
     /// Session its source forked from. Lifecycle, tracking, Conversation and
     /// Context stay fully independent of that source; this is a
-    /// provenance note, not a parent link in the old sense.
+    /// provenance note; it does not control lifecycle or tracking.
     pub forked_from_session_id: Option<Id>,
     pub started_at: Option<String>,
     /// Last activity observed on the source.
@@ -446,10 +440,6 @@ pub struct SessionMessage {
     /// next projected message is not another assistant message), never
     /// ingested; meaningless (false) on user rows.
     pub turn_final: bool,
-    // Source provenance.
-    pub source_message_id: Option<String>,
-    pub source_generation: i64,
-    pub source_position: String,
     pub source_identity_hash: String,
 }
 
@@ -564,20 +554,14 @@ impl SourceAvailability {
 /// sequence (adapter → core hand-off shape).
 #[derive(Debug, Clone)]
 pub struct ParsedSessionMessage {
+    /// Native ID used to compute identity; only the resulting hash is persisted.
     pub source_message_id: Option<String>,
-    pub source_position: String,
     pub ts: Option<String>,
     pub role: SessionMessageRole,
     pub content: String,
 }
 
 impl ParsedSessionMessage {
-    /// Source position, when the adapter has a stable native one.
-    pub fn with_position(mut self, position: String) -> Self {
-        self.source_position = position;
-        self
-    }
-
     /// Timestamp, when the adapter read one off the source.
     pub fn with_ts(mut self, ts: Option<String>) -> Self {
         self.ts = ts;
@@ -639,7 +623,6 @@ pub struct IngestSource {
     pub agent: Agent,
     pub path: String,
     pub origin: String, // default | user
-    pub created_at: String,
 }
 
 pub mod ingest_origin {

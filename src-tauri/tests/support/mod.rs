@@ -119,7 +119,6 @@ pub fn parsed_message(
 ) -> noending::domain::ParsedSessionMessage {
     noending::domain::ParsedSessionMessage {
         source_message_id: Some(source_message_id.into()),
-        source_position: String::new(),
         ts: None,
         role,
         content: content.into(),

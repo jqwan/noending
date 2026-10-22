@@ -388,8 +388,6 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
                 agent: Agent::Codex,
                 executable_path: "/usr/local/bin/codex".into(),
                 version: None,
-                source: "test".into(),
-                last_verified_at: String::new(),
             },
             &opts,
             None,

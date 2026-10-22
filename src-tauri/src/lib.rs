@@ -12,6 +12,7 @@ pub mod error;
 pub mod ingestion;
 pub mod launcher;
 pub mod lifecycle;
+mod mcp;
 pub mod platform;
 pub mod search;
 pub mod skills;
@@ -50,6 +51,7 @@ pub fn run() {
                 home.root.display(),
                 home.root_str()
             );
+            app.manage(home.acquire_access()?);
             let db_path = home.db_path.clone();
             let db = storage::Db::open(&db_path)?;
             eprintln!("[noending] db at {}", db_path.display());
@@ -94,17 +96,16 @@ pub fn run() {
             // touching app state from a thread.
             app.manage(terminal::TerminalRegistry::new(Some(app.handle().clone())));
 
-            // CLI requests use the same app-owned DB/services as Tauri commands.
-            // A scoped extraction connection never routes through this server.
+            // Standalone CLI mutations are observed through SQLite data_version.
             {
                 let state: tauri::State<commands::AppState> = app.state();
                 let handle = app.handle().clone();
-                match cli::start(state.db.clone(), home.clone(), layer.clone(), move || {
+                let watcher = cli::watch_changes(state.db.clone(), move || {
+                    let state: tauri::State<commands::AppState> = handle.state();
+                    handle.state::<terminal::TerminalRegistry>().bind_discovered(&state.db);
                     let _ = handle.emit("cli-data-changed", ());
-                }) {
-                    Ok(server) => { app.manage(server); }
-                    Err(error) => eprintln!("[noending] CLI unavailable: {error}"),
-                }
+                });
+                app.manage(watcher);
             }
 
             {
@@ -196,6 +197,7 @@ pub fn run() {
             commands::set_default_agent,
             // Explicit summary reads and user-triggered extraction.
             commands::get_session_context,
+            commands::set_summary_title_lock,
             commands::get_workstream_context_state,
             commands::get_project_context_state,
             commands::update_project_context,
@@ -205,10 +207,6 @@ pub fn run() {
             commands::update_workstream_context,
             commands::regenerate_workstream_context,
             commands::open_context_extraction_logs,
-            commands::list_preferences,
-            commands::save_preference,
-            commands::promote_preference,
-            commands::delete_preference,
             commands::get_summary_prompt_settings,
             commands::set_summary_prompt_template,
             commands::preview_summary_prompt,
@@ -277,8 +275,8 @@ pub fn run() {
             // Documented product behavior: closing NoEnding ends every
             // embedded Agent. The external-terminal path is unaffected.
             if let tauri::RunEvent::Exit = event {
-                if let Some(server) = app.try_state::<cli::Server>() {
-                    server.shutdown();
+                if let Some(watcher) = app.try_state::<cli::ChangeWatcher>() {
+                    watcher.shutdown();
                 }
                 if let Some(registry) = app.try_state::<terminal::TerminalRegistry>() {
                     registry.kill_all();

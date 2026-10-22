@@ -93,7 +93,6 @@ const mockSources: IngestSource[] = [
     path: "~/.claude/projects",
     origin: "default",
     exists: true,
-    created_at: "2026-10-05T14:00:00Z",
   },
   {
     id: "src-2",
@@ -101,7 +100,6 @@ const mockSources: IngestSource[] = [
     path: "~/.gemini/antigravity",
     origin: "default",
     exists: true,
-    created_at: "2026-10-05T14:00:00Z",
   },
   {
     id: "src-3",
@@ -109,7 +107,6 @@ const mockSources: IngestSource[] = [
     path: "~/.gemini/antigravity-cli",
     origin: "default",
     exists: true,
-    created_at: "2026-10-05T14:00:00Z",
   },
 ];
 
@@ -193,7 +190,6 @@ describe("AgentsView", () => {
       path: "/custom/sessions/path",
       origin: "user",
       exists: true,
-      created_at: "2026-10-05T15:00:00Z",
     });
 
     render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
@@ -259,7 +255,6 @@ describe("AgentsView", () => {
         path: "/custom/path",
         origin: "user",
         exists: true,
-        created_at: "2026-10-05T14:00:00Z",
       },
     ]);
 

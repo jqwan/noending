@@ -1,7 +1,6 @@
-//! Observable task membership, tracking and project/preference lifecycle contracts.
+//! Observable task membership, tracking and project lifecycle contracts.
 mod support;
 use noending::storage::{
-    preferences,
     workspace::{insert_workspace_path_conn, reassign_workspace_path_project_conn},
     workstream_projects as relations,
 };
@@ -205,35 +204,9 @@ fn launch_tracking_adds_without_replacing_existing_and_missing_selection_does_no
         .inherit_terminal_tracking(&wrong, &[a.clone()])
         .is_err());
 }
+
 #[test]
-fn preference_promotion_moves_scope_preserves_lock_and_coalesces_existing_user_item() {
-    let f = Fixture::new();
-    let item = preferences::save_item(f.db(), None, Some("a"), "Keep concise", true).unwrap();
-    let promoted = preferences::promote_item(f.db(), &item.id).unwrap();
-    assert!(promoted.project_id.is_none());
-    assert!(promoted.locked);
-    assert_eq!(promoted.id, item.id);
-    assert!(preferences::list_items(f.db(), Some("a"))
-        .unwrap()
-        .is_empty());
-    let p = preferences::save_item(f.db(), None, Some("a"), "Explain changes", true).unwrap();
-    let u = preferences::save_item(f.db(), None, None, "Explain changes", false).unwrap();
-    let combined = preferences::promote_item(f.db(), &p.id).unwrap();
-    assert_eq!(combined.id, u.id);
-    assert!(combined.locked);
-    assert_eq!(preferences::list_items(f.db(), None).unwrap().len(), 2);
-    assert!(preferences::save_item(f.db(), None, Some("a"), "Keep concise", false).is_err());
-    let other = preferences::save_item(f.db(), None, Some("a"), "Another rule", false).unwrap();
-    assert!(
-        preferences::save_item(f.db(), Some(&other.id), Some("a"), "Keep concise", false).is_err()
-    );
-    assert_eq!(
-        preferences::list_items(f.db(), Some("a")).unwrap()[0].content,
-        "Another rule"
-    );
-}
-#[test]
-fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_duplicates() {
+fn project_merge_folds_task_links_and_keeps_surviving_summary() {
     let f = Fixture::new();
     let task = f.task("Shared", &["a", "b"]);
     f.db()
@@ -255,9 +228,6 @@ fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_dup
             Ok(())
         })
         .unwrap();
-    preferences::save_item(f.db(), None, Some("a"), "Same rule", true).unwrap();
-    preferences::save_item(f.db(), None, Some("b"), "Same rule", false).unwrap();
-    preferences::save_item(f.db(), None, Some("a"), "Unique rule", false).unwrap();
     let revision_before =
         noending::storage::get_workstream_context_state_conn(&f.db().read(), &task)
             .unwrap()
@@ -279,15 +249,6 @@ fn project_merge_folds_task_links_and_preferences_keeps_b_summary_and_locked_dup
             .unwrap()
             .summary,
         noending_lib::domain::Summary::single("B summary")
-    );
-    let items = preferences::list_items(f.db(), Some("b")).unwrap();
-    assert_eq!(items.len(), 2);
-    assert!(
-        items
-            .iter()
-            .find(|p| p.content == "Same rule")
-            .unwrap()
-            .locked
     );
     assert_eq!(
         f.db()
@@ -335,7 +296,7 @@ fn archive_restore_and_stale_object_edits_preserve_task_memberships_and_summary(
     f.db()
         .write()
         .execute(
-            "UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"Retained summary\",\"description\":\"\",\"details\":[]}]}' WHERE workstream_id=?1",
+            "UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"Retained summary\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}' WHERE workstream_id=?1",
             [&task],
         )
         .unwrap();

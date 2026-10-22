@@ -2247,7 +2247,6 @@ mod tests {
             &source.id,
             &[crate::domain::ParsedSessionMessage {
                 source_message_id: Some("first".into()),
-                source_position: "0".into(),
                 ts: source.started_at.clone(),
                 role: crate::domain::SessionMessageRole::User,
                 content: prompt.clone(),

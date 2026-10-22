@@ -50,8 +50,6 @@ fn seed_installation(db: &Db, agent: Agent) {
             .to_string_lossy()
             .to_string(),
         version: Some("test".into()),
-        source: "test".into(),
-        last_verified_at: now(),
     })
     .unwrap();
 }

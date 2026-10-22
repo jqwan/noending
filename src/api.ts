@@ -1,7 +1,7 @@
 import { invalidateTargets } from "./app/removedTargets";
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Preference, Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
+  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
 
   IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
@@ -11,17 +11,10 @@ import type {
 
   Session, SessionListItem, SessionContextView, SessionDetail, SessionTracking,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
-  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings,
+  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings, SummaryLockResult,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamUpdateOutcome,
 } from "./types";
-
-/** Notify mounted preference lists after summary or user writes. */
-async function invokeWithPreferences<T>(command: string, args: Record<string, unknown>): Promise<T> {
-  const result = await invoke<T>(command, args);
-  window.dispatchEvent(new Event("noending:preferences"));
-  return result;
-}
 
 export const api = {
   listSkills: (scope: import("./types").SkillScope) =>
@@ -179,34 +172,30 @@ export const api = {
   /** Session 摘要 + 待更新状态。纯读取，不摄入、不调用模型。 */
   getSessionContext: (sessionId: string) =>
     invoke<SessionContextView>("get_session_context", { sessionId }),
+  setSummaryTitleLock: (kind: "session" | "task" | "project", id: string, revision: number, itemNumber: number, locked: boolean) =>
+    invoke<SummaryLockResult>("set_summary_title_lock", { kind, id, revision, itemNumber, locked }),
   /** Workstream 当前 Context + revision + 待更新状态。纯读取。 */
   getWorkstreamContextState: (workstreamId: string) =>
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
   /** 当前摘要与增量消息整合，最多启动一次 Agent。 */
   updateSessionContext: (sessionId: string) =>
-    invokeWithPreferences<SessionUpdateOutcome>("update_session_context", { sessionId }),
+    invoke<SessionUpdateOutcome>("update_session_context", { sessionId }),
   /** 从完整有效历史重新生成，不沿用当前摘要。 */
   regenerateSessionContext: (sessionId: string) =>
-    invokeWithPreferences<SessionUpdateOutcome>("regenerate_session_context", { sessionId }),
+    invoke<SessionUpdateOutcome>("regenerate_session_context", { sessionId }),
   /** 一次点击 → 最多一次模型调用 → 相关 Session 摘要与 Workstream 状态一起更新。 */
   updateWorkstreamContext: (workstreamId: string) =>
-    invokeWithPreferences<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
+    invoke<WorkstreamUpdateOutcome>("update_workstream_context", { workstreamId }),
 
   getProjectContextState: (projectId: string) =>
     invoke<ProjectContextView>("get_project_context_state", { projectId }),
   updateProjectContext: (projectId: string) =>
-    invokeWithPreferences<ProjectUpdateOutcome>("update_project_context", { projectId }),
+    invoke<ProjectUpdateOutcome>("update_project_context", { projectId }),
   regenerateProjectContext: (projectId: string) =>
-    invokeWithPreferences<ProjectUpdateOutcome>("regenerate_project_context", { projectId }),
+    invoke<ProjectUpdateOutcome>("regenerate_project_context", { projectId }),
 
   regenerateWorkstreamContext: (workstreamId: string) =>
-    invokeWithPreferences<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
-
-  listPreferences: (projectId: string | null) => invoke<Preference[]>("list_preferences", { projectId }),
-  promotePreference: (id: string) => invoke<Preference>("promote_preference",{id}),
-  savePreference: (id: string | null, projectId: string | null, content: string, locked: boolean) =>
-    invokeWithPreferences<Preference>("save_preference", { id, projectId, content, locked }),
-  deletePreference: (id: string) => invokeWithPreferences<void>("delete_preference", { id }),
+    invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
 
   getSummaryPromptSettings: () =>
     invoke<SummaryPromptSettings>("get_summary_prompt_settings"),

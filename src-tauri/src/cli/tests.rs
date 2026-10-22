@@ -1,15 +1,13 @@
 use super::*;
 use crate::domain::{Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate};
 use crate::storage::{now, Db};
-use crate::workspace::{home::NoEndingHome, wiring::WorkspaceLayer};
+use crate::workspace::home::NoEndingHome;
 use std::sync::Arc;
 
 struct Fixture {
     root: PathBuf,
     home: NoEndingHome,
-    server: Option<Server>,
     db: Option<Arc<Db>>,
-    changes: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -17,19 +15,10 @@ impl Fixture {
         let home = NoEndingHome::new(root.join("home").to_str().unwrap(), None).unwrap();
         home.ensure_dirs().unwrap();
         let db = Arc::new(Db::open(&home.db_path).unwrap());
-        let layer = Arc::new(WorkspaceLayer::new(&home));
-        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let notifications = changes.clone();
-        let server = start(db.clone(), home.clone(), layer, move || {
-            notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        })
-        .unwrap();
         Self {
             root,
             home,
-            server: Some(server),
             db: Some(db),
-            changes,
         }
     }
     fn db(&self) -> &Db {
@@ -37,12 +26,8 @@ impl Fixture {
     }
     fn call(&self, args: &[&str]) -> CliResult<Value> {
         let mut argv = vec![
-            "--connection".into(),
-            self.home
-                .runtime_dir
-                .join("cli.json")
-                .to_string_lossy()
-                .into_owned(),
+            "--home".into(),
+            self.home.root.to_string_lossy().into_owned(),
         ];
         argv.extend(args.iter().map(|s| s.to_string()));
         execute(&argv)
@@ -93,7 +78,6 @@ impl Fixture {
                 id,
                 &[ParsedSessionMessage {
                     source_message_id: Some(message.into()),
-                    source_position: message.into(),
                     role: SessionMessageRole::User,
                     ts: Some(now()),
                     content: content.into(),
@@ -113,7 +97,6 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        drop(self.server.take());
         drop(self.db.take());
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -155,41 +138,13 @@ fn cli_pages_search_whole_messages_preserve_order_cutoff_and_reject_rewritten_hi
     );
 }
 #[test]
-fn cli_preferences_respect_current_lock_and_summary_edits_preserve_pending_messages() {
+fn cli_summary_edits_preserve_pending_messages() {
     let f = Fixture::new();
-    let pref = f
-        .call(&[
-            "preference",
-            "add",
-            "--scope",
-            "user",
-            "--content",
-            "保持简洁",
-        ])
-        .unwrap();
-    let id = pref["id"].as_str().unwrap();
-    f.call(&["preference", "update", id, "--content", "说明要点"])
-        .unwrap();
-    crate::storage::preferences::save_item(f.db(), Some(id), None, "说明要点", true).unwrap();
-    assert_eq!(
-        f.call(&["preference", "delete", id]).unwrap_err().code,
-        "locked"
-    );
-    assert_eq!(
-        f.call(&["preference", "update", id, "--content", "不能覆盖"])
-            .unwrap_err()
-            .code,
-        "locked"
-    );
-    assert_eq!(
-        f.call(&["preference", "list", "--scope", "user"]).unwrap()["items"][0]["content"],
-        "说明要点"
-    );
     let sid = f.session();
     let file = f.root.join("summary.json");
     std::fs::write(
         &file,
-        r#"{"items":[{"title":"主题","description":"","details":["人工修正。"]}]}"#,
+        r#"{"items":[{"title":"主题","description":"","title_locked":false,"details":["人工修正。"]}]}"#,
     )
     .unwrap();
     let path = file.to_str().unwrap();
@@ -226,73 +181,109 @@ fn cli_preferences_respect_current_lock_and_summary_edits_preserve_pending_messa
         "stale_result"
     );
     assert_eq!(view["summary"]["items"][0]["details"][0], "人工修正。");
-    crate::storage::preferences::save_item(f.db(), Some(id), None, "说明要点", false).unwrap();
-    f.call(&["preference", "delete", id]).unwrap();
-    assert_eq!(
-        f.call(&["preference", "list", "--scope", "user"]).unwrap()["items"],
-        json!([])
-    );
 }
 
 #[test]
 fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
     let f = Fixture::new();
     let args = [
-        "preference",
-        "add",
-        "--scope",
-        "user",
-        "--content",
-        "简明解释",
+        "task",
+        "create",
+        "--title",
+        "Receipt task",
         "--request-id",
-        "pref-1",
+        "task-1",
     ];
     let first = f.call(&args).unwrap();
     let second = f.call(&args).unwrap();
-    assert_eq!(first["id"], second["id"]);
-    assert_eq!(first["request_id"], "pref-1");
+    assert_eq!(first["task"]["id"], second["task"]["id"]);
+    assert_eq!(first["request_id"], "task-1");
     assert_eq!(
-        f.call(&["preference", "list", "--scope", "user"]).unwrap()["items"]
+        f.call(&["task", "list"]).unwrap()["items"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
-    let receipt = f.call(&["request", "show", "pref-1"]).unwrap();
+    let receipt = f.call(&["request", "show", "task-1"]).unwrap();
     assert_eq!(receipt["status"], "completed");
     assert_eq!(receipt["response"]["ok"], true);
-    assert_eq!(receipt["response"]["data"]["id"], first["id"]);
-    let error = f
-        .call(&[
+    assert_eq!(
+        receipt["response"]["data"]["task"]["id"],
+        first["task"]["id"]
+    );
+    assert_eq!(
+        f.call(&[
             "task",
             "create",
             "--title",
-            "不能重复用编号",
+            "Other task",
             "--request-id",
-            "pref-1",
+            "task-1"
         ])
-        .unwrap_err();
-    assert_eq!(error.code, "request_conflict");
-    assert!(f.db().list_workstreams(None).unwrap().is_empty());
-    let id = first["id"].as_str().unwrap();
-    crate::storage::preferences::save_item(f.db(), Some(id), None, "简明解释", true).unwrap();
-    let locked = f
-        .call(&["preference", "delete", id, "--request-id", "delete-1"])
-        .unwrap_err();
-    assert_eq!(locked.code, "locked");
-    assert_eq!(
-        f.call(&["request", "show", "delete-1"]).unwrap()["response"]["error"]["code"],
-        "locked"
+        .unwrap_err()
+        .code,
+        "request_conflict"
     );
-    crate::storage::preferences::save_item(f.db(), Some(id), None, "简明解释", false).unwrap();
     assert_eq!(
-        f.call(&["preference", "delete", id, "--request-id", "delete-1"])
-            .unwrap_err()
-            .code,
-        "locked"
+        f.call(&["task", "list"]).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
-    f.call(&["preference", "delete", id, "--request-id", "delete-2"])
-        .unwrap();
+    let sid = f.session();
+    let file = f.root.join("summary.json");
+    std::fs::write(
+        &file,
+        r#"{"items":[{"title":"Summary","description":"","details":[],"title_locked":false}]}"#,
+    )
+    .unwrap();
+    let args = [
+        "summary",
+        "set",
+        "session",
+        &sid,
+        "--file",
+        file.to_str().unwrap(),
+        "--revision",
+        "1",
+        "--request-id",
+        "future-revision",
+    ];
+    assert_eq!(f.call(&args).unwrap_err().code, "stale_result");
+    assert_eq!(
+        f.call(&["request", "show", "future-revision"]).unwrap()["response"]["error"]["code"],
+        "stale_result"
+    );
+    f.call(&[
+        "summary",
+        "set",
+        "session",
+        &sid,
+        "--file",
+        file.to_str().unwrap(),
+        "--revision",
+        "0",
+    ])
+    .unwrap();
+    assert_eq!(f.call(&args).unwrap_err().code, "stale_result");
+    assert_eq!(
+        f.call(&[
+            "summary",
+            "set",
+            "session",
+            &sid,
+            "--file",
+            file.to_str().unwrap(),
+            "--revision",
+            "1",
+            "--request-id",
+            "fresh-edit"
+        ])
+        .unwrap()["revision"],
+        2
+    );
 }
 #[test]
 fn cli_tasks_reuse_ownership_and_lists_paginate_without_losing_sessions() {
@@ -363,30 +354,22 @@ fn cli_tasks_reuse_ownership_and_lists_paginate_without_losing_sessions() {
     }
 }
 #[test]
-fn cli_help_unknown_commands_and_connection_lifecycle_are_explicit() {
+fn cli_help_and_standalone_status_do_not_need_a_desktop_connection() {
     assert!(execute(&["--help".into()]).unwrap()["usage"].is_array());
-    assert_eq!(
-        execute(&[
-            "extraction".into(),
-            "submit".into(),
-            "--connection".into(),
-            "unused".into()
-        ])
-        .unwrap_err()
-        .code,
-        "invalid_arguments"
-    );
     let f = Fixture::new();
-    let connection = f.home.runtime_dir.join("cli.json");
-    assert_eq!(f.call(&["status"]).unwrap()["connected"], true);
     assert_eq!(
-        transport::request(&connection, json!({"action":"inputs"}))
-            .unwrap_err()
-            .code,
-        "invalid_command"
+        f.call(&["status"]).unwrap()["home"],
+        f.home.root.to_str().unwrap()
     );
-    f.server.as_ref().unwrap().shutdown();
-    assert_eq!(f.call(&["status"]).unwrap_err().code, "app_unavailable");
+    for args in [
+        vec!["job", "list"],
+        vec!["summary", "update", "session", "id", "--wait"],
+        vec!["status", "--connection", "unused"],
+        vec!["extraction", "inputs"],
+        vec!["extraction", "submit", "--connection", "unused"],
+    ] {
+        assert_eq!(f.call(&args).unwrap_err().code, "invalid_arguments");
+    }
 }
 
 #[test]
@@ -492,7 +475,7 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
     let file = f.root.join("summary.json");
     std::fs::write(
         &file,
-        r#"{"items":[{"title":"项目进展","description":"","details":["已建立任务。"]}]}"#,
+        r#"{"items":[{"title":"项目进展","description":"","title_locked":false,"details":["已建立任务。"]}]}"#,
     )
     .unwrap();
     for (kind, id) in [("task", tid), ("project", pid.as_str())] {
@@ -532,27 +515,10 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             .unwrap()
             .is_empty()
     );
-    let pref = f
-        .call(&[
-            "preference",
-            "add",
-            "--scope",
-            "project",
-            "--project",
-            pid,
-            "--content",
-            "项目内保持简洁",
-        ])
-        .unwrap();
-    assert_eq!(pref["project_id"], *pid);
-    assert_eq!(
-        f.call(&["preference", "list", "--scope", "user"]).unwrap()["items"],
-        json!([])
-    );
 }
 
 #[test]
-fn cli_extraction_jobs_report_backend_failure_without_claiming_summary_was_saved() {
+fn cli_extraction_returns_backend_failure_without_claiming_summary_was_saved() {
     let f = Fixture::new();
     let sid = f.session();
     f.db()
@@ -561,43 +527,18 @@ fn cli_extraction_jobs_report_backend_failure_without_claiming_summary_was_saved
             r#"{"agent":"none","runtime":{"model":null,"provider":null,"effort":null}}"#,
         )
         .unwrap();
-    let started = f.call(&["summary", "update", "session", &sid]).unwrap();
-    let job = started["job_id"].as_str().unwrap();
-    let start = std::time::Instant::now();
-    let result = loop {
-        let result = f.call(&["job", "show", job]).unwrap();
-        if result["status"] != "running" {
-            break result;
-        }
-        assert!(start.elapsed() < std::time::Duration::from_secs(5));
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    assert_eq!(result["status"], "failed");
-    assert!(!result["error"]["code"].as_str().unwrap().is_empty());
-    assert!(result.get("result").is_none());
-    assert!(f.db().get_session_context(&sid).unwrap().is_none());
-    let waited = f.call(&["job", "wait", job]).unwrap_err();
-    assert_eq!(waited.details.as_ref().unwrap()["job_id"], job);
-    assert_eq!(waited.details.as_ref().unwrap()["status"], "failed");
-    let waited = f
+    let error = f.call(&["summary", "update", "session", &sid]).unwrap_err();
+    assert_eq!(error.code, "agent_not_configured");
+    let receipt = f
         .call(&[
-            "summary",
-            "update",
-            "session",
-            &sid,
-            "--wait",
-            "--timeout",
-            "5",
+            "request",
+            "show",
+            error.details.unwrap()["request_id"].as_str().unwrap(),
         ])
-        .unwrap_err();
-    assert_eq!(waited.details.as_ref().unwrap()["status"], "failed");
-    assert_eq!(
-        f.call(&["job", "list"]).unwrap()["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+        .unwrap();
+    assert_eq!(receipt["status"], "completed");
+    assert_eq!(receipt["response"]["error"]["code"], "agent_not_configured");
+    assert!(f.db().get_session_context(&sid).unwrap().is_none());
 }
 
 #[test]
@@ -671,46 +612,6 @@ fn cli_global_search_filters_before_paging_and_excludes_retired_messages() {
 }
 
 #[test]
-fn cli_wait_reports_success_and_timeout_without_stopping_the_job() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let f = Fixture::new();
-    let connection = transport::Connection::create(f.root.join("wait-bridge")).unwrap();
-    let path = f.root.join("wait.json");
-    connection.publish(&path).unwrap();
-    let completed = AtomicBool::new(false);
-    let stop = AtomicBool::new(false);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stop.load(Ordering::Acquire) {
-                transport::serve_pending(&connection, |command| {
-                    assert_eq!(command["action"], "job");
-                    Ok(if completed.load(Ordering::Acquire) {
-                        json!({"job_id":"job-1","status":"completed","result":{"summary":"已保存"}})
-                    } else {
-                        json!({"job_id":"job-1","status":"running"})
-                    })
-                });
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
-        let error = wait_job(&path, "job-1", std::time::Duration::from_millis(30)).unwrap_err();
-        assert_eq!(error.code, "wait_timeout");
-        assert_eq!(error.details.as_ref().unwrap()["job_id"], "job-1");
-        completed.store(true, Ordering::Release);
-        let value = execute(&[
-            "--connection".into(),
-            path.to_string_lossy().into_owned(),
-            "job".into(),
-            "wait".into(),
-            "job-1".into(),
-        ])
-        .unwrap();
-        assert_eq!(value["result"]["summary"], "已保存");
-        stop.store(true, Ordering::Release);
-    });
-}
-
-#[test]
 fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
     let f = Fixture::new();
     let task = f
@@ -728,7 +629,6 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
     link_project(&f, tid, &sid);
     f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     f.call(&["task", "archive", tid]).unwrap();
-    let before = f.changes.load(std::sync::atomic::Ordering::SeqCst);
     let args = [
         "task",
         "update",
@@ -740,10 +640,6 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
     ];
     let updated = f.call(&args).unwrap();
     f.call(&args).unwrap();
-    assert_eq!(
-        f.changes.load(std::sync::atomic::Ordering::SeqCst),
-        before + 1
-    );
     assert_eq!(updated["task"]["title"], "NewTaskMarker");
     assert_eq!(updated["task"]["description"], "KeepDescriptionMarker");
     assert_eq!(updated["task"]["visibility"], "archived");
@@ -872,10 +768,10 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
     let session = json!({"items":[
-        {"title":"路径同步","description":"保留目录","details":["literal_% 的文件保持不变"]},
-        {"title":"窗口修复","description":"路径同步后的行为","details":[]}
+        {"title":"路径同步","description":"保留目录","title_locked":false,"details":["literal_% 的文件保持不变"]},
+        {"title":"窗口修复","description":"路径同步后的行为","title_locked":false,"details":[]}
     ]});
-    let topic = json!({"items":[{"title":"项目与任务","description":"路径同步","details":["CaseSensitiveWord"]}]});
+    let topic = json!({"items":[{"title":"项目与任务","description":"路径同步","title_locked":false,"details":["CaseSensitiveWord"]}]});
     for (kind, id, body) in [
         ("session", sid.as_str(), &session),
         ("task", tid, &topic),
@@ -969,7 +865,7 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
         "session",
         &sid,
         1,
-        &json!({"items":[{"title":"合并后的路径事项","description":"已精简","details":[]}]})
+        &json!({"items":[{"title":"合并后的路径事项","description":"已精简","title_locked":false,"details":[]}]})
             .to_string(),
     )
     .unwrap();
@@ -1000,24 +896,24 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
 }
 
 #[test]
-fn summary_edits_reject_legacy_text_and_invalid_items_without_changing_revision_or_progress() {
+fn summary_edits_reject_invalid_document_input_and_items_without_changing_revision_or_progress() {
     let f = Fixture::new();
     let sid = f.session();
-    let valid =
-        json!({"items":[{"title":"保留事项","description":"原始描述","details":["原始细则"]}]});
+    let valid = json!({"items":[{"title":"保留事项","description":"原始描述","title_locked":false,"details":["原始细则"]}]});
     crate::context::edit_summary(f.db(), "session", &sid, 0, &valid.to_string()).unwrap();
     let before = f.call(&["session", "summary", &sid]).unwrap();
     for invalid in [
-        "### 旧 Markdown",
+        "not a JSON document",
+        r#"{"items":[{"title":"缺少必填锁定字段","description":"","details":[]}]}"#,
         r#"{"items":[]}"#,
-        r#"{"items":[{"title":" ","description":"","details":[]}]}"#,
-        r#"{"items":[{"title":"事项","description":"","details":[""]}]}"#,
-        r#"{"items":[{"id":"fixed","title":"事项","description":"","details":[]}]}"#,
+        r#"{"items":[{"title":" ","description":"","title_locked":false,"details":[]}]}"#,
+        r#"{"items":[{"title":"事项","description":"","title_locked":false,"details":[""]}]}"#,
+        r#"{"items":[{"id":"fixed","title":"事项","description":"","title_locked":false,"details":[]}]}"#,
     ] {
         assert!(crate::context::edit_summary(f.db(), "session", &sid, 1, invalid).is_err());
     }
     assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
-    for invalid in ["old markdown", "{}", "[]", r#"{"items":{}}"#] {
+    for invalid in ["invalid JSON", "{}", "[]", r#"{"items":{}}"#] {
         assert!(f
             .db()
             .read()
@@ -1028,4 +924,169 @@ fn summary_edits_reject_legacy_text_and_invalid_items_without_changing_revision_
             .is_err());
     }
     assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
+}
+
+#[test]
+fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reject_invalid_values()
+{
+    let f = Fixture::new();
+    let show = || f.call(&["summary", "config", "show"]).unwrap();
+    assert_eq!(
+        show(),
+        json!({"agent":"codex","runtime":{"model":null,"provider":null,"effort":null}})
+    );
+    let selected = f
+        .call(&[
+            "summary",
+            "config",
+            "set",
+            "--agent",
+            "pi",
+            "--model",
+            "local-model",
+            "--provider",
+            "lmstudio",
+            "--effort",
+            "low",
+        ])
+        .unwrap();
+    assert_eq!(
+        selected["runtime"],
+        json!({"model":"local-model","provider":"lmstudio","effort":"low"})
+    );
+    f.call(&["summary", "config", "set", "--model", "new-model"])
+        .unwrap();
+    assert_eq!(
+        show()["runtime"],
+        json!({"model":"new-model","provider":"lmstudio","effort":"low"})
+    );
+    f.call(&["summary", "config", "set", "--model", ""])
+        .unwrap();
+    assert_eq!(show()["runtime"]["model"], Value::Null);
+    f.call(&[
+        "summary",
+        "config",
+        "set",
+        "--agent",
+        "claude",
+        "--model",
+        "selected-model",
+        "--effort",
+        "high",
+    ])
+    .unwrap();
+    assert_eq!(show()["agent"], "claude_code");
+    assert_eq!(
+        show()["runtime"],
+        json!({"model":"selected-model","provider":null,"effort":"high"})
+    );
+    f.call(&[
+        "summary",
+        "config",
+        "set",
+        "--agent",
+        "claude_code",
+        "--model",
+        "same-agent-model",
+    ])
+    .unwrap();
+    assert_eq!(show()["runtime"]["effort"], "high");
+    for args in [
+        vec!["summary", "config", "set"],
+        vec![
+            "summary",
+            "config",
+            "set",
+            "--provider",
+            "unsupported-provider",
+        ],
+        vec!["summary", "config", "set", "--agent", "antigravity"],
+        vec!["summary", "config", "set", "--agent", "unknown-agent"],
+        vec![
+            "summary", "config", "set", "--agent", "none", "--model", "unusable",
+        ],
+    ] {
+        assert_eq!(f.call(&args).unwrap_err().code, "invalid_arguments");
+    }
+    assert_eq!(
+        show()["runtime"],
+        json!({"model":"same-agent-model","provider":null,"effort":"high"})
+    );
+    f.call(&["summary", "config", "set", "--agent", "none"])
+        .unwrap();
+    assert_eq!(
+        show(),
+        json!({"agent":"none","runtime":{"model":null,"provider":null,"effort":null}})
+    );
+}
+
+#[test]
+fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_details() {
+    let f = Fixture::new();
+    let id = f.session();
+    let body = crate::domain::Summary::single("用户锁定的标题");
+    crate::context::edit_summary(
+        f.db(),
+        "session",
+        &id,
+        0,
+        &serde_json::to_string(&body).unwrap(),
+    )
+    .unwrap();
+    let locked =
+        crate::context::set_summary_title_lock(f.db(), "session", &id, 1, 1, true).unwrap();
+    let path = f.root.join("locked-summary.json");
+    let mut changed = locked.summary;
+    changed.items[0].description = "CLI 更新描述".into();
+    changed.items[0].details = vec!["CLI 更新细则".into()];
+    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
+    f.call(&[
+        "summary",
+        "set",
+        "session",
+        &id,
+        "--revision",
+        "2",
+        "--file",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    let stored = f.call(&["session", "summary", &id]).unwrap();
+    assert_eq!(stored["summary"]["items"][0]["title"], "用户锁定的标题");
+    assert_eq!(stored["summary"]["items"][0]["description"], "CLI 更新描述");
+    assert_eq!(
+        stored["summary"]["items"][0]["details"],
+        json!(["CLI 更新细则"])
+    );
+    assert_eq!(stored["summary"]["items"][0]["title_locked"], true);
+    changed.items[0].title_locked = false;
+    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
+    assert!(f
+        .call(&[
+            "summary",
+            "set",
+            "session",
+            &id,
+            "--revision",
+            "3",
+            "--file",
+            path.to_str().unwrap()
+        ])
+        .is_err());
+    changed.items[0].title_locked = true;
+    changed.items[0].title = "Agent 擅自改名".into();
+    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
+    assert!(f
+        .call(&[
+            "summary",
+            "set",
+            "session",
+            &id,
+            "--revision",
+            "3",
+            "--file",
+            path.to_str().unwrap()
+        ])
+        .is_err());
+    assert_eq!(f.call(&["session", "summary", &id]).unwrap(), stored);
 }

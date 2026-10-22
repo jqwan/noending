@@ -540,10 +540,6 @@ impl crate::adapters::AgentAdapter for DshAdapter {
                     if m.ts.is_none() {
                         m.ts = ts;
                     }
-                    if m.source_position.is_empty() {
-                        m.source_position =
-                            format!("seq:{}", m.source_message_id.clone().unwrap_or_default());
-                    }
                     messages.push(m);
                 }
             }

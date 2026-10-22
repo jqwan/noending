@@ -21,13 +21,11 @@ fn row_workspace_path(r: &Row) -> rusqlite::Result<WorkspacePath> {
         git_state: r.get("git_state")?,
         git_kind: r.get("git_kind")?,
         exists: r.get::<_, i64>("exists_on_disk")? != 0,
-        first_seen_at: r.get("first_seen_at")?,
-        last_seen_at: r.get("last_seen_at")?,
     })
 }
 
 const WORKSPACE_PATH_COLUMNS: &str =
-    "id, canonical_path, project_id, git_state, git_kind, exists_on_disk, first_seen_at, last_seen_at";
+    "id, canonical_path, project_id, git_state, git_kind, exists_on_disk";
 
 // connection-level readers -------------------------------------------------
 // Free functions over `&Connection`, so Project policy can run inside the
@@ -67,8 +65,7 @@ pub fn list_workspace_paths_for_project_conn(
 }
 
 /// The reconcile sweep walks the registry in `path_id` order under a
-/// hard cap, so a restart cannot shuffle the pass and move `last_seen_at` across
-/// the whole table at once.
+/// hard cap, so repeated refreshes visit paths in a deterministic order.
 pub fn scan_workspace_paths_conn(conn: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
     let mut st =
         conn.prepare("SELECT id, canonical_path FROM workspace_paths ORDER BY id LIMIT ?1")?;
@@ -151,12 +148,11 @@ pub fn insert_workspace_path_conn(
     project_id: &str,
 ) -> Result<String> {
     let id = crate::workspace::path_identity(canonical_path);
-    let ts = now();
     conn.execute(
         "INSERT OR IGNORE INTO workspace_paths
-           (id, canonical_path, project_id, git_state, git_kind, exists_on_disk, first_seen_at, last_seen_at)
-         VALUES (?1, ?2, ?3, 'none', NULL, 0, ?4, ?4)",
-        params![id, canonical_path, project_id, ts],
+           (id, canonical_path, project_id, git_state, git_kind, exists_on_disk)
+         VALUES (?1, ?2, ?3, 'none', NULL, 0)",
+        params![id, canonical_path, project_id],
     )?;
     Ok(id)
 }
@@ -172,9 +168,9 @@ pub fn update_workspace_path_observation_conn(
 ) -> Result<()> {
     conn.execute(
         "UPDATE workspace_paths
-            SET exists_on_disk = ?2, git_state = ?3, git_kind = ?4, last_seen_at = ?5
+            SET exists_on_disk = ?2, git_state = ?3, git_kind = ?4
           WHERE id = ?1",
-        params![path_id, exists as i64, git_state, git_kind, now()],
+        params![path_id, exists as i64, git_state, git_kind],
     )?;
     Ok(())
 }
@@ -188,8 +184,8 @@ pub fn reassign_workspace_path_project_conn(
     new_project_id: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE workspace_paths SET project_id = ?2, last_seen_at = ?3 WHERE id = ?1",
-        params![path_id, new_project_id, now()],
+        "UPDATE workspace_paths SET project_id = ?2 WHERE id = ?1",
+        params![path_id, new_project_id],
     )?;
     let ids = {
         let mut st = conn.prepare("SELECT id FROM sessions WHERE workspace_path_id = ?1")?;
@@ -225,8 +221,6 @@ fn row_git_identity(r: &Row) -> rusqlite::Result<GitIdentity> {
     Ok(GitIdentity {
         id: r.get("id")?,
         common_dir: r.get("common_dir")?,
-        first_seen_at: r.get("first_seen_at")?,
-        last_seen_at: r.get("last_seen_at")?,
         metadata: serde_json::from_str(&r.get::<_, String>("metadata")?).unwrap_or_default(),
     })
 }
@@ -311,11 +305,10 @@ pub fn ensure_git_identity_conn(conn: &Connection, common_dir: &str) -> Result<S
         return Ok(id.clone());
     }
 
-    let ts = now();
     conn.execute(
-        "INSERT INTO git_identities (id, common_dir, first_seen_at, last_seen_at, metadata)
-         VALUES (?1, ?2, ?3, ?3, '{}')",
-        params![new_id(), common_dir, ts],
+        "INSERT INTO git_identities (id, common_dir, metadata)
+         VALUES (?1, ?2, '{}')",
+        params![new_id(), common_dir],
     )?;
     Ok(conn.query_row(
         "SELECT id FROM git_identities WHERE common_dir = ?1",
@@ -387,14 +380,6 @@ pub fn git_identity_remote_url_conn(conn: &Connection, git_id: &str) -> Result<O
         .and_then(|name| remotes.get(*name))
         .and_then(|v| v.as_str())
         .map(str::to_string))
-}
-
-pub fn touch_git_identity_conn(conn: &Connection, git_id: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE git_identities SET last_seen_at = ?2 WHERE id = ?1",
-        params![git_id, now()],
-    )?;
-    Ok(())
 }
 
 /// Merge guard: absorbed projects must have transferred all paths.

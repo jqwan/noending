@@ -413,9 +413,6 @@ button.icon-button.small .ui-icon,
   flex-direction: column;
   gap: 12px;
 }
-.detail-section.preference-section {
-  margin: 0;
-}
 .detail-section-title,
 .detail-section h2,
 .agent-settings-section h2,

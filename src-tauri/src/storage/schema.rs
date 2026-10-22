@@ -1,32 +1,19 @@
-//! The ONE database format this build understands.
+//! Database identity, schema creation and validation.
 //!
-//! A database is recognised by *identity*, not by guessing: creation stamps the
-//! SQLite header with [`DATABASE_APPLICATION_ID`] +
-//! [`DATABASE_FORMAT_VERSION`], and opening demands that pair and then validates
-//! that every object [`CURRENT_SCHEMA`] declares is present. An empty file is
-//! created; a current-format database is used as it is and never repaired; a
-//! foreign file, an older generation or a half-created schema is refused —
-//! "no repair" never means "no validation".
-//!
-//! No migration chain and no `ALTER TABLE`: a breaking change edits
-//! [`CURRENT_SCHEMA`] and bumps [`DATABASE_FORMAT_VERSION`], and the local
-//! database is rebuilt from the Agent sources. The database is a projection over
-//! that data — except the Workstream/Context state NoEnding itself owns, which a
-//! rebuild does NOT restore.
+//! Empty files are initialized atomically. Existing files must carry the
+//! NoEnding identity and a supported schema version, and satisfy the declared
+//! structure before any runtime defaults or persistent connection settings run.
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{other, Result};
 
 /// Identity written into the SQLite header, so a NoEnding database can be told
-/// apart from any other SQLite file. `0x4E6F456E` spells "NoEn".
-pub const DATABASE_APPLICATION_ID: i32 = 0x4E6F_456E;
+/// apart from any other SQLite file. `0x4E453031` spells "NE01".
+pub const DATABASE_APPLICATION_ID: i32 = 0x4E45_3031;
 
-/// Exact SQLite format generation required by this build.
-///
-/// No migrations and no backwards compatibility: a database whose generation
-/// differs must be discarded and rebuilt from Agent source data.
-pub const DATABASE_FORMAT_VERSION: i64 = 13;
+/// Current schema version. Published versions increase monotonically.
+pub const DATABASE_FORMAT_VERSION: i64 = 1;
 
 /// Open an existing current-format database, or create one.
 ///
@@ -70,13 +57,12 @@ pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
     for agent in crate::domain::Agent::all() {
         for root in crate::platform::paths::agent_ingest_roots(*agent) {
             conn.execute(
-                "INSERT OR IGNORE INTO ingest_sources (id, agent, path, origin, created_at)
-                 VALUES (?1, ?2, ?3, 'default', ?4)",
+                "INSERT OR IGNORE INTO ingest_sources (id, agent, path, origin)
+                 VALUES (?1, ?2, ?3, 'default')",
                 params![
                     crate::storage::new_id(),
                     agent.as_str(),
-                    root.to_string_lossy().to_string(),
-                    crate::storage::now()
+                    root.to_string_lossy().to_string()
                 ],
             )?;
         }
@@ -144,8 +130,7 @@ fn validate_search_index(conn: &Connection) -> Result<()> {
 
 fn structure_mismatch(what: String) -> crate::error::AppError {
     other(format!(
-        "数据库结构与当前格式不符（{what}）。当前版本不支持修复，\
-         请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。"
+        "数据库结构校验失败（{what}）。请保留数据库，使用经过验证的备份恢复或联系维护者。"
     ))
 }
 
@@ -182,8 +167,7 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
     other(format!(
         "数据库格式与此版本 NoEnding 不兼容（application_id={application_id}，\
          database_format={version}；本版本要求 application_id={DATABASE_APPLICATION_ID}，\
-         required_format={DATABASE_FORMAT_VERSION}）。当前版本不支持数据库升级，\
-         请删除数据库后重新启动，Session 会从已配置的 Agent 数据源重新摄入。"
+         required_format={DATABASE_FORMAT_VERSION}）。请保留数据库并使用兼容的程序版本；不能通过修改版本号强行打开。"
     ))
 }
 
@@ -191,9 +175,8 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 /// writes. Verbatim source of truth — nothing else in the codebase creates
 /// schema.
 ///
-/// Agent facts and rebuildable projections coexist with NoEnding-owned state.
-/// Tasks, ownership, archive state, current summaries and settings must be
-/// preserved explicitly when replacing the database.
+/// Domain records, current summaries, synchronization state and derived search
+/// structures share the same transactional database.
 const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
@@ -263,9 +246,6 @@ const CURRENT_SCHEMA: &str = r#"
       session_id TEXT NOT NULL
         REFERENCES sessions(id) ON DELETE CASCADE,
       sequence INTEGER NOT NULL,
-      source_message_id TEXT,
-      source_generation INTEGER NOT NULL DEFAULT 0,
-      source_position TEXT NOT NULL DEFAULT '',
       source_identity_hash TEXT NOT NULL,
       ts TEXT,
       role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
@@ -358,19 +338,8 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS agent_installations (
       agent TEXT PRIMARY KEY,
       executable_path TEXT,
-      version TEXT,
-      source TEXT,
-      last_verified_at TEXT
+      version TEXT
     );
-    CREATE TABLE IF NOT EXISTS preferences (
-      id TEXT PRIMARY KEY,
-      project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-      content TEXT NOT NULL CHECK(length(trim(content)) > 0),
-      locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0, 1)),
-      revision INTEGER NOT NULL DEFAULT 1
-    );
-    CREATE INDEX IF NOT EXISTS idx_preferences_project ON preferences(project_id);
-
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -380,7 +349,6 @@ const CURRENT_SCHEMA: &str = r#"
       agent TEXT NOT NULL,
       path TEXT NOT NULL,
       origin TEXT NOT NULL DEFAULT 'user',   -- default | user
-      created_at TEXT NOT NULL,
       UNIQUE(agent, path)
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
@@ -398,8 +366,6 @@ const CURRENT_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS git_identities (
       id TEXT PRIMARY KEY,
       common_dir TEXT NOT NULL UNIQUE,
-      first_seen_at TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL,
       metadata TEXT NOT NULL DEFAULT '{}'
     );
     CREATE TABLE IF NOT EXISTS workspace_paths (
@@ -412,9 +378,7 @@ const CURRENT_SCHEMA: &str = r#"
       -- `exists INTEGER NOT NULL` is a syntax error, so the spec's column name
       -- would need quoting in every statement. The domain
       -- field stays `exists`.
-      exists_on_disk INTEGER NOT NULL DEFAULT 1,
-      first_seen_at TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL
+      exists_on_disk INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS workstream_projects (
       workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,

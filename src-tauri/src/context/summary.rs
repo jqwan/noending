@@ -1,30 +1,20 @@
 //! Scoped lazy database queries and result protocol for session, task and project summaries.
-use super::preferences::PreferenceReply;
 use super::prompts::{PromptKind, PromptTemplates};
 use super::query::Input;
 use super::SessionSnapshot;
 use crate::domain::SessionContextFields;
 use crate::error::{other, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-static ACTIVE_INPUTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+use std::sync::Mutex;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionReply {
-    Completed {
-        preferences: PreferenceReply,
-    },
-    Skipped {
-        reason: String,
-        preferences: PreferenceReply,
-    },
-    Failed {
-        error: String,
-    },
+    Completed {},
+    Skipped { reason: String },
+    Failed { error: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,17 +29,14 @@ pub struct SessionFailure {
 pub enum BatchReply {
     Completed {
         skipped_session_ids: Vec<String>,
-        preferences: PreferenceReply,
     },
     Partial {
         failed_sessions: Vec<SessionFailure>,
         skipped_session_ids: Vec<String>,
-        preferences: PreferenceReply,
     },
     Skipped {
         reason: String,
         skipped_session_ids: Vec<String>,
-        preferences: PreferenceReply,
     },
     Failed {
         error: String,
@@ -59,7 +46,19 @@ pub enum BatchReply {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SummaryResult {
-    summary: crate::domain::Summary,
+    summary: GeneratedSummary,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedSummary {
+    items: Vec<GeneratedItem>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedItem {
+    title: String,
+    description: String,
+    details: Vec<String>,
 }
 
 pub fn parse_session_reply(raw: &str) -> Result<SessionReply> {
@@ -94,10 +93,11 @@ pub fn parse_batch_reply(raw: &str) -> Result<BatchReply> {
 }
 
 /// A single invocation owns its directory and all involved session identities.
-/// Fixed filenames overwrite crash leftovers; locks cover standalone and batch calls.
+/// Unique directories isolate abandoned children; OS locks cover desktop and CLI calls.
 pub struct ExtractionFiles {
     pub dir: PathBuf,
-    keys: Vec<PathBuf>,
+    pub(super) target: String,
+    _locks: Vec<std::fs::File>,
     pub(super) inputs: Mutex<HashMap<String, Input>>,
 }
 impl ExtractionFiles {
@@ -110,30 +110,25 @@ impl ExtractionFiles {
         );
         keys.sort();
         keys.dedup();
-        {
-            let mut active = ACTIVE_INPUTS
-                .get_or_init(Mutex::default)
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if keys.iter().any(|key| active.contains(key)) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "相关摘要正在提取",
-                )
-                .into());
-            }
-            active.extend(keys.iter().cloned());
+        std::fs::create_dir_all(root.join(".locks"))?;
+        let mut locks = Vec::new();
+        for key in &keys {
+            use sha2::{Digest, Sha256};
+            let name = format!(
+                "{:x}.lock",
+                Sha256::digest(key.file_name().unwrap().to_string_lossy().as_bytes())
+            );
+            locks.push(crate::platform::file_lock::exclusive(
+                &root.join(".locks").join(name),
+            )?);
         }
         let files = Self {
-            dir: root.join(target),
-            keys,
+            dir: root.join(format!("{target}-{}", crate::storage::new_id())),
+            _locks: locks,
+            target: target.into(),
             inputs: Mutex::new(HashMap::new()),
         };
-        // The dedicated directory belongs only to this invocation; remove stale
-        // inputs AND outputs before a result can be accepted.
-        if files.dir.exists() {
-            std::fs::remove_dir_all(&files.dir)?;
-        }
+        // Never reuse an interrupted invocation's result paths.
         std::fs::create_dir_all(&files.dir)?;
         #[cfg(unix)]
         {
@@ -141,18 +136,6 @@ impl ExtractionFiles {
             std::fs::set_permissions(&files.dir, std::fs::Permissions::from_mode(0o700))?;
         }
         Ok(files)
-    }
-    pub fn preference_input(&self) -> PathBuf {
-        self.dir.join("preferences.input.json")
-    }
-    pub fn preference_result(&self) -> PathBuf {
-        self.dir.join("preferences.result.json")
-    }
-    pub(super) fn add_preferences(&self, projects: &[String]) {
-        self.inputs.lock().unwrap().insert(
-            "preferences.input.json".into(),
-            Input::Preferences(projects.to_vec()),
-        );
     }
     pub fn session_input(&self, id: &str) -> PathBuf {
         self.dir.join(format!("session-{id}.jsonl"))
@@ -174,7 +157,7 @@ impl ExtractionFiles {
         full_history: bool,
     ) {
         let name = if full_history {
-            self.preference_session_input(&snapshot.session.id)
+            self.history_session_input(&snapshot.session.id)
         } else {
             self.session_input(&snapshot.session.id)
         };
@@ -187,8 +170,8 @@ impl ExtractionFiles {
             },
         );
     }
-    pub fn preference_session_input(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("preferences-session-{id}.jsonl"))
+    pub fn history_session_input(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("history-session-{id}.jsonl"))
     }
     pub(super) fn add_batch(
         &self,
@@ -217,7 +200,20 @@ impl ExtractionFiles {
     }
     pub fn read_result(&self, path: &Path) -> Result<SessionContextFields> {
         let result: SummaryResult = serde_json::from_str(&self.read_text_result(path)?)?;
-        let summary = result.summary.validated()?;
+        let summary = crate::domain::Summary {
+            items: result
+                .summary
+                .items
+                .into_iter()
+                .map(|item| crate::domain::SummaryItem {
+                    title: item.title,
+                    description: item.description,
+                    details: item.details,
+                    title_locked: false,
+                })
+                .collect(),
+        }
+        .validated()?;
         Ok(SessionContextFields { summary })
     }
     pub(super) fn read_text_result(&self, path: &Path) -> Result<String> {
@@ -247,14 +243,7 @@ impl ExtractionFiles {
 }
 impl Drop for ExtractionFiles {
     fn drop(&mut self) {
-        let mut active = ACTIVE_INPUTS
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         let _ = std::fs::remove_dir_all(&self.dir);
-        for key in &self.keys {
-            active.remove(key);
-        }
     }
 }
 fn quoted(path: &Path) -> String {
@@ -262,12 +251,11 @@ fn quoted(path: &Path) -> String {
 }
 pub fn session_prompt(input: &Path, result: &Path, templates: &PromptTemplates) -> String {
     format!(
-        "根据本次会话输入生成完整、独立可读的摘要。\n输入查询名称：{}\n结果文件：{}\n{}\n## 会话摘要要求\n{}\n{}",
-        quoted(input), quoted(result), TIME_RULES, templates.session,
-        preference_requirements(input, templates, false)
+        "根据本次会话输入生成完整、独立可读的摘要。\n输入查询名称：{}\n结果文件：{}\n{}\n## 会话摘要要求\n{}",
+        quoted(input), quoted(result), TIME_RULES, templates.session
     )
 }
-const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。";
+const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。输入 locked_titles 中的每个标题必须原样保留，不能修改、删除或合并，描述和细则仍需根据材料更新；重新生成同样遵守。锁定标题优先于项数精简目标，锁定状态由程序管理，结果不输出 title_locked。";
 pub fn batch_prompt(
     kind: &str,
     input: &Path,
@@ -284,9 +272,8 @@ pub fn batch_prompt(
         )
     };
     format!(
-        "先更新会话摘要，再综合生成{label}摘要。\n输入查询名称：{}\n结果文件：{}\n{background}\n清单按 last_message_at 从早到晚排列，未知时间在前，顺序不代表结论优先级。{}\n逐个完整读取 need_update=true 的会话输入，成功摘要写到 result_file；无需更新的会话复用 current_summary。每份会话摘要只依据自身材料。失败会话有旧摘要就复用，否则暂不纳入；继续处理其他会话。\n综合时核对重要历史变更：提供的 preference_input_file 也可用于核对原始事实；检索后完整读取命中消息及前后讨论，结合 timestamp 综合。不仅比较摘要名称，没有原始证据时保留必要不确定性，不扫描工作目录。\n## 会话摘要要求\n{}\n## {label}摘要要求\n{requirements}\n{}",
-        quoted(input), quoted(result), TIME_RULES, templates.session,
-        preference_requirements(input, templates, true)
+        "先更新会话摘要，再综合生成{label}摘要。\n输入查询名称：{}\n结果文件：{}\n{background}\n清单按 last_message_at 从早到晚排列，未知时间在前，顺序不代表结论优先级。{}\n逐个完整读取 need_update=true 的会话输入，成功摘要写到 result_file；无需更新的会话复用 current_summary。每份会话摘要只依据自身材料。失败会话有旧摘要就复用，否则暂不纳入；继续处理其他会话。\n综合时核对重要历史变更：提供的 history_input_file 也可用于核对原始事实；检索后完整读取命中消息及前后讨论，结合 timestamp 综合。不仅比较摘要名称，没有原始证据时保留必要不确定性，不扫描工作目录。\n## 会话摘要要求\n{}\n## {label}摘要要求\n{requirements}",
+        quoted(input), quoted(result), TIME_RULES, templates.session
     )
 }
 /// Preview the skill, protocol and the same requirements used at runtime.
@@ -294,17 +281,9 @@ pub fn preview_prompt(kind: PromptKind, templates: &PromptTemplates) -> String {
     let input = Path::new("{{输入查询名称}}");
     let result = Path::new("{{结果文件路径}}");
     let requirements = match kind {
-        PromptKind::Session | PromptKind::Preferences => session_prompt(input, result, templates),
+        PromptKind::Session => session_prompt(input, result, templates),
         PromptKind::Task => batch_prompt("task", input, result, templates),
         PromptKind::Project => batch_prompt("project", input, result, templates),
     };
     super::tools::preview(&requirements)
-}
-fn preference_requirements(input: &Path, templates: &PromptTemplates, batch: bool) -> String {
-    let parent = input.parent().unwrap_or_else(|| Path::new(""));
-    format!(
-        "\n## 偏好提取要求\n偏好输入查询名称：{}\n偏好结果文件：{}\n{}\n完整读取现有 user 和 projects 条目，以及本次成功完整读取的原始用户消息。{}未读取的旧消息、失败会话的新消息和仅有摘要的会话不得作为偏好变更依据。汇总去重后只输出一份独立偏好结果。",
-        quoted(&parent.join("preferences.input.json")), quoted(&parent.join("preferences.result.json")), templates.preferences,
-        if batch { "清单提供 preference_input_file 时必须完整读取，否则使用已读取的会话输入。" } else { "" }
-    )
 }

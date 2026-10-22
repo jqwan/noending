@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 static FILE_PREPARATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const SKILL: &str = include_str!("../../skills/noending-assistant/SKILL.md");
-const CLI_DOC: &str = include_str!("../../../docs/cli.md");
+const CLI_DOC: &str = include_str!("../../../docs/guides/cli.md");
 const SKILL_INITIALIZED: &str = "assistant.skill_initialized";
 const ENTRY: &str = "<!-- NoEnding managed assistant entry -->\n# 助手工作目录\n\n此目录承载 NoEnding 内置助手的原生 Agent 会话。开始工作前读取 USER.md；技能按用户级或当前项目的启用配置加载；使用 bin/ne（Windows 为 bin/ne.cmd）查询或编辑工作区；临时产物放 tmp/，自行使用唯一文件名。操作对象由用户消息明确，必要时通过 CLI 查询确认。用户自定义要求写在 USER.md，应用更新会保留它。\n";
 
@@ -37,6 +37,7 @@ fn write_managed(path: &Path, text: &str) -> Result<()> {
 }
 /// Install only managed resources; preserve USER.md and arbitrary user files.
 pub fn prepare_files(home: &NoEndingHome) -> Result<()> {
+    let _access = home.acquire_access()?;
     let _files = FILE_PREPARATION
         .lock()
         .map_err(|_| other("助手资源准备被中断，请重试"))?;
@@ -54,12 +55,8 @@ pub fn prepare_files(home: &NoEndingHome) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.into()),
     }
-    crate::cli::install_workspace_entry(
-        &root.join("bin"),
-        &home.runtime_dir.join("cli.json"),
-        &crate::cli::executable()?,
-    )
-    .map_err(|e| other(e.to_string()))?;
+    crate::cli::install_workspace_entry(&root.join("bin"), &home.root, &crate::cli::executable()?)
+        .map_err(|e| other(e.to_string()))?;
     Ok(())
 }
 /// The bundled capability lives in the same library as other managed Skills.
@@ -152,7 +149,7 @@ pub fn ensure_workspace(
         directory: root.clone(),
     })
 }
-/// Codex sandbox needs file IPC access outside the working directory. Ordinary
+/// Codex sandbox needs standalone CLI data access outside its cwd. Ordinary
 /// launches keep their existing permissions; no per-conversation state is created.
 pub fn cli_writable_directories(runtime: &Path, cwd: Option<&str>) -> Vec<String> {
     let Some(parent) = runtime.parent() else {
@@ -165,7 +162,15 @@ pub fn cli_writable_directories(runtime: &Path, cwd: Option<&str>) -> Vec<String
     if cwd
         .is_some_and(|cwd| crate::workspace::identity::same_location(cwd, &root.to_string_lossy()))
     {
-        vec![runtime.join("cli").to_string_lossy().into_owned()]
+        vec![
+            home.data_dir,
+            home.runtime_dir,
+            home.logs_dir,
+            home.root.join(".access"),
+        ]
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
     } else {
         Vec::new()
     }

@@ -158,7 +158,5 @@ fn installation(agent: Agent) -> noending::platform::exec_resolver::AgentInstall
         agent,
         executable_path: format!("/tmp/fake-cli-{}", agent.as_str()),
         version: Some("test".into()),
-        source: "test".into(),
-        last_verified_at: now(),
     }
 }

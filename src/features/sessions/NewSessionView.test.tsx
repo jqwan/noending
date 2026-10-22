@@ -462,8 +462,6 @@ describe("NewSessionView task and project selection", () => {
         git_state: "detected",
         git_kind: "repo",
         exists: true,
-        first_seen_at: "2026-10-01T00:00:00Z",
-        last_seen_at: "2026-10-01T00:00:00Z",
       },
       project_id: "p-new",
       project_name: "picked",

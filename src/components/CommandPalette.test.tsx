@@ -17,6 +17,7 @@ const cases: { entry: NavigationItem; route: Route }[] = [
   { entry: item({ kind: "project", ref_id: "p", title: "Project", hint: "/repo", agent: null }), route: { view: "project", projectId: "p", initialTitle: "Project" } },
   { entry: item({ kind: "workstream", ref_id: "w", title: "Task", hint: "", agent: null, archived: true }), route: { view: "workstream", workstreamId: "w", initialTitle: "Task" } },
   { entry: item({ kind: "session", ref_id: "s", title: "Conversation", hint: "/repo" }), route: { view: "session", sessionId: "s", initialTitle: "Conversation", initialAgent: "codex" } },
+  { entry: item({ kind: "skill", ref_id: "review", title: "Review Skill", hint: "Code review helper", agent: null }), route: { view: "skill", resourceId: "review", initialTitle: "Review Skill" } },
 ];
 it.each(cases)("opens the corresponding detail for $entry.kind", async ({ entry, route }) => {
   vi.mocked(api.lookupNavigation).mockResolvedValue({ items: [entry], has_more: false });

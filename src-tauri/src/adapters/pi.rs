@@ -449,8 +449,6 @@ mod tests {
             agent: Agent::Pi,
             executable_path: "/usr/local/bin/pi".into(),
             version: None,
-            source: "test".into(),
-            last_verified_at: "test".into(),
         };
 
         // A project-local session file: `--session <id>` cannot see it, the

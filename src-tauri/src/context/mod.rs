@@ -4,7 +4,7 @@ pub(crate) mod diagnostics;
 mod edit;
 pub mod items;
 pub use edit::edit_summary;
-mod preferences;
+pub use edit::{set_summary_title_lock, SummaryLockResult};
 mod project;
 pub mod prompts;
 mod query;
@@ -51,7 +51,6 @@ pub struct SessionUpdateOutcome {
     pub session_id: String,
     pub status: ContextUpdateStatus,
     pub revision: i64,
-    pub preference_error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkstreamUpdateOutcome {
@@ -62,7 +61,6 @@ pub struct WorkstreamUpdateOutcome {
     pub skipped_session_ids: Vec<String>,
     pub failed_sessions: Vec<SessionFailure>,
     pub remaining_pending: usize,
-    pub preference_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -151,6 +149,22 @@ fn stale() -> AppError {
 }
 fn invalid(error: impl std::fmt::Display) -> AppError {
     AppError::context(ContextUpdateError::InvalidOutput(error.to_string()))
+}
+fn read_summary_result(
+    db: &Db,
+    files: &ExtractionFiles,
+    path: &std::path::Path,
+    kind: &str,
+    id: &str,
+    revision: i64,
+) -> Result<SessionContextFields> {
+    let mut fields = files.read_result(path).map_err(invalid)?;
+    let previous = query::target_summary(&db.read(), kind, id, revision)?.unwrap_or_default();
+    fields
+        .summary
+        .preserve_title_locks(&previous)
+        .map_err(invalid)?;
+    Ok(fields)
 }
 
 pub fn session_context_view(db: &Db, id: &str) -> Result<SessionContextView> {
@@ -338,7 +352,6 @@ fn extract_session(
                         ContextUpdateStatus::NoChange
                     },
                     revision,
-                    preference_error: None,
                 },
                 if snapshot.pending() {
                     "updated"
@@ -348,8 +361,6 @@ fn extract_session(
             ));
         }
         let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
-        let projects: Vec<_> = snapshot.session.project_id.clone().into_iter().collect();
-        files.add_preferences(&projects);
         files.add_session(
             &snapshot,
             !regenerate && snapshot.summary_generation == Some(snapshot.generation),
@@ -367,23 +378,23 @@ fn extract_session(
         )?;
         operation.set_stage("output_validation");
         let reply = summary::parse_session_reply(&raw).map_err(invalid)?;
-        let (fields, status, preference_reply) = match reply {
-            SessionReply::Completed { preferences } => (
-                files
-                    .read_result(&files.session_result(id))
-                    .map_err(invalid)?,
+        let (fields, status) = match reply {
+            SessionReply::Completed {} => (
+                read_summary_result(
+                    db,
+                    &files,
+                    &files.session_result(id),
+                    "session",
+                    id,
+                    snapshot.revision(),
+                )?,
                 ContextUpdateStatus::Updated,
-                preferences,
             ),
-            SessionReply::Skipped { preferences, .. } => {
+            SessionReply::Skipped { .. } => {
                 files
                     .require_absent(&files.session_result(id))
                     .map_err(invalid)?;
-                (
-                    snapshot.retained(&db.read())?,
-                    ContextUpdateStatus::Skipped,
-                    preferences,
-                )
+                (snapshot.retained(&db.read())?, ContextUpdateStatus::Skipped)
             }
             SessionReply::Failed { .. } => {
                 files
@@ -394,13 +405,8 @@ fn extract_session(
                 )));
             }
         };
-        let pending_preferences = preferences::Pending::read(
-            projects,
-            files.read_text_result(&files.preference_result()),
-            preference_reply,
-        );
         operation.set_stage("database_commit");
-        let (revision, preference_error) = db.tx(|tx| {
+        let revision = db.tx(|tx| {
             snapshot.validate(tx, None)?;
             let revision = commit_session_context_conn(
                 tx,
@@ -410,14 +416,13 @@ fn extract_session(
                 snapshot.generation,
                 snapshot.latest,
             )?;
-            Ok((revision, pending_preferences.apply(tx)?))
+            Ok(revision)
         })?;
         Ok((
             SessionUpdateOutcome {
                 session_id: id.into(),
                 status,
                 revision,
-                preference_error,
             },
             if status == ContextUpdateStatus::Skipped {
                 "skipped"
@@ -467,7 +472,6 @@ fn extract_task(
                     skipped_session_ids: vec![],
                     failed_sessions: vec![],
                     remaining_pending: 0,
-                    preference_error: None,
                 },
                 "no_change",
             ));
@@ -486,7 +490,7 @@ fn extract_task(
             runner,
         )?;
         operation.set_stage("database_commit");
-        let (revision, updated, preference_error) = db.tx(|tx| {
+        let (revision, updated) = db.tx(|tx| {
             let current = get_workstream_context_state_conn(tx, id)?;
             let current_ws: Option<(String, String)> = tx
                 .query_row(
@@ -546,7 +550,7 @@ fn extract_task(
             }
             context_repo::delete_unowned_workstream_frontiers_conn(tx, id)?;
             let revision = commit_workstream_summary_conn(tx, id, &batch.summary)?;
-            Ok((revision, updated, batch.preferences.apply(tx)?))
+            Ok((revision, updated))
         })?;
         let status = if !batch.failed.is_empty() {
             ContextUpdateStatus::Partial
@@ -564,7 +568,6 @@ fn extract_task(
                 skipped_session_ids: batch.skipped,
                 failed_sessions: batch.failed,
                 remaining_pending: workstream_context_view(db, id)?.pending_sessions,
-                preference_error,
             },
             match status {
                 ContextUpdateStatus::Partial => "partial",
@@ -582,7 +585,6 @@ struct BatchOutput {
     failed: Vec<SessionFailure>,
     skipped: Vec<String>,
     target_skipped: bool,
-    preferences: preferences::Pending,
 }
 fn run_batch(
     db: &Db,
@@ -598,17 +600,6 @@ fn run_batch(
 ) -> Result<BatchOutput> {
     let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
     let files = files_for(operation, &format!("{kind}-{id}"), &ids)?;
-    let mut projects: Vec<_> = snapshots
-        .iter()
-        .filter_map(|s| s.session.project_id.clone())
-        .chain((kind == "project").then(|| id.to_string()))
-        .collect();
-    if kind == "task" {
-        projects.extend(task_projects(&db.read(), id)?);
-    }
-    projects.sort();
-    projects.dedup();
-    files.add_preferences(&projects);
     let mut targets = HashSet::new();
     let mut ordered = snapshots.to_vec();
     ordered.sort_by_cached_key(|s| {
@@ -645,21 +636,18 @@ fn run_batch(
     )?;
     operation.set_stage("output_validation");
     let reply = summary::parse_batch_reply(&raw).map_err(invalid)?;
-    let (failed, skipped, target_skipped, preference_reply) = match reply {
+    let (failed, skipped, target_skipped) = match reply {
         BatchReply::Completed {
             skipped_session_ids,
-            preferences,
-        } => (vec![], skipped_session_ids, false, preferences),
+        } => (vec![], skipped_session_ids, false),
         BatchReply::Partial {
             failed_sessions,
             skipped_session_ids,
-            preferences,
-        } => (failed_sessions, skipped_session_ids, false, preferences),
+        } => (failed_sessions, skipped_session_ids, false),
         BatchReply::Skipped {
             skipped_session_ids,
-            preferences,
             ..
-        } => (vec![], skipped_session_ids, true, preferences),
+        } => (vec![], skipped_session_ids, true),
         BatchReply::Failed { .. } => {
             files
                 .require_absent(&files.batch_result(kind, id))
@@ -689,10 +677,15 @@ fn run_batch(
             .map_err(invalid)?;
         query::target_summary(&db.read(), kind, id, target_revision)?.unwrap_or_default()
     } else {
-        files
-            .read_result(&files.batch_result(kind, id))
-            .map_err(invalid)?
-            .summary
+        read_summary_result(
+            db,
+            &files,
+            &files.batch_result(kind, id),
+            kind,
+            id,
+            target_revision,
+        )?
+        .summary
     };
     let failed_ids: HashSet<_> = failed.iter().map(|f| f.session_id.as_str()).collect();
     let mut results = HashMap::new();
@@ -701,9 +694,14 @@ fn run_batch(
             continue;
         }
         let fields = if targets.contains(&s.session.id) && !reported.contains(&s.session.id) {
-            files
-                .read_result(&files.session_result(&s.session.id))
-                .map_err(invalid)?
+            read_summary_result(
+                db,
+                &files,
+                &files.session_result(&s.session.id),
+                "session",
+                &s.session.id,
+                s.revision(),
+            )?
         } else {
             if !targets.contains(&s.session.id) {
                 files
@@ -714,13 +712,7 @@ fn run_batch(
         };
         results.insert(s.session.id.clone(), fields);
     }
-    let preferences = preferences::Pending::read(
-        projects,
-        files.read_text_result(&files.preference_result()),
-        preference_reply,
-    );
     Ok(BatchOutput {
-        preferences,
         _files: files,
         results,
         summary: target_summary,
@@ -763,7 +755,7 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "agent_not_configured",
-            "未选择提取 Agent，请在设置 → 摘要与偏好提取中选择 Codex、Claude Code 或 Pi。",
+            "未选择提取 Agent，请在设置 → 摘要提取中选择 Codex、Claude Code 或 Pi。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
             "未选择 Context Agent".into(),
@@ -783,7 +775,7 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "runtime_configuration_invalid",
-            "提取运行参数无效，请检查设置 → 摘要与偏好提取。",
+            "提取运行参数无效，请检查设置 → 摘要提取。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
             "Agent Runtime 配置不可用".into(),

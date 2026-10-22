@@ -187,7 +187,6 @@ fn message_of(message: &Value, parts: &[Value], is_root: bool) -> Option<ParsedS
     }
     Some(ParsedSessionMessage {
         source_message_id: Some(id.to_string()),
-        source_position: format!("msg:{id}"),
         ts: data
             .pointer("/time/created")
             .and_then(|t| t.as_i64())

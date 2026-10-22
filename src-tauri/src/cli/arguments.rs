@@ -6,14 +6,17 @@ use std::path::PathBuf;
 
 pub(super) enum Invocation {
     Help(Value),
+    Mcp {
+        home: Option<PathBuf>,
+    },
     Install {
         directory: PathBuf,
         action: String,
     },
     Request {
+        home: Option<PathBuf>,
         connection: Option<PathBuf>,
         command: Value,
-        wait: Option<std::time::Duration>,
         request_id: Option<String>,
     },
 }
@@ -74,13 +77,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             ));
         }
         if let Some(key) = arg.strip_prefix("--") {
-            if key == "wait" {
-                if options.0.insert(key.into(), vec!["true".into()]).is_some() {
-                    return Err(invalid("重复 --wait"));
-                }
-                i += 1;
-                continue;
-            }
             let value = args
                 .get(i + 1)
                 .filter(|s| !s.starts_with("--"))
@@ -96,6 +92,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         }
     }
     let connection = options.take("connection").map(PathBuf::from);
+    let home = options.take("home").map(PathBuf::from);
     if help {
         return Ok(Invocation::Help(help_for(
             words.first().map(String::as_str),
@@ -106,19 +103,13 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         .map(String::as_str)
         .ok_or_else(|| invalid("缺少命令"))?;
     let action = words.get(1).map(String::as_str).unwrap_or("");
-    let wait = if (resource == "summary"
-        && matches!(action, "update" | "regenerate")
-        && options.take("wait").is_some())
-        || (resource == "job" && action == "wait")
-    {
-        let seconds = options.number("timeout", 600u64)?;
-        if !(1..=86400).contains(&seconds) {
-            return Err(invalid("--timeout 必须在 1 到 86400 秒之间"));
+    if resource == "mcp" && action == "serve" && words.len() == 2 {
+        if connection.is_some() {
+            return Err(invalid("MCP 使用 --home，不接受 --connection"));
         }
-        Some(std::time::Duration::from_secs(seconds))
-    } else {
-        None
-    };
+        options.finish()?;
+        return Ok(Invocation::Mcp { home });
+    }
     if options.0.get("path").is_some_and(|p| p.len() > 1)
         && !(resource == "task" && action == "create")
     {
@@ -139,6 +130,12 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             directory: dir,
             action: action.into(),
         });
+    }
+    if resource != "extraction" && connection.is_some() {
+        return Err(invalid("--connection 仅用于提取查询；业务命令使用 --home"));
+    }
+    if resource == "extraction" && home.is_some() {
+        return Err(invalid("提取查询不能使用 --home"));
     }
     let requested_id = options.take("request-id");
     let command = if resource == "extraction" {
@@ -168,6 +165,16 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
     } else {
         let c = match resource {
             "status" if words.len() == 1 => Command::Status,
+            "agent" if action == "list" && words.len() == 2 => Command::Agents,
+            "sync" if words.len() == 1 => {
+                let source = options.take("source");
+                let session = options.take("session");
+                if source.is_some() && session.is_some() {
+                    return Err(invalid("--source 与 --session 不能同时指定"));
+                }
+                Command::Sync { source, session }
+            }
+            "source" if action == "list" && words.len() == 2 => Command::Sources,
             "path" if action == "register" && words.len() == 2 => Command::RegisterPath {
                 path: options.required("path")?,
             },
@@ -188,6 +195,13 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => Kind::Project,
                 };
                 match action {
+                    "resolve" if kind == Kind::Project && words.len() == 2 => {
+                        Command::ResolveProject {
+                            path: options.take("path").map(Ok).unwrap_or_else(|| {
+                                std::env::current_dir().map(|p| p.to_string_lossy().into_owned())
+                            })?,
+                        }
+                    }
                     "project" if kind == Kind::Task && words.len() == 4 => {
                         let id = words[3].clone();
                         match words[2].as_str() {
@@ -279,6 +293,22 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => return Err(invalid("命令无效，使用 --help 查看用法")),
                 }
             }
+            "summary" if action == "config" && words.len() == 3 => match words[2].as_str() {
+                "show" => Command::ExtractionSettings,
+                "set" => {
+                    let patch = super::extraction_settings::Patch {
+                        agent: options.take("agent"),
+                        model: options.take("model"),
+                        provider: options.take("provider"),
+                        effort: options.take("effort"),
+                    };
+                    if patch.is_empty() {
+                        return Err(invalid("至少提供一个提取配置字段"));
+                    }
+                    Command::ConfigureExtraction { patch }
+                }
+                _ => return Err(invalid("使用 summary config show/set")),
+            },
             "summary" if action == "search" && words.len() == 2 => Command::SearchSummaries {
                 query: options.required("query")?,
                 kind: options.take("kind"),
@@ -311,36 +341,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => return Err(invalid("摘要命令无效")),
                 }
             }
-            "preference" => match action {
-                "list" | "add" if words.len() == 2 => {
-                    let scope = options.required("scope")?;
-                    let project = options.take("project");
-                    if !matches!(scope.as_str(), "user" | "project")
-                        || (scope == "project") != project.is_some()
-                    {
-                        return Err(invalid("user 不提供 --project；project 必须提供 --project"));
-                    }
-                    if action == "list" {
-                        Command::Preferences { project }
-                    } else {
-                        Command::AddPreference {
-                            project,
-                            content: options.required("content")?,
-                        }
-                    }
-                }
-                "update" => Command::UpdatePreference {
-                    id: id(&words)?,
-                    content: options.required("content")?,
-                },
-                "delete" => Command::DeletePreference { id: id(&words)? },
-                _ => return Err(invalid("偏好命令无效")),
-            },
-            "job" => match action {
-                "list" if words.len() == 2 => Command::Jobs,
-                "show" | "wait" => Command::Job { id: id(&words)? },
-                _ => return Err(invalid("作业命令无效")),
-            },
             _ => return Err(invalid("未知命令，使用 ne --help 查看用法")),
         };
         serde_json::to_value(c)?
@@ -369,21 +369,23 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
     };
     options.finish()?;
     Ok(Invocation::Request {
+        home,
         connection,
         command,
-        wait,
         request_id,
     })
 }
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
-        None => vec!["ne status", "ne search --help", "ne session/task/project --help", "ne preference --help", "ne summary --help", "ne job --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        None => vec!["ne status", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item NUMBER --revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
         Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item NUMBER --revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
-        Some("project") => vec!["ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item NUMBER --revision REVISION]"],
-        Some("summary") => vec!["ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID [--wait] [--timeout 600]", "ne summary regenerate session|task|project ID [--wait] [--timeout 600]", "ne summary set session|task|project ID --file FILE --revision REVISION"],
-        Some("preference") => vec!["ne preference list --scope user|project [--project ID]", "ne preference add --scope user|project [--project ID] --content TEXT", "ne preference update ID --content TEXT", "ne preference delete ID"],
-        Some("job") => vec!["ne job list", "ne job show ID", "ne job wait ID [--timeout 600]"],
+        Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item NUMBER --revision REVISION]"],
+        Some("summary") => vec!["ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID", "ne summary set session|task|project ID --file FILE --revision REVISION"],
+        Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
+        Some("agent") => vec!["ne agent list"],
+        Some("source") => vec!["ne source list"],
         Some("search")=>vec!["ne search --query TEXT [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
         Some("request")=>vec!["ne request show ID", "写操作可用 --request-id ID 重试相同操作；查询操作不接受该选项"],
         Some("path")=>vec!["ne path register --path ABSOLUTE_EXISTING_DIRECTORY"],
@@ -393,6 +395,6 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         _=>return Err(invalid("未知命令")),
     };
     Ok(
-        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","connection":"默认连接正在运行的 NoEnding；--connection 指定连接。提取连接只允许 extraction 查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary_jobs":"update/regenerate 返回 job_id，通过 job show/wait 查询后端确认的最终结果；--wait 等待完成，失败返回非零退出码，等待超时保留作业。set 的 FILE 必须是 {items:[{title,description,details}]} JSON，并提供当前摘要版本，保留消息处理进度。摘要读取返回事项列表；按事项读取需同时提供 --item 与 --revision。"}),
+        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","home":"独立访问当前 NoEnding Home；--home 指定数据目录，无需运行桌面应用。--connection 仅用于提取查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary":"update/regenerate 等待提取及入库完成后返回最终结果；失败返回非零退出码。set 的 FILE 必须是 {items:[{title,description,details,title_locked}]} JSON，并提供当前摘要版本，保留消息处理进度。锁定标题和锁定状态必须保留，描述和细则可更新。摘要读取返回事项列表；按事项读取需同时提供 --item 与 --revision。"}),
     )
 }
