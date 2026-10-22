@@ -139,8 +139,6 @@ pub struct ExecOptions {
     /// user turn, never generated Context or a runtime override. Each adapter
     /// owns its CLI's interactive prompt argument; Resume and exec ignore it.
     pub initial_message: Option<String>,
-    /// Additional writable directories required by file-based CLI transport.
-    pub writable_directories: Vec<String>,
 }
 
 impl ExecOptions {

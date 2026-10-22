@@ -37,6 +37,10 @@ pub(crate) enum Command {
         id: String,
     },
     Status,
+    Freshness {
+        kind: Option<Kind>,
+        id: Option<String>,
+    },
     Agents,
     ResolveProject {
         path: String,
@@ -102,6 +106,12 @@ pub(crate) enum Command {
         revision: i64,
         content: String,
     },
+    SetTaskSummaryTitleLock {
+        id: String,
+        revision: i64,
+        item: usize,
+        locked: bool,
+    },
     Extract {
         kind: Kind,
         id: String,
@@ -152,6 +162,7 @@ impl Command {
             Self::ConfigureExtraction { .. }
                 | Self::Sync { .. }
                 | Self::EditSummary { .. }
+                | Self::SetTaskSummaryTitleLock { .. }
                 | Self::Extract { .. }
                 | Self::CreateTask { .. }
                 | Self::UpdateTask { .. }
@@ -218,8 +229,24 @@ impl Service {
             } => self.execute_once(&request_id, *command),
             Command::Receipt { id } => super::receipts::show(&self.home, &id),
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","sync","source","agent","request"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request"]}),
             ),
+            Command::Freshness { kind, id } => {
+                if kind.is_some() != id.is_some() {
+                    return Err(CliError::new(
+                        "invalid_arguments",
+                        "kind 与 id 必须同时提供",
+                    ));
+                }
+                if let (Some(kind), Some(id)) = (kind, id.as_deref()) {
+                    self.require(kind, id)?;
+                }
+                Ok(serde_json::to_value(context::freshness::view(
+                    &self.db,
+                    kind.map(Kind::name),
+                    id.as_deref(),
+                )?)?)
+            }
             Command::Agents => Ok(super::agents::list()),
             Command::ExtractionSettings => Ok(serde_json::to_value(
                 crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
@@ -407,6 +434,19 @@ impl Service {
                     context::edit_summary(&self.db, kind.name(), &id, revision, &content)?;
                 Ok(json!({"kind":kind,"id":id,"revision":revision}))
             }
+            Command::SetTaskSummaryTitleLock {
+                id,
+                revision,
+                item,
+                locked,
+            } => {
+                self.require(Kind::Task, &id)?;
+                let result =
+                    context::set_summary_title_lock(&self.db, "task", &id, revision, item, locked)?;
+                Ok(
+                    json!({"kind":"task","id":id,"revision":result.revision,"summary":result.summary}),
+                )
+            }
             Command::Extract {
                 kind,
                 id,
@@ -559,15 +599,15 @@ impl Service {
         Ok(match kind {
             Kind::Session => {
                 let view = context::session_context_view(&self.db, id)?;
-                json!({"kind":kind,"id":id,"summary":view.fields.map(|f|f.summary),"revision":view.revision,"updated_at":view.updated_at,"pending":view.pending,"ingest_generation":view.ingest_generation,"processed_through_seq":view.processed_through_seq,"latest_message_seq":view.latest_message_seq})
+                json!({"kind":kind,"id":id,"summary":view.fields.map(|f|f.summary),"revision":view.revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"ingest_generation":view.ingest_generation,"processed_through_seq":view.processed_through_seq,"latest_message_seq":view.latest_message_seq})
             }
             Kind::Task => {
                 let view = context::workstream_context_view(&self.db, id)?;
-                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"pending_sessions":view.pending_sessions})
+                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_sessions":view.pending_sessions})
             }
             Kind::Project => {
                 let view = context::project_context_view(&self.db, id)?;
-                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"pending_sessions":view.pending_sessions})
+                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_sessions":view.pending_sessions})
             }
         })
     }

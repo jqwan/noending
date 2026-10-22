@@ -320,9 +320,39 @@ export interface SummaryDocument {
   items: SummaryItem[];
 }
 
-export interface SummaryLockResult {
+export interface SummaryEditResult {
   revision: number;
   summary: SummaryDocument;
+}
+
+export interface SummaryFreshness {
+  refreshed_at: string | null;
+  pending_messages: number | null;
+  history_rewritten_sessions: number;
+  unknown_coverage_sessions: number;
+  summary_changed_sessions: number;
+  scope_changed: boolean;
+  pending: boolean;
+}
+
+export interface SyncCheck {
+  started_at: string | null;
+  finished_at: string | null;
+  outcome: "success" | "partial" | "failed" | "missing" | "cancelled" | null;
+  checked_at: string | null;
+}
+
+export interface FreshnessView {
+  kind: "session" | "task" | "project" | null;
+  id: string | null;
+  all_sources: SyncCheck;
+  sources: { id: string; agent: Agent; path: string; check: SyncCheck }[];
+  sessions: {
+    total: number; checked: number; unknown: number; failed: number; missing: number;
+    oldest_checked_at: string | null; latest_checked_at: string | null;
+  };
+  session_check: SyncCheck | null;
+  summary: SummaryFreshness | null;
 }
 
 /** Session 的事项摘要（后端 `SessionContextFields`）。 */
@@ -339,6 +369,7 @@ export interface SessionContextView {
   ingest_generation: number;
   processed_through_seq: number;
   latest_message_seq: number;
+  freshness: SummaryFreshness;
   updated_at: string | null;
   /** 有新消息尚未并入摘要。 */
   pending: boolean;
@@ -359,6 +390,7 @@ export interface WorkstreamContextView {
   updated_at: string | null;
   pending: boolean;
   pending_sessions: number;
+  freshness: SummaryFreshness;
 }
 
 /** 显式更新的结果词汇（后端 `ContextUpdateStatus`）。全部是成功。 */

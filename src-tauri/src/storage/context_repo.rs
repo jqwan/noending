@@ -280,7 +280,7 @@ pub fn commit_workstream_summary_conn(
     summary: &crate::domain::Summary,
 ) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
-    conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3,
+    conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3, refreshed_at = ?3,
         context_revision = context_revision + 1, consumed_input_revision = input_revision WHERE workstream_id = ?1",
         params![workstream_id, summary, now()])?;
 
@@ -349,10 +349,12 @@ pub fn set_workstream_frontier_conn(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO workstream_session_frontiers
-           (workstream_id, session_id, session_context_revision)
-         VALUES (?1, ?2, ?3)
+           (workstream_id, session_id, session_context_revision, ingest_generation, processed_through_seq)
+         VALUES (?1, ?2, ?3,
+          (SELECT ingest_generation FROM session_contexts WHERE session_id=?2 AND revision=?3),
+          (SELECT processed_through_seq FROM session_contexts WHERE session_id=?2 AND revision=?3))
          ON CONFLICT(workstream_id, session_id) DO UPDATE SET
-           session_context_revision = ?3",
+           session_context_revision = ?3, ingest_generation=excluded.ingest_generation, processed_through_seq=excluded.processed_through_seq",
         params![f.workstream_id, f.session_id, f.session_context_revision,],
     )?;
     Ok(())

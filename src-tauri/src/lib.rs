@@ -110,6 +110,12 @@ pub fn run() {
 
             {
                 let state: tauri::State<commands::AppState> = app.state();
+                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_memory_skill(&state.db,&home,&executable)) {
+                    eprintln!("[noending] Memory skill unavailable: {error}");
+                }
+                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_collaboration_skill(&state.db,&home,&executable)) {
+                    eprintln!("[noending] Collaboration skill unavailable: {error}");
+                }
                 if let Err(error) = skills::Roots::current().and_then(|roots| assistant::ensure_workspace(&state.db, &home, &layer, &roots)) {
                     eprintln!("[noending] Assistant workspace unavailable: {error}");
                 }
@@ -197,7 +203,9 @@ pub fn run() {
             commands::set_default_agent,
             // Explicit summary reads and user-triggered extraction.
             commands::get_session_context,
+            commands::get_freshness,
             commands::set_summary_title_lock,
+            commands::save_summary,
             commands::get_workstream_context_state,
             commands::get_project_context_state,
             commands::update_project_context,

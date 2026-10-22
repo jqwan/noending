@@ -85,22 +85,31 @@ fn real_codex_assistant_queries_workspace_through_cli() {
     .unwrap();
     let install =
         noending::platform::exec_resolver::resolve(Agent::Codex).expect("Codex CLI required");
-    let command = noending::adapters::adapter_for(Agent::Codex)
-        .build_context_extraction_command(
+    let mut command = noending::adapters::adapter_for(Agent::Codex)
+        .build_new_command(
             &install,
             &ExecOptions {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("high".into()),
-                writable_directories: assistant::cli_writable_directories(
-                    &home.runtime_dir,
-                    Some(&workspace.directory),
+                initial_message: Some(
+                    "查询整个工作区当前的任务，只回复查到的任务标题与任务 ID。不要直接访问数据库。"
+                        .into(),
                 ),
                 ..Default::default()
             },
-            "查询整个工作区当前的任务，只回复查到的任务标题与任务 ID。不要直接访问数据库。",
-            std::path::Path::new(&workspace.directory),
+            Some(std::path::Path::new(&workspace.directory)),
         )
         .unwrap();
+    // Exercise the terminal launch policy in a one-shot process for this smoke
+    // test, preserving the assistant cwd and native skill loading.
+    command.args.splice(
+        0..0,
+        [
+            "exec".into(),
+            "--ephemeral".into(),
+            "--skip-git-repo-check".into(),
+        ],
+    );
     let output = run_headless(&command, 180).expect("Codex query");
     let answer = clean_exec_stdout(&output.stdout);
     println!("Assistant fixture answer: {answer}");

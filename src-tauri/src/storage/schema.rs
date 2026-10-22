@@ -13,38 +13,78 @@ use crate::error::{other, Result};
 pub const DATABASE_APPLICATION_ID: i32 = 0x4E45_3031;
 
 /// Current schema version. Published versions increase monotonically.
-pub const DATABASE_FORMAT_VERSION: i64 = 1;
+pub const DATABASE_FORMAT_VERSION: i64 = 2;
 
-/// Open an existing current-format database, or create one.
-///
-/// The only accepted starting points are a completely empty file and an intact
-/// database carrying this build's identity; everything else is refused with a
-/// message that says so. A current-format database is returned untouched: the
-/// startup path performs no schema repair, because SQLite schema is not
-/// self-healing and a half-created database must never look usable.
+/// Initialize an empty database or atomically upgrade a supported version.
+/// Unsupported identities/newer formats are refused before any mutation.
 pub fn open_or_create(conn: &Connection) -> Result<()> {
-    let application_id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-
-    // A completely empty file: no identity, no marker, no user object. Anything
-    // else in this branch (a foreign SQLite file, a file that only carries a
-    // version marker) fails the `empty` test and is refused below.
-    if application_id == 0 && version == 0 && !has_user_objects(conn)? {
-        let tx = conn.unchecked_transaction()?;
+    let tx = conn.unchecked_transaction()?;
+    let application_id: i32 = tx.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+    let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if application_id == 0 && version == 0 && !has_user_objects(&tx)? {
         create(&tx)?;
         tx.pragma_update(None, "application_id", DATABASE_APPLICATION_ID)?;
+    } else if application_id == DATABASE_APPLICATION_ID
+        && (1..=DATABASE_FORMAT_VERSION).contains(&version)
+    {
+        if version == 1 {
+            tx.execute_batch(MIGRATION_1_TO_2)?;
+        }
+        validate(&tx)?;
+    } else {
+        return Err(format_mismatch(application_id, version));
+    }
+    if version != DATABASE_FORMAT_VERSION {
         tx.pragma_update(None, "user_version", DATABASE_FORMAT_VERSION)?;
-        tx.commit()?;
-        return Ok(());
     }
-
-    // This build's own database, in the generation this build expects.
-    if application_id == DATABASE_APPLICATION_ID && version == DATABASE_FORMAT_VERSION {
-        return validate(conn);
-    }
-
-    Err(format_mismatch(application_id, version))
+    tx.commit()?;
+    Ok(())
 }
+
+// Published upgrade steps remain immutable; initialization uses CURRENT_SCHEMA.
+const MIGRATION_1_TO_2: &str = r#"
+ALTER TABLE session_contexts ADD COLUMN refreshed_at TEXT;
+ALTER TABLE workstream_context_state ADD COLUMN refreshed_at TEXT;
+ALTER TABLE project_context_state ADD COLUMN refreshed_at TEXT;
+ALTER TABLE workstream_session_frontiers ADD COLUMN ingest_generation INTEGER;
+ALTER TABLE workstream_session_frontiers ADD COLUMN processed_through_seq INTEGER;
+ALTER TABLE project_session_frontiers ADD COLUMN ingest_generation INTEGER;
+ALTER TABLE project_session_frontiers ADD COLUMN processed_through_seq INTEGER;
+UPDATE workstream_session_frontiers SET
+  ingest_generation=(SELECT ingest_generation FROM session_contexts c WHERE c.session_id=workstream_session_frontiers.session_id AND c.revision=session_context_revision),
+  processed_through_seq=(SELECT processed_through_seq FROM session_contexts c WHERE c.session_id=workstream_session_frontiers.session_id AND c.revision=session_context_revision);
+UPDATE project_session_frontiers SET
+  ingest_generation=(SELECT ingest_generation FROM session_contexts c WHERE c.session_id=project_session_frontiers.session_id AND c.revision=session_context_revision),
+  processed_through_seq=(SELECT processed_through_seq FROM session_contexts c WHERE c.session_id=project_session_frontiers.session_id AND c.revision=session_context_revision);
+CREATE TABLE sync_checks (
+  scope TEXT NOT NULL CHECK(scope IN ('all','source','session')),
+  target_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('success','partial','failed','missing','cancelled')),
+  checked_at TEXT,
+  PRIMARY KEY(scope,target_id),
+  CHECK(scope != 'all' OR target_id = '')
+);
+CREATE TRIGGER sync_checks_session_delete AFTER DELETE ON sessions BEGIN
+  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
+END;
+CREATE TRIGGER sync_checks_session_source AFTER UPDATE OF source_path,source_kind ON sessions
+WHEN old.source_path!=new.source_path OR old.source_kind!=new.source_kind BEGIN
+  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
+END;
+CREATE TRIGGER sync_checks_source_delete AFTER DELETE ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
+  DELETE FROM sync_checks WHERE scope='all';
+END;
+CREATE TRIGGER sync_checks_source_update AFTER UPDATE OF agent,path,origin ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
+  DELETE FROM sync_checks WHERE scope='all';
+END;
+CREATE TRIGGER sync_checks_source_insert AFTER INSERT ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='all';
+END;
+"#;
 
 /// Fill in the defaults that depend on the *current* environment. Runs on every
 /// start, so a newly supported Agent, a relocated `CODEX_HOME`, or a second
@@ -96,6 +136,30 @@ fn validate(conn: &Connection) -> Result<()> {
                 "缺少 {} {}",
                 object.kind, object.name
             )));
+        }
+    }
+    for (table, columns) in [
+        ("session_contexts", &["refreshed_at"][..]),
+        ("workstream_context_state", &["refreshed_at"][..]),
+        ("project_context_state", &["refreshed_at"][..]),
+        (
+            "workstream_session_frontiers",
+            &["ingest_generation", "processed_through_seq"][..],
+        ),
+        (
+            "project_session_frontiers",
+            &["ingest_generation", "processed_through_seq"][..],
+        ),
+    ] {
+        for column in columns {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                params![table, column],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(structure_mismatch(format!("缺少 {table}.{column}")));
+            }
         }
     }
     validate_search_index(conn)
@@ -172,8 +236,8 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 }
 
 /// The complete current structure: every table and index this build reads or
-/// writes. Verbatim source of truth — nothing else in the codebase creates
-/// schema.
+/// writes. New files use this source of truth; published upgrade steps above
+/// bring supported existing files to the equivalent structure.
 ///
 /// Domain records, current summaries, synchronization state and derived search
 /// structures share the same transactional database.
@@ -292,7 +356,8 @@ const CURRENT_SCHEMA: &str = r#"
       revision INTEGER NOT NULL DEFAULT 0,
       ingest_generation INTEGER NOT NULL DEFAULT 0,
       processed_through_seq INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      refreshed_at TEXT
     );
     -- The Workstream side of the two-level revision scheme.
     -- context_revision guards summary writes;
@@ -308,7 +373,8 @@ const CURRENT_SCHEMA: &str = r#"
       consumed_input_revision INTEGER NOT NULL DEFAULT 0,
       summary TEXT NOT NULL DEFAULT '{"items":[]}'
         CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
-      updated_at TEXT
+      updated_at TEXT,
+      refreshed_at TEXT
     );
     -- What the Workstream has already consumed from each tracked Session.
     -- Written in the same transaction as a combined update; a Session that
@@ -317,6 +383,8 @@ const CURRENT_SCHEMA: &str = r#"
       workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL REFERENCES sessions(id),
       session_context_revision INTEGER NOT NULL DEFAULT 0,
+      ingest_generation INTEGER,
+      processed_through_seq INTEGER,
       PRIMARY KEY (workstream_id, session_id)
     );
     -- One current project summary, an input fingerprint and consumed session
@@ -327,12 +395,15 @@ const CURRENT_SCHEMA: &str = r#"
       input_fingerprint TEXT NOT NULL DEFAULT '',
       summary TEXT NOT NULL DEFAULT '{"items":[]}'
         CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
-      updated_at TEXT
+      updated_at TEXT,
+      refreshed_at TEXT
     );
     CREATE TABLE IF NOT EXISTS project_session_frontiers (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       session_context_revision INTEGER NOT NULL DEFAULT 0,
+      ingest_generation INTEGER,
+      processed_through_seq INTEGER,
       PRIMARY KEY (project_id, session_id)
     );
     CREATE TABLE IF NOT EXISTS agent_installations (
@@ -351,6 +422,34 @@ const CURRENT_SCHEMA: &str = r#"
       origin TEXT NOT NULL DEFAULT 'user',   -- default | user
       UNIQUE(agent, path)
     );
+CREATE TABLE IF NOT EXISTS sync_checks (
+  scope TEXT NOT NULL CHECK(scope IN ('all','source','session')),
+  target_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK(outcome IN ('success','partial','failed','missing','cancelled')),
+  checked_at TEXT,
+  PRIMARY KEY(scope,target_id),
+  CHECK(scope != 'all' OR target_id = '')
+);
+CREATE TRIGGER IF NOT EXISTS sync_checks_session_delete AFTER DELETE ON sessions BEGIN
+  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS sync_checks_session_source AFTER UPDATE OF source_path,source_kind ON sessions
+WHEN old.source_path!=new.source_path OR old.source_kind!=new.source_kind BEGIN
+  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS sync_checks_source_delete AFTER DELETE ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
+  DELETE FROM sync_checks WHERE scope='all';
+END;
+CREATE TRIGGER IF NOT EXISTS sync_checks_source_update AFTER UPDATE OF agent,path,origin ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
+  DELETE FROM sync_checks WHERE scope='all';
+END;
+CREATE TRIGGER IF NOT EXISTS sync_checks_source_insert AFTER INSERT ON ingest_sources BEGIN
+  DELETE FROM sync_checks WHERE scope='all';
+END;
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_activity
       ON sessions(COALESCE(last_conversation_at, last_activity_at, started_at) DESC, id);

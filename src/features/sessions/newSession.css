@@ -29,7 +29,6 @@
   padding: 24px 0 32px;
   text-align: center;
 }
-.new-session-heading > .brand-mark { color: var(--text-muted); opacity: .65; }
 .new-session-heading h1 {
   font-size: clamp(24px, 3vw, 36px);
   font-weight: 500;

@@ -2,9 +2,10 @@
 //! Agent; model replies and files validate before a snapshot-guarded transaction.
 pub(crate) mod diagnostics;
 mod edit;
+pub mod freshness;
 pub mod items;
-pub use edit::edit_summary;
-pub use edit::{set_summary_title_lock, SummaryLockResult};
+pub use edit::{edit_summary, save_summary};
+pub use edit::{set_summary_title_lock, SummaryEditResult};
 mod project;
 pub mod prompts;
 mod query;
@@ -36,6 +37,7 @@ pub struct SessionContextView {
     pub latest_message_seq: i64,
     pub updated_at: Option<String>,
     pub pending: bool,
+    pub freshness: freshness::SummaryFreshness,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkstreamContextView {
@@ -44,6 +46,7 @@ pub struct WorkstreamContextView {
     pub context_revision: i64,
     pub updated_at: Option<String>,
     pub pending: bool,
+    pub freshness: freshness::SummaryFreshness,
     pub pending_sessions: usize,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +189,7 @@ pub fn session_context_view(db: &Db, id: &str) -> Result<SessionContextView> {
         processed_through_seq: from,
         latest_message_seq: latest,
         updated_at: ctx.as_ref().map(|c| c.updated_at.clone()),
+        freshness: freshness::summary(&db.read(), "session", id)?,
         pending: latest > from
             || ctx
                 .as_ref()
@@ -219,6 +223,7 @@ pub fn workstream_context_view(db: &Db, id: &str) -> Result<WorkstreamContextVie
             || membership_changed
             || pending_sessions > 0,
         pending_sessions,
+        freshness: freshness::summary(&db.read(), "task", id)?,
     })
 }
 
@@ -416,6 +421,7 @@ fn extract_session(
                 snapshot.generation,
                 snapshot.latest,
             )?;
+            crate::storage::freshness::mark_refreshed(tx, id)?;
             Ok(revision)
         })?;
         Ok((
@@ -535,7 +541,10 @@ fn extract_task(
                         s.revision(),
                         s.generation,
                         s.latest,
-                    )?
+                    ).and_then(|revision| {
+                        crate::storage::freshness::mark_refreshed(tx, &s.session.id)?;
+                        Ok(revision)
+                    })?
                 } else {
                     s.revision()
                 };

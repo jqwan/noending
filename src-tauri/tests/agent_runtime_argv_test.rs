@@ -89,11 +89,15 @@ fn resume_keeps_its_session_selector() {
     ] {
         let args = resume_args(agent, &ExecOptions::default());
         let at = args.iter().position(|a| a == selector).expect(selector);
-        assert_eq!(
-            args.get(at + 1).map(|s| s.as_str()),
-            Some("agent-session-id"),
-            "{agent:?} resume argv: {args:?}"
-        );
+        if agent == Agent::Codex {
+            assert_eq!(args.last().map(String::as_str), Some("agent-session-id"));
+        } else {
+            assert_eq!(
+                args.get(at + 1).map(String::as_str),
+                Some("agent-session-id"),
+                "{agent:?} resume argv: {args:?}"
+            );
+        }
     }
 }
 
@@ -115,7 +119,6 @@ fn codex_renders_model_and_reasoning_effort() {
         effort: Some("high".into()),
         root_session_id: None,
         initial_message: None,
-        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::Codex, &opts),
@@ -137,7 +140,6 @@ fn claude_renders_model_and_effort() {
         effort: Some("high".into()),
         root_session_id: None,
         initial_message: None,
-        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::ClaudeCode, &opts),
@@ -163,7 +165,6 @@ fn pi_renders_provider_model_and_thinking() {
         effort: Some("low".into()),
         root_session_id: None,
         initial_message: None,
-        writable_directories: Vec::new(),
     };
     for args in [
         exec_args(Agent::Pi, &opts),
@@ -195,7 +196,6 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
             effort: None,
             root_session_id: None,
             initial_message: None,
-            writable_directories: Vec::new(),
         },
     );
     assert!(args.iter().any(|a| a == value), "{args:?}");
@@ -223,7 +223,7 @@ fn new_session_sends_the_first_message_in_interactive_mode() {
             } else {
                 "--"
             };
-            assert_eq!(args, [selector, message], "{agent:?}");
+            assert_eq!(&args[args.len() - 2..], [selector, message], "{agent:?}");
             assert!(
                 !args.iter().any(|arg| arg == "--print" || arg == "-p"),
                 "{agent:?} must keep the interactive terminal open"
@@ -318,20 +318,75 @@ fn agents_without_a_cli_refuse_to_build_a_command() {
 }
 
 #[test]
-fn codex_cli_transport_is_writable_on_new_and_resume_without_changing_user_input() {
-    let options = ExecOptions {
-        writable_directories: vec!["/path with spaces/ipc".into()],
-        initial_message: Some("原始首条消息".into()),
-        ..Default::default()
-    };
-    let new = new_args(Agent::Codex, &options);
-    assert_eq!(new.last().unwrap(), "原始首条消息");
-    let resume = resume_args(Agent::Codex, &options);
-    for args in [new, resume.clone()] {
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--add-dir", "/path with spaces/ipc"]));
+fn terminal_new_and_resume_use_full_access_without_changing_background_policy() {
+    let opts = ExecOptions::default();
+    for agent in launchable() {
+        for args in [new_args(agent, &opts), resume_args(agent, &opts)] {
+            match agent {
+                Agent::Codex => assert!(args
+                    .iter()
+                    .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")),
+                Agent::ClaudeCode => {
+                    assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+                    #[cfg(not(windows))]
+                    {
+                        let at = args.iter().position(|a| a == "--settings").unwrap();
+                        let settings: serde_json::Value =
+                            serde_json::from_str(&args[at + 1]).unwrap();
+                        assert_eq!(settings["sandbox"]["enabled"], false);
+                    }
+                    #[cfg(windows)]
+                    assert!(!args.iter().any(|a| a == "--settings"));
+                }
+                Agent::Antigravity => {
+                    assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+                    assert!(args.iter().any(|a| a == "--sandbox=false"));
+                }
+                // Pi's native tools already run with the launching account's
+                // permissions; project trust is a separate setting.
+                Agent::Pi => {
+                    assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+                    assert!(!args.iter().any(|a| a == "--sandbox=false"));
+                }
+                _ => panic!("full-access policy missing for {agent:?}"),
+            }
+        }
     }
-    assert!(!resume.iter().any(|arg| arg == "原始首条消息"));
-    assert!(resume.iter().any(|arg| arg == "agent-session-id"));
+    for agent in headless_exec() {
+        let extraction = adapter_for(agent)
+            .build_context_extraction_command(
+                &install(agent),
+                &opts,
+                "extract",
+                std::path::Path::new("/runtime"),
+            )
+            .unwrap();
+        for args in [exec_args(agent, &opts), extraction.args] {
+            for flag in [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-skip-permissions",
+                "--settings",
+            ] {
+                assert!(
+                    !args.iter().any(|a| a == flag),
+                    "{agent:?} background policy: {args:?}"
+                );
+            }
+        }
+    }
+    assert!(exec_args(Agent::Codex, &opts)
+        .windows(2)
+        .any(|w| w == ["-s", "read-only"]));
+    let extraction = adapter_for(Agent::Codex)
+        .build_context_extraction_command(
+            &install(Agent::Codex),
+            &opts,
+            "extract",
+            std::path::Path::new("/runtime"),
+        )
+        .unwrap();
+    assert!(extraction
+        .args
+        .windows(2)
+        .any(|w| w == ["-s", "workspace-write"]));
 }

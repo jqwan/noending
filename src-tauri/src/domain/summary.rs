@@ -39,7 +39,7 @@ impl Summary {
             .map(|item| item.title.as_str())
             .collect()
     }
-    /// Generated content owns descriptions/details; only the user owns title locks.
+    /// Extraction owns descriptions/details; title locks change through explicit actions.
     /// Titles are the protected value, so matching does not require durable item IDs.
     pub fn preserve_title_locks(&mut self, previous: &Self) -> Result<()> {
         for title in previous.locked_titles() {

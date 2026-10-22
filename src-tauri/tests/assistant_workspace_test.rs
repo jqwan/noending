@@ -155,34 +155,6 @@ fn assistant_project_keeps_identity_after_rename_and_empty_registry_sweep() {
 }
 
 #[test]
-fn assistant_cli_access_covers_its_data_without_granting_other_workspaces() {
-    let f = Fixture::new();
-    let workspace = assistant::ensure_workspace(f.db(), &f.home, &f.layer, &f.roots).unwrap();
-    assert_eq!(
-        assistant::cli_writable_directories(&f.home.runtime_dir, Some(&workspace.directory)),
-        vec![
-            &f.home.data_dir,
-            &f.home.runtime_dir,
-            &f.home.logs_dir,
-            &f.home.root.join(".access")
-        ]
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-    );
-    for cwd in [
-        None,
-        Some(f.home.default_workspace_str()),
-        Some(format!("{}-other", workspace.directory)),
-        Some(format!("{}/tmp", workspace.directory)),
-    ] {
-        assert!(
-            assistant::cli_writable_directories(&f.home.runtime_dir, cwd.as_deref()).is_empty()
-        );
-    }
-}
-
-#[test]
 fn assistant_skill_uses_the_library_and_respects_project_disable_and_uninstall() {
     let f = Fixture::new();
     let workspace = assistant::ensure_workspace(f.db(), &f.home, &f.layer, &f.roots).unwrap();
@@ -348,4 +320,196 @@ fn assistant_skill_relocation_does_not_overwrite_a_conflicting_library_source() 
         std::fs::read_to_string(legacy.join("custom.md")).unwrap(),
         "keep original"
     );
+}
+
+type PrepareSkill = fn(&Db, &NoEndingHome, &std::path::Path) -> noending::error::Result<()>;
+const BUNDLED_SKILLS: [(&str, PrepareSkill); 2] = [
+    ("noending-memory", skills::prepare_memory_skill),
+    (
+        "noending-collaboration",
+        skills::prepare_collaboration_skill,
+    ),
+];
+
+#[test]
+fn bundled_skills_preserve_independent_links_disable_and_uninstall_across_reopen() {
+    for (name, prepare) in BUNDLED_SKILLS {
+        let mut f = Fixture::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_ne"));
+        let cwd = f.root.join("ordinary project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        prepare(f.db(), &f.home, executable).unwrap();
+        let (other_name, prepare_other) = BUNDLED_SKILLS
+            .iter()
+            .copied()
+            .find(|(n, _)| *n != name)
+            .unwrap();
+        prepare_other(f.db(), &f.home, executable).unwrap();
+        let registry = skills::load_skill_registry(f.db()).unwrap();
+        let source = registry
+            .sources
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .clone();
+        let library = f.home.root.join("skills");
+        let mut catalog = skills::list_catalog(&f.roots, &[cwd.clone()]);
+        skills::merge_skill_sources(&registry, &mut catalog, true, &library);
+        let row = catalog
+            .resources
+            .iter()
+            .find(|r| r.id == source.id)
+            .unwrap();
+        assert!(row.registered);
+        assert!(row.error.is_none());
+        assert!(row.entry_paths.is_empty());
+        let source_dir = std::path::Path::new(&source.path).parent().unwrap();
+        assert!(source_dir.join("references/operations.md").is_file());
+        assert!(source_dir.join("references/access.json").is_file());
+        let other = registry
+            .sources
+            .iter()
+            .find(|s| s.name == other_name)
+            .unwrap();
+        skills::enable_skill_project(&f.roots, &[cwd.clone()], &other.id, Some(&other.path))
+            .unwrap();
+        skills::enable_skill_project(&f.roots, &[cwd.clone()], &source.id, Some(&source.path))
+            .unwrap();
+        let before = skills::list(&f.roots, Some(&cwd));
+        let entries = &before
+            .resources
+            .iter()
+            .find(|r| r.id == source.id)
+            .unwrap()
+            .entry_paths;
+        assert!(!entries.is_empty());
+        std::fs::write(
+            source_dir.join("references/custom.md"),
+            "user-owned supporting material",
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: outdated capability\n---\nold definition\n"),
+        )
+        .unwrap();
+        prepare(f.db(), &f.home, executable).unwrap();
+        let after = skills::list(&f.roots, Some(&cwd));
+        let updated = after.resources.iter().find(|r| r.id == source.id).unwrap();
+        assert_eq!(&updated.entry_paths, entries);
+        assert!(updated.error.is_none());
+        assert_ne!(updated.description, "outdated capability");
+        assert_eq!(
+            std::fs::read_to_string(source_dir.join("references/custom.md")).unwrap(),
+            "user-owned supporting material"
+        );
+        skills::disable_skill_project(&f.roots, &[cwd.clone()], &source.id).unwrap();
+        drop(f.db.take());
+        f.db = Some(Db::open(&f.home.db_path).unwrap());
+        prepare(f.db(), &f.home, executable).unwrap();
+        assert!(!skills::list(&f.roots, Some(&cwd))
+            .resources
+            .iter()
+            .any(|r| r.id == source.id));
+        let registry = skills::load_skill_registry(f.db()).unwrap();
+        let current = skills::find_source(&registry, &source.id).unwrap();
+        skills::uninstall_registered_skill(
+            &f.roots,
+            &[cwd.clone()],
+            current,
+            &skills::source_revision(current),
+            true,
+        )
+        .unwrap();
+        let mut registry = skills::load_skill_registry(f.db()).unwrap();
+        skills::remove_source(&mut registry, &source.id);
+        skills::save_skill_registry(f.db(), &registry).unwrap();
+        drop(f.db.take());
+        f.db = Some(Db::open(&f.home.db_path).unwrap());
+        prepare(f.db(), &f.home, executable).unwrap();
+        assert!(!std::path::Path::new(&source.path).exists());
+        assert!(
+            skills::find_source(&skills::load_skill_registry(f.db()).unwrap(), &source.id)
+                .is_none()
+        );
+        prepare_other(f.db(), &f.home, executable).unwrap();
+        let other_row = skills::list(&f.roots, Some(&cwd))
+            .resources
+            .into_iter()
+            .find(|r| r.id == other.id)
+            .unwrap();
+        assert!(!other_row.entry_paths.is_empty());
+        assert!(other_row.error.is_none());
+        assert!(std::path::Path::new(&other.path).is_file());
+    }
+}
+
+#[test]
+fn bundled_skills_preserve_unowned_sources_and_user_scope_across_reopen() {
+    for (name, prepare) in BUNDLED_SKILLS {
+        let mut f = Fixture::new();
+        let executable = std::path::Path::new(env!("CARGO_BIN_EXE_ne"));
+        let source_dir = f.home.root.join("skills").join(name);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let custom =
+            format!("---\nname: {name}\ndescription: user-owned source\n---\ncustom content\n");
+        std::fs::write(source_dir.join("SKILL.md"), &custom).unwrap();
+        assert!(prepare(f.db(), &f.home, executable).is_err());
+        let (other_name, prepare_other) = BUNDLED_SKILLS
+            .iter()
+            .copied()
+            .find(|(n, _)| *n != name)
+            .unwrap();
+        prepare_other(f.db(), &f.home, executable).unwrap();
+        assert!(skills::load_skill_registry(f.db())
+            .unwrap()
+            .sources
+            .iter()
+            .any(|s| s.name == other_name));
+        assert_eq!(
+            std::fs::read_to_string(source_dir.join("SKILL.md")).unwrap(),
+            custom
+        );
+        std::fs::remove_dir_all(&source_dir).unwrap();
+        prepare(f.db(), &f.home, executable).unwrap();
+        let registry = skills::load_skill_registry(f.db()).unwrap();
+        let source = registry.sources.iter().find(|s| s.name == name).unwrap();
+        let a = f.root.join("project-a");
+        let b = f.root.join("project-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        skills::enable_skill_project(&f.roots, &[a.clone()], &source.id, Some(&source.path))
+            .unwrap();
+        assert!(skills::list(&f.roots, Some(&a))
+            .resources
+            .iter()
+            .any(|r| r.id == source.id));
+        assert!(!skills::list(&f.roots, Some(&b))
+            .resources
+            .iter()
+            .any(|r| r.id == source.id));
+        skills::enable_skill_all(
+            &f.roots,
+            &[a.clone(), b.clone()],
+            &source.id,
+            Some(&source.path),
+        )
+        .unwrap();
+        drop(f.db.take());
+        f.db = Some(Db::open(&f.home.db_path).unwrap());
+        prepare(f.db(), &f.home, executable).unwrap();
+        for cwd in [&a, &b] {
+            assert!(skills::list(&f.roots, Some(cwd))
+                .resources
+                .iter()
+                .any(|r| r.id == source.id));
+        }
+        skills::disable_skill_all(&f.roots, &source.id).unwrap();
+        for cwd in [&a, &b] {
+            assert!(!skills::list(&f.roots, Some(cwd))
+                .resources
+                .iter()
+                .any(|r| r.id == source.id));
+        }
+    }
 }

@@ -5,7 +5,7 @@ use crate::storage::{context_repo as repo, project_context_repo, Db};
 use rusqlite::params;
 
 #[derive(serde::Serialize)]
-pub struct SummaryLockResult {
+pub struct SummaryEditResult {
     pub revision: i64,
     pub summary: Summary,
 }
@@ -16,13 +16,29 @@ pub fn edit_summary(
     expected_revision: i64,
     text: &str,
 ) -> Result<i64> {
+    // CLI/MCP require a nonempty document; the desktop editor also supports
+    // explicitly removing the last item without changing extraction progress.
     let summary: Summary = serde_json::from_str(text)?;
-    let summary = summary.validated()?;
+    save_summary(db, kind, id, expected_revision, summary.validated()?)
+        .map(|result| result.revision)
+}
+
+pub fn save_summary(
+    db: &Db,
+    kind: &str,
+    id: &str,
+    expected_revision: i64,
+    summary: Summary,
+) -> Result<SummaryEditResult> {
+    let summary = if summary.is_empty() {
+        summary
+    } else {
+        summary.validated()?
+    };
     mutate_summary(db, kind, id, expected_revision, |previous| {
         summary.validate_title_locks(&previous)?;
         Ok(summary)
     })
-    .map(|result| result.revision)
 }
 
 pub fn set_summary_title_lock(
@@ -32,7 +48,7 @@ pub fn set_summary_title_lock(
     expected_revision: i64,
     item_number: usize,
     locked: bool,
-) -> Result<SummaryLockResult> {
+) -> Result<SummaryEditResult> {
     mutate_summary(db, kind, id, expected_revision, |mut summary| {
         let index = item_number
             .checked_sub(1)
@@ -52,7 +68,7 @@ fn mutate_summary(
     id: &str,
     expected_revision: i64,
     change: impl FnOnce(Summary) -> Result<Summary>,
-) -> Result<SummaryLockResult> {
+) -> Result<SummaryEditResult> {
     if expected_revision < 0 {
         return Err(other("需要当前摘要版本"));
     }
@@ -84,6 +100,6 @@ fn mutate_summary(
 
             },
         }
-        Ok(SummaryLockResult { revision:revision+1, summary })
+        Ok(SummaryEditResult { revision:revision+1, summary })
     })
 }

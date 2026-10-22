@@ -1,3 +1,4 @@
+import { useSummaryEditor } from "./useSummaryEditor";
 import { removedTargets } from "../../app/removedTargets";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "./SummaryContent";
 import Icon from "../../components/Icon";
@@ -53,7 +54,7 @@ export default function SessionDetailView({
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const showSkeleton = useLoadingDelay(!detail && !failed);
-  /** Context：纯读取的Markdown 摘要 + 显式「更新摘要 / 重新生成」。 */
+  /** Current items support explicit edits and Agent extraction. */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(() => sessionContextCache.get(sessionId) ?? null);
   const summaryExpansion = useSummaryExpansion(sessionCtx?.fields?.summary);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
@@ -71,6 +72,22 @@ export default function SessionDetailView({
    * 派生链自带名字，正常情况下不多这一次读取。
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
+
+  const summaryEditor = useSummaryEditor({
+    target: sessionCtx?.session_id === sessionId ? { kind: "session", id: sessionId, revision: sessionCtx.revision } : undefined,
+    summary: sessionCtx?.fields?.summary,
+    disabled: Boolean(ctxBusy),
+    onChange: (result, removedIndex) => {
+      summaryExpansion.preserve(result.summary, removedIndex);
+      if (currentSessionId.current !== sessionId) return;
+      setSessionCtx(previous => {
+        if (!previous || previous.revision > result.revision) return previous;
+        const next = {...previous,revision:result.revision,fields:result.summary.items.length ? {summary:result.summary} : null};
+        sessionContextCache.set(sessionId,next);
+        return next;
+      });
+    },
+  });
 
   useEffect(() => {
     setCtxError(null);
@@ -160,7 +177,7 @@ export default function SessionDetailView({
 
   /** 一次点击 → 最多启动一次 Agent → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async (regenerate = false) => {
-    if (ctxBusy) return;
+    if (ctxBusy || summaryEditor.editing) return;
     const updateSessionId = sessionId;
     setCtxBusy(regenerate ? "regenerate" : "update");
     setCtxReadError(null);
@@ -291,7 +308,7 @@ export default function SessionDetailView({
       {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
       <div className="detail-layout session-detail-layout">
         <div className="detail-main session-detail-main">
-          {/* 当前摘要只读；更新合并增量，重新生成从完整历史重建。 */}
+          {/* 编辑保留提取进度；更新合并增量，重新生成读取完整历史。 */}
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center" }}>
               <div className="detail-section-title">
@@ -299,7 +316,7 @@ export default function SessionDetailView({
                 <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
               </div>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
-                <SummaryControls expansion={summaryExpansion} />
+                <SummaryControls expansion={summaryExpansion} editor={summaryEditor} />
                 {sessionCtx?.fields?.summary && (
                   <button
                     type="button"
@@ -315,7 +332,7 @@ export default function SessionDetailView({
                   <button
                     type="button"
                     className="btn ghost icon-button small"
-                    disabled={Boolean(ctxBusy)}
+                    disabled={Boolean(ctxBusy) || summaryEditor.editing}
                     title={ctxBusy === "regenerate" ? "重新生成中…" : "重新生成"}
                     aria-label="重新生成"
                     onClick={() => updateSummary(true)}
@@ -327,7 +344,7 @@ export default function SessionDetailView({
                   <button
                     type="button"
                     className="btn primary icon-button small"
-                    disabled={Boolean(ctxBusy)}
+                    disabled={Boolean(ctxBusy) || summaryEditor.editing}
                     title={ctxBusy === "update" ? "更新中…" : "更新摘要"}
                     aria-label="更新摘要"
                     onClick={() => updateSummary()}
@@ -358,20 +375,11 @@ export default function SessionDetailView({
                 )}
               </div>
             )}
-            {sessionCtx?.fields ? (
+            {sessionCtx && (sessionCtx.fields || summaryEditor.editing) ? (
               <div className="md-body" style={{ overflowWrap: "anywhere" }}>
                 <SummaryContent expansion={summaryExpansion}
-                  target={{kind:"session",id:sessionId,revision:sessionCtx.revision}}
-                  onChange={result => {
-                    if (currentSessionId.current !== sessionId) return;
-                    setSessionCtx(previous => {
-                      if (!previous || previous.revision > result.revision) return previous;
-                      const next = {...previous,revision:result.revision,fields:{summary:result.summary}};
-                      sessionContextCache.set(sessionId,next);
-                      return next;
-                    });
-                  }}>
-                  {sessionCtx.fields.summary}
+                  editor={summaryEditor}>
+                  {sessionCtx.fields?.summary ?? {items:[]}}
                 </SummaryContent>
               </div>
             ) : sessionCtx === null ? (

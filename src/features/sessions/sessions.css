@@ -169,6 +169,43 @@
 .md-body .summary-item-details > li { margin: 3px 0; }
 .md-body .summary-item-details > li > :last-child { margin-bottom: 0; }
 
+.summary-item-editor { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.summary-item-editor input,
+.summary-item-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  transition: border-color 120ms, background 120ms;
+}
+.summary-item-editor input:focus, .summary-item-editor textarea:focus { border-color: var(--accent); }
+.summary-item-editor textarea { display: block; resize: none; overflow: hidden; min-height: 29px; }
+.summary-item-editor input.summary-edit-title { min-height: 36px; padding: 6px 8px; font-weight: 600; color: var(--text-primary); }
+.summary-item-editor input[readonly] { border-color: transparent; padding-left: 0; }
+.summary-edit-lock { display: flex; gap: 4px; align-items: center; }
+.summary-edit-lock .ui-icon { width: 12px; height: 12px; }
+.md-body .summary-edit-details { list-style: none; padding: 0 0 0 16px; margin: 0; }
+.md-body .summary-edit-details > li { display: flex; gap: 4px; align-items: flex-start; margin: 4px 0; position: relative; }
+.summary-edit-details > li::before { content: "•"; position: absolute; left: -12px; top: 4px; color: var(--text-muted); }
+.summary-edit-details > li > textarea { flex: 1; }
+.summary-edit-details > li > button { flex: none; margin-top: 2px; }
+.summary-edit-footer { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-top: 2px; }
+.summary-edit-extra-actions, .summary-edit-save-actions { display: flex; align-items: center; gap: 4px; }
+.summary-edit-save-actions { margin-left: auto; }
+.summary-edit-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.summary-edit-error > button { margin-left: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .summary-item-editor input, .summary-item-editor textarea { transition: none; }
+}
+
 /* ---------- Session conversation reader ---------- */
 /* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
    最新、向上翻页时也能原地锚住。 */
@@ -506,14 +543,6 @@ button.btn.conversation-jump:active {
   padding: 7px 0; border-top: 1px solid var(--bg-panel); font-size: 12.5px;
 }
 .feed-row .when { color: var(--text-muted); flex: none; }
-
-@media (prefers-reduced-motion: no-preference) {
-  .mark-reveal {
-    clip-path: inset(0 100% 0 0);
-    animation: mark-reveal 0.7s ease-out forwards;
-  }
-}
-@keyframes mark-reveal { to { clip-path: inset(0 0 0 0); } }
 
 
 /* ---------- Session Cards (会话卡片网格) ---------- */

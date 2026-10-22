@@ -13,6 +13,7 @@ use crate::error::{other, Result};
 // The WorkspacePath registry, explicit task/project memberships and Session→path
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
+pub mod freshness;
 pub mod message_query;
 pub mod project_context_repo;
 pub mod schema;
@@ -270,12 +271,8 @@ impl Db {
         Ok(out)
     }
 
-    /// Open (or create) the database in the ONE format this build understands,
-    /// then reconcile the defaults that depend on the current environment —
-    /// see [`schema`] for the recognition rule, the refusal cases and why
-    /// reconciliation is not a migration. Neither step ever repairs structure,
-    /// and neither runs a persistent PRAGMA, so calling this before
-    /// `journal_mode = WAL` keeps a refused file untouched.
+    /// Validate/create/upgrade before enabling persistent connection settings.
+    /// Runtime defaults only reconcile environment-dependent registered sources.
     fn initialize_schema(conn: &Connection) -> Result<()> {
         schema::open_or_create(conn)?;
         schema::reconcile_runtime_defaults(conn)

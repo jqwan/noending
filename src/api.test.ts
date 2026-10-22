@@ -45,3 +45,22 @@ it.each(cases)("leaves navigation valid when $command fails", async ({ run }) =>
     expect([...removedTargets.sessions, ...removedTargets.workstreams, ...removedTargets.projects, ...removedTargets.terminals]).toEqual([]);
   } finally { window.removeEventListener(EVT_REMOVED, listener); }
 });
+
+
+it("queries persisted freshness for the requested scope without synchronizing", async () => {
+  vi.mocked(invoke).mockResolvedValue({ kind: "project", id: "p" });
+  await expect(api.getFreshness("project", "p")).resolves.toEqual({ kind: "project", id: "p" });
+  expect(vi.mocked(invoke).mock.calls).toEqual([["get_freshness", { kind: "project", id: "p" }]]);
+  vi.mocked(invoke).mockClear();
+  await api.getFreshness();
+  expect(vi.mocked(invoke).mock.calls).toEqual([["get_freshness", { kind: null, id: null }]]);
+});
+
+it.each(["session", "task", "project"] as const)("sends versioned summary edits and explicit clearing for %s", async kind => {
+  const summary = { items: [{ title: "当前结论", description: "用户修正", details: ["已核实"], title_locked: false }] };
+  vi.mocked(invoke).mockResolvedValue({ revision: 3, summary });
+  await expect(api.saveSummary(kind, "target", 2, summary)).resolves.toEqual({ revision: 3, summary });
+  expect(invoke).toHaveBeenLastCalledWith("save_summary", { kind, id: "target", revision: 2, summary });
+  await api.saveSummary(kind, "target", 3, { items: [] });
+  expect(invoke).toHaveBeenLastCalledWith("save_summary", { kind, id: "target", revision: 3, summary: { items: [] } });
+});

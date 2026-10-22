@@ -7,8 +7,7 @@
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
 //! cwd, runtime, initial tracking task) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
-//! Assistant sessions use ordinary directory instructions; only the CLI file
-//! transport directory is additionally writable for sandboxed agents.
+//! Interactive terminal sessions use each Agent’s full-access launch mode.
 //!
 //! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
@@ -470,8 +469,6 @@ impl SessionLauncher {
         // Preview = Launch: the argv comes from the frozen intent, not from
         // whatever Settings holds right now.
         let mut runtime_opts = prepared.runtime.exec_options();
-        runtime_opts.writable_directories =
-            crate::assistant::cli_writable_directories(&self.runtime_dir, prepared.cwd.as_deref());
 
         if prepared.mode == "new" {
             if prepared

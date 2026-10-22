@@ -1,3 +1,4 @@
+import { useSummaryEditor } from "../sessions/useSummaryEditor";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, useRefreshSignal } from "../../components/common";
@@ -23,6 +24,21 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
   const [error, setError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [failed, setFailed] = useState<{ session_id: string; error: string }[]>([]);
 
+  const summaryEditor = useSummaryEditor({
+    target: view?.project_id === projectId ? { kind: "project", id: projectId, revision: view.context_revision } : undefined,
+    summary: view?.summary,
+    disabled: Boolean(busy),
+    onChange: (result, removedIndex) => {
+      summaryExpansion.preserve(result.summary, removedIndex);
+      setView(previous => {
+        if (!previous || previous.context_revision > result.revision) return previous;
+        const next = {...previous,context_revision:result.revision,summary:result.summary.items.length ? result.summary : null};
+        cache.set(projectId,next);
+        return next;
+      });
+    },
+  });
+
   const refresh = useCallback(() => {
     const seq = ++request.current;
     api.getProjectContextState(projectId).then(next => {
@@ -42,7 +58,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
   useRefreshSignal(refresh);
 
   const update = async (regenerate = false) => {
-    if (busyRef.current) return;
+    if (busyRef.current || summaryEditor.editing) return;
     busyRef.current = true;
     setBusy(regenerate ? "regenerate" : "update");
     setError(null);
@@ -70,7 +86,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
           <span>项目摘要{view?.summary ? `（${view?.summary.items.length}）` : ""}</span>
         </h2>
         <div className="actions" style={{ display: "flex", gap: 8 }}>
-          <SummaryControls expansion={summaryExpansion} />
+          <SummaryControls expansion={summaryExpansion} editor={summaryEditor} />
           {view?.summary && (
             <button
               type="button"
@@ -85,7 +101,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
           <button
             type="button"
             className="btn ghost icon-button small"
-            disabled={Boolean(busy) || !view}
+            disabled={Boolean(busy) || !view || summaryEditor.editing}
             title={busy === "regenerate" ? "重新生成中…" : "重新生成"}
             aria-label="重新生成"
             onClick={() => update(true)}
@@ -96,7 +112,7 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
             <button
               type="button"
               className="btn primary icon-button small"
-              disabled={Boolean(busy)}
+              disabled={Boolean(busy) || summaryEditor.editing}
               title={busy === "update" ? "更新中…" : "更新摘要"}
               aria-label="更新摘要"
               onClick={() => update()}
@@ -107,16 +123,8 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
         </div>
       </div>
       {view?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
-      {view?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
-        target={{kind:"project",id:projectId,revision:view.context_revision}}
-        onChange={result => {
-          setView(previous => {
-            if (!previous || previous.context_revision > result.revision) return previous;
-            const next = {...previous,context_revision:result.revision,summary:result.summary};
-            cache.set(projectId,next);
-            return next;
-          });
-        }}>{view.summary}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
+      {view && (view.summary || summaryEditor.editing) ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
+        editor={summaryEditor}>{view.summary ?? {items:[]}}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
       {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
       {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}
     </section>

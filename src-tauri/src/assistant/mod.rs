@@ -149,29 +149,3 @@ pub fn ensure_workspace(
         directory: root.clone(),
     })
 }
-/// Codex sandbox needs standalone CLI data access outside its cwd. Ordinary
-/// launches keep their existing permissions; no per-conversation state is created.
-pub fn cli_writable_directories(runtime: &Path, cwd: Option<&str>) -> Vec<String> {
-    let Some(parent) = runtime.parent() else {
-        return Vec::new();
-    };
-    let Some(home) = NoEndingHome::new(&parent.to_string_lossy(), None) else {
-        return Vec::new();
-    };
-    let root = directory(&home);
-    if cwd
-        .is_some_and(|cwd| crate::workspace::identity::same_location(cwd, &root.to_string_lossy()))
-    {
-        vec![
-            home.data_dir,
-            home.runtime_dir,
-            home.logs_dir,
-            home.root.join(".access"),
-        ]
-        .into_iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect()
-    } else {
-        Vec::new()
-    }
-}

@@ -12,6 +12,7 @@ pub struct ProjectContextView {
     pub updated_at: Option<String>,
     pub pending: bool,
     pub pending_sessions: usize,
+    pub freshness: super::freshness::SummaryFreshness,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectUpdateOutcome {
@@ -65,6 +66,10 @@ impl ProjectInput {
         })
     }
 }
+pub(super) fn input_changed(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(ProjectInput::read(conn, id)?.fingerprint != repo::state(conn, id)?.input_fingerprint)
+}
+
 pub fn project_context_view(db: &Db, id: &str) -> Result<ProjectContextView> {
     let (input, state, frontiers) = {
         let conn = db.read();
@@ -88,6 +93,7 @@ pub fn project_context_view(db: &Db, id: &str) -> Result<ProjectContextView> {
         updated_at: state.updated_at,
         pending: input.fingerprint != state.input_fingerprint || pending_sessions > 0,
         pending_sessions,
+        freshness: super::freshness::summary(&db.read(), "project", id)?,
     })
 }
 pub fn update_project(
@@ -191,7 +197,11 @@ pub(super) fn extract_project(
                         s.revision(),
                         s.generation,
                         s.latest,
-                    )?
+                    )
+                    .and_then(|revision| {
+                        crate::storage::freshness::mark_refreshed(tx, &s.session.id)?;
+                        Ok(revision)
+                    })?
                 } else {
                     s.revision()
                 };

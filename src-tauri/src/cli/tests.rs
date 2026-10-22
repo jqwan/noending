@@ -165,6 +165,19 @@ fn cli_summary_edits_preserve_pending_messages() {
     let view = f.call(&["session", "summary", &sid]).unwrap();
     assert_eq!(view["processed_through_seq"], 0);
     assert_eq!(view["pending"], true);
+    assert_eq!(view["freshness"]["pending_messages"], 1);
+    assert!(view["freshness"]["refreshed_at"].is_null());
+    let state = f.call(&["freshness", "--session", &sid]).unwrap();
+    assert_eq!(state["summary"]["pending_messages"], 1);
+    assert!(state["session_check"]["checked_at"].is_null());
+    assert!(state["all_sources"]["checked_at"].is_null());
+    assert_eq!(
+        f.call(&["freshness", "--session", &sid, "--task", "t"])
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+
     assert_eq!(
         f.call(&[
             "summary",
@@ -1021,29 +1034,79 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
 }
 
 #[test]
-fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_details() {
+fn cli_task_title_locks_protect_edits_and_unlock_completed_items_without_exposing_other_scopes() {
     let f = Fixture::new();
-    let id = f.session();
+    let session = f.session();
+    let project = f.call(&["project", "list"]).unwrap()["items"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let task = f.call(&["task", "create", "--title", "待办任务"]).unwrap()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (kind, id) in [("session", session), ("project", project)] {
+        crate::context::edit_summary(
+            f.db(),
+            kind,
+            &id,
+            0,
+            &serde_json::to_string(&crate::domain::Summary::single("普通摘要")).unwrap(),
+        )
+        .unwrap();
+        for action in ["lock", "unlock"] {
+            assert_eq!(
+                f.call(&[
+                    "summary",
+                    action,
+                    kind,
+                    &id,
+                    "--revision",
+                    "1",
+                    "--item",
+                    "1"
+                ])
+                .unwrap_err()
+                .code,
+                "invalid_arguments"
+            );
+        }
+        assert_eq!(
+            f.call(&[kind, "summary", &id]).unwrap()["summary"]["items"][0]["title_locked"],
+            false
+        );
+    }
+    let kind = "task";
+    let id = task;
     let body = crate::domain::Summary::single("用户锁定的标题");
-    crate::context::edit_summary(
-        f.db(),
-        "session",
+    crate::context::edit_summary(f.db(), kind, &id, 0, &serde_json::to_string(&body).unwrap())
+        .unwrap();
+    let request = format!("publish-todo-{kind}");
+    let lock_args = [
+        "summary",
+        "lock",
+        kind,
         &id,
-        0,
-        &serde_json::to_string(&body).unwrap(),
-    )
-    .unwrap();
-    let locked =
-        crate::context::set_summary_title_lock(f.db(), "session", &id, 1, 1, true).unwrap();
+        "--revision",
+        "1",
+        "--item",
+        "1",
+        "--request-id",
+        &request,
+    ];
+    let locked = f.call(&lock_args).unwrap();
+    assert_eq!(locked["revision"], 2);
+    assert_eq!(locked["summary"]["items"][0]["title_locked"], true);
     let path = f.root.join("locked-summary.json");
-    let mut changed = locked.summary;
+    let mut changed: crate::domain::Summary =
+        serde_json::from_value(locked["summary"].clone()).unwrap();
     changed.items[0].description = "CLI 更新描述".into();
     changed.items[0].details = vec!["CLI 更新细则".into()];
     std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
     f.call(&[
         "summary",
         "set",
-        "session",
+        kind,
         &id,
         "--revision",
         "2",
@@ -1051,7 +1114,7 @@ fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_detail
         path.to_str().unwrap(),
     ])
     .unwrap();
-    let stored = f.call(&["session", "summary", &id]).unwrap();
+    let stored = f.call(&[kind, "summary", &id]).unwrap();
     assert_eq!(stored["summary"]["items"][0]["title"], "用户锁定的标题");
     assert_eq!(stored["summary"]["items"][0]["description"], "CLI 更新描述");
     assert_eq!(
@@ -1065,7 +1128,7 @@ fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_detail
         .call(&[
             "summary",
             "set",
-            "session",
+            kind,
             &id,
             "--revision",
             "3",
@@ -1080,7 +1143,7 @@ fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_detail
         .call(&[
             "summary",
             "set",
-            "session",
+            kind,
             &id,
             "--revision",
             "3",
@@ -1088,5 +1151,75 @@ fn cli_summary_edits_preserve_title_locks_but_can_update_descriptions_and_detail
             path.to_str().unwrap()
         ])
         .is_err());
-    assert_eq!(f.call(&["session", "summary", &id]).unwrap(), stored);
+    assert_eq!(f.call(&[kind, "summary", &id]).unwrap(), stored);
+    assert_eq!(f.call(&lock_args).unwrap()["revision"], 2);
+    for args in [
+        vec![
+            "summary",
+            "lock",
+            kind,
+            &id,
+            "--revision",
+            "3",
+            "--item",
+            "0",
+        ],
+        vec![
+            "summary",
+            "lock",
+            kind,
+            &id,
+            "--revision",
+            "3",
+            "--item",
+            "2",
+        ],
+        vec![
+            "summary",
+            "unlock",
+            kind,
+            &id,
+            "--revision",
+            "2",
+            "--item",
+            "1",
+        ],
+        vec!["summary", "lock", kind, &id, "--item", "1"],
+    ] {
+        assert!(f.call(&args).is_err());
+    }
+    assert_eq!(f.call(&[kind, "summary", &id]).unwrap()["revision"], 3);
+    let unlocked = f
+        .call(&[
+            "summary",
+            "unlock",
+            kind,
+            &id,
+            "--revision",
+            "3",
+            "--item",
+            "1",
+        ])
+        .unwrap();
+    assert_eq!(unlocked["revision"], 4);
+    assert_eq!(unlocked["summary"]["items"][0]["title_locked"], false);
+    let mut completed: crate::domain::Summary =
+        serde_json::from_value(unlocked["summary"].clone()).unwrap();
+    completed.items[0].title = "已完成事项".into();
+    std::fs::write(&path, serde_json::to_string(&completed).unwrap()).unwrap();
+    f.call(&[
+        "summary",
+        "set",
+        kind,
+        &id,
+        "--revision",
+        "4",
+        "--file",
+        path.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        f.call(&[kind, "summary", &id]).unwrap()["summary"]["items"][0]["title"],
+        "已完成事项"
+    );
 }

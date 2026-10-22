@@ -236,3 +236,133 @@ fn explicit_full_incremental_and_native_fallback_share_default_scope() {
     assert_eq!(report.messages, 0);
     assert_eq!(db.list_sessions(Default::default()).unwrap().len(), 1);
 }
+
+#[test]
+fn freshness_distinguishes_session_source_and_all_checks_and_preserves_success_after_failure() {
+    use noending_lib::context::freshness::view;
+    let f = Fixture::new();
+    let db_path = f.0.join("freshness.db");
+    let db = Db::open(&db_path).unwrap();
+    db.write()
+        .execute("DELETE FROM ingest_sources", [])
+        .unwrap();
+    let a_dir = f.0.join("a");
+    let b_dir = f.0.join("b");
+    let a_id = "019f135a-621c-76a1-a76c-7c71021847aa";
+    let b_id = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
+    let a_file = a_dir.join(format!("rollout-{a_id}.jsonl"));
+    let b_file = b_dir.join(format!("rollout-{b_id}.jsonl"));
+    write(&a_file, &codex(a_id, json!({})));
+    write(&b_file, &codex(b_id, json!({})));
+    let a = db
+        .add_ingest_source(Agent::Codex, a_dir.to_str().unwrap())
+        .unwrap();
+    let b = db
+        .add_ingest_source(Agent::Codex, b_dir.to_str().unwrap())
+        .unwrap();
+    ingestion::reconcile_source(&db, &a, &|_| {}).unwrap();
+    let sid = db
+        .find_session_by_root_agent_id(Agent::Codex, a_id)
+        .unwrap()
+        .unwrap()
+        .id;
+    let one = view(&db, Some("session"), Some(&sid)).unwrap();
+    assert_eq!(
+        one.session_check.as_ref().unwrap().outcome.as_deref(),
+        Some("success")
+    );
+    assert!(one.all_sources.checked_at.is_none());
+    assert_eq!(one.sources.len(), 1);
+    assert_eq!(one.sources[0].id, a.id);
+    let first_check = one.session_check.unwrap().checked_at.unwrap();
+    let first_source_check = one.sources[0].check.checked_at.clone();
+    assert_eq!(ingestion::refresh_session(&db, &sid).unwrap(), 0);
+    let checked = view(&db, Some("session"), Some(&sid)).unwrap();
+    assert!(checked.session_check.unwrap().checked_at.unwrap() > first_check);
+    assert_eq!(checked.sources[0].check.checked_at, first_source_check);
+    assert!(checked.all_sources.checked_at.is_none());
+    let all = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(all.failures.is_empty());
+    let before = view(&db, None, None).unwrap();
+    assert_eq!(before.all_sources.outcome.as_deref(), Some("success"));
+    assert_eq!(before.sessions.checked, 2);
+    assert_eq!(before.sessions.unknown, 0);
+    let b_checked = before
+        .sources
+        .iter()
+        .find(|s| s.id == b.id)
+        .unwrap()
+        .check
+        .checked_at
+        .clone();
+    assert_eq!(ingestion::reconcile_source(&db, &a, &|_| {}).unwrap().1, 0);
+    let unchanged = view(&db, Some("session"), Some(&sid)).unwrap();
+    assert!(unchanged.session_check.unwrap().checked_at > Some(first_check));
+    assert_eq!(
+        unchanged.all_sources.checked_at,
+        before.all_sources.checked_at
+    );
+    // Invalid tail is a real partial read; retained history must remain readable.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&b_file)
+        .unwrap()
+        .write_all(b"{broken frame\n")
+        .unwrap();
+    let report = ingestion::reconcile_all_report(&db, &|_| {}).unwrap();
+    assert!(!report.failures.is_empty());
+    let failed = view(&db, None, None).unwrap();
+    assert_eq!(failed.all_sources.outcome.as_deref(), Some("partial"));
+    assert_eq!(failed.all_sources.checked_at, before.all_sources.checked_at);
+    assert_eq!(
+        failed
+            .sources
+            .iter()
+            .find(|s| s.id == a.id)
+            .unwrap()
+            .check
+            .outcome
+            .as_deref(),
+        Some("success")
+    );
+    let b_state = &failed.sources.iter().find(|s| s.id == b.id).unwrap().check;
+    assert_eq!(b_state.outcome.as_deref(), Some("failed"));
+    assert_eq!(b_state.checked_at, b_checked);
+    assert_eq!(failed.sessions.failed, 1);
+    std::fs::remove_file(&b_file).unwrap();
+    let b_sid = db
+        .find_session_by_root_agent_id(Agent::Codex, b_id)
+        .unwrap()
+        .unwrap()
+        .id;
+    assert_eq!(ingestion::refresh_session(&db, &b_sid).unwrap(), 0);
+    let missing = view(&db, Some("session"), Some(&b_sid)).unwrap();
+    assert_eq!(
+        missing.session_check.unwrap().outcome.as_deref(),
+        Some("missing")
+    );
+    assert_eq!(missing.sessions.missing, 1);
+    db.remove_ingest_source(&b.id).unwrap();
+    let removed = view(&db, None, None).unwrap();
+    assert!(removed.all_sources.checked_at.is_none());
+    assert!(removed.sources.iter().all(|s| s.id != b.id));
+    assert_eq!(
+        removed
+            .sources
+            .iter()
+            .find(|s| s.id == a.id)
+            .unwrap()
+            .check
+            .outcome
+            .as_deref(),
+        Some("success")
+    );
+    drop(db);
+    let reopened = Db::open(&db_path).unwrap();
+    let persisted = view(&reopened, Some("session"), Some(&b_sid)).unwrap();
+    assert_eq!(
+        persisted.session_check.unwrap().outcome.as_deref(),
+        Some("missing")
+    );
+}

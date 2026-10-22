@@ -30,6 +30,11 @@
   --warning-wash: #fdf3e7;
   --danger: #c0392b;
 
+  /* brand — 墨绿。界面签名用 --brand；深色大块/物料用更深一档 #1e3a32。
+     同色相色阶：L17% #1e3a32 → L39% #4a7c66 → L60% #7fb39b。
+     只用于品牌签名，不参与交互态，避免和 --accent 撞车。 */
+  --brand: #4a7c66;
+
   /* shape & layout */
   --radius-sm: 6px;
   --radius-md: 8px;
@@ -77,6 +82,9 @@
   --warning-wash: #3a2f1c;
   --danger: #e07a6a;
 
+  /* 深色底上提亮同一色相，保持品牌色的可读性 */
+  --brand: #7fb39b;
+
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
   --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
@@ -109,6 +117,8 @@
     --warning: #d9a04a;
     --warning-wash: #3a2f1c;
     --danger: #e07a6a;
+
+    --brand: #7fb39b;
 
     --shadow-menu: 0 8px 24px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.25);
     --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.45);

@@ -17,6 +17,7 @@ import type {
 // 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
+    saveSummary: vi.fn(),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
@@ -31,7 +32,7 @@ vi.mock("../../api", () => ({
       revision: 0,
       ingest_generation: 0,
       processed_through_seq: 0,
-      latest_message_seq: 0,
+      latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },
       updated_at: null,
       pending: false,
     }),
@@ -58,7 +59,7 @@ beforeEach(() => {
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
-  vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false });
+  vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
   vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2 });
   vi.mocked(api.listProjects).mockResolvedValue([]);
@@ -342,7 +343,7 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
     revision: 0,
     ingest_generation: 0,
     processed_through_seq: 0,
-    latest_message_seq: 0,
+    latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },
     updated_at: null,
     pending: false,
     ...over,
@@ -579,4 +580,23 @@ it("shows the physical compressed source and uses it for copy and reveal", async
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("compressed"));
   fireEvent.click(screen.getByRole("button", { name: "复制源会话路径" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(path));
+});
+
+it("creates a session summary from an empty state and keeps it after remount", async () => {
+  let persisted = contextView();
+  vi.mocked(api.getSessionContext).mockImplementation(async () => persisted);
+  vi.mocked(api.saveSummary).mockImplementation(async (kind,id,revision,summary) => {
+    expect([kind,id,revision]).toEqual(["session","me",0]);
+    persisted = {...persisted,revision:1,fields:{summary}};
+    return {revision:1,summary};
+  });
+  await renderDetail(detail(session("me")));
+  await waitFor(() => expect(screen.getByRole("button",{name:"新增事项"}).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button",{name:"新增事项"}));
+  fireEvent.change(screen.getByRole("textbox",{name:"事项标题"}),{target:{value:"手动整理的会话结论"}});
+  fireEvent.click(screen.getByRole("button",{name:"保存"}));
+  await screen.findByRole("heading",{name:"手动整理的会话结论"});
+  cleanup();
+  await renderDetail(detail(session("me")));
+  await screen.findByRole("heading",{name:"手动整理的会话结论"});
 });

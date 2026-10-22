@@ -257,11 +257,11 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
 
 .ui-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
 
-.brand-mark {
+.brand-lockup {
   display: inline-block;
   flex-shrink: 0;
   vertical-align: middle;
-  background-color: var(--text-primary);
+  background-color: var(--brand);
   mask: no-repeat center / contain;
   -webkit-mask: no-repeat center / contain;
 }

@@ -298,6 +298,21 @@ fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
     args
 }
 
+/// Tool approval and the Bash sandbox are independent settings. Apply this
+/// policy only to terminal launches; background extraction keeps its own policy.
+fn interactive_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
+    let mut args = vec!["--dangerously-skip-permissions".into()];
+    // Native Windows commands already run unsandboxed. Avoid inline JSON there:
+    // legacy PowerShell native argument passing can strip its embedded quotes.
+    #[cfg(not(windows))]
+    args.extend([
+        "--settings".into(),
+        r#"{"sandbox":{"enabled":false}}"#.into(),
+    ]);
+    args.extend(runtime_args(opts));
+    args
+}
+
 impl crate::adapters::AgentAdapter for ClaudeAdapter {
     fn agent(&self) -> Agent {
         Agent::ClaudeCode
@@ -394,7 +409,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         opts: &crate::adapters::ExecOptions,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = runtime_args(opts);
+        let mut args = interactive_args(opts);
         // The launcher's prespecified id: the session file is born with a
         // known identity, so the embedded terminal binds by exact match.
         if let Some(id) = &opts.root_session_id {
@@ -419,7 +434,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
-        args.extend(runtime_args(opts));
+        args.extend(interactive_args(opts));
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,

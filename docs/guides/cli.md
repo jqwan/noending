@@ -25,11 +25,29 @@ ne cli uninstall --dir ~/.local/bin
 
 Windows 使用 `ne.exe` 或 `noending.exe cli install --dir <目录>`，生成 `ne.cmd` 和 `noending.cmd`。将所选目录加入 PATH；这些命令不修改 shell 配置。install 不覆盖已有文件，update 和 uninstall 只操作有 NoEnding 管理标记的普通文件，拒绝覆盖其他命令或符号链接。status 检查两个入口是否存在、是否受管理、是否指向当前程序。移动应用后，用新位置的程序执行 cli update 修正入口。
 
+## 内置技能
+
+桌面应用启动时在技能库分别提供 `noending-memory` 和 `noending-collaboration`，默认不为任何 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载技能。
+
+记忆技能负责按会话、项目、任务或本机范围回忆与维护上下文；协作技能负责创建与调整任务、项目关联、已有会话的任务跟踪及进展汇总。两者可独立启停、卸载；任务摘要仍属于记忆范围。当前协作接口不提供新建／继续会话或消息发送。
+
+内置技能的 `references/access.json` 提供固定到当前 Home 的 CLI 绝对路径，入口随技能分发，不修改全局 PATH，也不自动配置 MCP。该入口已带 `--home`，调用时不重复追加；独立安装的普通 `ne` 命令仍可按本文方式选择 Home。已有 MCP 连接应核对 `status.home` 与技能 Home 一致。
+
+应用更新只维护内置定义、操作参考及访问入口，保留其他支持文件；项目／用户级停用和删除源文件的卸载不会在重启时被恢复。存储位置变更后保留现有技能源和加载链接，更新它们访问的 Home。同名、未经应用管理的目录会保留，不自动覆盖。
+
+通过 NoEnding 新建或继续的终端 Agent 会话，默认使用各自的完全访问模式：Codex 使用 `--dangerously-bypass-approvals-and-sandbox`；Claude Code 使用 `--dangerously-skip-permissions`，并在支持沙箱的非 Windows 平台通过本次启动的 `--settings` 关闭沙箱；Antigravity 使用 `--dangerously-skip-permissions --sandbox=false`。Pi 原生按当前系统账户权限执行工具，无需额外权限参数。这些启动参数不依赖助手项目或记忆技能是否启用，不修改 Agent 的持久配置，也不改变后台摘要提取的权限策略。
+
+参数依据：[Codex CLI](https://developers.openai.com/codex/cli/reference)、[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) 与[沙箱说明](https://code.claude.com/docs/en/sandboxing)、[Antigravity CLI 权限](https://www.antigravity.google/docs/permissions?tab=cli)、[Pi 安全模型](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)。
+
 ## 查询
 
 ```sh
 ne --help
 ne status
+ne freshness
+ne freshness --session <id>
+ne freshness --task <id>
+ne freshness --project <id>
 ne agent list
 ne project resolve
 ne project resolve --path /absolute/project/subdirectory
@@ -109,11 +127,11 @@ archive/unarchive 复用界面的归档规则，保留摘要、历史消息和�
 
 path register 要求目录已存在且为绝对路径，不创建磁盘目录，也不扫描摄入目录下的会话。项目按目录和 Git/worktree 规则派生。task project set 替换任务的完整项目列表，空列表解除所有项目关联；不会移动目录或会话，也不会清除现有任务跟踪。任务的 --path 查询匹配其关联项目当前的所有目录。
 
-桌面应用运行时会观察这些写操作的数据库提交并刷新。CLI 不提供原始消息编辑、原生会话标题改写、项目身份修改或永久删除。内置助手的 Codex 会话仅额外开放 NoEnding 的数据、运行、日志和访问锁目录，以便独立 CLI 工作，不开放其他项目工作目录。
+桌面应用运行时会观察这些写操作的数据库提交并刷新。CLI 不提供原始消息编辑、原生会话标题改写、项目身份修改或永久删除。
 
 ## 摘要
 
-摘要以 `summary.items` 列表返回，每个事项包含 `title`、`description`、`details` 和必填的 `title_locked`。界面可锁定或解锁标题；锁定后 Agent 仍可更新描述和细则，但不能通过改名、删除或合并使锁定标题消失；保留标题时可融合相关描述和细则。CLI 和 MCP 不能改变锁定状态。未锁定事项可自由调整、合并、拆分、增删和排序。版本号仍属于整份摘要，事项没有固定 ID。
+摘要以 `summary.items` 列表返回，每个事项包含 `title`、`description`、`details` 和必填的 `title_locked`。界面可锁定或解锁标题；锁定后 Agent 仍可更新描述和细则，但不能通过改名、删除或合并使锁定标题消失；保留标题时可融合相关描述和细则。CLI 和 MCP 仅开放任务摘要的显式加锁／解锁；会话和项目摘要不开放该入口。未锁定事项可自由调整、合并、拆分、增删和排序。版本号仍属于整份摘要，事项没有固定 ID。
 
 ```sh
 ne summary search --query "关键词" --project <id> --scope all
@@ -127,6 +145,8 @@ ne project summary <id> --item 1 --revision 2
 
 按序号读取时必须同时提供 `--item` 和检索结果中的 `--revision`，避免摘要重组后读取错位内容。摘要版本变化返回 `stale_result`；分页范围或摘要版本变化返回 `stale_cursor`，需要重新检索。事项序号仅在对应摘要版本内有效。
 
+桌面详情页支持逐项编辑摘要：点击事项旁的编辑按钮修改标题、描述和细则，标题栏的「＋」添加事项。编辑状态可以删除未锁定事项，也可删除最后一项清空摘要；锁定标题须先解锁才能改名或删除。手动编辑保留提取进度，编辑期间当前页面的模型更新按钮暂停，版本冲突会保留草稿。
+
 `summary set` 文件使用 UTF-8 JSON，格式为 `{"items":[{"title":"事项标题","description":"简短描述","details":["细则"],"title_locked":false}]}`，一次替换完整列表；须保留原有锁定标题及其 `title_locked=true`，不能新增、移除或转移标题锁。至少包含一个事项，标题必须是非空单行文字，描述允许为空字符串，细则允许为空数组；每条细则必须非空。旧 Markdown 正文不再接受。默认提取提示词要求会话最多 15 个事项，任务和项目最多 10 个事项，并建议标题不超过 20 字符、描述不超过 60 字符、每条细则不超过 80 字符、整个事项不超过 300 字符；这些数量和篇幅要求用于指导模型整理，后端不据此拒绝或截断提取及手动编辑结果。
 
 ```sh
@@ -134,11 +154,30 @@ ne summary update session <id>
 ne summary regenerate task <id>
 ne summary update project <id>
 ne summary set session <id> --file summary.json --revision <当前版本>
+ne summary lock task <id> --item 1 --revision <当前版本>
+ne summary unlock task <id> --item 1 --revision <当前版本>
 ```
+
+`summary lock task` / `summary unlock task` 显式切换一个任务事项的标题锁，必须提供当前 `--revision` 和从 1 开始的 `--item`，返回新版本及完整摘要。它不修改描述、细则或提取消费位置；普通 `summary set` 仍不得改变锁状态。多项操作逐次采用新版本，版本冲突时重新读取并定位，不能复用旧序号。
+
+从历史提取摘要时保留已有锁；发布待办时先写入，再锁定对应标题。确认待办完成后先写回结果，再显式解锁，让后续摘要可以合并和整理。未完成或仍待验收时保留锁，不把所有锁定事项都视为待办。加锁／解锁失败需单独报告，不把部分成功说成整个流程完成。
 
 更新和重新生成等待配置的 Agent 调用及后端校验、入库全部完成后，直接返回最终结果。失败时 `ok=false` 并返回非零退出码；部分完成状态仍需检查结果字段。`update` 沿用旧摘要，`regenerate` 忽略目标旧摘要，遵守现有提取和并发规则。同一会话参与的独立和批量提取共用跨进程锁，桌面与 CLI 不能重叠提取。Ctrl+C 会取消当前命令并结束它启动的 headless Agent 进程树；同步在安全边界停止，已提交数据保留。强制杀进程无法保证执行清理，未确认完成的写请求需要核对业务状态后再操作。
 
 人工编辑使用 UTF-8 JSON 文件，必须提供查询得到的当前摘要版本；版本不一致时拒绝覆盖。编辑只改内容和版本，不把待处理消息标记为已提取。
+
+## 记忆更新状态
+
+`ne freshness` 读取全部已登记来源和本机已入库会话的检查状态；`--session`、`--task`、`--project` 三选一，查询对应范围及摘要覆盖。查询不扫描文件、不调用模型，包含已归档会话。项目返回所有来源的扫描状态，因为新会话可能来自尚无该项目记录的 Agent；任务和会话返回已知关联会话所属来源。未登记来源的会话仍可查询单会话状态。
+
+- `all_sources` 是最近一次全部来源同步的观察；`sources[].check` 是各来源扫描状态；`session_check` 只在单会话查询中提供。单会话同步不更新来源或全部来源时间，单来源同步不更新全部来源时间。
+- `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装 Agent 的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。
+- `sessions` 汇总范围内会话数量、曾成功检查数、从未成功检查数、最近检查失败／来源缺失数，以及成功检查时间的最早／最晚值；这些计数可交叉，曾成功检查的会话也可能最近失败。查询不验证当前磁盘状态。
+- `summary` 与普通摘要读取返回的 `freshness` 含义相同。`refreshed_at` 是最近成功提取并提交的时间（含保留摘要但确认材料已处理的跳过结果）；`updated_at` 仍表示编辑时间，手动编辑和标题锁定不会推进 `refreshed_at` 或消费消息。
+- `pending_messages` 是已入库、尚未被目标摘要消费的 user/assistant 消息数，按会话去重，不是长消息分页块数或工具事件数。任务／项目以自身消费位置计算，单独刷新子会话摘要不会将这个计数归零。新关联会话的未覆盖消息也计入，因此它不等同于按时间统计“刚刚新产生”的消息。
+- `summary_changed_sessions` 表示会话摘要版本变化、尚未汇入目标；`scope_changed` 表示关联或元数据输入变化。`history_rewritten_sessions` 表示已消费历史发生改写；`unknown_coverage_sessions` 表示消费位置无法确定。后两者非零时 `pending_messages=null`，不冒充零条新增；结合 `pending` 决定是否更新或重新提取。
+
+版本 1 数据会在同一事务内兼容升级，保留现有数据。无法还原的同步／提取时间为 `null`；只有可以通过消费版本核实的位置才会补齐。零条待处理只描述已入库材料，尚未检查的源文件可能仍有新内容。
 
 ## 会话同步
 

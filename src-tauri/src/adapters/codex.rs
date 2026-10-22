@@ -456,10 +456,6 @@ fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
     if let Some(e) = &opts.effort {
         args.extend(["-c".into(), format!("model_reasoning_effort=\"{}\"", e)]);
     }
-    for directory in &opts.writable_directories {
-        args.extend(["--add-dir".into(), directory.clone()]);
-    }
-
     args
 }
 
@@ -600,7 +596,8 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         opts: &ExecOptions,
         cwd: Option<&Path>,
     ) -> Result<AgentCommand> {
-        let mut args = runtime_args(opts);
+        let mut args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+        args.extend(runtime_args(opts));
         if let Some(message) = opts.initial_message() {
             // Stop option/subcommand parsing even when the message starts
             // with a dash or matches a CLI command such as `resume`.
@@ -622,7 +619,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         _source_path: Option<&str>,
     ) -> Result<AgentCommand> {
         // codex resume [OPTIONS] [SESSION_ID]
-        let mut args = vec!["resume".into()];
+        let mut args = vec![
+            "resume".into(),
+            "--dangerously-bypass-approvals-and-sandbox".into(),
+        ];
         args.extend(runtime_args(opts));
         args.push(agent_session_id.into());
         Ok(AgentCommand {

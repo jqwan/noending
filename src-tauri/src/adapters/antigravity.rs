@@ -685,7 +685,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         // Bare `agy` opens the interactive TUI. With a first message, its
         // interactive-prompt flag runs that turn and keeps the TUI open;
         // `--prompt` would run print mode and exit instead.
-        let mut args = runtime_args(opts);
+        let mut args = interactive_args(opts);
         if let Some(message) = opts.initial_message() {
             args.extend(["--prompt-interactive".into(), message.into()]);
         }
@@ -708,7 +708,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         // the CLI's own store; the IDE store is invisible to the CLI (see the
         // module header). The launch still starts in `cwd` when it is given.
         let mut args = vec!["--conversation".into(), agent_session_id.to_string()];
-        args.extend(runtime_args(opts));
+        args.extend(interactive_args(opts));
         Ok(AgentCommand {
             program: install.executable_path.clone(),
             args,
@@ -762,6 +762,15 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
     }
 }
 
+fn interactive_args(opts: &ExecOptions) -> Vec<String> {
+    let mut args = vec![
+        "--dangerously-skip-permissions".into(),
+        "--sandbox=false".into(),
+    ];
+    args.extend(runtime_args(opts));
+    args
+}
+
 /// `agy` flags for NoEnding's runtime-override intent. `--effort` accepts
 /// low|medium|high|max and `--model` a model name; there is no provider
 /// switch, and capabilities.rs keeps provider Unsupported so a value can
@@ -807,6 +816,8 @@ mod tests {
         assert_eq!(
             new_cmd.args,
             vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--sandbox=false".to_string(),
                 "--model".to_string(),
                 "gemini-3-pro".to_string(),
                 "--effort".to_string(),
@@ -830,6 +841,8 @@ mod tests {
             vec![
                 "--conversation".to_string(),
                 "5bbd1246-5106-49e4-b399-d23faa2ede93".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--sandbox=false".to_string(),
                 "--model".to_string(),
                 "gemini-3-pro".to_string(),
                 "--effort".to_string(),
@@ -838,12 +851,14 @@ mod tests {
         );
         assert_eq!(resume_cmd.cwd, None);
 
-        // Default overrides must produce NO flags: the Agent's own
-        // configuration stays untouched and unguessed.
+        // Without runtime overrides, only the terminal permission policy is set.
         let bare = adapter
             .build_new_command(&install, &ExecOptions::default(), None)
             .unwrap();
-        assert!(bare.args.is_empty());
+        assert_eq!(
+            bare.args,
+            ["--dangerously-skip-permissions", "--sandbox=false"]
+        );
         assert_eq!(bare.cwd, None);
     }
 

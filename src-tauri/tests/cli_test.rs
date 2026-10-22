@@ -70,6 +70,10 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
         let (success, status) = f.run(Path::new(exe), &["status"]);
         assert!(success);
         assert_eq!(status["data"]["connected"], true);
+        let (success, freshness) = f.run(Path::new(exe), &["freshness"]);
+        assert!(success);
+        assert_eq!(freshness["data"]["sessions"]["total"], 0);
+        assert!(freshness["data"]["all_sources"]["checked_at"].is_null());
         let (success, error) = f.run(Path::new(exe), &["session", "delete", "unknown"]);
         assert!(!success);
         assert_eq!(error["ok"], false);
@@ -260,8 +264,8 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
 }
 
 #[test]
-fn assistant_launchers_use_their_explicit_home_and_literal_arguments() {
-    let f = Fixture::new();
+fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments() {
+    let mut f = Fixture::new();
     let directory = f.root.join("assistant's tools with spaces");
     cli::install_workspace_entry(
         &directory,
@@ -269,32 +273,111 @@ fn assistant_launchers_use_their_explicit_home_and_literal_arguments() {
         Path::new(env!("CARGO_BIN_EXE_ne")),
     )
     .unwrap();
-    // Batch files cannot carry CR/LF arguments; the native entries cover those above.
-    let content = "literal $() `text` 中文 ' quotes";
-    for name in ["ne", "noending"] {
-        let output = installed_command(&directory, name)
-            .args([
-                "task",
-                "create",
-                "--title",
-                content,
-                "--request-id",
-                "assistant-launcher",
-            ])
+    let mut entries = Vec::new();
+    for (name, prepare) in [
+        (
+            "noending-memory",
+            noending::skills::prepare_memory_skill
+                as fn(&Db, &NoEndingHome, &Path) -> noending::error::Result<()>,
+        ),
+        (
+            "noending-collaboration",
+            noending::skills::prepare_collaboration_skill,
+        ),
+    ] {
+        prepare(
+            f.db.as_ref().unwrap(),
+            &f.home,
+            Path::new(env!("CARGO_BIN_EXE_ne")),
+        )
+        .unwrap();
+        let skill = f.home.root.join("skills").join(name);
+        let access: Value =
+            serde_json::from_slice(&std::fs::read(skill.join("references/access.json")).unwrap())
+                .unwrap();
+        let entry = PathBuf::from(access["cli"].as_str().unwrap());
+        assert!(entry.is_file());
+        let status = Command::new(&entry)
+            .arg("status")
+            .current_dir(&f.root)
             .env("NOENDING_HOME", f.root.join("wrong-home"))
             .output()
             .unwrap();
         assert!(
-            output.status.success(),
+            status.status.success(),
             "{}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&status.stderr)
         );
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["data"]["task"]["title"], content);
+        let value: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(value["data"]["home"], access["home"]);
+        entries.push(entry);
+    }
+    // Batch files cannot carry CR/LF arguments; the native entries cover those above.
+    let content = "literal $() `text` 中文 ' quotes";
+    let mut directories = vec![directory.as_path()];
+    directories.extend(entries.iter().map(|entry| entry.parent().unwrap()));
+    for directory in directories {
+        for name in ["ne", "noending"] {
+            let output = installed_command(&directory, name)
+                .args([
+                    "task",
+                    "create",
+                    "--title",
+                    content,
+                    "--request-id",
+                    "assistant-launcher",
+                ])
+                .env("NOENDING_HOME", f.root.join("wrong-home"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["data"]["task"]["title"], content);
+        }
     }
     assert_eq!(
         f.db.as_ref().unwrap().list_workstreams(None).unwrap().len(),
         1
+    );
+    // Relocation preserves source links while rebinding the private command.
+    let relocated =
+        NoEndingHome::new(f.root.join("relocated home").to_str().unwrap(), None).unwrap();
+    relocated.ensure_dirs().unwrap();
+    drop(f.db.take());
+    std::fs::remove_dir(&relocated.data_dir).unwrap();
+    std::fs::rename(&f.home.data_dir, &relocated.data_dir).unwrap();
+    let db = Db::open(&relocated.db_path).unwrap();
+    for prepare in [
+        noending::skills::prepare_memory_skill,
+        noending::skills::prepare_collaboration_skill,
+    ] {
+        prepare(&db, &relocated, Path::new(env!("CARGO_BIN_EXE_ne"))).unwrap();
+    }
+    for entry in entries {
+        let status = Command::new(entry)
+            .arg("status")
+            .env("NOENDING_HOME", &f.home.root)
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let result: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(result["data"]["home"], relocated.root.to_str().unwrap());
+    }
+    assert_eq!(db.list_workstreams(None).unwrap().len(), 1);
+    assert_eq!(
+        noending::skills::load_skill_registry(&db)
+            .unwrap()
+            .sources
+            .len(),
+        2
     );
 }
 

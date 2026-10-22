@@ -231,6 +231,44 @@ fn ingest_session_mode(
     force_full: bool,
     prepared: Option<PreparedRead>,
 ) -> Result<i64> {
+    let started = crate::storage::now();
+    let Some(observed) = db.get_session(&session.id)? else {
+        return Ok(0);
+    };
+    let session = &observed;
+    let result = ingest_session_inner(db, session, force_full, prepared);
+    let outcome = if crate::platform::cancellation::requested() {
+        "cancelled"
+    } else if result.is_err() {
+        "failed"
+    } else if matches!(
+        crate::adapters::adapter_for(session.agent).inspect_session_source(session),
+        Ok(SourceAvailability::Missing)
+    ) {
+        "missing"
+    } else {
+        "success"
+    };
+    db.tx(|tx| {
+        let same_source: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND source_path=?2 AND source_kind=?3)",
+            rusqlite::params![session.id, session.source_path, session.source_kind],
+            |r| r.get(0),
+        )?;
+        if same_source {
+            crate::storage::freshness::record(tx, "session", &session.id, &started, outcome)?;
+        }
+        Ok(())
+    })?;
+    result
+}
+
+fn ingest_session_inner(
+    db: &Db,
+    session: &Session,
+    force_full: bool,
+    prepared: Option<PreparedRead>,
+) -> Result<i64> {
     crate::platform::cancellation::check()?;
     // A purge that raced this pass leaves nothing to attach the facts to.
     let Some(current) = db.get_session(&session.id)? else {
@@ -449,72 +487,39 @@ pub fn reconcile_all_report<F>(db: &Db, on_session: &F) -> Result<ReconcileRepor
 where
     F: Fn(&Session),
 {
-    let sources = db.list_ingest_sources()?;
-    let adapters = crate::adapters::all_adapters();
-    let file_unchanged = unchanged_since_cursor(db)?;
-    let skipped_paths = std::cell::RefCell::new(BTreeSet::new());
-    let unchanged = |path: &std::path::Path| {
-        let same = file_unchanged(path);
-        if same {
-            skipped_paths.borrow_mut().insert(path.to_path_buf());
-        }
-        same
-    };
-    let mut total_discovered = 0usize;
-    let mut total_messages = 0i64;
-    let mut failures = Vec::new();
+    let started = crate::storage::now();
+    let before: Vec<_> = db
+        .list_ingest_sources()?
+        .into_iter()
+        .map(|s| (s.id, s.agent.as_str().to_owned(), s.path, s.origin))
+        .collect();
+    let result = reconcile_all_inner(db, on_session);
+    db.tx(|tx| {
+        let mut stmt = tx.prepare("SELECT id,agent,path,origin FROM ingest_sources ORDER BY agent,path")?;
+        let after = stmt.query_map([], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let unavailable: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ingest_sources s LEFT JOIN sync_checks c ON c.scope='source' AND c.target_id=s.id WHERE c.outcome IS NULL OR c.outcome!='success' OR c.started_at<?1)", [&started], |r|r.get(0))?;
+        let outcome = if crate::platform::cancellation::requested() { "cancelled" }
+            else if let Ok(report) = &result {
+                if report.failures.is_empty() && !unavailable && after==before { "success" } else { "partial" }
+            } else { "failed" };
+        crate::storage::freshness::record(tx, "all", "", &started, outcome)
+    })?;
+    result
+}
 
-    for adapter in &adapters {
+fn reconcile_all_inner<F: Fn(&Session)>(db: &Db, on_session: &F) -> Result<ReconcileReport> {
+    let mut total_discovered = 0;
+    let mut total_messages = 0;
+    let mut failures = Vec::new();
+    for source in db.list_ingest_sources()? {
         crate::platform::cancellation::check()?;
-        let roots: Vec<PathBuf> = sources
-            .iter()
-            .filter(|source| source.agent == adapter.agent())
-            .flat_map(crate::adapters::source_discovery_roots)
-            .collect();
-        if roots.is_empty() {
-            continue;
+        match reconcile_source(db, &source, on_session) {
+            Ok((discovered, messages)) => {
+                total_discovered += discovered;
+                total_messages += messages;
+            }
+            Err(error) => failures.push(format!("Source {} sync failed: {error}", source.id)),
         }
-        let sessions = db.sessions_for_ingestion(adapter.agent())?;
-        let discovered = match adapter.discover_batch_for_sessions(&roots, &unchanged, &sessions) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!(
-                    "[reconcile] {} discovery failed: {}",
-                    adapter.agent().display_name(),
-                    e
-                );
-                failures.push(format!(
-                    "{} discovery failed: {e}",
-                    adapter.agent().display_name()
-                ));
-                continue;
-            }
-        };
-        total_discovered += discovered.members.len();
-        let resolved = match resolve_batch(db, adapter.as_ref(), discovered) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[reconcile] resolve failed: {}", e);
-                failures.push(format!(
-                    "{} resolve failed: {e}",
-                    adapter.agent().display_name()
-                ));
-                continue;
-            }
-        };
-        let (messages, processed) =
-            process_resolved_batch(db, resolved, on_session, false, &mut failures)?;
-        total_messages += messages;
-        total_messages += retry_undiscovered_sessions(
-            db,
-            &sessions,
-            &roots,
-            &processed,
-            &skipped_paths.borrow(),
-            false,
-            on_session,
-            &mut failures,
-        )?;
     }
 
     // The one piece of workspace work a skipped Session still owes. It runs
@@ -624,6 +629,68 @@ pub fn reconcile_source<F>(
 where
     F: Fn(&Session),
 {
+    let started = crate::storage::now();
+    let result = reconcile_source_inner(db, source, on_session);
+    finish_source_check(db, source, &started, result.is_err())?;
+    result
+}
+
+fn finish_source_check(
+    db: &Db,
+    source: &crate::domain::IngestSource,
+    started: &str,
+    failed: bool,
+) -> Result<()> {
+    let roots = crate::adapters::source_discovery_roots(source);
+    let (mut succeeded, mut incomplete) = (false, false);
+    {
+        let conn = db.read();
+        let mut stmt = conn.prepare("SELECT s.source_path,c.outcome FROM sessions s JOIN sync_checks c ON c.scope='session' AND c.target_id=s.id WHERE s.agent=?1 AND c.started_at>=?2")?;
+        let rows = stmt.query_map(rusqlite::params![source.agent.as_str(), started], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (path, outcome) = row?;
+            if roots
+                .iter()
+                .any(|root| crate::workspace::is_within(&path, &root.to_string_lossy()))
+            {
+                if outcome == "success" {
+                    succeeded = true;
+                } else {
+                    incomplete = true;
+                }
+            }
+        }
+    }
+    let outcome = if crate::platform::cancellation::requested() {
+        "cancelled"
+    } else if failed {
+        if succeeded {
+            "partial"
+        } else {
+            "failed"
+        }
+    } else if !roots.iter().any(|p| p.exists()) {
+        "missing"
+    } else if incomplete {
+        "partial"
+    } else {
+        "success"
+    };
+    db.tx(|tx| {
+        let unchanged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ingest_sources WHERE id=?1 AND agent=?2 AND path=?3 AND origin=?4)",rusqlite::params![source.id,source.agent.as_str(),source.path,source.origin],|r|r.get(0))?;
+        if unchanged { crate::storage::freshness::record(tx, "source", &source.id, started, outcome)?; }
+        Ok(())
+    })
+}
+
+fn reconcile_source_inner<F: Fn(&Session)>(
+    db: &Db,
+    source: &crate::domain::IngestSource,
+    on_session: &F,
+) -> Result<(usize, i64)> {
+    let checked_at = crate::storage::now();
     let adapter = crate::adapters::adapter_for(source.agent);
     let file_unchanged = unchanged_since_cursor(db)?;
     let skipped_paths = std::cell::RefCell::new(BTreeSet::new());
@@ -654,6 +721,23 @@ where
         on_session,
         &mut failures,
     )?;
+    db.tx(|tx| {
+        for session in &sessions {
+            if skipped_paths
+                .borrow()
+                .contains(&PathBuf::from(&session.source_path))
+            {
+                crate::storage::freshness::record(
+                    tx,
+                    "session",
+                    &session.id,
+                    &checked_at,
+                    "success",
+                )?;
+            }
+        }
+        Ok(())
+    })?;
     if !failures.is_empty() {
         return Err(other(format!("部分来源摄入失败：{}", failures.join("; "))));
     }
@@ -679,6 +763,17 @@ pub fn reingest_source<F>(
 where
     F: Fn(&Session),
 {
+    let started = crate::storage::now();
+    let result = reingest_source_inner(db, source, on_session);
+    finish_source_check(db, source, &started, result.is_err())?;
+    result
+}
+
+fn reingest_source_inner<F: Fn(&Session)>(
+    db: &Db,
+    source: &crate::domain::IngestSource,
+    on_session: &F,
+) -> Result<(usize, i64)> {
     let adapter = crate::adapters::adapter_for(source.agent);
     let roots = crate::adapters::source_discovery_roots(source);
     let discovered = adapter.discover_batch(&roots, &|_| false)?;

@@ -179,10 +179,12 @@ fn stdio_catalog_and_both_entries_work_without_desktop_or_terminal_controls() {
         let tools = catalog["result"]["tools"].as_array().unwrap();
         for name in [
             "status",
+            "freshness",
             "agent_list",
             "project_resolve",
             "session_messages",
             "summary_search",
+            "task_summary_title_lock",
             "task_create",
             "sync",
             "summary_config_set",
@@ -212,6 +214,12 @@ fn stdio_catalog_and_both_entries_work_without_desktop_or_terminal_controls() {
         let status = client.ok("status", json!({}));
         assert_eq!(status["home"], f.home.root.to_str().unwrap());
         assert_eq!(status["connected"], true);
+        let freshness = client.ok("freshness", json!({}));
+        assert_eq!(freshness["sessions"]["total"], 0);
+        assert!(freshness["all_sources"]["checked_at"].is_null());
+        assert!(freshness["summary"].is_null());
+        let invalid = client.call("freshness", json!({"kind":"session"}));
+        assert_eq!(invalid["error"]["code"], "invalid_arguments");
         assert_eq!(
             client.call("project_resolve", json!({}))["error"]["code"],
             "invalid_arguments"
@@ -303,10 +311,47 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         client.ok("summary_search", json!({"query":"Protocol","kind":"task"}))["items"][0]["id"],
         task
     );
-    let db = Db::open(&f.home.db_path).unwrap();
-    noending_lib::context::set_summary_title_lock(&db, "task", task.as_str().unwrap(), 1, 1, true)
-        .unwrap();
-    drop(db);
+    let lock_args =
+        json!({"id":task,"revision":1,"item":1,"locked":true,"request_id":"publish-todo-lock"});
+    for kind in ["session", "project"] {
+        assert_eq!(
+            client.call(
+                "task_summary_title_lock",
+                json!({"kind":kind,"id":task,"revision":1,"item":1,"locked":true})
+            )["error"]["code"],
+            "invalid_arguments"
+        );
+    }
+    let locked = client.ok("task_summary_title_lock", lock_args.clone());
+    assert_eq!(locked["revision"], 2);
+    assert_eq!(locked["summary"]["items"][0]["title_locked"], true);
+    assert_eq!(
+        client.ok("task_summary_title_lock", lock_args.clone())["revision"],
+        2
+    );
+    assert_eq!(
+        client.call(
+            "task_summary_title_lock",
+            json!({"id":task,"revision":1,"item":1,"locked":false})
+        )["error"]["code"],
+        "stale_result"
+    );
+    for item in [0, 2] {
+        assert_eq!(
+            client.call(
+                "task_summary_title_lock",
+                json!({"id":task,"revision":2,"item":item,"locked":false})
+            )["ok"],
+            false
+        );
+    }
+    assert_eq!(
+        client.call(
+            "task_summary_title_lock",
+            json!({"id":task,"item":1,"locked":true})
+        )["error"]["code"],
+        "invalid_arguments"
+    );
     assert_eq!(
         client.call(
             "summary_set",
@@ -334,6 +379,17 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
     assert_eq!(
         next.ok("summary_config_get", json!({}))["runtime"]["model"],
         "test-model"
+    );
+    assert_eq!(next.ok("task_summary_title_lock", lock_args)["revision"], 2);
+    let unlocked = next.ok(
+        "task_summary_title_lock",
+        json!({"id":task,"revision":3,"item":1,"locked":false}),
+    );
+    assert_eq!(unlocked["revision"], 4);
+    assert_eq!(unlocked["summary"]["items"][0]["title_locked"], false);
+    assert_eq!(
+        unlocked["summary"]["items"][0]["description"],
+        "Updated body with a protected title"
     );
     next.ok(
         "object_archive",

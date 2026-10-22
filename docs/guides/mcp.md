@@ -31,11 +31,11 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 | 范围 | 工具 |
 | --- | --- |
-| 状态与定位 | `status`、`agent_list`、`project_resolve` |
+| 状态与定位 | `status`、`freshness`、`agent_list`、`project_resolve` |
 | 对象查询 | `object_list`、`object_get` |
 | 历史与证据 | `session_search`、`session_messages` |
 | 事项摘要 | `summary_search`、`summary_get`、`summary_set`、`summary_update` |
-| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_session_set` |
+| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_session_set`、`task_summary_title_lock` |
 | 项目与归档 | `path_register`、`project_rename`、`object_archive` |
 | 同步与配置 | `source_list`、`sync`、`summary_config_get`、`summary_config_set` |
 | 写请求状态 | `request_get` |
@@ -43,6 +43,8 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 这一版不提供终端启动、终端输入、消息发送、页面跳转、技能管理、永久删除或直接执行 SQL 的工具。内部摘要提取使用的 `extraction inputs/read/search` 仍是受限的 CLI 通道，不通过这个通用 MCP 暴露。
 
 ### 查询
+
+- `freshness` 不带参数查询本机更新状态；同时传 `kind=session|task|project` 和 `id` 查询目标范围。返回全部来源、相关来源、会话检查统计和目标摘要覆盖。普通 `summary_get` 也返回 `freshness`。时间未知为 `null`；`pending_messages=null` 表示历史改写或消费位置未知，不能解释为零条新增。检查结果只覆盖已观察来源和已入库消息，不证明磁盘当前没有新内容。字段及更新规则见 [CLI 记忆更新状态](cli.md#记忆更新状态)。
 
 - `project_resolve` 必须显式传入目标目录 `path`，是已存在的绝对目录。不要把 MCP 服务的启动目录当成 Agent 当前项目。解析不会自动登记项目；登记使用 `path_register`。
 - `object_list` 的 `kind` 为 `session`、`task` 或 `project`，默认 `scope=unarchived`，也支持 `archived`、`all`。会话支持项目、任务、Agent 筛选；任务支持项目筛选。列表只读取元数据。
@@ -71,7 +73,9 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 超时或断开后，先用 `request_get` 查询原编号。`running` 表示仍在执行；`completed` 含最终响应；`interrupted` 表示无法确认完成，应核对业务状态，不换编号盲目重复写入。回执位于 Home 的 `runtime/cli-requests/`，清理该目录会丢失去重记录。
 
-`summary_set` 接受 `{items:[{title,description,details:[],title_locked:false}]}` 对象和当前 `revision`，保留现有摘要校验与并发保护。`title_locked` 必填；锁定状态只能在桌面界面切换。写入必须保留锁定标题，描述与细则仍可更新。`summary_get` 可整份读取，也可同时传 `item` 和 `revision` 读取某个事项。
+`summary_set` 接受 `{items:[{title,description,details:[],title_locked:false}]}` 对象和当前 `revision`，保留现有摘要校验与并发保护。`title_locked` 必填；普通 `summary_set` 不得改变锁定状态。写入必须保留锁定标题，描述与细则仍可更新。`summary_get` 可整份读取，也可同时传 `item` 和 `revision` 读取某个事项。
+
+`task_summary_title_lock {id, item, revision, locked}` 显式切换任务摘要事项的标题锁：`id` 是任务 ID，`item` 为当前版本中从 1 开始的序号，`revision` 为预期版本，`locked` 为布尔值。返回新版本与完整摘要，不修改描述、细则或提取消费位置。此工具没有 `kind` 参数，不开放会话／项目摘要的加锁或解锁。发布待办后加锁，确认完成且写回结果后解锁；普通历史提取保留原锁。多项操作逐次采用新版本，冲突时重新读取，不能沿用旧序号；使用独立 `request_id` 处理每次写操作及其重试。
 
 `summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。客户端应为模型操作配置足够的工具调用超时。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
 

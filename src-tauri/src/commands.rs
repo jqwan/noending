@@ -131,6 +131,20 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
 
 // ---------------- Explicit Context update ----------------
 
+/// Explicit desktop edits preserve extraction coverage, including when cleared.
+#[tauri::command]
+pub fn save_summary(
+    state: State<AppState>,
+    kind: String,
+    id: String,
+    revision: i64,
+    summary: crate::domain::Summary,
+) -> Result<crate::context::SummaryEditResult> {
+    with_db(&state, |db| {
+        crate::context::save_summary(db, &kind, &id, revision, summary)
+    })
+}
+
 #[tauri::command]
 pub fn set_summary_title_lock(
     state: State<AppState>,
@@ -139,9 +153,21 @@ pub fn set_summary_title_lock(
     revision: i64,
     item_number: usize,
     locked: bool,
-) -> Result<crate::context::SummaryLockResult> {
+) -> Result<crate::context::SummaryEditResult> {
     with_db(&state, |db| {
         crate::context::set_summary_title_lock(db, &kind, &id, revision, item_number, locked)
+    })
+}
+
+/// Read persisted sync observations and summary coverage without scanning.
+#[tauri::command]
+pub fn get_freshness(
+    state: State<AppState>,
+    kind: Option<String>,
+    id: Option<String>,
+) -> Result<crate::context::freshness::FreshnessView> {
+    with_db(&state, |db| {
+        crate::context::freshness::view(db, kind.as_deref(), id.as_deref())
     })
 }
 

@@ -7,6 +7,7 @@ import type { WorkstreamContext, WorkstreamContextView } from "../../types";
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
   api: {
+    saveSummary: vi.fn(),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
@@ -65,7 +66,7 @@ function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamCont
     updated_at: null,
     context_revision: 1,
     pending: false,
-    pending_sessions: 0,
+    pending_sessions: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },
     ...over,
   };
 }
@@ -141,7 +142,7 @@ it("shows 更新摘要 with the pending-session count and calls the explicit upd
   const state: WorkstreamContextView = contextState({
     context_revision: 2,
     pending: true,
-    pending_sessions: 2,
+    pending_sessions: 2, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },
   });
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(state);
   vi.mocked(api.updateWorkstreamContext).mockResolvedValue({
@@ -168,7 +169,7 @@ it("hides 更新摘要 when the Context is already up to date", async () => {
 
 it("offers a copyable operation id after a structured Context update failure", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
-  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, }));
   vi.mocked(api.updateWorkstreamContext).mockRejectedValue({
     code: "cli_timeout",
     message: "Agent CLI 超时，请重试或检查 CLI 状态。",
@@ -200,7 +201,7 @@ it("renders structured topics and regenerates through the separate action even w
 });
 
 it("keeps the task summary visible and reports failed sessions after a partial update", async () => {
-  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1 }));
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, }));
   vi.mocked(api.updateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{ session_id: "s-failed", error: "无法完整读取消息" }], remaining_pending: 1 });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByRole("button", { name: "更新摘要" });
@@ -255,4 +256,24 @@ it("allows associating projects directly from task detail page", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "确定" }));
   await waitFor(() => expect(api.setWorkstreamProjects).toHaveBeenCalledWith("w1", ["pr", "p2"]));
   expect(screen.queryByRole("dialog", { name: "选择关联项目" })).toBeNull();
+});
+
+it("edits the task summary without changing the task and restores it on remount", async () => {
+  let persisted = contextState();
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
+  vi.mocked(api.getWorkstreamContextState).mockImplementation(async () => persisted);
+  vi.mocked(api.saveSummary).mockImplementation(async (kind,id,revision,summary) => {
+    expect([kind,id,revision]).toEqual(["task","w1",1]);
+    persisted = {...persisted,context_revision:2,summary};
+    return {revision:2,summary};
+  });
+  const first = render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button",{name:"编辑事项：任务状态"}));
+  fireEvent.change(screen.getByRole("textbox",{name:"事项描述"}),{target:{value:"接口实现已完成，等待验收。"}});
+  fireEvent.click(screen.getByRole("button",{name:"保存"}));
+  await screen.findByText("接口实现已完成，等待验收。");
+  first.unmount();
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByText("接口实现已完成，等待验收。");
+  screen.getByText("整理 API 设计");
 });

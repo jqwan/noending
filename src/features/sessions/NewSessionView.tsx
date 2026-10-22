@@ -8,7 +8,7 @@ import RuntimePopover from "./RuntimePopover";
 import { readNewSessionPreferences, updateNewSessionPreferences, lastNewSessionRuntime, rememberNewSessionRuntime } from "./newSessionPreferences";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
-import SidebarLogo from "../../components/SidebarLogo";
+import BrandLockup from "../../components/BrandLockup";
 import { showToast } from "../../components/Toast";
 import type { Route } from "../../app/routes";
 import { announceLaunch } from "../launcher/LaunchResultModal";
@@ -471,7 +471,7 @@ export default function NewSessionView({
       <PageHeader title="新建会话" />
       <div className="new-session-content">
         <div className="new-session-heading">
-          <SidebarLogo size={64} />
+          <BrandLockup cap={20} />
           <h1 id="new-session-title">你想在 {selectedProject?.name ?? "这里"} 中构建什么？</h1>
           <section className="new-session-tasks" aria-label="跟踪任务（可选）">
             <div className="new-session-tasks-head">

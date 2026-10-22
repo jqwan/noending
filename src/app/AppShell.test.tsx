@@ -52,7 +52,7 @@ beforeEach(() => {
   vi.mocked(api.getSessionDetail).mockReset();
   vi.mocked(api.getSessionContext).mockReset().mockImplementation(async session_id => ({
     session_id, fields: null, revision: 0, ingest_generation: 0,
-    processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false,
+    processed_through_seq: 0, latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, updated_at: null, pending: false,
   }));
   sessionPages.clear(); sessionTerminals.clear();
   localStorage.clear();

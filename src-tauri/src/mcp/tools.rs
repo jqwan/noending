@@ -108,6 +108,14 @@ struct Id {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct Freshness {
+    /// Omit kind and id together for local database/source coverage.
+    kind: Option<Kind>,
+    id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Target {
     kind: Kind,
     id: String,
@@ -240,6 +248,20 @@ struct SummarySet {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct TaskSummaryTitleLock {
+    id: String,
+    /// Expected current revision from summary_get or the preceding write.
+    #[schemars(range(min = 0))]
+    revision: i64,
+    /// One-based item number in this revision. Never reuse after reordering.
+    #[schemars(range(min = 1))]
+    item: usize,
+    /// True protects the title. False explicitly unlocks it; never unlock to bypass an edit failure.
+    locked: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Extract {
     kind: Kind,
     id: String,
@@ -313,6 +335,7 @@ struct Config {
 pub(super) fn catalog() -> Vec<Spec> {
     vec![
         Spec::new("status", "Read NoEnding Home, version and capabilities. Does not start the desktop app or synchronize.", false, false, |_: Empty| Command::Status),
+        Spec::new("freshness", "Read persisted source/session sync checks and summary coverage for an optional kind+id. pending_messages is null for rewritten or unknown history; zero only describes ingested messages. Does not scan or extract.", false, false, |p: Freshness| Command::Freshness {kind:p.kind,id:p.id}),
         Spec::new("agent_list", "Query local Agent CLI availability and extraction capabilities. Does not verify login or model access.", false, false, |_: Empty| Command::Agents),
         Spec::new("project_resolve", "Resolve an existing absolute directory to a registered project, without registration or synchronization. Always pass the target path explicitly.", false, false, |p: Directory| Command::ResolveProject { path:p.path }),
         Spec::new("object_list", "List sessions, tasks or projects with filters and pagination. Returns metadata; read summaries separately.", false, false, |p: List| Command::List {kind:p.kind,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,title:p.title,path:p.path,cursor:p.cursor,limit:p.limit}),
@@ -322,6 +345,7 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("summary_get", "Read a structured summary and its revision, or one item using item plus revision. Does not trigger extraction.", false, false, |p: Summary| Command::Summary {kind:p.kind,id:p.id,item:p.item,revision:p.revision}),
         Spec::new("summary_search", "Search summary items across sessions, tasks and projects. Results include kind, object ID, item number and revision for summary_get.", false, false, |p: SummarySearch| Command::SearchSummaries {query:p.query,kind:p.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_owned()),project:p.project,scope:p.scope.name(),cursor:p.cursor,limit:p.limit}),
         Spec::new("summary_set", "Replace a summary with structured items using the expected revision. Preserve existing title_locked flags and locked titles; descriptions/details remain editable. Does not invoke an Agent.", true, false, |p: SummarySet| Command::EditSummary {kind:p.kind,id:p.id,revision:p.revision,content:serde_json::to_string(&p.content).expect("Summary contains only JSON fields")}),
+        Spec::new("task_summary_title_lock", "Explicitly lock or unlock a TASK summary item's title using its current revision and one-based item number. Lock published to-dos; unlock after recording confirmed completion or when requested. Bodies remain editable. Never unlock to bypass summary_set protection. Session/project locks are not exposed.", true, false, |p: TaskSummaryTitleLock| Command::SetTaskSummaryTitleLock {id:p.id,revision:p.revision,item:p.item,locked:p.locked}),
         Spec::new("summary_update", "Explicitly run the configured Agent to update a summary; waits for extraction and persistence. Set regenerate only when requested. Inspect partial failures in the result.", true, true, |p: Extract| Command::Extract {kind:p.kind,id:p.id,regenerate:p.regenerate}),
         Spec::new("task_create", "Create a task with optional description and project associations. Does not launch a session.", true, false, |p: TaskCreate| Command::CreateTask {title:p.title,description:p.description,projects:p.projects}),
         Spec::new("task_update", "Edit a task title or description. Supply at least one field; omitted fields are preserved.", true, false, |p: TaskUpdate| Command::UpdateTask {id:p.id,title:p.title,description:p.description}),

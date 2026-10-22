@@ -408,7 +408,7 @@ fn version_marker_without_the_database_identity_is_refused() {
 /// Invalid and newer version markers cannot bypass the supported-schema gate.
 #[test]
 fn unsupported_version_markers_preserve_the_database() {
-    for unsupported in [DATABASE_FORMAT_VERSION - 1, DATABASE_FORMAT_VERSION + 1] {
+    for unsupported in [0, DATABASE_FORMAT_VERSION + 1] {
         let path = db_path("unsupported");
         let db = Db::open(path.path()).unwrap();
         assert_eq!(application_id(&db.read()), DATABASE_APPLICATION_ID);
@@ -475,4 +475,149 @@ fn runtime_defaults_are_reconciled_on_every_start() {
         )
         .unwrap();
     assert_eq!((path.as_str(), origin.as_str()), ("/mine", "user"));
+}
+
+fn version_one(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(include_str!("fixtures/schema-v1.sql"))
+        .unwrap();
+    conn.execute_batch(r#"
+      INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','Persistent project','2026-01-01','2026-01-01');
+      INSERT INTO workspace_paths(id,canonical_path,project_id,git_state) VALUES('wp','/fixture','p','none');
+      INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('t','Persistent task','2026-01-01','2026-01-01');
+      INSERT INTO sessions(id,agent,root_agent_session_id,workspace_path_id,source_kind,source_path,latest_message_seq) VALUES('s','codex','native-s','wp','jsonl','/fixture/s.jsonl',1);
+      INSERT INTO session_workstreams VALUES('s','t');
+      INSERT INTO session_messages(id,session_id,sequence,role,content,source_identity_hash) VALUES('m','s',1,'user','Persistent evidence','hash');
+      INSERT INTO session_message_projection VALUES('s',1,'m',1);
+      INSERT INTO session_contexts VALUES('s','{"items":[{"title":"Locked title","description":"Retained detail","details":[],"title_locked":true}]}',4,0,1,'2026-01-02');
+      INSERT INTO workstream_context_state(workstream_id,context_revision,summary) VALUES('t',2,'{"items":[]}');
+      INSERT INTO project_context_state(project_id,context_revision,summary) VALUES('p',2,'{"items":[]}');
+      INSERT INTO workstream_session_frontiers VALUES('t','s',4);
+      INSERT INTO project_session_frontiers VALUES('p','s',3);
+      INSERT INTO settings VALUES('preserved','yes');
+    "#).unwrap();
+}
+
+fn schema_shape(conn: &Connection) -> Vec<(String, String, Vec<(String, String, i64, i64)>)> {
+    let objects: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    objects
+        .into_iter()
+        .map(|(kind, name)| {
+            let columns = conn
+                .prepare("SELECT name,type,\"notnull\",pk FROM pragma_table_info(?1)")
+                .unwrap()
+                .query_map([&name], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (kind, name, columns)
+        })
+        .collect()
+}
+
+#[test]
+fn baseline_upgrade_preserves_data_and_reports_unknown_freshness_without_inventing_history() {
+    let path = db_path("upgrade");
+    version_one(path.path());
+    let db = Db::open(path.path()).unwrap();
+    assert_eq!(user_version(&db.read()), 2);
+    assert_eq!(db.get_setting("preserved").unwrap().as_deref(), Some("yes"));
+    let session = db.get_session("s").unwrap().unwrap();
+    assert_eq!(session.project_id.as_deref(), Some("p"));
+    assert_eq!(session.tracked_workstream_ids, vec!["t"]);
+    let context = db.get_session_context("s").unwrap().unwrap();
+    assert_eq!(context.revision, 4);
+    assert!(context.fields.summary.items[0].title_locked);
+    assert_eq!(
+        context.fields.summary.items[0].description,
+        "Retained detail"
+    );
+    assert_eq!(
+        db.read()
+            .query_row(
+                "SELECT content FROM session_messages WHERE id='m'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "Persistent evidence"
+    );
+    let view = noending::context::freshness::view(&db, Some("session"), Some("s")).unwrap();
+    assert!(view.session_check.unwrap().checked_at.is_none());
+    let summary = view.summary.unwrap();
+    assert!(summary.refreshed_at.is_none());
+    assert_eq!(summary.pending_messages, Some(0));
+    let task = noending::context::freshness::view(&db, Some("task"), Some("t"))
+        .unwrap()
+        .summary
+        .unwrap();
+    assert_eq!(task.pending_messages, Some(0));
+    let project = noending::context::freshness::view(&db, Some("project"), Some("p"))
+        .unwrap()
+        .summary
+        .unwrap();
+    assert_eq!(project.pending_messages, None);
+    assert_eq!(project.unknown_coverage_sessions, 1);
+    let fresh = db_path("equivalence");
+    let current = Db::open(fresh.path()).unwrap();
+    assert_eq!(schema_shape(&db.read()), schema_shape(&current.read()));
+    assert_eq!(
+        db.read()
+            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        db.read()
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |_| Ok(()))
+            .unwrap()
+            .count(),
+        0
+    );
+    drop(db);
+    assert_eq!(
+        Db::open(path.path())
+            .unwrap()
+            .get_session_context("s")
+            .unwrap()
+            .unwrap()
+            .revision,
+        4
+    );
+}
+
+#[test]
+fn a_failed_upgrade_rolls_back_all_schema_changes_and_the_version() {
+    let path = db_path("rollback");
+    version_one(path.path());
+    let conn = Connection::open(path.path()).unwrap();
+    conn.execute("DROP INDEX idx_projection_message", [])
+        .unwrap();
+    let before = schema_shape(&conn);
+    drop(conn);
+    assert!(Db::open(path.path()).is_err());
+    let conn = Connection::open(path.path()).unwrap();
+    assert_eq!(user_version(&conn), 1);
+    assert_eq!(schema_shape(&conn), before);
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM settings WHERE key='preserved'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "yes"
+    );
 }

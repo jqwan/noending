@@ -165,6 +165,25 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
     } else {
         let c = match resource {
             "status" if words.len() == 1 => Command::Status,
+            "freshness" if words.len() == 1 => {
+                let targets = [
+                    (Kind::Session, options.take("session")),
+                    (Kind::Task, options.take("task")),
+                    (Kind::Project, options.take("project")),
+                ]
+                .into_iter()
+                .filter_map(|(kind, id)| id.map(|id| (kind, id)))
+                .collect::<Vec<_>>();
+                if targets.len() > 1 {
+                    return Err(invalid("只能指定一个会话、任务或项目"));
+                }
+                let (kind, id) = targets
+                    .into_iter()
+                    .next()
+                    .map(|(kind, id)| (Some(kind), Some(id)))
+                    .unwrap_or((None, None));
+                Command::Freshness { kind, id }
+            }
             "agent" if action == "list" && words.len() == 2 => Command::Agents,
             "sync" if words.len() == 1 => {
                 let source = options.take("source");
@@ -320,7 +339,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             "summary" => {
                 if words.len() != 4 {
                     return Err(invalid(
-                        "使用 summary update/regenerate/set <session|task|project> <id>",
+                        "使用 summary update/regenerate/set <session|task|project> <id>，或 summary lock/unlock task <id>",
                     ));
                 }
                 let kind: Kind = serde_json::from_value(json!(words[2]))
@@ -338,6 +357,17 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         revision: options.number("revision", -1)?,
                         content: std::fs::read_to_string(options.required("file")?)?,
                     },
+                    "lock" | "unlock" => {
+                        if kind != Kind::Task {
+                            return Err(invalid("仅任务摘要支持通过 CLI 加锁或解锁"));
+                        }
+                        Command::SetTaskSummaryTitleLock {
+                            id,
+                            revision: options.number("revision", -1)?,
+                            item: options.number("item", 0)?,
+                            locked: action == "lock",
+                        }
+                    }
                     _ => return Err(invalid("摘要命令无效")),
                 }
             }
@@ -377,24 +407,25 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
 }
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
-        None => vec!["ne status", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("session") => vec!["ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item NUMBER --revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
         Some("task") => vec!["ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item NUMBER --revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item NUMBER --revision REVISION]"],
-        Some("summary") => vec!["ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID", "ne summary set session|task|project ID --file FILE --revision REVISION"],
+        Some("summary") => vec!["ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID", "ne summary set session|task|project ID --file FILE --revision REVISION", "ne summary lock task ID --item NUMBER --revision REVISION", "ne summary unlock task ID --item NUMBER --revision REVISION"],
         Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
         Some("agent") => vec!["ne agent list"],
         Some("source") => vec!["ne source list"],
         Some("search")=>vec!["ne search --query TEXT [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
         Some("request")=>vec!["ne request show ID", "写操作可用 --request-id ID 重试相同操作；查询操作不接受该选项"],
         Some("path")=>vec!["ne path register --path ABSOLUTE_EXISTING_DIRECTORY"],
+        Some("freshness")=>vec!["ne freshness [--session ID | --task ID | --project ID]"],
         Some("status")=>vec!["ne status"],
         Some("cli")=>vec!["ne cli install --dir <PATH目录>", "ne cli status --dir <PATH目录>", "ne cli update --dir <PATH目录>", "ne cli uninstall --dir <PATH目录>"],
         Some("extraction")=>vec!["ne --connection FILE extraction inputs", "ne --connection FILE extraction read --input NAME [--cursor 0] [--limit 8]", "ne --connection FILE extraction search --input NAME --query TEXT [--cursor 0] [--limit 8]"],
         _=>return Err(invalid("未知命令")),
     };
     Ok(
-        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","home":"独立访问当前 NoEnding Home；--home 指定数据目录，无需运行桌面应用。--connection 仅用于提取查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary":"update/regenerate 等待提取及入库完成后返回最终结果；失败返回非零退出码。set 的 FILE 必须是 {items:[{title,description,details,title_locked}]} JSON，并提供当前摘要版本，保留消息处理进度。锁定标题和锁定状态必须保留，描述和细则可更新。摘要读取返回事项列表；按事项读取需同时提供 --item 与 --revision。"}),
+        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","home":"独立访问当前 NoEnding Home；--home 指定数据目录，无需运行桌面应用。--connection 仅用于提取查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary":"update/regenerate 等待提取及入库完成后返回最终结果；失败返回非零退出码。set 的 FILE 必须是 {items:[{title,description,details,title_locked}]} JSON，并提供当前摘要版本，保留消息处理进度。set 必须保留锁定标题和锁定状态，描述和细则可更新；lock/unlock 仅显式切换任务摘要的一个标题锁，需要 --item 与 --revision，返回新版本和完整事项。摘要读取返回事项列表；按事项读取需同时提供 --item 与 --revision。"}),
     )
 }

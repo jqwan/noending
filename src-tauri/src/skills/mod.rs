@@ -1,4 +1,5 @@
 //! Skill discovery and management. Agent load directories remain authoritative.
+mod bundled;
 mod files;
 mod inventory;
 mod operations;
@@ -11,6 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use bundled::{prepare_collaboration_skill, prepare_memory_skill};
 pub use inventory::{
     catalog, detail, detail_in_catalog, invalidate_catalog, list, list_catalog, merge_inventories,
 };

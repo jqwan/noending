@@ -27,9 +27,9 @@ pub fn commit(
     summary: &crate::domain::Summary,
     consumed: &[(String, i64)],
 ) -> Result<i64> {
-    conn.execute("INSERT INTO project_context_state(project_id,context_revision,input_fingerprint,summary,updated_at) VALUES (?1,1,?2,?3,?4) ON CONFLICT(project_id) DO UPDATE SET context_revision=context_revision+1,input_fingerprint=?2,summary=?3,updated_at=?4",params![id,fingerprint,summary,super::now()])?;
+    conn.execute("INSERT INTO project_context_state(project_id,context_revision,input_fingerprint,summary,updated_at,refreshed_at) VALUES (?1,1,?2,?3,?4,?4) ON CONFLICT(project_id) DO UPDATE SET context_revision=context_revision+1,input_fingerprint=?2,summary=?3,updated_at=?4,refreshed_at=?4",params![id,fingerprint,summary,super::now()])?;
     for (sid, revision) in consumed {
-        conn.execute("INSERT INTO project_session_frontiers(project_id,session_id,session_context_revision) VALUES (?1,?2,?3) ON CONFLICT(project_id,session_id) DO UPDATE SET session_context_revision=?3", params![id,sid,revision])?;
+        conn.execute("INSERT INTO project_session_frontiers(project_id,session_id,session_context_revision,ingest_generation,processed_through_seq) VALUES (?1,?2,?3,(SELECT ingest_generation FROM session_contexts WHERE session_id=?2 AND revision=?3),(SELECT processed_through_seq FROM session_contexts WHERE session_id=?2 AND revision=?3)) ON CONFLICT(project_id,session_id) DO UPDATE SET session_context_revision=?3,ingest_generation=excluded.ingest_generation,processed_through_seq=excluded.processed_through_seq", params![id,sid,revision])?;
     }
     conn.execute("DELETE FROM project_session_frontiers WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id=project_session_frontiers.session_id AND wp.project_id=?1)", [id])?;
     Ok(state(conn, id)?.revision)

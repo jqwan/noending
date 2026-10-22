@@ -131,6 +131,78 @@ fn summary_at(db: &Db, kind: &str, id: &str) -> (i64, crate::domain::Summary) {
 }
 
 #[test]
+fn desktop_summary_edits_create_clear_and_restore_without_consuming_messages() {
+    let mut f = ServiceFixture::new();
+    let sid = f.add_session(2, 10);
+    let (project, _) = project_fixture(&f, "manual-summary-project", &[&sid]);
+    let ws = task(&f, &[&sid]);
+    let targets = [
+        ("session", sid.clone()),
+        ("task", ws.id),
+        ("project", project.id),
+    ];
+    for (kind, id) in &targets {
+        let first = save_summary(
+            f.db(),
+            kind,
+            id,
+            0,
+            crate::domain::Summary::single("用户记录的结论"),
+        )
+        .unwrap();
+        assert_eq!(first.revision, 1);
+        let locked = set_summary_title_lock(f.db(), kind, id, 1, 1, true).unwrap();
+        assert!(locked.summary.items[0].title_locked);
+        assert!(save_summary(f.db(), kind, id, 2, crate::domain::Summary::default()).is_err());
+        set_summary_title_lock(f.db(), kind, id, 2, 1, false).unwrap();
+        let cleared = save_summary(f.db(), kind, id, 3, crate::domain::Summary::default()).unwrap();
+        assert_eq!(cleared.revision, 4);
+        assert!(cleared.summary.is_empty());
+        assert!(save_summary(
+            f.db(),
+            kind,
+            id,
+            3,
+            crate::domain::Summary::single("过期草稿")
+        )
+        .is_err());
+        assert!(edit_summary(f.db(), kind, id, 4, r#"{"items":[]}"#).is_err());
+    }
+    drop(f.db.take());
+    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
+    let session = session_context_view(f.db(), &sid).unwrap();
+    assert!(session.fields.is_none());
+    assert_eq!(session.revision, 4);
+    assert_eq!(session.processed_through_seq, 0);
+    assert_eq!(session.latest_message_seq, 2);
+    assert!(session.pending);
+    assert!(session.freshness.refreshed_at.is_none());
+    assert!(workstream_context_view(f.db(), &targets[1].1)
+        .unwrap()
+        .summary
+        .is_none());
+    assert!(project_context_view(f.db(), &targets[2].1)
+        .unwrap()
+        .summary
+        .is_none());
+    for (kind, id) in &targets {
+        let restored = save_summary(
+            f.db(),
+            kind,
+            id,
+            4,
+            crate::domain::Summary::single("重新记录的结论"),
+        )
+        .unwrap();
+        assert_eq!(restored.revision, 5);
+        assert_eq!(
+            summary_at(f.db(), kind, id).1.items[0].title,
+            "重新记录的结论"
+        );
+    }
+}
+
+#[test]
 fn title_locks_persist_in_all_scopes_allow_body_edits_and_require_user_unlock_for_renames() {
     let mut f = ServiceFixture::new();
     let sid = f.add_session(1, 10);
@@ -1604,4 +1676,108 @@ fn structured_summary_updates_can_reorganize_all_fields_without_changing_extract
     assert_eq!(view.revision, 2);
     assert_eq!(view.processed_through_seq, 3);
     assert!(!view.pending);
+}
+
+#[test]
+fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_separate() {
+    let mut f = ServiceFixture::new();
+    let home = f.home();
+    let a = f.add_session(2, 10);
+    let outside = f.add_session(7, 10);
+    let task = task(&f, &[&a]);
+    let (project, _) = project_fixture(&f, "fresh-project", &[&a]);
+    let read = |db: &Db, kind: &str, id: &str| {
+        freshness::view(db, Some(kind), Some(id))
+            .unwrap()
+            .summary
+            .unwrap()
+    };
+    assert_eq!(read(f.db(), "session", &a).pending_messages, Some(2));
+    assert_eq!(read(f.db(), "task", &task.id).pending_messages, Some(2));
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "session", &a, "Session conclusion");
+        result(dir, "task", &task.id, "Task conclusion");
+        Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
+    };
+    extract_task(f.db(), &task.id, Some(&home), false, &mut runner).unwrap();
+    let task_refreshed = read(f.db(), "task", &task.id);
+    assert_eq!(task_refreshed.pending_messages, Some(0));
+    assert!(!task_refreshed.pending);
+    assert!(task_refreshed.refreshed_at.is_some());
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "project", &project.id, "Project conclusion");
+        Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
+    };
+    project::extract_project(f.db(), &project.id, Some(&home), false, &mut runner).unwrap();
+    assert_eq!(
+        read(f.db(), "project", &project.id).pending_messages,
+        Some(0)
+    );
+    assert_eq!(read(f.db(), "session", &outside).pending_messages, Some(7));
+    append(&f, &a, "New evidence", false);
+    assert_eq!(read(f.db(), "task", &task.id).pending_messages, Some(1));
+    assert_eq!(
+        read(f.db(), "project", &project.id).pending_messages,
+        Some(1)
+    );
+    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        result(dir, "session", &a, "Updated session conclusion");
+        Ok(r#"{"status":"completed"}"#.into())
+    };
+    extract_session(f.db(), &a, Some(&home), false, &mut runner).unwrap();
+    assert_eq!(read(f.db(), "session", &a).pending_messages, Some(0));
+    for (kind, id) in [("task", &task.id), ("project", &project.id)] {
+        let info = read(f.db(), kind, id);
+        assert_eq!(
+            info.pending_messages,
+            Some(1),
+            "a session refresh cannot advance its parent's consumed messages"
+        );
+        assert_eq!(info.summary_changed_sessions, 1);
+    }
+    for (kind, id) in [
+        ("session", &a),
+        ("task", &task.id),
+        ("project", &project.id),
+    ] {
+        let before = read(f.db(), kind, id);
+        let (revision, _) = summary_at(f.db(), kind, id);
+        let lock = set_summary_title_lock(f.db(), kind, id, revision, 1, true).unwrap();
+        let mut content = lock.summary;
+        content.items[0].description = "Manual clarification".into();
+        edit_summary(
+            f.db(),
+            kind,
+            id,
+            lock.revision,
+            &serde_json::to_string(&content).unwrap(),
+        )
+        .unwrap();
+        let after = read(f.db(), kind, id);
+        assert_eq!(after.refreshed_at, before.refreshed_at);
+        assert_eq!(after.pending_messages, before.pending_messages);
+    }
+    let new_session = f.add_session(3, 10);
+    crate::storage::seed_tracking(f.db(), &new_session, Some(&task.id)).unwrap();
+    let info = read(f.db(), "task", &task.id);
+    assert_eq!(info.pending_messages, Some(4));
+    assert!(info.scope_changed);
+    append(&f, &a, "Rewritten historical evidence", true);
+    for (kind, id) in [
+        ("session", &a),
+        ("task", &task.id),
+        ("project", &project.id),
+    ] {
+        let info = read(f.db(), kind, id);
+        assert_eq!(info.pending_messages, None);
+        assert_eq!(info.history_rewritten_sessions, 1);
+        assert!(info.pending);
+    }
+    drop(f.db.take());
+    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
+    assert_eq!(
+        read(f.db(), "task", &task.id).refreshed_at,
+        task_refreshed.refreshed_at
+    );
+    assert_eq!(read(f.db(), "task", &task.id).history_rewritten_sessions, 1);
 }

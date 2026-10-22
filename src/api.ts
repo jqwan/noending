@@ -11,7 +11,7 @@ import type {
 
   Session, SessionListItem, SessionContextView, SessionDetail, SessionTracking,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
-  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings, SummaryLockResult,
+  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings, SummaryEditResult, SummaryDocument,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamUpdateOutcome,
 } from "./types";
@@ -168,12 +168,17 @@ export const api = {
   /** 最近一次后台摄入任务的结果（高级维护页展示）。 */
   getIngestionStatus: () => invoke<IngestTaskStatus | null>("get_ingestion_status"),
 
+  getFreshness: (kind?: "session" | "task" | "project", id?: string) =>
+    invoke<import("./types").FreshnessView>("get_freshness", { kind: kind ?? null, id: id ?? null }),
+
   // Explicit Context update (read + one-click update)
   /** Session 摘要 + 待更新状态。纯读取，不摄入、不调用模型。 */
   getSessionContext: (sessionId: string) =>
     invoke<SessionContextView>("get_session_context", { sessionId }),
+  saveSummary: (kind: "session" | "task" | "project", id: string, revision: number, summary: SummaryDocument) =>
+    invoke<SummaryEditResult>("save_summary", { kind, id, revision, summary }),
   setSummaryTitleLock: (kind: "session" | "task" | "project", id: string, revision: number, itemNumber: number, locked: boolean) =>
-    invoke<SummaryLockResult>("set_summary_title_lock", { kind, id, revision, itemNumber, locked }),
+    invoke<SummaryEditResult>("set_summary_title_lock", { kind, id, revision, itemNumber, locked }),
   /** Workstream 当前 Context + revision + 待更新状态。纯读取。 */
   getWorkstreamContextState: (workstreamId: string) =>
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),

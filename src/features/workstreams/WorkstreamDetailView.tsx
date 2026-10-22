@@ -1,3 +1,4 @@
+import { useSummaryEditor } from "../sessions/useSummaryEditor";
 import { removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./workstreams.css";
@@ -45,7 +46,7 @@ export default function WorkstreamDetailView({
   const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(() => cached?.ctx ?? null);
   const showSkeleton = useLoadingDelay(!ctx && loadError === "");
-  /** Context 状态（只读）：当前投影 + revision + 待更新。 */
+  /** Current items, revision and extraction coverage. */
   const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
   const summaryExpansion = useSummaryExpansion(ctxState?.summary);
   const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
@@ -58,6 +59,23 @@ export default function WorkstreamDetailView({
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
   const busyRef = useRef(false);
+
+  const summaryEditor = useSummaryEditor({
+    target: ctxState?.workstream_id === workstreamId ? { kind: "task", id: workstreamId, revision: ctxState.context_revision } : undefined,
+    summary: ctxState?.summary,
+    disabled: Boolean(ctxUpdating),
+    onChange: (result, removedIndex) => {
+      summaryExpansion.preserve(result.summary, removedIndex);
+      if (currentWorkstreamId.current !== workstreamId) return;
+      setCtxState(previous => {
+        if (!previous || previous.context_revision > result.revision) return previous;
+        const next = {...previous,context_revision:result.revision,summary:result.summary.items.length ? result.summary : null};
+        const cached = workstreamDetailCache.get(workstreamId);
+        if (cached) workstreamDetailCache.set(workstreamId,{...cached,ctxState:next});
+        return next;
+      });
+    },
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -130,7 +148,7 @@ export default function WorkstreamDetailView({
 
   /** 一次点击 → 相关 Session 摘要与 Workstream 状态一起更新（后端一次模型调用）。 */
   const updateContext = async (regenerate = false) => {
-    if (ctxUpdating) return;
+    if (ctxUpdating || summaryEditor.editing) return;
     setCtxUpdating(regenerate ? "regenerate" : "update");
     setCtxUpdateError(null);
     setFailedSessions([]);
@@ -350,7 +368,7 @@ export default function WorkstreamDetailView({
                 <span>任务摘要{ctxState?.summary ? `（${ctxState?.summary.items.length}）` : ""}</span>
               </h2>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
-                <SummaryControls expansion={summaryExpansion} />
+                <SummaryControls expansion={summaryExpansion} editor={summaryEditor} />
                 {ctxState?.summary && (
                   <button
                     type="button"
@@ -365,7 +383,7 @@ export default function WorkstreamDetailView({
                 <button
                   type="button"
                   className="btn ghost icon-button small"
-                  disabled={Boolean(ctxUpdating)}
+                  disabled={Boolean(ctxUpdating) || summaryEditor.editing}
                   title={ctxUpdating === "regenerate" ? "重新生成中…" : "重新生成"}
                   aria-label="重新生成"
                   onClick={() => updateContext(true)}
@@ -376,7 +394,7 @@ export default function WorkstreamDetailView({
                   <button
                     type="button"
                     className="btn primary icon-button small"
-                    disabled={Boolean(ctxUpdating)}
+                    disabled={Boolean(ctxUpdating) || summaryEditor.editing}
                     title={ctxUpdating === "update" ? "更新中…" : "更新摘要"}
                     aria-label="更新摘要"
                     onClick={() => updateContext()}
@@ -387,18 +405,8 @@ export default function WorkstreamDetailView({
               </div>
             </div>
             {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
-            {ctxState?.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
-              target={{kind:"task",id:workstreamId,revision:ctxState.context_revision}}
-              onChange={result => {
-                if (currentWorkstreamId.current !== workstreamId) return;
-                setCtxState(previous => {
-                  if (!previous || previous.context_revision > result.revision) return previous;
-                  const next = {...previous,context_revision:result.revision,summary:result.summary};
-                  const cached = workstreamDetailCache.get(workstreamId);
-                  if (cached) workstreamDetailCache.set(workstreamId,{...cached,ctxState:next});
-                  return next;
-                });
-              }}>{ctxState.summary}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
+            {ctxState && (ctxState.summary || summaryEditor.editing) ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
+              editor={summaryEditor}>{ctxState.summary ?? {items:[]}}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
             {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
             {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
           </section>
