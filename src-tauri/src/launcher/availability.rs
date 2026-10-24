@@ -9,7 +9,7 @@ use crate::error::{other, Result};
 use crate::storage::Db;
 
 /// Shared by the real resume preparation and the UI's availability projection.
-pub(super) fn validate_resume_session(session: &Session) -> Result<()> {
+pub(crate) fn validate_resume_session(session: &Session) -> Result<()> {
     if session.is_archived() {
         return Err(other("已归档的会话不能继续，请先取消归档"));
     }

@@ -64,6 +64,14 @@ fn write_plain(file: &std::path::Path, body: &str) {
     std::fs::write(file, body).unwrap();
 }
 
+// Codex transcripts always carry their thread identity before message frames.
+fn write_codex(file: &std::path::Path, body: &str) {
+    let header = serde_json::json!({"type":"session_meta","payload":{
+        "id":"codex_truncate_rewrite_dedup", "cwd":"/repo"
+    }});
+    write_plain(file, &format!("{header}\n{body}"));
+}
+
 fn append_plain(file: &std::path::Path, extra: &str) {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new().append(true).open(file).unwrap();
@@ -248,7 +256,11 @@ macro_rules! identity_suite {
         fn $fn_name() {
             let db = open_db(stringify!($fn_name));
             let dir = unique_dir(stringify!($fn_name));
-            let file = dir.join("session.jsonl");
+            let file = dir.join(if $agent == Agent::Codex {
+                "rollout-2026-09-13T10-00-00.jsonl"
+            } else {
+                "session.jsonl"
+            });
             let adapter: &dyn AgentAdapter = &$adapter;
             let write: fn(&std::path::Path, &str) = $write;
             let append: fn(&std::path::Path, &str) = $append;
@@ -398,7 +410,7 @@ identity_suite!(
     noending::adapters::codex::CodexAdapter,
     codex_line,
     codex_line,
-    write_plain,
+    write_codex,
     append_plain
 );
 identity_suite!(

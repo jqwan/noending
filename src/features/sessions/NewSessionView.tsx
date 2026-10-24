@@ -40,7 +40,7 @@ export type NewSessionViewProps = {
 
 const STANDALONE = "none";
 // Match the launcher's UTF-16 limit (String.length); keep long drafts intact.
-const INITIAL_MESSAGE_LIMIT = 2000;
+const INLINE_MESSAGE_LIMIT = 2000;
 
 /** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
@@ -80,9 +80,11 @@ export default function NewSessionView({
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const projectRef = useRef<HTMLDivElement>(null);
   const dirRef = useRef<HTMLDivElement>(null);
   const agentRef = useRef<HTMLDivElement>(null);
+  const taskRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
@@ -102,7 +104,7 @@ export default function NewSessionView({
   }, []);
 
   useEffect(() => {
-    if (!projectMenuOpen && !dirMenuOpen && !agentMenuOpen) return;
+    if (!projectMenuOpen && !dirMenuOpen && !agentMenuOpen && !taskMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (projectMenuOpen && !projectRef.current?.contains(e.target as Node)) {
         setProjectMenuOpen(false);
@@ -113,12 +115,16 @@ export default function NewSessionView({
       if (agentMenuOpen && !agentRef.current?.contains(e.target as Node)) {
         setAgentMenuOpen(false);
       }
+      if (taskMenuOpen && !taskRef.current?.contains(e.target as Node)) {
+        setTaskMenuOpen(false);
+      }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setProjectMenuOpen(false);
         setDirMenuOpen(false);
         setAgentMenuOpen(false);
+        setTaskMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", handleClickOutside);
@@ -127,7 +133,7 @@ export default function NewSessionView({
       window.removeEventListener("mousedown", handleClickOutside);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [projectMenuOpen, dirMenuOpen, agentMenuOpen]);
+  }, [projectMenuOpen, dirMenuOpen, agentMenuOpen, taskMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -352,6 +358,7 @@ export default function NewSessionView({
     if (next === selectedProjectId) return;
     projectChanged.current = true;
     setProjectError("");
+    setTaskMenuOpen(false);
     releasePrepared();
     setSelectedProjectId(next);
     const preferences = readNewSessionPreferences();
@@ -419,9 +426,9 @@ export default function NewSessionView({
   };
 
   const hasMessage = Boolean(message.trim());
-  const messageTooLong = message.length > INITIAL_MESSAGE_LIMIT;
+  const messageUsesFile = message.length > INLINE_MESSAGE_LIMIT;
   const launchLabel = hasMessage ? "发送" : "打开终端";
-  const canSend = Boolean(!messageTooLong && selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
+  const canSend = Boolean(selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
 
   const start = async () => {
     if (!canSend || launching.current) return;
@@ -461,38 +468,27 @@ export default function NewSessionView({
   const currentDir = launchCwd || "";
   const dirLabel = useMemo(() => {
     if (!currentDir) return "默认工作目录";
-    return ellipsisPathMiddle(currentDir, 42);
+    return ellipsisPathMiddle(currentDir, 28);
   }, [currentDir]);
 
   const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
+
+  // 任务数量没有上限，顶栏只显示摘要：没选=「任务」，选一个=标题，多个=计数。
+  const trackedTasks = availableTasks.filter(task => trackedWorkstreamIds.includes(task.id));
+  const taskLabel = trackedTasks.length === 0
+    ? "任务"
+    : trackedTasks.length === 1 ? trackedTasks[0].title : `任务 · ${trackedTasks.length}`;
+  const taskTitle = trackedTasks.length > 0
+    ? trackedTasks.map(task => task.title).join("、")
+    : availableTasks.length > 0 ? "选择跟踪任务" : "该项目下还没有跟踪任务";
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
       <PageHeader title="新建会话" />
       <div className="new-session-content">
         <div className="new-session-heading">
-          <BrandLockup cap={20} />
+          <BrandLockup cap={13} />
           <h1 id="new-session-title">你想在 {selectedProject?.name ?? "这里"} 中构建什么？</h1>
-          <section className="new-session-tasks" aria-label="跟踪任务（可选）">
-            <div className="new-session-tasks-head">
-              <div className="new-session-tasks-title">
-                <Icon name="tasks" />
-                <span>跟踪任务 <span className="muted">· 可多选</span></span>
-                {trackedWorkstreamIds.length > 0 && (
-                  <span className="badge accent">{trackedWorkstreamIds.length} 已选</span>
-                )}
-              </div>
-              <button type="button" className="btn ghost icon-button small" aria-label="新建跟踪任务" title="新建任务"
-                disabled={busy || !selectedProject} onClick={() => setShowNewWorkstreamModal(true)}><Icon name="plus" /></button>
-            </div>
-            <div className="new-session-task-list">
-              {availableTasks.map(task => <label key={task.id} className={`new-session-task-option${trackedWorkstreamIds.includes(task.id) ? " selected" : ""}`}>
-                <input type="checkbox" checked={trackedWorkstreamIds.includes(task.id)} disabled={busy} onChange={() => toggleTask(task.id)} />
-                <span className="truncate" title={task.title}>{task.title}</span>
-              </label>)}
-              {availableTasks.length === 0 && <p className="muted small">当前项目暂无可跟踪任务</p>}
-            </div>
-          </section>
         </div>
 
         <form className="new-session-form" onSubmit={(e) => { e.preventDefault(); void start(); }}>
@@ -673,6 +669,87 @@ export default function NewSessionView({
                 </div>
               );
             })()}
+
+            <section className="new-session-tasks" aria-label="跟踪任务（可选）">
+              {/* 菜单必须挂在 role=button 外面：按钮的子节点对辅助技术是隐藏的，
+                  勾选框藏在里面键盘和读屏都够不到。 */}
+              <div className="new-session-task-picker" ref={taskRef}>
+                <div
+                  className={`new-session-picker has-custom-menu${taskMenuOpen ? " open" : ""}${trackedTasks.length > 0 ? " is-set" : ""}`}
+                  onClick={() => {
+                    if (busy) return;
+                    setTaskMenuOpen((v) => !v);
+                    setProjectMenuOpen(false);
+                    setDirMenuOpen(false);
+                    setAgentMenuOpen(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (busy) return;
+                    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+                      if (!taskMenuOpen) {
+                        e.preventDefault();
+                        setTaskMenuOpen(true);
+                        setProjectMenuOpen(false);
+                        setDirMenuOpen(false);
+                        setAgentMenuOpen(false);
+                      }
+                    }
+                  }}
+                  tabIndex={busy ? -1 : 0}
+                  role="button"
+                  aria-haspopup="menu"
+                  aria-expanded={taskMenuOpen}
+                  aria-label={`跟踪任务：${taskLabel}`}
+                  title={taskTitle}
+                >
+                  <Icon name="tasks" />
+                  <span className="new-session-picker-label truncate">{taskLabel}</span>
+                  <Icon name="chevronDown" className="new-session-chevron" />
+                </div>
+
+                {taskMenuOpen && (
+                  <div className="new-session-dropdown-menu" role="group" aria-label="跟踪任务列表">
+                    {availableTasks.length === 0 ? (
+                      <p className="new-session-menu-empty">该项目下还没有跟踪任务</p>
+                    ) : (
+                      <div className="new-session-menu-list">
+                        {availableTasks.map(task => {
+                          const selected = trackedWorkstreamIds.includes(task.id);
+                          return (
+                            <label
+                              key={task.id}
+                              className={`new-session-task-option${selected ? " selected" : ""}`}
+                              title={task.title}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                disabled={busy}
+                                onChange={() => toggleTask(task.id)}
+                              />
+                              <span className="truncate">{task.title}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <div className="new-session-menu-divider" />
+                    <button
+                      type="button"
+                      className="new-session-menu-action"
+                      disabled={busy || !selectedProject}
+                      onClick={() => {
+                        setTaskMenuOpen(false);
+                        setShowNewWorkstreamModal(true);
+                      }}
+                    >
+                      <span className="action-icon"><Icon name="plus" /></span>
+                      <span>新建任务</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </section>
           </div>
 
           {!agentAvailable && <p role="alert">没有可用的新建会话 Agent，请确保本地已安装支持的 Agent CLI。</p>}
@@ -681,7 +758,6 @@ export default function NewSessionView({
               autoFocus
               aria-label="首条消息"
               placeholder="描述你想完成的任务，或直接打开终端…"
-              aria-invalid={messageTooLong}
               aria-describedby="new-session-message-hint"
               value={message}
               onChange={(e) => handleMessageChange(e.target.value)}
@@ -777,8 +853,6 @@ export default function NewSessionView({
                     </div>
                   )}
                 </div>
-              </div>
-              <div className="new-session-composer-footer-right">
                 <RuntimePopover
                   agent={selectedAgent}
                   runtime={runtime}
@@ -790,6 +864,8 @@ export default function NewSessionView({
                     rememberNewSessionRuntime(selectedAgent, v);
                   }}
                 />
+              </div>
+              <div className="new-session-composer-footer-right">
                 <button
                   type="submit"
                   className="new-session-send"
@@ -827,10 +903,8 @@ export default function NewSessionView({
               )}
             </div>
           )}
-          <p id="new-session-message-hint" className="new-session-hint" role={messageTooLong ? "alert" : undefined}>
-            {messageTooLong
-              ? `首条消息最多 ${INITIAL_MESSAGE_LIMIT} 字符，当前 ${message.length}。请缩短内容，或清空后直接打开终端输入。`
-              : `Enter ${launchLabel} · Shift + Enter 换行 · ${message.length}/${INITIAL_MESSAGE_LIMIT}`}
+          <p id="new-session-message-hint" className="new-session-hint">
+            {`Enter ${launchLabel} · Shift + Enter 换行${message.length > 0 ? ` · ${message.length} 字符` : ""}${messageUsesFile ? " · 长消息将通过临时文本文件发送" : ""}`}
           </p>
         </form>
       </div>

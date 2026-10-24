@@ -7,6 +7,7 @@ export default function TerminalActivityIndicator({ terminal }: {
 }) {
   const activity = terminal.activity;
   const state = !terminal.live ? "exited"
+    : (!activity || activity.state === "unknown") ? "unknown"
     : activity?.state === "working" ? "working"
     : activity?.state === "waiting" ? "waiting"
     : activity?.state === "failed" ? "failed" : "idle";
@@ -14,7 +15,7 @@ export default function TerminalActivityIndicator({ terminal }: {
   const label = terminalActivityLabel(terminal);
   return <span className="terminal-activity-indicator" role="img" aria-label={label} title={label}>
     <span aria-hidden="true" className={`terminal-activity-marker is-${state}${unread ? " is-unread" : ""}`}>
-      {state === "waiting" || state === "failed" ? "!" : null}
+      {state === "unknown" ? "?" : state === "waiting" || state === "failed" ? "!" : null}
     </span>
   </span>;
 }

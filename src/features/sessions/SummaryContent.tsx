@@ -25,39 +25,24 @@ function Text({ children }: { children: string }) {
   return <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{children}</ReactMarkdown>;
 }
 
-function contentKey(summary: SummaryDocument | null | undefined) {
-  return JSON.stringify(summary?.items.map(({title,description,details}) => ({title,description,details})) ?? null);
-}
-
 export function useSummaryExpansion(summary: SummaryDocument | null | undefined) {
-  const key = contentKey(summary);
-  const [state, setState] = useState(() => ({ key, expanded: new Set<number>() }));
-  // Positions belong to one content version; identical reads keep their state.
-  const current = state.key === key ? state : { key, expanded: new Set<number>() };
-  if (current !== state) setState(current);
-  const expandable = summary?.items.flatMap((item, index) => item.details.length > 0 ? [index] : []) ?? [];
-  const allExpanded = expandable.length > 0 && expandable.every(index => current.expanded.has(index));
+  const [expanded, setExpanded] = useState(new Set<string>());
+  const expandable = summary?.items.filter(item => item.details.length > 0).map(item => item.id) ?? [];
+  const allExpanded = expandable.length > 0 && expandable.every(id => expanded.has(id));
   return {
-    expanded: current.expanded,
+    expanded,
     hasDetails: expandable.length > 0,
     allExpanded,
-    toggle(index: number) {
-      setState(previous => {
-        const expanded = new Set(previous.key === key ? previous.expanded : []);
-        if (expanded.has(index)) expanded.delete(index);
-        else expanded.add(index);
-        return { key, expanded };
+    toggle(id: string) {
+      setExpanded(previous => {
+        const next = new Set(previous);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
       });
     },
-    toggleAll() {
-      setState({ key, expanded: allExpanded ? new Set() : new Set(expandable) });
-    },
-    preserve(next: SummaryDocument, removedIndex?: number) {
-      const expanded = [...current.expanded]
-        .filter(index => index !== removedIndex)
-        .map(index => removedIndex !== undefined && index > removedIndex ? index - 1 : index)
-        .filter(index => index < next.items.length);
-      setState({key:contentKey(next),expanded:new Set(expanded)});
+    toggleAll() { setExpanded(allExpanded ? new Set() : new Set(expandable)); },
+    preserve(next: SummaryDocument) {
+      setExpanded(previous => new Set(next.items.filter(item => previous.has(item.id)).map(item => item.id)));
     },
   };
 }
@@ -98,11 +83,11 @@ export default function SummaryContent({ children, expansion, editor }: {
   const { expanded, toggle } = expansion;
   return <div className="summary-items">
     {summary.items.map((item, index) => {
-      if (editor?.draft?.index === index) return <section className="summary-item is-editing" key={index}><SummaryItemEditor editor={editor} /></section>;
+      if (editor?.draft?.index === index) return <section className="summary-item is-editing" key={item.id}><SummaryItemEditor editor={editor} /></section>;
       const titleId = `${prefix}-title-${index}`;
       const detailsId = `${prefix}-details-${index}`;
-      const open = expanded.has(index);
-      return <section className="summary-item" aria-labelledby={titleId} key={index}>
+      const open = expanded.has(item.id);
+      return <section className="summary-item" aria-labelledby={titleId} key={item.id}>
         <div className="summary-item-header">
           <h3 id={titleId}>{item.title}</h3>
           <div className="summary-item-actions">
@@ -126,7 +111,7 @@ export default function SummaryContent({ children, expansion, editor }: {
               aria-controls={detailsId}
               aria-label={`${open ? "收起" : "展开"}${item.title}的细则`}
               disabled={editor?.editing}
-              onClick={() => toggle(index)}
+              onClick={() => toggle(item.id)}
             ><Icon name={open ? "chevronDown" : "chevronRight"} /></button>}
             <button
               type="button"

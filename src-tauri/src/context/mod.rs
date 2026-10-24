@@ -4,8 +4,11 @@ pub(crate) mod diagnostics;
 mod edit;
 pub mod freshness;
 pub mod items;
+pub use edit::{
+    complete_task_todo, discard_task_todo, publish_task_todo, set_summary_title_lock,
+    SummaryEditResult, TaskTodoContent, TaskTodoResult,
+};
 pub use edit::{edit_summary, save_summary};
-pub use edit::{set_summary_title_lock, SummaryEditResult};
 mod project;
 pub mod prompts;
 mod query;
@@ -163,6 +166,10 @@ fn read_summary_result(
 ) -> Result<SessionContextFields> {
     let mut fields = files.read_result(path).map_err(invalid)?;
     let previous = query::target_summary(&db.read(), kind, id, revision)?.unwrap_or_default();
+    fields.summary = fields
+        .summary
+        .resolve_extracted_ids(&previous)
+        .map_err(invalid)?;
     fields
         .summary
         .preserve_title_locks(&previous)

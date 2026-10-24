@@ -7,8 +7,9 @@ export function useTerminalActivitySeen(terminal: TerminalSummary | undefined) {
   const id = terminal?.terminal_id;
   const revision = terminal?.activity?.revision;
   const unread = terminal?.activity?.unread;
+  const state = terminal?.activity?.state;
   useEffect(() => {
-    if (!id || revision === undefined || !unread) return;
+    if (!id || revision === undefined || (!unread && !["completed", "failed", "interrupted"].includes(state ?? ""))) return;
     let stopped = false;
     let pending = false;
     let acknowledged = false;
@@ -27,5 +28,5 @@ export function useTerminalActivitySeen(terminal: TerminalSummary | undefined) {
       document.removeEventListener("visibilitychange", acknowledge);
       window.removeEventListener("focus", acknowledge);
     };
-  }, [id, revision, unread]);
+  }, [id, revision, unread, state]);
 }

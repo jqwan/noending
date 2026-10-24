@@ -112,13 +112,14 @@ fn an_empty_replacement_generation_preserves_the_current_session_summary() {
             "old transcript",
         )],
     );
+    let expected_summary = noending_lib::domain::Summary::single("summary of old transcript");
     let initial_generation = db.get_session_ingest_state(&session.id).unwrap().0;
     db.tx(|tx| {
         noending::storage::context_repo::commit_session_context_conn(
             tx,
             &session.id,
             &SessionContextFields {
-                summary: noending_lib::domain::Summary::single("summary of old transcript"),
+                summary: expected_summary.clone(),
                 ..Default::default()
             },
             0,
@@ -160,10 +161,7 @@ fn an_empty_replacement_generation_preserves_the_current_session_summary() {
 
     let view = noending::context::session_context_view(&db, &session.id).unwrap();
     assert!(!view.pending);
-    assert_eq!(
-        view.fields.as_ref().unwrap().summary,
-        noending_lib::domain::Summary::single("summary of old transcript")
-    );
+    assert_eq!(view.fields.as_ref().unwrap().summary, expected_summary);
     assert_eq!(view.ingest_generation, initial_generation + 1);
 }
 

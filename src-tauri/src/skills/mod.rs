@@ -12,7 +12,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub use bundled::{prepare_collaboration_skill, prepare_memory_skill};
+pub use bundled::{prepare_mailbox_skill, prepare_memory_skill, prepare_task_skill};
 pub use inventory::{
     catalog, detail, detail_in_catalog, invalidate_catalog, list, list_catalog, merge_inventories,
 };

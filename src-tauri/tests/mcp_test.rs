@@ -26,7 +26,8 @@ impl Fixture {
         let mut command = Command::new(exe);
         command
             .args(["--home", self.home.root.to_str().unwrap(), "mcp", "serve"])
-            .env("NOENDING_HOME", self.root.join("wrong-home"));
+            .env("NOENDING_HOME", self.root.join("wrong-home"))
+            .env_remove("NOENDING_TERMINAL_ID");
         command
     }
     fn start(&self) -> Client {
@@ -86,6 +87,9 @@ impl Client {
             "{initialized}"
         );
         assert_eq!(initialized["result"]["serverInfo"]["name"], "noending");
+        let guidance = initialized["result"]["instructions"].as_str().unwrap();
+        assert!(guidance.contains("mailbox_read"));
+        assert!(guidance.contains("mailbox_send"));
         client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
         client
     }
@@ -171,7 +175,7 @@ impl Drop for Client {
 }
 
 #[test]
-fn stdio_catalog_and_both_entries_work_without_desktop_or_terminal_controls() {
+fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_dependency() {
     let f = Fixture::new();
     for exe in [env!("CARGO_BIN_EXE_ne"), env!("CARGO_BIN_EXE_noending")] {
         let mut client = Client::start(f.command(exe));
@@ -182,7 +186,15 @@ fn stdio_catalog_and_both_entries_work_without_desktop_or_terminal_controls() {
             "freshness",
             "agent_list",
             "project_resolve",
+            "session_resolve",
             "session_messages",
+            "session_terminals",
+            "mailbox_read",
+            "session_start",
+            "mailbox_send",
+            "task_todo_publish",
+            "task_todo_complete",
+            "task_todo_discard",
             "summary_search",
             "task_summary_title_lock",
             "task_create",
@@ -194,14 +206,41 @@ fn stdio_catalog_and_both_entries_work_without_desktop_or_terminal_controls() {
                 "Missing {name}"
             );
         }
-        assert!(!tools
+        let send = tools
             .iter()
-            .any(|tool| tool["name"].as_str().unwrap().starts_with("terminal_")));
+            .find(|tool| tool["name"] == "mailbox_send")
+            .unwrap();
+        assert_eq!(send["annotations"]["readOnlyHint"], false);
+        assert_eq!(send["annotations"]["openWorldHint"], false);
+        assert_eq!(
+            client.call("session_terminals", json!({}))["error"]["code"],
+            "desktop_unavailable"
+        );
         let resolve = tools
             .iter()
             .find(|tool| tool["name"] == "project_resolve")
             .unwrap();
         assert_eq!(resolve["inputSchema"]["required"], json!(["path"]));
+        let native = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_resolve")
+            .unwrap();
+        assert_eq!(native["annotations"]["readOnlyHint"], true);
+        assert_eq!(native["annotations"]["openWorldHint"], false);
+        assert_eq!(
+            native["inputSchema"]["required"],
+            json!(["agent", "native_id"])
+        );
+        for arguments in [
+            json!({"agent":"codex"}),
+            json!({"agent":"codex","native_id":" "}),
+            json!({"agent":"unknown","native_id":"id"}),
+        ] {
+            assert_eq!(
+                client.call("session_resolve", arguments)["error"]["code"],
+                "invalid_arguments"
+            );
+        }
         let add = tools
             .iter()
             .find(|tool| tool["name"] == "task_create")
@@ -295,10 +334,11 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         "invalid_arguments"
     );
     let mut summary = json!({"items":[{"title":"Protocol memory","description":"Persistent summary","title_locked":false,"details":["Preserve message evidence"]}]});
-    client.ok(
+    summary = client.ok(
         "summary_set",
         json!({"kind":"task","id":task,"revision":0,"content":summary,"request_id":"set-summary"}),
-    );
+    )["summary"]
+        .clone();
     assert_eq!(client.call("summary_set", json!({"kind":"task","id":task,"revision":0,"content":{"items":[{"title":"Stale edit","description":"","title_locked":false,"details":[]}]}}))["error"]["code"], "stale_result");
     assert_eq!(
         client.ok(
@@ -312,7 +352,7 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         task
     );
     let lock_args =
-        json!({"id":task,"revision":1,"item":1,"locked":true,"request_id":"publish-todo-lock"});
+        json!({"id":task,"revision":1,"item":1,"locked":true,"request_id":"explicit-title-lock"});
     for kind in ["session", "project"] {
         assert_eq!(
             client.call(
@@ -391,6 +431,80 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         unlocked["summary"]["items"][0]["description"],
         "Updated body with a protected title"
     );
+    let publish_args = json!({"id":task,"revision":4,"content":{"title":"Protocol todo"},"request_id":"mcp-todo-publish"});
+    let published = next.ok("task_todo_publish", publish_args.clone());
+    assert_eq!(published["revision"], 5);
+    assert_eq!(published["item"], 2);
+    assert_eq!(
+        published["summary"]["items"][0],
+        unlocked["summary"]["items"][0]
+    );
+    assert_eq!(published["summary"]["items"][1]["title_locked"], true);
+    assert_eq!(published["summary"]["items"][1]["description"], "");
+    assert_eq!(published["summary"]["items"][1]["details"], json!([]));
+    assert_eq!(next.call("task_todo_publish",json!({"id":task,"revision":5,"content":{"title":"Progress is not publication input","details":[]}}))["error"]["code"],"invalid_arguments");
+    assert_eq!(
+        next.ok("task_todo_publish", publish_args.clone())["revision"],
+        5
+    );
+    assert_eq!(
+        next.call(
+            "task_todo_publish",
+            json!({"id":task,"revision":4,"content":{"title":"Stale todo"}})
+        )["error"]["code"],
+        "stale_result"
+    );
+    for args in [
+        json!({"id":task,"revision":5,"item":2,"result":{"description":"","details":[]}}),
+        json!({"id":task,"revision":5,"item":2,"result":{"description":"Done","details":[],"title_locked":false}}),
+    ] {
+        assert_eq!(next.call("task_todo_complete", args)["ok"], false);
+    }
+    let complete_args = json!({"id":task,"revision":5,"item_id":published["item_id"],"result":{"description":"Protocol checks passed","details":["Confirmed results"]},"request_id":"mcp-todo-complete"});
+    let completed = next.ok("task_todo_complete", complete_args.clone());
+    assert_eq!(completed["revision"], 6);
+    assert_eq!(
+        completed["summary"]["items"][1],
+        json!({"id":published["item_id"],"title":"Protocol todo","description":"Protocol checks passed","details":["Confirmed results"],"title_locked":false})
+    );
+    next.finish();
+    let mut next = f.start();
+    assert_eq!(next.ok("task_todo_complete", complete_args)["revision"], 6);
+    assert_eq!(next.ok("task_todo_publish", publish_args)["revision"], 5);
+    let stored = next.ok("summary_get", json!({"kind":"task","id":task}));
+    assert_eq!(stored["revision"], 6);
+    assert_eq!(stored["summary"], completed["summary"]);
+    next.ok(
+        "task_todo_publish",
+        json!({"id":task,"revision":6,"item":2,"content":{"title":"Protocol todo"}}),
+    );
+    let retained = next.ok(
+        "task_todo_complete",
+        json!({"id":task,"revision":7,"item":2}),
+    );
+    assert_eq!(retained["revision"], 8);
+    assert_eq!(retained["summary"], completed["summary"]);
+    next.ok(
+        "task_todo_publish",
+        json!({"id":task,"revision":8,"content":{"title":"Abandoned work"}}),
+    );
+    assert_eq!(
+        next.call(
+            "task_todo_discard",
+            json!({"id":task,"revision":8,"item":3})
+        )["error"]["code"],
+        "stale_result"
+    );
+    let discard_args = json!({"id":task,"revision":9,"item_id":next.ok("summary_get",json!({"kind":"task","id":task}))["summary"]["items"][2]["id"],"request_id":"mcp-todo-discard"});
+    let discarded = next.ok("task_todo_discard", discard_args.clone());
+    assert_eq!(discarded["revision"], 10);
+    assert_eq!(discarded["summary"], completed["summary"]);
+    next.finish();
+    let mut next = f.start();
+    assert_eq!(next.ok("task_todo_discard", discard_args)["revision"], 10);
+    let after = next.ok("summary_get", json!({"kind":"task","id":task}));
+    assert_eq!(after["revision"], 10);
+    assert_eq!(after["summary"], completed["summary"]);
     next.ok(
         "object_archive",
         json!({"kind":"task","id":task,"archived":true}),
@@ -445,12 +559,26 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
         .iter()
         .any(|s| s["id"] == source.id));
     assert_eq!(
+        client.call(
+            "session_resolve",
+            json!({"agent":"codex","native_id":"mcp-native-session"})
+        )["error"]["code"],
+        "not_found"
+    );
+    assert_eq!(
         client.ok("object_list", json!({"kind":"session"}))["items"],
         json!([])
     );
     client.ok("sync", json!({"source":source.id}));
     let sessions = client.ok("object_list", json!({"kind":"session"}));
     let id = sessions["items"][0]["id"].clone();
+    let resolved = client.ok(
+        "session_resolve",
+        json!({"agent":"codex","native_id":"mcp-native-session"}),
+    );
+    assert_eq!(resolved["id"], id);
+    assert_eq!(resolved["native_id"], "mcp-native-session");
+    assert_eq!(resolved["project_id"], sessions["items"][0]["project_id"]);
     let task = client.ok(
         "task_create",
         json!({"title":"Evidence task","projects":[sessions["items"][0]["project_id"]]}),
@@ -459,6 +587,13 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     client.ok(
         "task_session_set",
         json!({"task":task,"session":id,"tracked":true}),
+    );
+    assert_eq!(
+        client.ok(
+            "session_resolve",
+            json!({"agent":"codex","native_id":"mcp-native-session"})
+        )["task_ids"],
+        json!([task])
     );
     assert_eq!(
         client.ok("object_list", json!({"kind":"session","task":task}))["items"][0]["id"],
@@ -655,4 +790,101 @@ fn cancelling_one_extraction_preserves_connection_and_eof_cleans_up_active_agent
         1
     );
     next.finish();
+}
+
+#[test]
+fn mcp_session_controls_share_desktop_receipts_with_cli() {
+    use noending_lib::session_control::{ControlCommand, DesktopHost};
+    let f = Fixture::new();
+    let _host=DesktopHost::start(&f.home,move|command,sender_terminal|match command {
+        ControlCommand::List{session}=>Ok(json!({"items":[],"session":session})),
+        ControlCommand::Start(p)=>Ok(json!({"terminal_id":noending_lib::storage::new_id(),"options":p,"caller_terminal":sender_terminal})),
+        ControlCommand::Identity{claimed}=>Ok(json!({"session_id":claimed})),
+    }).unwrap();
+    let mut command = f.command(env!("CARGO_BIN_EXE_ne"));
+    command.env("NOENDING_TERMINAL_ID", "caller-terminal");
+    let mut client = Client::start(command);
+    assert_eq!(
+        client.ok("session_terminals", json!({"session":"a"}))["session"],
+        "a"
+    );
+    let start = client.ok(
+        "session_start",
+        json!({"agent":"codex","message":"literal 中文\n$()","request_id":"mcp-start"}),
+    );
+    let replay = client.ok(
+        "session_start",
+        json!({"agent":"codex","message":"literal 中文\n$()","request_id":"mcp-start"}),
+    );
+    assert_eq!(start["terminal_id"], replay["terminal_id"]);
+    assert_eq!(start["caller_terminal"], "caller-terminal");
+    let output = Command::new(env!("CARGO_BIN_EXE_ne"))
+        .env("NOENDING_HOME", &f.home.root)
+        .args(["request", "show", "mcp-start"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        receipt["data"]["response"]["data"]["terminal_id"],
+        start["terminal_id"]
+    );
+    client.finish();
+}
+
+#[test]
+fn mailbox_tools_persist_and_mark_without_a_desktop_and_reject_anonymous_or_wrong_recipient() {
+    let f = Fixture::new();
+    f.home.ensure_dirs().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
+    let mut c = f.start();
+    assert_eq!(
+        c.call(
+            "mailbox_send",
+            json!({"session":"target","message":"anonymous"})
+        )["error"]["code"],
+        "sender_unavailable"
+    );
+    assert_eq!(
+        c.call(
+            "mailbox_send",
+            json!({"session":"target","from_session":"user","message":"fake user"})
+        )["error"]["code"],
+        "sender_unavailable"
+    );
+    let sent=c.ok("mailbox_send",json!({"session":"target","from_session":"sender","message":"persisted text","notify_immediately":true,"request_id":"mailbox-once"}));
+    let replay = c.ok("mailbox_send", json!({"session":"target","from_session":"sender","message":"persisted text","notify_immediately":true,"request_id":"mailbox-once"}));
+    assert_eq!(replay["message_id"], sent["message_id"]);
+    assert_eq!(c.call("mailbox_send", json!({"session":"target","from_session":"sender","message":"persisted text","notify_immediately":false,"request_id":"mailbox-once"}))["error"]["code"], "request_conflict");
+    let mid = sent["message_id"].as_str().unwrap();
+    let mail = c.ok("mailbox_read", json!({"session":"target","message_id":mid}));
+    assert_eq!(mail["body"], "persisted text");
+    assert_eq!(mail["notify_immediately"], true);
+    assert!(mail["read_at"].is_null());
+    let mark = json!({"session":"target","message_id":mid,"revision":mail["revision"],"state":"read","from_session":"target"});
+    c.ok("mailbox_mark", mark);
+    assert_eq!(
+        c.ok("mailbox_list", json!({"session":"target"}))["unread"],
+        0
+    );
+    let ordinary = c.ok(
+        "mailbox_send",
+        json!({"session":"target","from_session":"sender","message":"ordinary","request_id":"ordinary-once"}),
+    );
+    let explicit_default = c.ok("mailbox_send", json!({"session":"target","from_session":"sender","message":"ordinary","notify_immediately":false,"request_id":"ordinary-once"}));
+    assert_eq!(explicit_default["message_id"], ordinary["message_id"]);
+    assert_eq!(
+        c.ok(
+            "mailbox_read",
+            json!({"session":"target","message_id":ordinary["message_id"]})
+        )["notify_immediately"],
+        false
+    );
+    c.finish();
+    let mut c = f.start();
+    assert!(
+        c.ok("mailbox_read", json!({"session":"target","message_id":mid}))["read_at"].is_string()
+    );
+    c.finish();
 }

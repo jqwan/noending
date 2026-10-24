@@ -1,133 +1,121 @@
 # AGENTS.md
 
-## Project
+## 项目概况
 
-NoEnding is a local multi-Agent workspace built with:
+NoEnding 是一个本地多 Agent 工作区，使用以下技术构建：
 
 * Tauri 2
 * Rust + SQLite
 * React + TypeScript
-* Agent adapters — the roster is `Agent` in `domain/models.rs` plus
-  `all_adapters()` in `adapters/mod.rs`, and it changes; not every Agent has a
-  CLI (some adapters are history-ingestion only, so `detect()` never succeeds
-  by design, not by bug)
+* Agent 适配器：支持列表以 `domain/models.rs` 中的 `Agent` 和
+  `adapters/mod.rs` 中的 `all_adapters()` 为准，该列表会变化。
+  并非所有 Agent 都提供 CLI；部分适配器仅用于历史摄入，
+  因此其 `detect()` 始终不成功是设计行为，不是缺陷。
 
-Core concepts include `Workstream`, `Session`, `Project`, and `WorkspacePath`.
+核心概念包括 `Workstream`、`Session`、`Project` 和 `WorkspacePath`。
 
-## Repository
+## 工程结构
 
-Backend code lives under `src-tauri/src/`.
+后端代码位于 `src-tauri/src/`，主要模块：
 
-Key areas:
+* `adapters/` — Agent 集成
+* `domain/` — 与平台无关的领域模型（Session / SessionMember / SessionMessage 等）
+* `platform/` — 操作系统相关行为
+* `workspace/` — 工作区与项目逻辑
+* `ingestion/` — 会话发现与摄入
+* `sync/` — 同步与提取
+* `context/` — 显式 Context 更新服务与读取投影
+* `agent_runtime/` — Agent 运行配置（默认值由 Agent 管理，覆盖值由 NoEnding 管理）
+* `assistant/` — 内置空白助手项目；原生 Agent 会话复用启动与摄入流程
+* `search/` — FTS5 搜索
+* `launcher/` — 新建与恢复会话的启动流程
+* `lifecycle/` — 会话生命周期
+* `storage/` — SQLite 与持久化
+* `commands/` — Tauri API 边界
 
-* `adapters/` — Agent integrations
-* `domain/` — platform-independent domain model (Session / SessionMember / SessionMessage / …)
-* `platform/` — OS-specific behavior
-* `workspace/` — workspace and project logic
-* `ingestion/` — session discovery and ingestion
-* `sync/` — synchronization and extraction
-* `context/` — explicit Context update service and read projections
-* `agent_runtime/` — Agent runtime configuration (Agent owns defaults, NoEnding owns overrides)
-* `assistant/` — built-in Assistant project and managed capabilities; native Agent sessions reuse the launcher and ingestion
-* `search/` — FTS5 search
-* `launcher/` — New / Resume launch flows
-* `lifecycle/` — session lifecycle
-* `storage/` — SQLite and persistence
-* `commands/` — Tauri API boundary
+前端代码位于 `src/`，主要模块：
 
-Frontend code lives under `src/`.
+* `app/` — 应用外壳、路由器与路由
+* `features/` — 产品功能
+* `components/` — 共享界面组件
+* `layout/` — 应用布局与导航
+* `hooks/` — 共享 React Hook
+* `api.ts` — 前后端 API
+* `types.ts` — 前端 API 类型
 
-Key areas:
+## 开发约定
 
-* `app/` — app shell, router and routes
-* `features/` — product features
-* `components/` — shared UI
-* `layout/` — application shell and navigation
-* `hooks/` — shared React hooks
-* `api.ts` — frontend/backend API
-* `types.ts` — frontend API types
+* 保持改动精简，限定在当前任务范围内。
+* 遵循现有模块边界，尽可能复用已有 API。
+* 数据库结构或行为变更需要按下述规则补充或扩展回归测试。
+* `storage/schema.rs` 是当前数据库结构的定义来源。应用版本使用语义化版本，数据库格式使用独立的
+  递增整数。数据库兼容性基线为版本 1；`application_id` 和基线标识保持稳定。
+* 正式格式以明确承诺数据库兼容的发布为边界。提交、推送、本地试用，以及本地数据库需要保留数据，
+  都不会自动冻结开发格式。对外提供测试版本时，也必须明确是否承诺格式兼容。
+* 同一开发批次只维护最终结构和从上一正式格式到最终结构的一份迁移草案。开发过程中的增加、删除、
+  改名可以修改或合并草案；新增后又删除且最终无持久化格式变化时，不留下迁移，也不增加正式版本。
+  发布前统一递增一次格式版本，完成验证后冻结。已承诺兼容的正式迁移不得改写；后续发布需要新迁移。
+* 本地开发数据库的结构与当前代码不匹配时，应拒绝打开并明确提示，不能仅凭格式版本相同就继续读写。
+  开发结构标识只用于检查草案匹配，不是另一套正式版本号，不因此生成永久兼容分支。
+* 使用隔离的 NoEnding Home 开发和验证，不使用用户真实 Home 试验结构。人工测试 Home 放在 `.tmp/`；
+  自动化测试可以使用会自行清理的系统临时目录。不得认为 `.tmp/` 下的所有数据库都可丢弃。
+  明确可丢弃的开发库可以从保留的快照重新准备；需要保留本地新增数据时，先备份，再使用临时开发工具
+  显式转换到当前结构并验证数据完整性，不将这些中间步骤加入正式迁移链。临时工具验收完成后删除。
+* 正式升级必须保留现有数据，提供有序、事务性的前向迁移；桌面端、CLI 和 MCP 使用同一套数据库
+  打开流程。禁止通过删除或重建用户数据库实现正式升级，也不将一次性转换工具作为长期产品代码维护。
+  发布前验证受支持格式升级、与全新建库的结构等价性、数据保留、失败回滚及较新版本拒绝。
+  不支持的较新格式、不同基线或不匹配的开发结构必须拒绝且不得修改。对需保留数据的数据库执行已获
+  授权的转换或升级前必须备份。基线重置需要用户明确授权，先保留数据完成一次性转换，再清理失效历史。
+* 当前数据库结构文档只描述受支持格式。临时转换工具、开发阶段格式的测试样本、过时对象清单
+  和历史结构说明不应留在长期维护的源码或文档中。
+* 涉及平台差异的代码必须同时考虑 macOS 和 Windows。
 
-## Development
+修改领域行为前，先检查当前代码、测试和相关文档。
 
-* Keep changes small and scoped.
-* Follow the existing module boundaries and reuse existing APIs where practical.
-* Add or extend regression tests for schema or behavior changes using the rules below.
-* `storage/schema.rs` is the current schema source. Database versioning and
-  compatibility changes must preserve existing data and include regression
-  tests. Do not use database deletion/rebuilding as an upgrade path or retain
-  disposable one-off migration tools as maintained product code.
-* The database compatibility baseline is version 1. Keep `application_id` stable
-  and increment the schema version for persisted format changes. Add ordered,
-  transactional forward migrations for published versions; desktop, CLI and
-  MCP must use the same storage opening path. Preserve existing domain data,
-  verify upgrade/fresh-schema equivalence and rollback, and refuse unsupported
-  newer databases without modifying them. Keep migration steps immutable.
-* Keep current schema documentation focused on the supported format. Temporary
-  conversion tools, development-format fixtures, obsolete object inventories
-  and historical schema commentary do not belong in maintained source or docs.
-* Consider both macOS and Windows for platform-sensitive code.
+通过 `docs/README.md` 查找长期维护的使用指南（`guides/`）。临时方案、调查和工作记录放在
+已忽略的 `.tmp/docs/`，不放入需要提交的文档中。只有经过审查、可以复用的结论才整理到 `docs/`；
+本地研究材料和旧方案不是当前有效规范。
 
-For domain-specific behavior, inspect the current code, tests, and relevant documentation before making changes.
+## 测试设计
 
-Use `docs/README.md` to find maintained usage guides (`guides/`).
-Temporary plans, investigations and work records
-belong in ignored `.tmp/docs/`, not in committed documentation. Promote only
-reviewed, reusable conclusions into `docs/`; local research and old plans are
-not active specifications.
+* 测试可观察行为、公共契约、数据完整性或外部协议；不能仅因为代码发生变化或为了提高覆盖率而增加测试。
+* 复现实际场景，并断言独立确定的预期结果；避免自我比较、无实际验证作用的检查，以及照抄实现的断言。
+  界面测试通过角色、可访问名称和可见状态进行断言，持久化行为通过重新挂载验证。
+  不断言写入次数、内部字段或存储键；只有 IPC 调用本身就是契约时，才断言调用次数。
+* 否定断言需要对应的肯定验证，且所检查的对象必须实际存在于源码中；测试名称应说明其断言证明的不变量。
+* 优先扩展已有测试覆盖，再考虑新增测试。合并等价用例，但保留不同的行为、平台和协议边界；
+  同一不变量的两侧（内部／外部、启用／禁用）属于边界覆盖，不是重复用例。
+* 避免固定无关的文案、图标、像素或内部结构；只有影响含义、导航或操作可用性时，才测试这些界面细节。
+* 隔离模拟对象、缓存和持久化状态。明确外部前置条件；缺少条件时，不能未执行检查却静默通过。
 
-## Test design
+## 验证要求
 
-* Test observable behavior, public contracts, data integrity or external protocols;
-  changed code and coverage numbers alone do not justify a test.
-* Exercise the actual scenario and assert independent expected results; avoid
-  self-comparisons, vacuous checks and assertions that mirror the implementation.
-  Assert through roles, accessible names and visible state (persistence: a
-  remount); no write counts, private columns or storage keys — call counts only
-  when the IPC call itself is the contract.
-* A negative assertion needs a positive counterpart and must reference something
-  that exists in source; the test name states the invariant its assertions prove.
-* Extend existing coverage before adding tests. Merge equivalent cases, but keep
-  distinct behavioral, platform and protocol boundaries — the two sides of one
-  invariant (inside/outside, enabled/disabled) are boundaries, not duplicates.
-* Avoid pinning incidental copy, icons, pixels or private structure; test UI
-  details when they affect meaning, navigation or action availability.
-* Isolate mocks, caches and persistent state. Declare external prerequisites;
-  missing prerequisites must never silently pass without executing checks.
+验证范围应与改动匹配，不要每轮对话或每次提交都运行全量测试。
 
-## Verify
+* 文档：只运行 `git diff --check`。
+* 文案／样式／布局：检查受影响界面；TS/TSX 改动需要类型检查。
+* 前端行为：运行 `pnpm exec tsc --noEmit` 和 `pnpm test <path>`。
+  禁止使用 `pnpm test -- --run <path>`，该写法会无提示地运行整个测试套件。
+* Rust：在 `src-tauri` 中运行 `cargo fmt --check`、`cargo check`，
+  以及 `cargo test <name>` 或 `cargo test --test <suite>`。
+* 数据库结构／存储／摄入：补充回归测试，并检查受影响的调用方。API 契约变更需要验证两端。
+* 构建／导入／资源／配置：运行受影响部分的构建。依赖变更需要重新安装依赖，
+  并运行受影响一侧的全量测试和构建。
 
-Match verification to the change; do not run full tests for every turn or commit.
+以实际输出为准，不能只看命令写法。定向测试必须显示筛选确实生效，例如 Vitest 显示
+`Test Files 1`，Rust 测试数量大于零；过滤条件未匹配任何测试时，仍可能以退出码 0 结束。
+全量测试只有退出状态成功才算通过；通过管道传给 `head`／`tail`／`grep` 会丢失原命令的退出状态，
+因此应先将输出重定向到文件，再读取日志。`cargo test` 会在第一个失败目标处停止，
+修复后只重跑该目标通过，不代表整个套件已经通过。
 
-* Docs: `git diff --check` only.
-* Copy/style/layout: inspect the affected UI; type-check TS/TSX changes.
-* Frontend behavior: `pnpm exec tsc --noEmit` + `pnpm test <path>` (never
-  `pnpm test -- --run <path>` — that silently runs the whole suite).
-* Rust: in `src-tauri`, `cargo fmt --check`, `cargo check`, plus
-  `cargo test <name>` or `cargo test --test <suite>`.
-* Schema/storage/ingestion: add regression tests and check affected
-  consumers. API contract changes require checks on both sides.
-* Build/import/asset/config changes: run the affected build. Dependency changes:
-  reinstall and run the affected-side full tests and build.
+重大重构、广泛改动、阶段验收、发布准备或用户明确要求时，在最终代码状态上执行一次完整验证：
 
-Read the output, not the command line: a targeted run must show it filtered
-(vitest `Test Files 1`, a nonzero Rust test count — a filter matching nothing
-still exits 0); a full suite is green only by its exit status, which pipes
-through head/tail/grep discard, so redirect to a file before reading; and
-`cargo test` stops at the first failing target, so re-running that one target
-after a fix is not a green suite.
+* 后端（`src-tauri`）：`cargo fmt --check`、`cargo check --all-targets`、`cargo test --all-targets`。
+* 前端：`pnpm test`、`pnpm build`。
 
-Run full verification for major refactors, broad changes, stage acceptance,
-release preparation, or explicit requests — once, at the end, on the final
-code state:
+仅在依赖／锁文件变更或依赖缺失时运行 `pnpm install --frozen-lockfile`。
+已覆盖的代码没有变化时，复用此前通过的检查；影响范围不确定时再扩大验证。
+全量验证通过后的小幅调整，只重跑受影响部分及 tsc。报告实际结果和未覆盖项。
 
-* Backend (`src-tauri`): `cargo fmt --check`, `cargo check --all-targets`,
-  `cargo test --all-targets`.
-* Frontend: `pnpm test`, `pnpm build`.
-
-Run `pnpm install --frozen-lockfile` only when dependencies/lockfile change or
-are missing. Reuse passing checks while covered code is unchanged; broaden
-checks when impact is uncertain. A post-green touch-up re-runs only the
-affected slice plus tsc. Report actual results and gaps.
-
-For platform-sensitive changes, check macOS and Windows; use remote CI only
-when authorized, and report any unverified platform.
+涉及平台差异的改动需要检查 macOS 和 Windows；仅在获得授权时使用远程 CI，
+并明确说明尚未验证的平台。

@@ -3,7 +3,7 @@
 //!
 //! Fixtures are Codex rollouts (plain JSONL), the one adapter whose sources
 //! express child threads (`thread_source=subagent`), side threads
-//! (`guardian_review`) and forked pages (`history_base`) — so one fixture family
+//! (`guardian_review`) and independent forks (`forked_from_id`) — so one fixture family
 //! covers the whole source-shape vocabulary.
 
 mod support;
@@ -65,10 +65,6 @@ fn message_line(ordinal: usize, id: &str, role: &str, text: &str) -> String {
 
 fn rollout_name(id: &str) -> String {
     format!("rollout-2026-09-20T21-01-47-{id}.jsonl")
-}
-
-fn forked_rollout_name(base: &str, own: &str) -> String {
-    format!("rollout-2026-09-22T21-17-07-{base}_{own}.jsonl")
 }
 
 fn write_rollout(root: &Path, name: &str, lines: &[String]) -> PathBuf {
@@ -666,13 +662,13 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
     );
     write_rollout(
         &root_dir,
-        &forked_rollout_name(ROOT_ID, FORK_ID),
+        &rollout_name(FORK_ID),
         &[
-            // A forked page's meta still names the thread it forked FROM.
+            // A true fork declares its own thread and explicit provenance.
             meta_line(
                 ROOT_ID,
                 serde_json::json!({
-                    "history_base": {"thread_id": ROOT_ID, "end_ordinal_exclusive": 90},
+                    "id":FORK_ID,"forked_from_id":ROOT_ID,
                 }),
             ),
             message_line(90, "f1", "user", "fork 里的新提问"),
@@ -1154,12 +1150,13 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
         .iter()
         .map(|m| m.id.clone())
         .collect();
+    let expected_summary = noending_lib::domain::Summary::single("已有摘要");
     db.tx(|tx| {
         noending::storage::context_repo::commit_session_context_conn(
             tx,
             &before.id,
             &SessionContextFields {
-                summary: noending_lib::domain::Summary::single("已有摘要"),
+                summary: expected_summary.clone(),
                 ..Default::default()
             },
             0,
@@ -1185,10 +1182,7 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
     assert_eq!(cold.last_activity_at, before.last_activity_at);
     assert_eq!(cold.last_conversation_at, before.last_conversation_at);
     let summary = db.get_session_context(&before.id).unwrap().unwrap();
-    assert_eq!(
-        summary.fields.summary,
-        noending_lib::domain::Summary::single("已有摘要")
-    );
+    assert_eq!(summary.fields.summary, expected_summary);
     assert_eq!(summary.ingest_generation, before.fact_generation);
     assert_eq!(summary.processed_through_seq, 2);
     // A completed raw-byte cursor means the unchanged archive is not decoded again.

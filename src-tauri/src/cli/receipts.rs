@@ -76,7 +76,7 @@ pub(super) fn show(home: &NoEndingHome, id: &str) -> CliResult<Value> {
         json!({"request_id":id,"status":if receipt.result.is_some(){"completed"}else{"interrupted"},"response":receipt.result.map(super::envelope)}),
     )
 }
-pub(super) fn execute(
+pub(crate) fn execute(
     home: &NoEndingHome,
     id: &str,
     command: &[u8],

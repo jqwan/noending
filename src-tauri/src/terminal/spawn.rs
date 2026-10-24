@@ -10,6 +10,39 @@
 use crate::adapters::AgentCommand;
 use crate::error::{other, Result};
 
+/// ConPTY starts with a cursor query before the child can run. A fresh PTY
+/// has an empty screen at 1;1. Answer only this initial query, removing it
+/// from replay so a later xterm attachment cannot answer it a second time.
+/// Subsequent Agent VT queries remain the frontend terminal's responsibility.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub(super) struct StartupQuery {
+    prefix: Vec<u8>,
+    finished: bool,
+}
+#[cfg(any(windows, test))]
+impl StartupQuery {
+    pub fn feed(&mut self, bytes: &[u8]) -> (Vec<u8>, bool) {
+        if self.finished {
+            return (bytes.to_vec(), false);
+        }
+        self.prefix.extend_from_slice(bytes);
+        const QUERY: &[u8] = b"\x1b[6n";
+        if QUERY.starts_with(&self.prefix) && self.prefix.len() < QUERY.len() {
+            return (Vec::new(), false);
+        }
+        self.finished = true;
+        let reply = self.prefix.starts_with(QUERY);
+        let output = if reply {
+            self.prefix[QUERY.len()..].to_vec()
+        } else {
+            self.prefix.clone()
+        };
+        self.prefix.clear();
+        (output, reply)
+    }
+}
+
 /// A freshly opened PTY pair. The slave exists to spawn the child; dropping
 /// it (when the pair is consumed into its master) is what lets the master
 /// see EOF once the child exits.
@@ -209,6 +242,24 @@ pub(crate) fn process_tree_killer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn initial_conpty_query_is_answered_once_without_a_frontend() {
+        for split in 0..=4 {
+            let mut query = super::StartupQuery::default();
+            let wire = b"\x1b[6nready\x1b[6n";
+            let (first, first_reply) = query.feed(&wire[..split]);
+            let (second, second_reply) = query.feed(&wire[split..]);
+            assert_eq!([first, second].concat(), b"ready\x1b[6n");
+            assert!(first_reply ^ second_reply);
+            assert_eq!(query.feed(b"\x1b[6n"), (b"\x1b[6n".to_vec(), false));
+        }
+        let mut query = super::StartupQuery::default();
+        assert_eq!(
+            query.feed(b"normal output"),
+            (b"normal output".to_vec(), false)
+        );
+        assert_eq!(query.feed(b"\x1b[6n"), (b"\x1b[6n".to_vec(), false));
+    }
     use super::*;
 
     #[test]

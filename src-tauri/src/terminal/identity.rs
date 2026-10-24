@@ -6,6 +6,7 @@
 //! per-launch environment; existing user configuration is never replaced.
 
 mod antigravity;
+mod claude;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -49,6 +50,14 @@ pub struct NativeIdentityEvent {
     pub source: Option<String>,
     #[serde(default)]
     pub activity: Option<ActivitySignal>,
+    #[serde(default)]
+    pub input: Option<NativeInput>,
+}
+
+/// A native input identity schedules history ingestion; no message content crosses the bridge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeInput {
+    pub id: Option<String>,
 }
 
 pub type IdentityCallback = Arc<dyn Fn(NativeIdentityEvent) + Send + Sync>;
@@ -436,11 +445,11 @@ const connection = {settings};
 export default function(pi) {{
   let turn = 0;
   let failed = false;
-  const report = (source, ctx, activity = null) => new Promise((resolve) => {{
+  const report = (source, ctx, activity = null, input = null) => new Promise((resolve) => {{
     const native_id = ctx.sessionManager.getSessionId();
     if (!native_id) {{ resolve(); return; }}
     const event = {{ native_id, cwd: ctx.sessionManager.getCwd(),
-      source_path: ctx.sessionManager.getSessionFile() ?? null, source, activity }};
+      source_path: ctx.sessionManager.getSessionFile() ?? null, source, activity, input }};
     const socket = net.createConnection({{host: connection.host, port: connection.port}});
     socket.setTimeout(400);
     socket.on("connect", () => socket.end(JSON.stringify({{
@@ -457,6 +466,12 @@ export default function(pi) {{
   pi.on("agent_start", (_event, ctx) => {{
     failed = false;
     return report("agent_start", ctx, {{state: "working", turn_id: String(++turn), starts_turn: true}});
+  }});
+  pi.on("message_start", (event, ctx) => {{
+    if (event.message.role !== "user") return;
+    return report("message_start", ctx, null, {{
+      id: event.message.timestamp == null ? `input:${{turn}}` : String(event.message.timestamp)
+    }});
   }});
   pi.on("ui_prompt_start", (_event, ctx) => report("ui_prompt_start", ctx,
     {{state: "waiting", turn_id: String(turn)}}));
@@ -484,6 +499,7 @@ fn receive_events(
     terminal_id: String,
     agent: Agent,
 ) {
+    let mut prompts = claude::InputTracker::default();
     loop {
         if state.lock().map_or(true, |state| state.stopped) {
             return;
@@ -526,7 +542,7 @@ fn receive_events(
                     // switched again. Validate at consumption too, so a
                     // delayed old socket cannot restore an obsolete identity.
                     if agent == Agent::ClaudeCode {
-                        consume_claude_event(&state, &callback, &mut pending);
+                        consume_claude_event(&state, &callback, &mut pending, &mut prompts);
                     } else {
                         callback(pending.event);
                         // Stop hooks finish after the last identity callback,
@@ -537,6 +553,10 @@ fn receive_events(
                 None => break,
             }
         }
+        let callback = state.lock().ok().and_then(|s| s.callback.clone());
+        if let Some(callback) = callback {
+            prompts.poll(&callback);
+        }
         std::thread::sleep(Duration::from_millis(15));
     }
 }
@@ -545,11 +565,20 @@ fn consume_claude_event(
     state: &Mutex<BridgeState>,
     callback: &IdentityCallback,
     pending: &mut PendingEvent,
+    prompts: &mut claude::InputTracker,
 ) {
     let Some(path) = pending.active_record.as_ref() else {
         let _ = pending.acknowledgement.write_all(b"ok\n");
         return;
     };
+    // Capture the transcript boundary before acknowledging the hook. Claude
+    // writes the actual user turn only after this hook returns.
+    if active_record_event(path, &pending.event)
+        .is_some_and(|current| current.native_id == pending.event.native_id)
+    {
+        prompts.arm(&pending.event, path);
+    }
+    let input = pending.event.input.take();
     let mut observed = active_record_event(path, &pending.event);
     if let Some(event) = observed.as_ref() {
         callback(event.clone());
@@ -574,6 +603,11 @@ fn consume_claude_event(
         std::thread::sleep(CLAUDE_RECORD_SETTLE_INTERVAL);
         if let Some(event) = active_record_event(path, &pending.event) {
             let reached = event.native_id == pending.event.native_id;
+            if reached && input.is_some() {
+                let mut trigger = pending.event.clone();
+                trigger.input = input.clone();
+                prompts.arm(&trigger, path);
+            }
             if observed.as_ref() != Some(&event) {
                 callback(event.clone());
                 observed = Some(event);
@@ -641,6 +675,15 @@ fn hook_event(value: serde_json::Value) -> Option<NativeIdentityEvent> {
         source_path: text("transcript_path"),
         source: text("source").or_else(|| Some(name.to_string())),
         activity: hook_activity(name, &value),
+        input: (name == "UserPromptSubmit")
+            .then(|| {
+                value["prompt"].as_str().map(|_prompt| NativeInput {
+                    // Native turn/prompt IDs can be shared by several steering
+                    // inputs. Give this hook invocation its own input event ID.
+                    id: Some(crate::storage::new_id()),
+                })
+            })
+            .flatten(),
     })
 }
 
@@ -804,6 +847,9 @@ fn active_record_event(path: &Path, trigger: &NativeIdentityEvent) -> Option<Nat
         source: Some("active_record".into()),
         // An obsolete notification can reveal the current identity, but its
         // turn state must never be assigned to that different conversation.
+        input: (native_id == trigger.native_id)
+            .then(|| trigger.input.clone())
+            .flatten(),
         activity: (native_id == trigger.native_id)
             .then(|| trigger.activity.clone())
             .flatten(),
@@ -840,6 +886,7 @@ mod tests {
                 cwd: None,
                 source_path: None,
                 source: Some("resume".into()),
+                input: None,
                 activity: None,
             },
             active_record: None,
@@ -1253,6 +1300,8 @@ await run("agent_end", {messages:[{role:"assistant", stopReason:"error"}]});
 await run("agent_settled", {aborted:false});
 await run("agent_start");
 await run("agent_settled", {aborted:true});
+await run("message_start", {message:{role:"assistant", content:[{type:"text", text:"ignored"}]}});
+await run("message_start", {message:{role:"user", timestamp:42, content:[{type:"text", text:"  中文\r\nnext 😀  "}]}});
 "#;
         let mut child = Command::new("node")
             .args(["--input-type=module", "--eval", script])
@@ -1279,7 +1328,7 @@ await run("agent_settled", {aborted:true});
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let events: Vec<_> = (0..12)
+        let events: Vec<_> = (0..13)
             .map(|_| rx.recv_timeout(Duration::from_secs(1)).unwrap())
             .collect();
         use ActivityState::*;
@@ -1301,14 +1350,41 @@ await run("agent_settled", {aborted:true});
                 None,
                 Some(Failed),
                 Some(Working),
-                Some(Interrupted)
+                Some(Interrupted),
+                None
             ]
         );
+        assert_eq!(
+            events[12].input,
+            Some(NativeInput {
+                id: Some("42".into()),
+            })
+        );
+        assert!(!serde_json::to_string(&events[12]).unwrap().contains("中文"));
+        assert!(events[..12].iter().all(|event| event.input.is_none()));
         assert!(events.iter().all(|event| event.native_id == "native"));
         assert_ne!(
             events[1].activity.as_ref().unwrap().turn_id,
             events[7].activity.as_ref().unwrap().turn_id
         );
+    }
+
+    #[test]
+    fn input_hooks_schedule_ingestion_without_exposing_prompt_content() {
+        let payload = serde_json::json!({"hook_event_name":"UserPromptSubmit","session_id":"native","prompt":"private text"});
+        let first = hook_event(payload.clone()).unwrap();
+        let second = hook_event(payload).unwrap();
+        assert!(first.input.is_some());
+        assert_ne!(first.input, second.input);
+        assert!(!serde_json::to_string(&first)
+            .unwrap()
+            .contains("private text"));
+        assert!(hook_event(
+            serde_json::json!({"hook_event_name":"PostToolUse","session_id":"native"})
+        )
+        .unwrap()
+        .input
+        .is_none());
     }
 
     #[test]
@@ -1455,6 +1531,7 @@ await run("agent_settled", {aborted:true});
             cwd: Some("/old-cwd".into()),
             source_path: Some("/old-transcript".into()),
             source: Some("fork".into()),
+            input: None,
             activity: Some(ActivitySignal {
                 state: ActivityState::Completed,
                 turn_id: Some("old-turn".into()),
@@ -1521,6 +1598,7 @@ await run("agent_settled", {aborted:true});
                         cwd: None,
                         source_path: Some(format!("/{native_id}")),
                         source: Some(source.into()),
+                        input: None,
                         activity: None,
                     },
                     active_record: Some(path.clone()),

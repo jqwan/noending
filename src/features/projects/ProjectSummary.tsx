@@ -28,8 +28,8 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
     target: view?.project_id === projectId ? { kind: "project", id: projectId, revision: view.context_revision } : undefined,
     summary: view?.summary,
     disabled: Boolean(busy),
-    onChange: (result, removedIndex) => {
-      summaryExpansion.preserve(result.summary, removedIndex);
+    onChange: (result) => {
+      summaryExpansion.preserve(result.summary);
       setView(previous => {
         if (!previous || previous.context_revision > result.revision) return previous;
         const next = {...previous,context_revision:result.revision,summary:result.summary.items.length ? result.summary : null};

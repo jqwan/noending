@@ -81,6 +81,9 @@ fn ensure_logical_session(
         return Ok(None);
     }
 
+    if d.agent == Agent::Codex {
+        db.canonicalize_codex_identity(&d.source_member_id, &d.metadata)?;
+    }
     let path_id =
         crate::workspace::session::resolve_session_path(&db.write(), attacher, observed_cwd)?;
 
@@ -218,8 +221,9 @@ fn resolve_batch(
 /// reconcile pass alike — source parsing needs no database lock, and the storage
 /// layer serializes the writes itself.
 ///
-/// Pure ingestion: writes messages, cursors, the current-message
-/// projection and the fact generation, and NOTHING else. No Context, no AI.
+/// Writes messages, cursors, projections and fact generations. Verified Codex
+/// rollout aliases are consolidated while retaining their app-owned content.
+/// Does not invoke AI or generate summaries.
 /// Returns the number of newly stored messages.
 pub fn ingest_session(db: &Db, session: &Session) -> Result<i64> {
     ingest_session_mode(db, session, false, None)
@@ -249,6 +253,16 @@ fn ingest_session_mode(
     } else {
         "success"
     };
+    if result.is_ok() && outcome == "success" {
+        if let Some(current) = db.get_session(&session.id)? {
+            if current.agent == Agent::Codex
+                && crate::adapters::adapter_for(current.agent)
+                    .source_matches_cursor(&current, &current.source_cursor())?
+            {
+                db.reconcile_codex_rollouts(&current)?;
+            }
+        }
+    }
     db.tx(|tx| {
         let same_source: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND source_path=?2 AND source_kind=?3)",
@@ -307,10 +321,7 @@ fn ingest_session_inner(
                     prefix_hash: source.prefix_hash.clone(),
                     ..Default::default()
                 };
-                if crate::adapters::file_matches_cursor(
-                    &adapter.session_source_path(session),
-                    &expected,
-                )? {
+                if adapter.source_matches_cursor(session, &expected)? {
                     source.generation = if original_cursor.source_file_identity.is_empty() {
                         0
                     } else if source.file_identity != original_cursor.source_file_identity
@@ -590,8 +601,15 @@ where
             .flat_map(|source| crate::adapters::source_discovery_roots(&source))
             .collect();
     }
-    let discovered =
-        adapter.discover_batch_for_sessions(&roots, &|_| false, existing.as_slice())?;
+    let discovered = if agent == Agent::Codex {
+        crate::adapters::codex::CodexAdapter::discover_native_batch(
+            &roots,
+            native_id,
+            existing.as_slice(),
+        )?
+    } else {
+        adapter.discover_batch_for_sessions(&roots, &|_| false, existing.as_slice())?
+    };
     let matching: Vec<_> = discovered
         .members
         .into_iter()
@@ -599,7 +617,7 @@ where
         .collect();
     if matching.is_empty() {
         if let Some(session) = existing {
-            return refresh_session(db, &session.id).map(|n| (0, n));
+            return ingest_session(db, &session).map(|n| (0, n));
         }
     }
     let count = matching.len();
@@ -807,5 +825,15 @@ pub fn refresh_session(db: &Db, session_id: &str) -> Result<i64> {
     let Some(session) = db.get_session(session_id)? else {
         return Ok(0);
     };
+    if session.agent == Agent::Codex {
+        return reconcile_native(
+            db,
+            session.agent,
+            &session.root_agent_session_id,
+            Some(&session.source_path),
+            &|_| {},
+        )
+        .map(|(_, n)| n);
+    }
     ingest_session(db, &session)
 }

@@ -143,6 +143,8 @@ impl Input {
                         } else {
                             json!(summary)
                         };
+                        header["item_identities"] =
+                            json!(summary.as_ref().map(|s| s.identities()).unwrap_or_default());
                         header["locked_titles"] = json!(summary
                             .as_ref()
                             .map(|s| s.locked_titles())
@@ -157,6 +159,7 @@ impl Input {
                         json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
                             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at,
                             "need_update":need_update,"current_summary":current,
+                            "item_identities":current.as_ref().map(|s|s.identities()).unwrap_or_default(),
                             "locked_titles":current.as_ref().map(|summary| summary.locked_titles()).unwrap_or_default(),
                             "history_input_file":regenerate.then(||files.history_session_input(&s.session.id)),
                             "input_file":need_update.then(||files.session_input(&s.session.id)),
@@ -188,7 +191,8 @@ fn session_page(
         let current = target_summary(conn, "session", &s.session.id, s.revision())?;
         records.push(json!({"cursor":0,"record":{"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
             "working_directory":s.session.cwd,"agent":s.session.agent,"current_summary":if include_summary {current.as_ref()} else {None},
-            "locked_titles":current.as_ref().map(|summary|summary.locked_titles()).unwrap_or_default(),
+            "item_identities":current.as_ref().map(|s|s.identities()).unwrap_or_default(),
+                            "locked_titles":current.as_ref().map(|summary|summary.locked_titles()).unwrap_or_default(),
             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":if full_history {None} else {s.summary_through_at.as_deref()},
             "from_sequence":from+1,"through_sequence":s.latest,"message_count":s.latest-from}}));
     }

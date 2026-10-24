@@ -12,79 +12,180 @@ use crate::error::{other, Result};
 /// apart from any other SQLite file. `0x4E453031` spells "NE01".
 pub const DATABASE_APPLICATION_ID: i32 = 0x4E45_3031;
 
-/// Current schema version. Published versions increase monotonically.
-pub const DATABASE_FORMAT_VERSION: i64 = 2;
+/// Published persistence formats increase independently of the app version.
+pub const DATABASE_FORMAT_VERSION: i64 = 1;
+/// Stable identity of this format lineage; a version alone does not identify it.
+pub const DATABASE_BASELINE: &str = "7dc9a8c1-4a08-4430-985b-3f591202614d";
+const BASELINE_SETTING: &str = "database.baseline";
+const DEFINITION_SETTING: &str = "database.definition";
 
-/// Initialize an empty database or atomically upgrade a supported version.
-/// Unsupported identities/newer formats are refused before any mutation.
+/// Initialize an empty database, or validate a matching persistence format.
+/// Identity and definition checks run before defaults or persistent PRAGMAs.
 pub fn open_or_create(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let application_id: i32 = tx.query_row("PRAGMA application_id", [], |r| r.get(0))?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if application_id == 0 && version == 0 && !has_user_objects(&tx)? {
         create(&tx)?;
+        tx.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,?2),(?3,?4)",
+            params![
+                BASELINE_SETTING,
+                DATABASE_BASELINE,
+                DEFINITION_SETTING,
+                definition_fingerprint()
+            ],
+        )?;
         tx.pragma_update(None, "application_id", DATABASE_APPLICATION_ID)?;
-    } else if application_id == DATABASE_APPLICATION_ID
-        && (1..=DATABASE_FORMAT_VERSION).contains(&version)
-    {
-        if version == 1 {
-            tx.execute_batch(MIGRATION_1_TO_2)?;
-        }
+        tx.pragma_update(None, "user_version", DATABASE_FORMAT_VERSION)?;
+    } else if application_id == DATABASE_APPLICATION_ID && version == DATABASE_FORMAT_VERSION {
+        validate_baseline(&tx)?;
         validate(&tx)?;
+        let definition: Option<String> = tx
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                [DEFINITION_SETTING],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if definition.as_deref() != Some(definition_fingerprint()) {
+            return Err(other("数据库开发结构与当前代码不匹配。请保留数据并先备份，再执行经过验证的开发转换；不能仅修改版本号或结构标识。"));
+        }
     } else {
         return Err(format_mismatch(application_id, version));
-    }
-    if version != DATABASE_FORMAT_VERSION {
-        tx.pragma_update(None, "user_version", DATABASE_FORMAT_VERSION)?;
     }
     tx.commit()?;
     Ok(())
 }
 
-// Published upgrade steps remain immutable; initialization uses CURRENT_SCHEMA.
-const MIGRATION_1_TO_2: &str = r#"
-ALTER TABLE session_contexts ADD COLUMN refreshed_at TEXT;
-ALTER TABLE workstream_context_state ADD COLUMN refreshed_at TEXT;
-ALTER TABLE project_context_state ADD COLUMN refreshed_at TEXT;
-ALTER TABLE workstream_session_frontiers ADD COLUMN ingest_generation INTEGER;
-ALTER TABLE workstream_session_frontiers ADD COLUMN processed_through_seq INTEGER;
-ALTER TABLE project_session_frontiers ADD COLUMN ingest_generation INTEGER;
-ALTER TABLE project_session_frontiers ADD COLUMN processed_through_seq INTEGER;
-UPDATE workstream_session_frontiers SET
-  ingest_generation=(SELECT ingest_generation FROM session_contexts c WHERE c.session_id=workstream_session_frontiers.session_id AND c.revision=session_context_revision),
-  processed_through_seq=(SELECT processed_through_seq FROM session_contexts c WHERE c.session_id=workstream_session_frontiers.session_id AND c.revision=session_context_revision);
-UPDATE project_session_frontiers SET
-  ingest_generation=(SELECT ingest_generation FROM session_contexts c WHERE c.session_id=project_session_frontiers.session_id AND c.revision=session_context_revision),
-  processed_through_seq=(SELECT processed_through_seq FROM session_contexts c WHERE c.session_id=project_session_frontiers.session_id AND c.revision=session_context_revision);
-CREATE TABLE sync_checks (
-  scope TEXT NOT NULL CHECK(scope IN ('all','source','session')),
-  target_id TEXT NOT NULL,
-  started_at TEXT NOT NULL,
-  finished_at TEXT NOT NULL,
-  outcome TEXT NOT NULL CHECK(outcome IN ('success','partial','failed','missing','cancelled')),
-  checked_at TEXT,
-  PRIMARY KEY(scope,target_id),
-  CHECK(scope != 'all' OR target_id = '')
-);
-CREATE TRIGGER sync_checks_session_delete AFTER DELETE ON sessions BEGIN
-  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
-END;
-CREATE TRIGGER sync_checks_session_source AFTER UPDATE OF source_path,source_kind ON sessions
-WHEN old.source_path!=new.source_path OR old.source_kind!=new.source_kind BEGIN
-  DELETE FROM sync_checks WHERE scope='session' AND target_id=old.id;
-END;
-CREATE TRIGGER sync_checks_source_delete AFTER DELETE ON ingest_sources BEGIN
-  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
-  DELETE FROM sync_checks WHERE scope='all';
-END;
-CREATE TRIGGER sync_checks_source_update AFTER UPDATE OF agent,path,origin ON ingest_sources BEGIN
-  DELETE FROM sync_checks WHERE scope='source' AND target_id=old.id;
-  DELETE FROM sync_checks WHERE scope='all';
-END;
-CREATE TRIGGER sync_checks_source_insert AFTER INSERT ON ingest_sources BEGIN
-  DELETE FROM sync_checks WHERE scope='all';
-END;
-"#;
+fn validate_baseline(conn: &Connection) -> Result<()> {
+    let has_settings: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings')",
+        [],
+        |r| r.get(0),
+    )?;
+    let baseline: Option<String> = if has_settings {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [BASELINE_SETTING],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
+    if baseline.as_deref() != Some(DATABASE_BASELINE) {
+        return Err(other("数据库基线与此版本 NoEnding 不兼容。请保留数据库，使用匹配的程序版本或经过验证的数据转换工具。"));
+    }
+    Ok(())
+}
+
+/// The stamp detects changes to an unpublished definition without assigning
+/// each draft a public version. Comments and whitespace outside SQL literals
+/// do not change it; data and environment-dependent defaults are excluded.
+fn definition_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        // JSON field names/types matter; documentation and input defaults do not.
+        use sha2::{Digest, Sha256};
+        let mut summary =
+            serde_json::to_value(rmcp::schemars::schema_for!(crate::domain::Summary)).unwrap();
+        remove_schema_annotations(&mut summary);
+        let definition =
+            serde_json::json!({"sql": fingerprint(CURRENT_SCHEMA), "summary": summary});
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&definition).unwrap())
+        )
+    })
+}
+
+fn remove_schema_annotations(schema: &mut serde_json::Value) {
+    match schema {
+        serde_json::Value::Object(object) => {
+            for annotation in ["$schema", "title", "description", "default", "examples"] {
+                object.remove(annotation);
+            }
+            for (key, child) in object {
+                if matches!(
+                    key.as_str(),
+                    "properties"
+                        | "$defs"
+                        | "definitions"
+                        | "patternProperties"
+                        | "dependentSchemas"
+                ) {
+                    // These maps use domain field/type names, including "title".
+                    if let Some(entries) = child.as_object_mut() {
+                        for value in entries.values_mut() {
+                            remove_schema_annotations(value);
+                        }
+                    }
+                } else {
+                    remove_schema_annotations(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                remove_schema_annotations(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fingerprint(definition: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut tokens = Vec::new();
+    let mut chars = definition.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '-' && chars.peek() == Some(&'-') {
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    break;
+                }
+            }
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(next) = chars.next() {
+                if next == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+        } else if matches!(c, '\'' | '"' | '`' | '[') {
+            let end = if c == '[' { ']' } else { c };
+            let mut token = String::from(c);
+            while let Some(next) = chars.next() {
+                token.push(next);
+                if next == end {
+                    if chars.peek() == Some(&end) {
+                        token.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+            }
+            tokens.push(token);
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            let mut token = String::from(c);
+            while chars
+                .peek()
+                .is_some_and(|v| v.is_ascii_alphanumeric() || *v == '_')
+            {
+                token.push(chars.next().unwrap());
+            }
+            tokens.push(token.to_ascii_lowercase());
+        } else if !c.is_whitespace() {
+            tokens.push(c.to_string());
+        }
+    }
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&tokens).expect("SQL token serialization"))
+    )
+}
 
 /// Fill in the defaults that depend on the *current* environment. Runs on every
 /// start, so a newly supported Agent, a relocated `CODEX_HOME`, or a second
@@ -140,6 +241,20 @@ fn validate(conn: &Connection) -> Result<()> {
     }
     for (table, columns) in [
         ("session_contexts", &["refreshed_at"][..]),
+        (
+            "mailbox_messages",
+            &[
+                "seq",
+                "id",
+                "recipient_session_id",
+                "sender_session_id",
+                "body",
+                "created_at",
+                "read_at",
+                "revision",
+                "notify_immediately",
+            ][..],
+        ),
         ("workstream_context_state", &["refreshed_at"][..]),
         ("project_context_state", &["refreshed_at"][..]),
         (
@@ -236,8 +351,7 @@ fn format_mismatch(application_id: i32, version: i64) -> crate::error::AppError 
 }
 
 /// The complete current structure: every table and index this build reads or
-/// writes. New files use this source of truth; published upgrade steps above
-/// bring supported existing files to the equivalent structure.
+/// writes. Fresh creation and definition validation use this source of truth.
 ///
 /// Domain records, current summaries, synchronization state and derived search
 /// structures share the same transactional database.
@@ -542,6 +656,20 @@ END;
     CREATE TRIGGER IF NOT EXISTS session_messages_search_delete BEFORE DELETE ON session_messages BEGIN
       DELETE FROM search_documents WHERE kind = 'message' AND ref_id = old.id;
     END;
+CREATE TABLE IF NOT EXISTS mailbox_messages (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  recipient_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  sender_session_id TEXT,
+  body TEXT NOT NULL CHECK(length(trim(body)) > 0),
+  created_at TEXT NOT NULL,
+  read_at TEXT,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  notify_immediately INTEGER NOT NULL DEFAULT 0 CHECK(notify_immediately IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS mailbox_recipient ON mailbox_messages(recipient_session_id,seq);
+CREATE INDEX IF NOT EXISTS mailbox_unread ON mailbox_messages(recipient_session_id,seq) WHERE read_at IS NULL;
+
 "#;
 
 /// Create the current format. Only ever called for a completely empty file, so
@@ -554,6 +682,50 @@ fn create(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_format_identity_ignores_documentation_but_preserves_domain_field_names_and_types() {
+        let mut base = serde_json::json!({"type":"object","properties":{"title":{"type":"string"},"id":{"type":"string"}},"required":["title","id"]});
+        let mut documented = base.clone();
+        documented["title"] = serde_json::json!("Summary item");
+        documented["properties"]["title"]["description"] = serde_json::json!("Editable heading");
+        documented["properties"]["id"]["default"] = serde_json::json!("");
+        remove_schema_annotations(&mut base);
+        remove_schema_annotations(&mut documented);
+        assert_eq!(documented, base);
+        assert_eq!(base["properties"]["title"]["type"], "string");
+        let mut changed = base.clone();
+        changed["properties"]["id"]["type"] = serde_json::json!("integer");
+        remove_schema_annotations(&mut changed);
+        assert_ne!(changed, base);
+    }
+
+    #[test]
+    fn definition_identity_ignores_formatting_but_preserves_columns_and_literal_content() {
+        let base = "CREATE TABLE t (v TEXT DEFAULT 'a b');";
+        assert_eq!(
+            fingerprint(base),
+            fingerprint(
+                "-- a comment\ncreate table t(v text /* another comment */ default 'a b');"
+            )
+        );
+        assert_ne!(
+            fingerprint(base),
+            fingerprint("CREATE TABLE t (v TEXT DEFAULT 'ab');")
+        );
+        assert_ne!(
+            fingerprint(base),
+            fingerprint("CREATE TABLE t (v TEXT DEFAULT 'a b', extra TEXT);")
+        );
+        assert_ne!(
+            fingerprint("CREATE TABLE t (v TEXT NOT NULL);"),
+            fingerprint("CREATE TABLE t (v TEXTNOTNULL);")
+        );
+        assert_ne!(
+            fingerprint("CREATE TABLE t (v TEXT DEFAULT '--');"),
+            fingerprint("CREATE TABLE t (v TEXT DEFAULT '');")
+        );
+    }
 
     /// The validation list is read off the DDL, so this pins the reader itself:
     /// every object of the current format must come out of it, with the kind it

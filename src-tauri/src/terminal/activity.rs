@@ -34,6 +34,8 @@ pub struct TerminalActivity {
     pub unread: bool,
     #[serde(skip)]
     turn_id: Option<String>,
+    #[serde(skip)]
+    last_signal: Option<ActivitySignal>,
 }
 
 impl TerminalActivity {
@@ -52,6 +54,10 @@ impl TerminalActivity {
         {
             return false;
         }
+        if !signal.starts_turn && self.last_signal.as_ref() == Some(signal) {
+            return false;
+        }
+        self.last_signal = Some(signal.clone());
         let new_turn = signal.starts_turn
             && (self.turn_id != signal.turn_id
                 || !matches!(self.state, ActivityState::Working | ActivityState::Waiting));
@@ -70,10 +76,21 @@ impl TerminalActivity {
     }
 
     pub fn mark_seen(&mut self, revision: u64) -> bool {
-        if !self.unread || self.revision != revision {
+        if self.revision != revision {
+            return false;
+        }
+        let reset = matches!(
+            self.state,
+            ActivityState::Completed | ActivityState::Failed | ActivityState::Interrupted
+        );
+        if !self.unread && !reset {
             return false;
         }
         self.unread = false;
+        if reset {
+            self.state = ActivityState::Idle;
+        }
+        self.revision += 1;
         true
     }
 }

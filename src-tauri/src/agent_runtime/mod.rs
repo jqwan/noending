@@ -17,6 +17,7 @@ pub mod capabilities;
 pub mod discovery;
 pub mod store;
 
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::ExecOptions;
@@ -31,7 +32,9 @@ pub use discovery::{discover_runtime_options, AgentRuntimeDiscovery, ModelCatalo
 pub use store::{get_runtime_overrides, set_runtime_overrides};
 
 /// Explicit user overrides for one Agent. `None` = Agent default = no CLI argument.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
 #[serde(default)]
 pub struct AgentRuntimeOverrides {
     pub model: Option<String>,

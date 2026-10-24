@@ -99,6 +99,17 @@ pub(super) fn hook_event(
         cwd,
         source_path: Some(transcript.to_string_lossy().into_owned()),
         source: Some(source.into()),
+        input: (source == "PreInvocation")
+            .then(|| {
+                let steps = value["initialNumSteps"].as_u64()?;
+                let (idx, _text) = crate::adapters::antigravity::invocation_user_input(
+                    store_root, native_id, steps,
+                )?;
+                Some(NativeInput {
+                    id: Some(format!("step:{idx}")),
+                })
+            })
+            .flatten(),
         activity: match source {
             "PreInvocation" => Some(ActivitySignal {
                 state: ActivityState::Working,
@@ -305,6 +316,59 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn invocation_input_covers_only_user_inputs_already_in_the_model_trajectory() {
+        let store = Store::new();
+        std::fs::create_dir_all(store.0.join("conversations")).unwrap();
+        let db =
+            rusqlite::Connection::open(store.0.join("conversations").join(format!("{ROOT_A}.db")))
+                .unwrap();
+        db.execute_batch(
+            "CREATE TABLE steps(idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB)",
+        )
+        .unwrap();
+        // Protobuf 19.2 is the typed native user input, independently encoded here.
+        for (idx, text) in [(0, "first"), (4, "next")] {
+            let mut payload = vec![0x9a, 0x01, (text.len() + 2) as u8, 0x12, text.len() as u8];
+            payload.extend_from_slice(text.as_bytes());
+            db.execute(
+                "INSERT INTO steps VALUES (?1,14,?2)",
+                rusqlite::params![idx, payload],
+            )
+            .unwrap();
+        }
+        let mut value = input(&store.0, ROOT_A);
+        let input_event = hook_event(value.clone(), "PreInvocation", &store.0)
+            .unwrap()
+            .input
+            .unwrap();
+        assert_eq!(input_event.id.as_deref(), Some("step:0"));
+
+        value["initialNumSteps"] = serde_json::json!(4);
+        assert_eq!(
+            hook_event(value.clone(), "PreInvocation", &store.0)
+                .unwrap()
+                .input,
+            Some(input_event)
+        );
+        value["initialNumSteps"] = serde_json::json!(5);
+        let next = hook_event(value.clone(), "PreInvocation", &store.0)
+            .unwrap()
+            .input
+            .unwrap();
+        assert_eq!(next.id.as_deref(), Some("step:4"));
+
+        assert!(hook_event(value.clone(), "Stop", &store.0)
+            .unwrap()
+            .input
+            .is_none());
+        value["initialNumSteps"] = serde_json::json!(0);
+        assert!(hook_event(value, "PreInvocation", &store.0)
+            .unwrap()
+            .input
+            .is_none());
     }
 
     #[test]

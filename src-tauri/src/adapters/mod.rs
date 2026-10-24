@@ -878,6 +878,11 @@ pub trait AgentAdapter: Send + Sync {
         PathBuf::from(&session.source_path)
     }
 
+    /// Validate prepared reads, including linked history when an adapter has it.
+    fn source_matches_cursor(&self, session: &Session, cursor: &SourceCursor) -> Result<bool> {
+        file_matches_cursor(&self.session_source_path(session), cursor)
+    }
+
     /// Strict availability verdict for the session's source. This is the
     /// permanent-delete and Resume authority: only a fresh `Missing` may ever
     /// enable a local purge.
@@ -915,6 +920,23 @@ pub trait AgentAdapter: Send + Sync {
         cwd: Option<&Path>,
         source_path: Option<&str>,
     ) -> Result<AgentCommand>;
+
+    /// An explicitly supplied follow-up for a newly resumed terminal. New-session
+    /// ExecOptions never implicitly carry their first message into Resume.
+    fn build_resume_message_command(
+        &self,
+        install: &AgentInstallation,
+        opts: &ExecOptions,
+        agent_session_id: &str,
+        cwd: Option<&Path>,
+        source_path: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<AgentCommand> {
+        if message.is_some_and(|text| !text.trim().is_empty()) {
+            return Err(crate::error::other("此 Agent 不支持继续会话时附带消息"));
+        }
+        self.build_resume_command(install, opts, agent_session_id, cwd, source_path)
+    }
 
     /// Desktop app display name (also its bundle name on macOS).
     /// `None` means this Agent has no desktop surface.

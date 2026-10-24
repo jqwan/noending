@@ -390,3 +390,64 @@ fn terminal_new_and_resume_use_full_access_without_changing_background_policy() 
         .windows(2)
         .any(|w| w == ["-s", "workspace-write"]));
 }
+
+#[test]
+fn resume_followups_remain_single_literal_prompt_arguments_without_changing_the_session() {
+    for agent in launchable() {
+        let adapter = adapter_for(agent);
+        let install = install(agent);
+        let opts = ExecOptions {
+            initial_message: Some("new-only".into()),
+            model: Some("chosen-model".into()),
+            ..Default::default()
+        };
+        let base = resume_args(agent, &opts);
+        for message in [
+            "--model other",
+            "中文😀\n$(id) 'text'",
+            "@someone follow up",
+        ] {
+            let command = adapter
+                .build_resume_message_command(
+                    &install,
+                    &opts,
+                    "agent-session-id",
+                    None,
+                    None,
+                    Some(message),
+                )
+                .unwrap();
+            assert_eq!(&command.args[..base.len()], base.as_slice(), "{agent:?}");
+            let expected = if agent == Agent::Pi && message.starts_with('@') {
+                format!(" {message}")
+            } else {
+                message.into()
+            };
+            assert_eq!(command.args.last(), Some(&expected));
+            assert_eq!(
+                command.args[base.len()],
+                if agent == Agent::Antigravity {
+                    "--prompt-interactive"
+                } else {
+                    "--"
+                }
+            );
+        }
+        for empty in [None, Some(" \n\t")] {
+            assert_eq!(
+                adapter
+                    .build_resume_message_command(
+                        &install,
+                        &opts,
+                        "agent-session-id",
+                        None,
+                        None,
+                        empty
+                    )
+                    .unwrap()
+                    .args,
+                base
+            );
+        }
+    }
+}

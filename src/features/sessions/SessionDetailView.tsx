@@ -1,3 +1,4 @@
+import { MailboxHistory } from "./MailboxMessages";
 import { useSummaryEditor } from "./useSummaryEditor";
 import { removedTargets } from "../../app/removedTargets";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "./SummaryContent";
@@ -77,8 +78,8 @@ export default function SessionDetailView({
     target: sessionCtx?.session_id === sessionId ? { kind: "session", id: sessionId, revision: sessionCtx.revision } : undefined,
     summary: sessionCtx?.fields?.summary,
     disabled: Boolean(ctxBusy),
-    onChange: (result, removedIndex) => {
-      summaryExpansion.preserve(result.summary, removedIndex);
+    onChange: (result) => {
+      summaryExpansion.preserve(result.summary);
       if (currentSessionId.current !== sessionId) return;
       setSessionCtx(previous => {
         if (!previous || previous.revision > result.revision) return previous;
@@ -308,6 +309,7 @@ export default function SessionDetailView({
       {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
       <div className="detail-layout session-detail-layout">
         <div className="detail-main session-detail-main">
+          <MailboxHistory sessionId={sessionId} />
           {/* 编辑保留提取进度；更新合并增量，重新生成读取完整历史。 */}
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center" }}>

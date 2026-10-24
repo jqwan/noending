@@ -21,6 +21,8 @@ pub mod availability;
 
 use std::path::PathBuf;
 
+pub mod message;
+
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::{AgentCommand, DesktopResume};
@@ -28,11 +30,6 @@ use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::domain::Agent;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now, Db};
-
-/// The New composer and backend share a UTF-16 budget so Windows launches
-/// leave room for runtime flags and native hooks. This is a product limit,
-/// not the operating system's total command-line limit.
-pub const INITIAL_MESSAGE_LIMIT: usize = 2000;
 
 /// How a prepared launch decided the directory the Agent will start in
 ///. This is a *user-visible* fact, not an implementation detail:
@@ -186,8 +183,8 @@ pub struct PreparedLaunch {
     /// exclusive — a desktop route never carries the embedded flag.
     #[serde(default)]
     pub embedded: bool,
-    /// The New Session composer's first user turn, frozen for this launch.
-    /// It is not Context and is never added to a Resume invocation.
+    /// An explicitly supplied user turn, frozen for this New/Resume launch.
+    /// It is not generated Context.
     #[serde(default)]
     pub initial_message: Option<String>,
     pub state_fingerprint: String,
@@ -470,16 +467,13 @@ impl SessionLauncher {
         // whatever Settings holds right now.
         let mut runtime_opts = prepared.runtime.exec_options();
 
+        let mut initial = prepared
+            .initial_message
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .map(message::prepare)
+            .transpose()?;
         if prepared.mode == "new" {
-            if prepared
-                .initial_message
-                .as_deref()
-                .is_some_and(|message| message.encode_utf16().count() > INITIAL_MESSAGE_LIMIT)
-            {
-                return Err(other(format!(
-                    "首条消息最多 {INITIAL_MESSAGE_LIMIT} 字符，请缩短内容，或不带消息打开终端后输入。"
-                )));
-            }
             for task in &prepared.initial_workstream_ids {
                 require_unarchived_task(db, task)?;
                 validate_initial_task(db, Some(task), prepared.cwd.as_deref(), workspace)?;
@@ -497,7 +491,7 @@ impl SessionLauncher {
             let expected_root_session_id =
                 adapter.supports_prespecified_session_id().then(|| new_id());
             runtime_opts.root_session_id = expected_root_session_id.clone();
-            runtime_opts.initial_message = prepared.initial_message.clone();
+            runtime_opts.initial_message = initial.as_ref().map(|m| m.text.clone());
 
             let cmd: AgentCommand =
                 adapter.build_new_command(&install, &runtime_opts, cwd_path.as_deref())?;
@@ -533,6 +527,17 @@ impl SessionLauncher {
                 spawn(&cmd)?
             };
 
+            if let Some(file) = initial.as_mut().and_then(|m| m.file.take()) {
+                if let Some(id) = outcome.terminal_id.as_deref() {
+                    if let Some(embedded) = embedded {
+                        embedded.registry.retain_runtime_file(id, file)?;
+                    } else {
+                        file.keep();
+                    }
+                } else {
+                    file.keep();
+                }
+            }
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: public_command_line.unwrap_or(outcome.command_line),
@@ -583,13 +588,25 @@ impl SessionLauncher {
 
             // the resume identity is the ROOT's, never a member's
             // arbitrary external id.
-            let cmd = adapter.build_resume_command(
+            let cmd = adapter.build_resume_message_command(
                 &install,
                 &runtime_opts,
                 &session.root_agent_session_id,
                 cwd_path.as_deref(),
                 Some(&session.source_path),
+                initial.as_ref().map(|m| m.text.as_str()),
             )?;
+            let public_command_line = prepared
+                .initial_message
+                .as_deref()
+                .filter(|message| !message.trim().is_empty())
+                .map(|_| {
+                    let mut display = cmd.clone();
+                    if let Some(last) = display.args.last_mut() {
+                        *last = "[启动消息]".into();
+                    }
+                    display.display()
+                });
             // The embedded flag is the frozen preview fact; the spawn surface
             // must exist to honor it. No silent downgrade to an external
             // window: the user previewed "inside NoEnding".
@@ -601,7 +618,7 @@ impl SessionLauncher {
                 // this resume, and hold the reservation through spawn and
                 // registry registration to exclude concurrent resumes.
                 embedded.registry.bind_discovered(db);
-                let _reservation = if let Some(expected) = embedded.reconnect {
+                let reservation = if let Some(expected) = embedded.reconnect {
                     embedded.registry.reserve_reconnect(expected, session_id)?
                 } else {
                     embedded
@@ -619,17 +636,26 @@ impl SessionLauncher {
                         agent: session.agent,
                     },
                 )?;
-                if let Some(expected) = embedded.reconnect {
-                    embedded.registry.close(&expected.terminal_id);
-                }
+                reservation.finish_reconnect();
                 outcome
             } else {
                 spawn(&cmd)?
             };
 
+            if let Some(file) = initial.as_mut().and_then(|m| m.file.take()) {
+                if let Some(id) = outcome.terminal_id.as_deref() {
+                    if let Some(embedded) = embedded {
+                        embedded.registry.retain_runtime_file(id, file)?;
+                    } else {
+                        file.keep();
+                    }
+                } else {
+                    file.keep();
+                }
+            }
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
-                command_line: outcome.command_line,
+                command_line: public_command_line.unwrap_or(outcome.command_line),
                 note: if prepared.embedded {
                     "已在内嵌终端恢复该会话。".into()
                 } else {

@@ -36,7 +36,14 @@ pub(crate) enum Command {
     Receipt {
         id: String,
     },
+    MailboxList(crate::mailbox::List),
+    MailboxRead(crate::mailbox::Read),
+    MailboxSend(crate::mailbox::Send),
+    MailboxMark(crate::mailbox::Mark),
     Status,
+    SessionControl {
+        command: crate::session_control::ControlCommand,
+    },
     Freshness {
         kind: Option<Kind>,
         id: Option<String>,
@@ -44,6 +51,10 @@ pub(crate) enum Command {
     Agents,
     ResolveProject {
         path: String,
+    },
+    ResolveSession {
+        agent: String,
+        native_id: String,
     },
     ExtractionSettings,
     ConfigureExtraction {
@@ -90,6 +101,7 @@ pub(crate) enum Command {
         kind: Kind,
         id: String,
         item: Option<usize>,
+        item_id: Option<String>,
         revision: Option<i64>,
     },
     SearchSummaries {
@@ -109,8 +121,29 @@ pub(crate) enum Command {
     SetTaskSummaryTitleLock {
         id: String,
         revision: i64,
-        item: usize,
+        item: Option<usize>,
+        item_id: Option<String>,
         locked: bool,
+    },
+    PublishTaskTodo {
+        id: String,
+        revision: i64,
+        item: Option<usize>,
+        item_id: Option<String>,
+        content: context::TaskTodoContent,
+    },
+    CompleteTaskTodo {
+        id: String,
+        revision: i64,
+        item: Option<usize>,
+        item_id: Option<String>,
+        result: Option<context::TaskTodoResult>,
+    },
+    DiscardTaskTodo {
+        id: String,
+        revision: i64,
+        item: Option<usize>,
+        item_id: Option<String>,
     },
     Extract {
         kind: Kind,
@@ -157,12 +190,20 @@ pub(crate) enum Command {
 }
 impl Command {
     pub(crate) fn is_write(&self) -> bool {
+        if let Self::SessionControl { command } = self {
+            return command.is_write();
+        }
         matches!(
             self,
-            Self::ConfigureExtraction { .. }
+            Self::MailboxSend(_)
+                | Self::MailboxMark(_)
+                | Self::ConfigureExtraction { .. }
                 | Self::Sync { .. }
                 | Self::EditSummary { .. }
                 | Self::SetTaskSummaryTitleLock { .. }
+                | Self::PublishTaskTodo { .. }
+                | Self::CompleteTaskTodo { .. }
+                | Self::DiscardTaskTodo { .. }
                 | Self::Extract { .. }
                 | Self::CreateTask { .. }
                 | Self::UpdateTask { .. }
@@ -228,8 +269,26 @@ impl Service {
                 command,
             } => self.execute_once(&request_id, *command),
             Command::Receipt { id } => super::receipts::show(&self.home, &id),
+            Command::SessionControl { command } => {
+                if command.is_write() {
+                    return Err(CliError::new(
+                        "invalid_arguments",
+                        "会话控制写操作需要请求编号",
+                    ));
+                }
+                crate::session_control::request(&self.home, command, None)
+            }
+            Command::MailboxList(p) => Ok(serde_json::to_value(
+                self.db
+                    .mailbox_list(&p.session, &p.state, p.cursor, p.limit)?,
+            )?),
+            Command::MailboxRead(p) => Ok(serde_json::to_value(
+                self.db.mailbox_read(&p.session, &p.message_id)?,
+            )?),
+            Command::MailboxSend(p) => crate::mailbox::send(&self.db, &self.home, p),
+            Command::MailboxMark(p) => crate::mailbox::mark(&self.db, &self.home, p),
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox"]}),
             ),
             Command::Freshness { kind, id } => {
                 if kind.is_some() != id.is_some() {
@@ -248,6 +307,25 @@ impl Service {
                 )?)?)
             }
             Command::Agents => Ok(super::agents::list()),
+            Command::ResolveSession { agent, native_id } => {
+                let agent = crate::domain::Agent::parse(&agent)
+                    .ok_or_else(|| CliError::new("invalid_arguments", "Agent 无效"))?;
+                if native_id.trim().is_empty() {
+                    return Err(CliError::new("invalid_arguments", "原生会话 ID 不能为空"));
+                }
+                let session = self
+                    .db
+                    .find_session_by_root_agent_id(agent, &native_id)?
+                    .ok_or_else(|| {
+                        CliError::new(
+                            "not_found",
+                            "当前 Home 未找到该 Agent 的原生会话，可能尚未同步",
+                        )
+                    })?;
+                let mut value = session_value(&session);
+                value["native_id"] = json!(session.root_agent_session_id);
+                Ok(value)
+            }
             Command::ExtractionSettings => Ok(serde_json::to_value(
                 crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
             )?),
@@ -375,26 +453,30 @@ impl Service {
                 kind,
                 id,
                 item,
+                item_id,
                 revision,
             } => {
-                if item.is_some() != revision.is_some() {
+                let selected = item.is_some() || item_id.is_some();
+                if selected != revision.is_some() {
                     return Err(CliError::new(
                         "invalid_arguments",
-                        "按事项读取时需要同时提供 --item 与 --revision",
+                        "按事项读取时需要 --item-id 或 --item，以及 --revision",
                     ));
                 }
-                if let (Some(number), Some(revision)) = (item, revision) {
-                    if number == 0 || revision < 0 {
-                        return Err(CliError::new(
-                            "invalid_arguments",
-                            "事项序号从 1 开始，摘要版本不能为负数",
-                        ));
-                    }
-                    self.require(kind, &id)?;
+                self.require(kind, &id)?;
+                if let Some(revision) = revision {
+                    let number = context::items::resolve_number(
+                        &self.db,
+                        kind.name(),
+                        &id,
+                        revision,
+                        item,
+                        item_id.as_deref(),
+                    )?;
                     let item =
                         context::items::read_item(&self.db, kind.name(), &id, revision, number)?;
                     Ok(
-                        json!({"kind":kind,"id":id,"revision":revision,"item_number":number,"item":item}),
+                        json!({"kind":kind,"id":id,"revision":revision,"item_number":number,"item_id":item.id,"item":item}),
                     )
                 } else {
                     self.summary(kind, &id)
@@ -430,21 +512,96 @@ impl Service {
                 content,
             } => {
                 self.require(kind, &id)?;
-                let revision =
-                    context::edit_summary(&self.db, kind.name(), &id, revision, &content)?;
-                Ok(json!({"kind":kind,"id":id,"revision":revision}))
+                let result = context::edit_summary(&self.db, kind.name(), &id, revision, &content)?;
+                Ok(json!({"kind":kind,"id":id,"revision":result.revision,"summary":result.summary}))
             }
             Command::SetTaskSummaryTitleLock {
                 id,
                 revision,
                 item,
+                item_id,
                 locked,
             } => {
                 self.require(Kind::Task, &id)?;
+                let item = context::items::resolve_number(
+                    &self.db,
+                    "task",
+                    &id,
+                    revision,
+                    item,
+                    item_id.as_deref(),
+                )?;
                 let result =
                     context::set_summary_title_lock(&self.db, "task", &id, revision, item, locked)?;
                 Ok(
-                    json!({"kind":"task","id":id,"revision":result.revision,"summary":result.summary}),
+                    json!({"kind":"task","id":id,"item_id":result.summary.items[item-1].id,"revision":result.revision,"summary":result.summary}),
+                )
+            }
+            Command::PublishTaskTodo {
+                id,
+                revision,
+                item,
+                item_id,
+                content,
+            } => {
+                self.require(Kind::Task, &id)?;
+                let item = if item.is_some() || item_id.is_some() {
+                    Some(context::items::resolve_number(
+                        &self.db,
+                        "task",
+                        &id,
+                        revision,
+                        item,
+                        item_id.as_deref(),
+                    )?)
+                } else {
+                    None
+                };
+                let result = context::publish_task_todo(&self.db, &id, revision, item, content)?;
+                Ok(
+                    json!({"kind":"task","id":id,"item":item.unwrap_or(result.summary.items.len()),"item_id":result.summary.items[item.unwrap_or(result.summary.items.len())-1].id,"revision":result.revision,"summary":result.summary}),
+                )
+            }
+            Command::CompleteTaskTodo {
+                id,
+                revision,
+                item,
+                item_id,
+                result,
+            } => {
+                self.require(Kind::Task, &id)?;
+                let item = context::items::resolve_number(
+                    &self.db,
+                    "task",
+                    &id,
+                    revision,
+                    item,
+                    item_id.as_deref(),
+                )?;
+                let result = context::complete_task_todo(&self.db, &id, revision, item, result)?;
+                Ok(
+                    json!({"kind":"task","id":id,"item":item,"item_id":result.summary.items[item-1].id,"revision":result.revision,"summary":result.summary}),
+                )
+            }
+            Command::DiscardTaskTodo {
+                id,
+                revision,
+                item,
+                item_id,
+            } => {
+                self.require(Kind::Task, &id)?;
+                let item = context::items::resolve_number(
+                    &self.db,
+                    "task",
+                    &id,
+                    revision,
+                    item,
+                    item_id.as_deref(),
+                )?;
+                let removed = context::items::read_item(&self.db, "task", &id, revision, item)?;
+                let result = context::discard_task_todo(&self.db, &id, revision, item)?;
+                Ok(
+                    json!({"kind":"task","id":id,"item":item,"item_id":removed.id,"revision":result.revision,"summary":result.summary}),
                 )
             }
             Command::Extract {
@@ -564,6 +721,9 @@ impl Service {
     fn execute_once(self: &Arc<Self>, id: &str, command: Command) -> CliResult<Value> {
         if !command.is_write() {
             return Err(CliError::new("invalid_arguments", "请求编号只支持写操作"));
+        }
+        if let Command::SessionControl { command } = command {
+            return crate::session_control::request(&self.home, command, Some(id.to_string()));
         }
         let payload = serde_json::to_vec(&command)?;
         super::receipts::execute(&self.home, id, &payload, || self.dispatch(command))

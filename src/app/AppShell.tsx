@@ -264,6 +264,9 @@ export default function AppShell() {
     // Sidebar 最近列表等自行 invalidate。
     const un2 = listen("workspace-reconcile-completed", () => emitSynced());
     const unCli = listen("cli-data-changed", () => emitSynced());
+    const unMailboxError = listen<{session_id:string;error:string}>("mailbox-notification-error", ({payload}) => {
+      showToast(`信箱唤醒失败：${payload.error}`);
+    });
     // 终端集合或状态变化（spawn / exit / bind / close）→ Sidebar 的
     // 「运行中」列表自行重取；terminal-bound 有 payload，由终端视图直听。
     const un3 = listen("terminals-changed", () => {
@@ -277,6 +280,7 @@ export default function AppShell() {
       un1.then((f) => f());
       un2.then((f) => f());
       unCli.then((f) => f());
+      unMailboxError.then(f => f());
       un3.then((f) => f());
     };
   }, []);

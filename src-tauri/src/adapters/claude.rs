@@ -442,6 +442,23 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         })
     }
 
+    fn build_resume_message_command(
+        &self,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
+        agent_session_id: &str,
+        cwd: Option<&Path>,
+        source_path: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<AgentCommand> {
+        let mut command =
+            self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
+        if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
+            command.args.extend(["--".into(), message.to_string()]);
+        }
+        Ok(command)
+    }
+
     fn build_exec_command(
         &self,
         install: &AgentInstallation,

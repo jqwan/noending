@@ -232,6 +232,9 @@ fn project_merge_folds_task_links_and_keeps_surviving_summary() {
         noending::storage::get_workstream_context_state_conn(&f.db().read(), &task)
             .unwrap()
             .input_revision;
+    let expected_summary = noending::storage::project_context_repo::state(&f.db().read(), "b")
+        .unwrap()
+        .summary;
     let merged = project::merge_projects(f.db(), "a", "b").unwrap();
     assert_eq!(merged.survivor, "b");
     assert!(
@@ -248,7 +251,7 @@ fn project_merge_folds_task_links_and_keeps_surviving_summary() {
         noending::storage::project_context_repo::state(&f.db().read(), "b")
             .unwrap()
             .summary,
-        noending_lib::domain::Summary::single("B summary")
+        expected_summary
     );
     assert_eq!(
         f.db()
@@ -274,12 +277,15 @@ fn project_merge_adopts_a_summary_only_when_b_has_none() {
             )
         })
         .unwrap();
+    let expected_summary = noending::storage::project_context_repo::state(&f.db().read(), "a")
+        .unwrap()
+        .summary;
     project::merge_projects(f.db(), "a", "b").unwrap();
     assert_eq!(
         noending::storage::project_context_repo::state(&f.db().read(), "b")
             .unwrap()
             .summary,
-        noending_lib::domain::Summary::single("A summary")
+        expected_summary
     );
     assert!(
         noending::context::project_context_view(f.db(), "b")
@@ -293,11 +299,12 @@ fn archive_restore_and_stale_object_edits_preserve_task_memberships_and_summary(
     let f = Fixture::new();
     let task = f.task("Lifecycle", &["a"]);
     f.db().set_session_tracking(&f.sid, &task, true).unwrap();
+    let expected_summary = noending_lib::domain::Summary::single("Retained summary");
     f.db()
         .write()
         .execute(
-            "UPDATE workstream_context_state SET summary='{\"items\":[{\"title\":\"Retained summary\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}' WHERE workstream_id=?1",
-            [&task],
+            "UPDATE workstream_context_state SET summary=?2 WHERE workstream_id=?1",
+            rusqlite::params![&task, &expected_summary],
         )
         .unwrap();
     let stale = f.db().get_workstream(&task).unwrap().unwrap();
@@ -315,7 +322,7 @@ fn archive_restore_and_stale_object_edits_preserve_task_memberships_and_summary(
         noending::storage::get_workstream_context_state_conn(&f.db().read(), &task)
             .unwrap()
             .summary,
-        noending_lib::domain::Summary::single("Retained summary")
+        expected_summary
     );
     assert!(workstream::create_workstream(f.db(), " ", "", &[]).is_err());
 }

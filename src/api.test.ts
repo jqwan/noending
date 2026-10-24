@@ -57,7 +57,7 @@ it("queries persisted freshness for the requested scope without synchronizing", 
 });
 
 it.each(["session", "task", "project"] as const)("sends versioned summary edits and explicit clearing for %s", async kind => {
-  const summary = { items: [{ title: "当前结论", description: "用户修正", details: ["已核实"], title_locked: false }] };
+  const summary = { items: [{ id: "api.test-item-1", title: "当前结论", description: "用户修正", details: ["已核实"], title_locked: false }] };
   vi.mocked(invoke).mockResolvedValue({ revision: 3, summary });
   await expect(api.saveSummary(kind, "target", 2, summary)).resolves.toEqual({ revision: 3, summary });
   expect(invoke).toHaveBeenLastCalledWith("save_summary", { kind, id: "target", revision: 2, summary });

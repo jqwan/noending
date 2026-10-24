@@ -7,8 +7,9 @@
 //! `Child` (a task thread Codex spawned); `thread_source=guardian_review` →
 //! `Side` (a review lane beside the main conversation);
 //! `thread_source=memory_consolidation` → `Child` (Codex's background memory
-//! pass, never a conversation); forked page → `ForkRoot` (its own Logical
-//! Session, the fork base being provenance only). `agent_created_thread` and
+//! pass, never a conversation); a distinct user thread with fork provenance
+//! is `ForkRoot`. Reverted rollouts retain their original thread identity.
+//! `agent_created_thread` and
 //! `chatgpt_handoff` are NOT internal — verified as ordinary interactive
 //! threads — so they stay `Root`.
 //!
@@ -17,6 +18,8 @@
 //! traffic, reasoning, compaction markers, session meta, and the per-turn
 //! model state events (`turn_context`, `thread_settings_applied`) — is not
 //! conversation and contributes nothing since the provenance retirement.
+
+mod history;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,7 +51,7 @@ fn extract_text(content: &Value) -> String {
     parts.join("\n")
 }
 
-/// Both physical forms name the same native thread, including fork filenames.
+/// Plain and compressed forms share the same rollout identity.
 fn rollout_stem(path: &Path) -> Option<&str> {
     let name = path.file_name()?.to_str()?;
     name.strip_suffix(".jsonl.zst")
@@ -79,32 +82,9 @@ fn resolve_rollout(path: &Path) -> PathBuf {
     }
 }
 
-/// The uuid Codex wrote into a rollout's name: the file's OWN thread id,
-/// which differs from `payload.id` only on a forked page.
+/// Filename fallback only. The suffix is a rollout version, not a thread.
 fn thread_id_from_filename(path: &Path) -> Option<String> {
-    let rest = rollout_stem(path)?.strip_prefix("rollout-")?;
-    let own = rest.rsplit('_').next()?;
-    let parts: Vec<&str> = own.rsplit('-').take(5).collect();
-    if parts.len() < 5 {
-        return None;
-    }
-    Some(parts.into_iter().rev().collect::<Vec<_>>().join("-"))
-}
-
-/// A forked page's name carries `_<own uuid>` after the id it forked from;
-/// this is Codex's own mark that the file continues another rollout rather than
-/// being it.
-///
-/// NOT to be confused with `session_meta.forked_from_id`, which means the
-/// thread inherited another thread's HISTORY, which every forked-history
-/// subagent has (over the local corpus all 13 occurrences equal the thread's own
-/// `parent_thread_id`). Treating it as this marker would promote those subagents
-/// from `Child` to `ForkRoot` — one phantom Logical Session each.
-fn is_forked_page_name(path: &Path) -> bool {
-    rollout_stem(path)
-        .and_then(|s| s.strip_prefix("rollout-"))
-        .map(|rest| rest.contains('_'))
-        .unwrap_or(false)
+    history::filename_ids(path).map(|ids| ids.0)
 }
 
 /// Threads Codex runs for itself, whose "user" turns are prompts Codex wrote
@@ -118,24 +98,12 @@ fn is_internal_source(thread_source: Option<&str>) -> bool {
     )
 }
 
-/// Which side of the execution graph one rollout sits on.
-///
-/// Verified over the local corpus (75 rollouts): `subagent` (37) and
-/// `guardian_review` (4) each carry a `parent_thread_id` and are internal;
-/// `user` (32) is a normal root. `agent_created_thread` and `chatgpt_handoff`
-/// are NOT internal — the sampled ones are ordinary interactive threads (one
-/// waiting for the user's task, one a conversation handed over from ChatGPT) —
-/// so they stay Root. `memory_consolidation` is Codex updating its memories in
-/// the background, never a conversation, so it is internal too.
+/// Internal execution takes precedence over inherited/forked history.
 fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMemberKind {
-    if forked {
-        // A forked page is independently continuable — the fork wins over any
-        // internal marking a continued prefix may carry.
-        return DiscoveredMemberKind::ForkRoot;
-    }
     match thread_source {
         Some("guardian_review") => DiscoveredMemberKind::Side,
         Some("subagent") | Some("memory_consolidation") => DiscoveredMemberKind::Child,
+        _ if forked => DiscoveredMemberKind::ForkRoot,
         _ => DiscoveredMemberKind::Root,
     }
 }
@@ -150,7 +118,8 @@ struct RolloutFacts {
     cwd: Option<String>,
     started_at: Option<String>,
     parent: Option<String>,
-    fork_base: Option<String>,
+    forked_from: Option<String>,
+    history_base: Option<Value>,
     thread_source: Option<String>,
     first_user_text: Option<String>,
     first_agent_text: Option<String>,
@@ -178,14 +147,8 @@ impl RolloutFacts {
         }
         let vtype = v.get("type").and_then(|t| t.as_str());
         if vtype == Some("session_meta") {
-            // The FIRST meta is this rollout's OWN declaration (codex
-            // writes it at file creation). A continuation file embeds the
-            // RESUMED thread's meta inside its replayed history — letting
-            // a later meta override identity re-keys the file to a session
-            // whose usage lives in a different rollout, and two rollouts
-            // then fight over one member: source_path flips per discovery
-            // pass and the member row is replaced with each flip (a
-            // real store showed generation 21). First meta wins, always.
+            // Only the first declaration owns this thread; replayed headers
+            // later in the transcript describe inherited history.
             if !self.meta_seen {
                 self.meta_seen = true;
                 let p = v.get("payload").unwrap_or(&v);
@@ -210,12 +173,11 @@ impl RolloutFacts {
                     .get("thread_source")
                     .and_then(|t| t.as_str())
                     .map(|t| t.to_string());
-                // A forked page records where the prefix it inherited lives.
-                self.fork_base = p
-                    .get("history_base")
-                    .and_then(|h| h.get("thread_id"))
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
+                self.forked_from = p
+                    .get("forked_from_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                self.history_base = p.get("history_base").cloned();
             }
         } else if vtype == Some("response_item") {
             let p = v.get("payload").unwrap_or(&v);
@@ -253,33 +215,23 @@ impl RolloutFacts {
             cwd,
             started_at,
             parent,
-            fork_base,
+            forked_from,
+            history_base,
             thread_source,
             first_user_text,
             first_agent_text,
             last_activity,
             ..
         } = self;
-        // Identity is the file's OWN thread id. A forked page's meta still
-        // names the thread it forked FROM, so there the name has to decide;
-        // everywhere else the meta leads. Keying on `session_id` instead would
-        // collapse several rollouts into one session.
-        let by_name = || thread_id_from_filename(path);
-        let forked = is_forked_page_name(path);
-        let session_id = if forked {
-            by_name().or(meta_id).or(legacy_session_id)
-        } else {
-            meta_id.or_else(by_name).or(legacy_session_id)
-        }
-        .ok_or_else(|| {
-            crate::error::other(format!("无法解析 Codex session id: {}", path.display()))
-        })?;
-
-        // A fork whose only parent link is `history_base` still gets a real
-        // parent; a self-reference would be a lie.
-        let parent = parent.or_else(|| fork_base.filter(|b| *b != session_id));
-
-        let kind = member_kind_of(thread_source.as_deref(), forked);
+        let session_id = meta_id
+            .or_else(|| thread_id_from_filename(path))
+            .or(legacy_session_id)
+            .ok_or_else(|| {
+                crate::error::other(format!("无法解析 Codex session id: {}", path.display()))
+            })?;
+        let forked_from = forked_from.filter(|id| id != &session_id);
+        let kind = member_kind_of(thread_source.as_deref(), forked_from.is_some());
+        let parent = parent.or(forked_from);
         let is_logical_root = kind.is_logical_root();
 
         let last_activity = last_activity.map(|t| t.to_rfc3339());
@@ -303,7 +255,7 @@ impl RolloutFacts {
             first_agent_text: is_logical_root
                 .then_some(first_agent_text.map(|t| truncate_text(&t, 400)))
                 .flatten(),
-            metadata: serde_json::json!({ "thread_source": thread_source }),
+            metadata: serde_json::json!({ "thread_source": thread_source, "rollout_id":history::filename_ids(path).map(|ids|ids.1),"history_base":history_base }),
         }))
     }
 }
@@ -365,7 +317,7 @@ impl CodexAdapter {
         let mut facts = RolloutFacts::default();
         let mut parse = |_: usize, value: &Value| {
             facts.observe(value);
-            if is_internal_source(facts.thread_source.as_deref()) && !is_forked_page_name(path) {
+            if is_internal_source(facts.thread_source.as_deref()) {
                 None
             } else {
                 parse_line(value, true)
@@ -445,6 +397,119 @@ impl CodexAdapter {
     }
 }
 
+impl CodexAdapter {
+    pub(crate) fn discover_native_batch(
+        roots: &[PathBuf],
+        native_id: &str,
+        sessions: &[Session],
+    ) -> Result<DiscoveryBatch> {
+        let expanded: Vec<_> = roots
+            .iter()
+            .flat_map(|root| history::roots_for(&root.join("rollout")))
+            .collect();
+        Self::discover_rollouts(&expanded, &|_| false, sessions, Some(native_id))
+    }
+    fn discover_rollouts(
+        roots: &[PathBuf],
+        unchanged: &dyn Fn(&Path) -> bool,
+        sessions: &[Session],
+        native: Option<&str>,
+    ) -> Result<DiscoveryBatch> {
+        let catalog = history::Catalog::load(roots)?;
+        let names = ThreadNames::load(roots);
+        let mut batch = DiscoveryBatch::default();
+        const PREPARED_BUDGET: usize = 16 * 1024 * 1024;
+        let mut retained = 0usize;
+        for head in catalog.selected(native)? {
+            if native.is_some_and(|id| id != head.thread_id) {
+                continue;
+            }
+            if is_internal_source(head.metadata["thread_source"].as_str()) {
+                let mut facts = RolloutFacts::default();
+                facts.observe(&serde_json::json!({"type":"session_meta","payload":head.metadata}));
+                if let Some(member) = facts.finish(&head.path)? {
+                    batch.members.push(member);
+                }
+                continue;
+            }
+            let known = sessions.iter().find(|s| {
+                s.root_agent_session_id == head.thread_id
+                    && history::same_path(&resolve_rollout(Path::new(&s.source_path)), &head.path)
+                    && s.title.is_some()
+                    && !s.source_prefix_hash.is_empty()
+            });
+            if head.base.is_none() && known.is_some() && unchanged(&head.path) {
+                continue;
+            }
+            let base = known.map(Session::source_cursor);
+            let original = base.clone().unwrap_or_default();
+            let physical = catalog.physical_cursor(head, &original)?;
+            let before = catalog.identity(head)?;
+            let discovered = if let Some(session) = known.filter(|_| !is_compressed(&head.path)) {
+                Self::read_known(&head.path, session, &physical)
+            } else {
+                Self::read_snapshot(&head.path, &physical)
+            };
+            let (member, mut delta) = discovered?;
+            let Some(mut member) = member else {
+                continue;
+            };
+            catalog.prepend(head, &mut delta)?;
+            if before != catalog.identity(head)? {
+                return Err(crate::error::other("Codex 历史依赖在读取期间发生变化"));
+            }
+            if delta
+                .source
+                .as_ref()
+                .is_some_and(|s| s.start_byte_offset == 0)
+                && head.base.is_some()
+            {
+                member.first_user_text = delta
+                    .messages
+                    .iter()
+                    .find(|m| m.role == SessionMessageRole::User)
+                    .map(|m| truncate_text(&m.content, 400));
+                member.first_agent_text = delta
+                    .messages
+                    .iter()
+                    .find(|m| m.role == SessionMessageRole::Assistant)
+                    .map(|m| truncate_text(&m.content, 400));
+            }
+            if member.kind.is_logical_root() {
+                member.native_title =
+                    names.title_for(&member.source_member_id, member.first_user_text.as_deref());
+                if delta.complete_snapshot {
+                    let size: usize = delta.messages.iter().map(|m| m.content.len()).sum();
+                    if size <= PREPARED_BUDGET.saturating_sub(retained) {
+                        retained += size;
+                        batch.prepared.insert(
+                            head.path.clone(),
+                            crate::adapters::PreparedRead { delta, base },
+                        );
+                    }
+                }
+            }
+            if let Some(started) = catalog
+                .rollouts
+                .iter()
+                .filter(|r| r.thread_id == head.thread_id)
+                .filter_map(|r| r.started_at.as_ref())
+                .min()
+            {
+                member.started_at = Some(started.clone());
+            }
+            member.metadata["rollout_versions"] = serde_json::json!(catalog
+                .rollouts
+                .iter()
+                .filter(|r| r.thread_id == head.thread_id)
+                .map(|r| serde_json::json!({"id":r.rollout_id,"path":r.path}))
+                .collect::<Vec<_>>());
+            batch.members.push(member);
+        }
+        Ok(batch)
+    }
+}
+
 /// Runtime overrides in Codex's own spelling: `-m <model>` plus a config
 /// override for reasoning effort. Codex has no provider flag, so
 /// `ExecOptions::provider` is deliberately not rendered here.
@@ -497,67 +562,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         unchanged: &dyn Fn(&Path) -> bool,
         sessions: &[Session],
     ) -> Result<DiscoveryBatch> {
-        let mut batch = DiscoveryBatch::default();
-        let known: HashMap<PathBuf, &Session> = sessions
-            .iter()
-            .filter(|s| s.title.is_some() && !s.source_prefix_hash.is_empty())
-            .map(|s| (resolve_rollout(Path::new(&s.source_path)), s))
-            .collect();
-        // Bound retained prose, even when importing many cold rollouts at once.
-        const PREPARED_BUDGET: usize = 16 * 1024 * 1024;
-        let mut prepared_bytes = 0usize;
-        let names = ThreadNames::load(roots);
-        let mut stack: Vec<PathBuf> = roots.to_vec();
-        while let Some(dir) = stack.pop() {
-            let rd = match std::fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for entry in rd.filter_map(|e| e.ok()) {
-                let p = entry.path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                if rollout_stem(&p).is_none() || resolve_rollout(&p) != p {
-                    continue;
-                }
-                if unchanged(&p) {
-                    continue;
-                }
-                let base = known
-                    .get(&p)
-                    .filter(|_| !is_compressed(&p))
-                    .map(|s| s.source_cursor());
-                let discovered =
-                    if let (Some(session), Some(cursor)) = (known.get(&p), base.as_ref()) {
-                        Self::read_known(&p, session, cursor)
-                    } else {
-                        Self::read_snapshot(&p, &SourceCursor::default())
-                    };
-                match discovered {
-                    Ok((Some(mut m), delta)) => {
-                        if m.kind.is_logical_root() {
-                            m.native_title =
-                                names.title_for(&m.source_member_id, m.first_user_text.as_deref());
-                        }
-                        if m.kind.is_logical_root() && delta.complete_snapshot {
-                            let size: usize = delta.messages.iter().map(|m| m.content.len()).sum();
-                            if size <= PREPARED_BUDGET.saturating_sub(prepared_bytes) {
-                                prepared_bytes += size;
-                                batch
-                                    .prepared
-                                    .insert(p, crate::adapters::PreparedRead { delta, base });
-                            }
-                        }
-                        batch.members.push(m)
-                    }
-                    Ok((None, _)) => {}
-                    Err(e) => eprintln!("[discover] skip {}: {}", p.display(), e),
-                }
-            }
-        }
-        Ok(batch)
+        Self::discover_rollouts(roots, unchanged, sessions, None)
     }
 
     fn read_session_delta(
@@ -565,23 +570,49 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         session: &Session,
         cursor: &SourceCursor,
     ) -> Result<MemberReadDelta> {
-        let path = resolve_rollout(Path::new(&session.source_path));
-        let parse = |_idx, v: &Value| parse_line(v, true);
-        if !is_compressed(&path) {
-            return read_jsonl_delta(&path, cursor, &parse);
+        let path = self.session_source_path(session);
+        let catalog = history::Catalog::load(&history::roots_for(&path))?;
+        let selected = catalog.selected(Some(&session.root_agent_session_id))?;
+        let head = selected
+            .into_iter()
+            .find(|r| r.thread_id == session.root_agent_session_id)
+            .ok_or_else(|| crate::error::other("Codex 当前转录身份不存在或已变化"))?;
+        let physical = catalog.physical_cursor(head, cursor)?;
+        let before = catalog.identity(head)?;
+        let (_, mut delta) = if is_compressed(&head.path) {
+            if crate::adapters::file_matches_cursor(&head.path, &physical)? {
+                return Ok(MemberReadDelta {
+                    complete_snapshot: true,
+                    ..Default::default()
+                });
+            }
+            Self::read_snapshot(&head.path, &physical)?
+        } else {
+            Self::read_known(&head.path, session, &physical)?
+        };
+        catalog.prepend(head, &mut delta)?;
+        if before != catalog.identity(head)? {
+            return Err(crate::error::other("Codex 历史依赖在读取期间发生变化"));
         }
-        if crate::adapters::file_matches_cursor(&path, cursor)? {
-            return Ok(crate::adapters::MemberReadDelta {
-                messages: vec![],
-                source: None,
-                complete_snapshot: true,
-            });
-        }
-        Self::read_snapshot(&path, cursor).map(|(_, delta)| delta)
+        Ok(delta)
+    }
+
+    fn source_matches_cursor(&self, session: &Session, cursor: &SourceCursor) -> Result<bool> {
+        let path = self.session_source_path(session);
+        let catalog = history::Catalog::load(&history::roots_for(&path))?;
+        let head = catalog
+            .rollouts
+            .iter()
+            .find(|r| history::same_path(&r.path, &path))
+            .ok_or_else(|| crate::error::other("Codex 当前转录不可读取"))?;
+        crate::adapters::file_matches_cursor(&path, &catalog.physical_cursor(head, cursor)?)
     }
 
     fn session_source_path(&self, session: &Session) -> PathBuf {
-        resolve_rollout(Path::new(&session.source_path))
+        let path = Path::new(&session.source_path);
+        history::active_paths(&history::roots_for(path))
+            .remove(&session.root_agent_session_id)
+            .unwrap_or_else(|| resolve_rollout(path))
     }
 
     fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
@@ -630,6 +661,23 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
+    }
+
+    fn build_resume_message_command(
+        &self,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
+        agent_session_id: &str,
+        cwd: Option<&Path>,
+        source_path: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<AgentCommand> {
+        let mut command =
+            self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
+        if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
+            command.args.extend(["--".into(), message.to_string()]);
+        }
+        Ok(command)
     }
 
     fn build_exec_command(
@@ -958,7 +1006,7 @@ mod rollout_tests {
     }
 
     #[test]
-    fn compressed_fork_keeps_its_own_native_identity() {
+    fn compressed_rollout_version_keeps_the_thread_identity() {
         let dir = temp_dir("compressed-fork");
         let own = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
         let body = [meta_line(), message_line(1, "user", "继续分支")].join("\n") + "\n";
@@ -970,8 +1018,8 @@ mod rollout_tests {
             .discover_members_in(&[dir.clone()], &|_| false)
             .unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].source_member_id, own);
-        assert_eq!(found[0].kind, DiscoveredMemberKind::ForkRoot);
+        assert_eq!(found[0].source_member_id, SESSION_ID);
+        assert_eq!(found[0].kind, DiscoveredMemberKind::Root);
         assert_eq!(found[0].first_user_text.as_deref(), Some("继续分支"));
         // A renamed foreign transcript is never claimed just because it is zstd.
         std::fs::write(
@@ -1037,11 +1085,8 @@ mod rollout_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A forked page carries `_<own uuid>` in its name yet still names the
-    /// thread it forked FROM in `payload.id`: identity must follow the name, or
-    /// the fork collapses back into the thread it came from.
     #[test]
-    fn a_forked_page_is_its_own_logical_root_with_the_fork_as_parent() {
+    fn a_reverted_rollout_keeps_its_thread_and_has_no_fork_parent() {
         const BASE: &str = "019f135a-621c-76a1-a76c-7c71021847aa";
         const OWN: &str = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
         let dir = temp_dir("forked-page");
@@ -1058,9 +1103,9 @@ mod rollout_tests {
             ],
         );
         let m = CodexAdapter::parse_member(&path).unwrap().unwrap();
-        assert_eq!(m.source_member_id, OWN, "the file's name owns the identity");
-        assert_eq!(m.kind, DiscoveredMemberKind::ForkRoot);
-        assert_eq!(m.parent_source_member_id.as_deref(), Some(BASE));
+        assert_eq!(m.source_member_id, BASE);
+        assert_eq!(m.kind, DiscoveredMemberKind::Root);
+        assert!(m.parent_source_member_id.is_none());
         assert_eq!(m.first_user_text.as_deref(), Some("接着上面继续"));
         let _ = std::fs::remove_dir_all(&dir);
     }

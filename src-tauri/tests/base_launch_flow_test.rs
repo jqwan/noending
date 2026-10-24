@@ -168,9 +168,9 @@ fn an_embedded_new_launch_spawns_unbound() {
 const FIRST_MESSAGE: &str = "  请开始实现\n$(id) 'literal' \"message\"  ";
 
 #[test]
-fn new_launch_enforces_the_composer_message_budget_before_spawning() {
-    let db = open_db("message-budget");
-    let launcher = launcher_in("message-budget");
+fn new_launch_transports_long_messages_as_files_for_all_interactive_agents() {
+    let db = open_db("message-files");
+    let launcher = launcher_in("message-files");
     let workspace = LaunchWorkspace::default();
     for agent in [
         Agent::Codex,
@@ -182,26 +182,42 @@ fn new_launch_enforces_the_composer_message_budget_before_spawning() {
         let mut prepared = launcher
             .prepare_new_in(&db, agent, None, None, &workspace)
             .unwrap();
-        // Chinese counts as one UTF-16 unit; this emoji counts as two.
-        let boundary = "中".repeat(1998) + "😀";
-        prepared.initial_message = Some(boundary.clone());
-        assert_eq!(
-            launcher
-                .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-                .unwrap()
-                .launched_via,
-            FAKE_SPAWN_TAG
-        );
-        prepared.initial_message = Some(boundary + "!");
-        let error = launcher
-            .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("2000"), "{error}");
-        assert!(
-            !error.contains("😀"),
-            "launch errors must not echo private prompts"
-        );
+        prepared.initial_message = Some("中".repeat(1998) + "😀");
+        launcher
+            .launch_prepared_with_in(
+                &db,
+                &prepared,
+                &workspace,
+                |command| {
+                    assert_eq!(command.args.last().unwrap(), &("中".repeat(1998) + "😀"));
+                    fake_spawn(command)
+                },
+                fake_open,
+                None,
+            )
+            .unwrap();
+        prepared.initial_message.as_mut().unwrap().push('!');
+        launcher
+            .launch_prepared_with_in(
+                &db,
+                &prepared,
+                &workspace,
+                |command| {
+                    let wire = command.args.last().unwrap();
+                    assert!(wire.encode_utf16().count() <= 2000);
+                    let path = std::path::Path::new(wire.lines().last().unwrap());
+                    assert_eq!(
+                        std::fs::read_to_string(path).unwrap(),
+                        "中".repeat(1998) + "😀!"
+                    );
+                    let result = fake_spawn(command);
+                    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+                    result
+                },
+                fake_open,
+                None,
+            )
+            .unwrap();
     }
 }
 
@@ -825,6 +841,12 @@ fn failed_embedded_spawn(
         .registry
         .reserve_resume(target.session_id.unwrap())
         .is_err());
+    assert!(target
+        .registry
+        .list()
+        .iter()
+        .filter(|t| t.session_id.as_deref() == target.session_id)
+        .all(|t| !t.live));
     Err(noending::error::other("test spawn failed"))
 }
 
@@ -1052,4 +1074,64 @@ fn reconnect_validates_archive_state_before_stopping_the_terminal() {
     assert!(result.is_err());
     assert!(registry.attach(&expected.terminal_id).unwrap().summary.live);
     registry.kill_all();
+}
+
+#[test]
+fn resume_followup_uses_existing_identity_redacts_the_prompt_and_supports_long_messages() {
+    let db = open_db("resume-followup");
+    seed_installation(&db, Agent::Codex);
+    let launcher = launcher_in("resume-followup");
+    let workspace = LaunchWorkspace::default();
+    let sid = codex_resume_session(&db, "followup");
+    let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
+    prepared.initial_message = Some("中文😀 literal $(id)\nnext line".into());
+    let result = launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            |command| {
+                assert_eq!(
+                    command.args.last().map(String::as_str),
+                    Some("中文😀 literal $(id)\nnext line")
+                );
+                assert!(command.args.contains(&"emb-root-followup".to_string()));
+                Ok(LaunchOutcome {
+                    launched_via: "fake".into(),
+                    command_line: "must be redacted".into(),
+                    pid: None,
+                    terminal_id: None,
+                })
+            },
+            fake_open,
+            None,
+        )
+        .unwrap();
+    assert!(result.command_line.contains("[启动消息]"));
+    assert!(!result.command_line.contains("$(id)"));
+    prepared.initial_message = Some("中".repeat(1998) + "😀");
+    launcher
+        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
+        .unwrap();
+    prepared.initial_message.as_mut().unwrap().push('!');
+    launcher
+        .launch_prepared_with_in(
+            &db,
+            &prepared,
+            &workspace,
+            |command| {
+                let wire = command.args.last().unwrap();
+                let path = std::path::Path::new(wire.lines().last().unwrap());
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    "中".repeat(1998) + "😀!"
+                );
+                let result = fake_spawn(command);
+                std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+                result
+            },
+            fake_open,
+            None,
+        )
+        .unwrap();
 }

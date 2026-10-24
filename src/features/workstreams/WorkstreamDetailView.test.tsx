@@ -62,7 +62,7 @@ function context(): WorkstreamContext {
 function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
   return {
     workstream_id: "w1",
-    summary: { items: [{ title: "任务状态", description: "**当前进展**：接口设计已确定。", title_locked: false, details: [] }] },
+    summary: { items: [{ id: "WorkstreamDetailView.test-item-1", title: "任务状态", description: "**当前进展**：接口设计已确定。", title_locked: false, details: [] }] },
     updated_at: null,
     context_revision: 1,
     pending: false,

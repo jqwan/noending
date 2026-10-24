@@ -32,6 +32,7 @@ impl Fixture {
         let output = Command::new(exe)
             .args(args)
             .env("NOENDING_HOME", &self.home.root)
+            .env_remove("NOENDING_TERMINAL_ID")
             .output()
             .unwrap();
         let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
@@ -280,10 +281,7 @@ fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments
             noending::skills::prepare_memory_skill
                 as fn(&Db, &NoEndingHome, &Path) -> noending::error::Result<()>,
         ),
-        (
-            "noending-collaboration",
-            noending::skills::prepare_collaboration_skill,
-        ),
+        ("noending-task", noending::skills::prepare_task_skill),
     ] {
         prepare(
             f.db.as_ref().unwrap(),
@@ -353,7 +351,7 @@ fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments
     let db = Db::open(&relocated.db_path).unwrap();
     for prepare in [
         noending::skills::prepare_memory_skill,
-        noending::skills::prepare_collaboration_skill,
+        noending::skills::prepare_task_skill,
     ] {
         prepare(&db, &relocated, Path::new(env!("CARGO_BIN_EXE_ne"))).unwrap();
     }
@@ -1083,4 +1081,262 @@ fn project_resolution_stops_at_unknown_repositories_and_recognizes_new_worktrees
     );
     assert!(success, "{unresolved}");
     assert_eq!(unresolved["data"]["found"], false);
+}
+
+#[test]
+fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
+    use noending::session_control::{ControlCommand, DesktopHost};
+    use serde_json::json;
+    let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let (ok, missing) = f.run(exe, &["session", "terminals"]);
+    assert!(!ok);
+    assert_eq!(missing["error"]["code"], "desktop_unavailable");
+    // This fixture stands in for desktop business dispatch; process arguments,
+    // Home routing and durable exactly-once launch receipts cross real IPC.
+    let (submitted_tx, submitted_rx) = std::sync::mpsc::channel();
+    let host = DesktopHost::start(&f.home, move |command, _sender_terminal| match command {
+        ControlCommand::Identity { claimed } => Ok(json!({"session_id":claimed})),
+        ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
+        ControlCommand::Start(options) => {
+            let terminal_id = noending::storage::new_id();
+            if options.message.as_deref() == Some("disconnect fixture") {
+                submitted_tx.send(terminal_id.clone()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Ok(json!({"terminal_id":terminal_id,"options":options}))
+        }
+    })
+    .unwrap();
+    assert!(DesktopHost::start(&f.home, |_, _| Ok(json!({}))).is_err());
+    let (ok, list) = f.run(exe, &["session", "terminals", "--session", "session-a"]);
+    assert!(ok, "{list}");
+    assert_eq!(list["data"]["session"], "session-a");
+    let (ok, literal_option) = f.run(
+        exe,
+        &[
+            "session",
+            "new",
+            "--agent",
+            "codex",
+            "--message",
+            "--model is message text",
+        ],
+    );
+    assert!(ok, "{literal_option}");
+    assert_eq!(
+        literal_option["data"]["options"]["message"],
+        "--model is message text"
+    );
+    assert!(literal_option["data"]["options"]["runtime"].is_null());
+    let file = f.root.join("消息.txt");
+    let literal = "中文😀\n$(echo inert) `text` 'quotes' --option";
+    std::fs::write(&file, literal).unwrap();
+    let args = [
+        "session",
+        "new",
+        "--agent",
+        "codex",
+        "--cwd",
+        f.root.to_str().unwrap(),
+        "--task",
+        "a",
+        "--task",
+        "b",
+        "--model",
+        "test-model",
+        "--file",
+        file.to_str().unwrap(),
+        "--request-id",
+        "start-once",
+    ];
+    let (ok, first) = f.run(exe, &args);
+    assert!(ok, "{first}");
+    assert_eq!(first["data"]["options"]["message"], literal);
+    assert_eq!(first["data"]["options"]["tasks"], json!(["a", "b"]));
+    assert_eq!(first["data"]["options"]["runtime"]["model"], "test-model");
+    let (ok, replay) = f.run(Path::new(env!("CARGO_BIN_EXE_noending")), &args);
+    assert!(ok, "{replay}");
+    assert_eq!(first["data"]["terminal_id"], replay["data"]["terminal_id"]);
+    let (ok, receipt) = f.run(exe, &["request", "show", "start-once"]);
+    assert!(ok, "{receipt}");
+    assert_eq!(
+        receipt["data"]["response"]["data"]["terminal_id"],
+        first["data"]["terminal_id"]
+    );
+    let disconnect_args = [
+        "session",
+        "new",
+        "--agent",
+        "codex",
+        "--message",
+        "disconnect fixture",
+        "--request-id",
+        "disconnected-launch",
+    ];
+    let mut disconnected = Command::new(exe)
+        .args(disconnect_args)
+        .env("NOENDING_HOME", &f.home.root)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let launched_id = submitted_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    disconnected.kill().unwrap();
+    disconnected.wait().unwrap();
+    let (ok, recovered) = f.run(exe, &disconnect_args);
+    assert!(ok, "{recovered}");
+    assert_eq!(
+        recovered["data"]["terminal_id"], launched_id,
+        "disconnecting the client must not repeat the desktop action"
+    );
+    let other = Fixture::new();
+    let (ok, wrong_home) = other.run(exe, &["session", "terminals"]);
+    assert!(!ok);
+    assert_eq!(wrong_home["error"]["code"], "desktop_unavailable");
+    drop(host);
+    let (ok, closed) = f.run(exe, &["session", "terminals"]);
+    assert!(!ok);
+    assert_eq!(closed["error"]["code"], "desktop_unavailable");
+}
+
+#[test]
+fn mailbox_cli_persists_without_desktop_requires_session_sender_and_uses_current_revision() {
+    let f = Fixture::new();
+    let db = f.db.as_ref().unwrap();
+    db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let (ok, err) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "send",
+            "--session",
+            "target",
+            "--message",
+            "text",
+        ],
+    );
+    assert!(!ok);
+    assert_eq!(err["error"]["code"], "sender_unavailable");
+    let args = [
+        "mailbox",
+        "send",
+        "--session",
+        "target",
+        "--from-session",
+        "sender",
+        "--message",
+        "中文 body",
+        "--request-id",
+        "mail-once",
+        "--notify-immediately",
+        "true",
+    ];
+    let (ok, sent) = f.run(exe, &args);
+    assert!(ok, "{sent}");
+    let (ok, replay) = f.run(exe, &args);
+    assert!(ok, "{replay}");
+    assert_eq!(sent["data"]["message_id"], replay["data"]["message_id"]);
+    let mid = sent["data"]["message_id"].as_str().unwrap();
+    let (ok, read) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "read",
+            "--session",
+            "target",
+            "--message-id",
+            mid,
+        ],
+    );
+    assert!(ok, "{read}");
+    assert_eq!(read["data"]["body"], "中文 body");
+    assert_eq!(read["data"]["notify_immediately"], true);
+    let (ok, ordinary) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "send",
+            "--session",
+            "target",
+            "--from-session",
+            "sender",
+            "--message",
+            "ordinary",
+        ],
+    );
+    assert!(ok, "{ordinary}");
+    assert!(
+        !db.mailbox_read("target", ordinary["data"]["message_id"].as_str().unwrap())
+            .unwrap()
+            .notify_immediately
+    );
+    let ordinary_id = ordinary["data"]["message_id"].as_str().unwrap();
+    db.mailbox_mark("target", ordinary_id, 1, true).unwrap();
+    let (ok, invalid) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "send",
+            "--session",
+            "target",
+            "--from-session",
+            "sender",
+            "--message",
+            "invalid",
+            "--notify-immediately",
+            "yes",
+        ],
+    );
+    assert!(!ok, "{invalid}");
+    assert!(read["data"]["read_at"].is_null());
+    let (ok, denied) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "mark",
+            "--session",
+            "target",
+            "--message-id",
+            mid,
+            "--revision",
+            "1",
+            "--state",
+            "read",
+            "--from-session",
+            "sender",
+        ],
+    );
+    assert!(!ok);
+    assert_eq!(denied["error"]["code"], "identity_mismatch");
+    let (ok, marked) = f.run(
+        exe,
+        &[
+            "mailbox",
+            "mark",
+            "--session",
+            "target",
+            "--message-id",
+            mid,
+            "--revision",
+            "1",
+            "--state",
+            "read",
+            "--from-session",
+            "target",
+        ],
+    );
+    assert!(ok, "{marked}");
+    let (ok, page) = f.run(exe, &["mailbox", "list", "--session", "target"]);
+    assert!(ok, "{page}");
+    assert_eq!(page["data"]["unread"], 0);
+    assert_eq!(
+        db.mailbox_list("target", "all", None, 50)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
 }

@@ -26,7 +26,6 @@ it("switches between history and detail without launching an Agent", async () =>
   const navigate = vi.fn();
   const view = render(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" navigate={navigate} />);
   await act(async () => {});
-  expect(screen.queryByRole("button", { name: "跟踪任务" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
   expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
   view.rerender(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" entry="conversation" navigate={navigate} />);
@@ -39,7 +38,6 @@ it("switches among this session's live and exited terminals and remembers the se
   vi.mocked(api.terminalList).mockResolvedValue([{ ...terminal("t1"), activity: { state: "working", revision: 1, unread: false } }, terminal("t2", false), terminal("other", true, "s2")]);
   const navigate = vi.fn();
   const view = render(<SessionSubpageTabs sessionId="s1" terminalId="t1" agent="codex" navigate={navigate} />);
-  expect(screen.getByRole("button", { name: "跟踪任务" })).toBeTruthy();
   fireEvent.click(await screen.findByRole("button", { name: "切换终端" }));
   expect(screen.getAllByRole("menuitemradio")).toHaveLength(2);
   expect(screen.getByRole("img", { name: "正在处理" })).toBeTruthy();

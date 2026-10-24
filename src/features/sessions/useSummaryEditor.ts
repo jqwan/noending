@@ -15,7 +15,7 @@ type Draft = {
 export function useSummaryEditor({ target, summary, onChange, disabled = false }: {
   target?: Target;
   summary?: SummaryDocument | null;
-  onChange: (result: SummaryEditResult, removedIndex?: number) => void;
+  onChange: (result: SummaryEditResult) => void;
   disabled?: boolean;
 }) {
   const key = target ? `${target.kind}:${target.id}` : "";
@@ -43,7 +43,7 @@ export function useSummaryEditor({ target, summary, onChange, disabled = false }
   const start = (index: number | null) => {
     if (!target || !available || draft) return;
     const base = structuredClone(summary ?? { items: [] });
-    const item = index === null ? { title: "", description: "", details: [], title_locked: false } : structuredClone(base.items[index]);
+    const item = index === null ? { id: "", title: "", description: "", details: [], title_locked: false } : structuredClone(base.items[index]);
     setState({ key, target: { ...target }, base, index, item });
     setError("");
   };
@@ -70,7 +70,7 @@ export function useSummaryEditor({ target, summary, onChange, disabled = false }
     try {
       const result = await api.saveSummary(draft.target.kind, draft.target.id, draft.target.revision, { items });
       if (!mounted.current || operation !== epoch.current) return;
-      onChange(result, remove ? draft.index! : undefined);
+      onChange(result);
       setState(null);
       showToast(remove ? "已删除事项" : "已保存事项");
       window.dispatchEvent(new Event("noending:sync"));

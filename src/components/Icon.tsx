@@ -1,4 +1,5 @@
 const paths = {
+  panelRight: "M2.5 3h13v12h-13ZM11 3v12",
   close: "M4 4l10 10M14 4L4 14",
   refresh: "M14 6A6 6 0 1 0 15 11M14 2v4h-4",
   palette: "M9 2a7 7 0 1 0 0 14h1a2 2 0 0 0 1-4c-1-1 0-2 1-2h2c3 0 2-8-5-8ZM5 7h.1M8 5h.1M12 6h.1",

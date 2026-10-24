@@ -15,8 +15,8 @@ function SummaryPreview({ children }: { children: SummaryDocument }) {
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const summary: SummaryDocument = { items: [
-  { title: "路径同步", description: "保留已有目录。", title_locked: false, details: ["保留 **原始文件**。", "使用 `ne status` 检查连接。"] },
-  { title: "后续工作", description: "", title_locked: false, details: [] },
+  { id: "SummaryContent.test-item-1", title: "路径同步", description: "保留已有目录。", title_locked: false, details: ["保留 **原始文件**。", "使用 `ne status` 检查连接。"] },
+  { id: "SummaryContent.test-item-2", title: "后续工作", description: "", title_locked: false, details: [] },
 ] };
 it("keeps titles and descriptions visible while only details start collapsed", () => {
   render(<SummaryPreview>{summary}</SummaryPreview>);
@@ -38,7 +38,7 @@ it("keeps titles and descriptions visible while only details start collapsed", (
   expect(within(simple).queryByRole("button", { name: /细则/ })).toBeNull();
 });
 it("expands and collapses all detail lists, including after an individual toggle", () => {
-  render(<SummaryPreview>{{ items: [...summary.items, { title: "验证范围", description: "待验证", title_locked: false, details: ["Windows 仍待验证。"] }] }}</SummaryPreview>);
+  render(<SummaryPreview>{{ items: [...summary.items, { id: "SummaryContent.test-item-3", title: "验证范围", description: "待验证", title_locked: false, details: ["Windows 仍待验证。"] }] }}</SummaryPreview>);
   fireEvent.click(screen.getByRole("button", { name: "展开路径同步的细则" }));
   expect(screen.getAllByRole("list")).toHaveLength(1);
   fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
@@ -57,7 +57,7 @@ it("retains expansion on identical reads and resets it when the summary is reorg
   fireEvent.click(screen.getByRole("button", { name: "展开路径同步的细则" }));
   rerender(<SummaryPreview>{JSON.parse(JSON.stringify(summary)) as SummaryDocument}</SummaryPreview>);
   screen.getByRole("list");
-  rerender(<SummaryPreview>{{ items: [{ title: "合并后的事项", description: "### 内容中的标题", title_locked: false, details: ["新的细则"] }] }}</SummaryPreview>);
+  rerender(<SummaryPreview>{{ items: [{ id: "SummaryContent.test-item-4", title: "合并后的事项", description: "### 内容中的标题", title_locked: false, details: ["新的细则"] }] }}</SummaryPreview>);
   expect(screen.queryByText("路径同步")).toBeNull();
   screen.getByText("内容中的标题");
   expect(screen.queryByRole("list")).toBeNull();
@@ -131,7 +131,7 @@ function Editable({ initial, kind = "session", id = "target", onSaved = () => {}
   const [view, setView] = useState(initial);
   const expansion = useSummaryExpansion(view.summary);
   const editor = useSummaryEditor({ summary: view.summary, target: { kind, id, revision: view.revision },
-    onChange: (result, removedIndex) => { expansion.preserve(result.summary, removedIndex); setView(result); onSaved(result); } });
+    onChange: (result) => { expansion.preserve(result.summary); setView(result); onSaved(result); } });
   return <>
     <header><SummaryControls expansion={expansion} editor={editor} />
       <button disabled={editor.editing}>更新摘要</button>
@@ -275,4 +275,13 @@ it("ignores a completed save after switching targets and permits editing the new
   expect(onSaved).not.toHaveBeenCalled();
   expect((screen.getByRole("textbox", { name: "事项描述" }) as HTMLTextAreaElement).value).toBe("第二个会话的草稿");
   expect(screen.getByRole("button", { name: "保存" }).hasAttribute("disabled")).toBe(false);
+});
+
+it("keeps expanded details attached to the item ID after renaming and reordering", () => {
+  const {rerender} = render(<SummaryPreview>{summary}</SummaryPreview>);
+  fireEvent.click(screen.getByRole("button", {name:"展开路径同步的细则"}));
+  rerender(<SummaryPreview>{{items:[summary.items[1], {...summary.items[0],title:"路径处理已更新"}]}}</SummaryPreview>);
+  const item = screen.getByRole("region",{name:"路径处理已更新"});
+  expect(within(item).getByRole("button",{name:"收起路径处理已更新的细则"}).getAttribute("aria-expanded")).toBe("true");
+  within(item).getByRole("list");
 });

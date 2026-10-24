@@ -1,6 +1,6 @@
 # NoEnding CLI
 
-CLI 独立打开 NoEnding 数据库，复用桌面应用的业务模块，无需启动桌面应用。命令等待操作完成后返回并退出；不启动常驻服务，也不自动扫描会话、技能或项目。`ne` 是短命令，`noending` 保留完整名称，子命令不使用缩写。输出为 JSON，日志不写入标准输出。
+数据命令独立打开 NoEnding 数据库，复用桌面应用的业务模块，无需启动桌面应用；会话终端控制需同一 Home 的桌面应用正在运行。命令等待操作完成后返回并退出；不启动常驻服务，也不自动扫描会话、技能或项目。`ne` 是短命令，`noending` 保留完整名称，子命令不使用缩写。输出为 JSON，日志不写入标准输出。
 
 Agent 也可以使用 `ne mcp serve [--home PATH]` 启动 stdio MCP 服务，直接调用同一业务能力。该服务保持连接期间运行，标准输出专供 MCP 协议；配置及工具见 [MCP 使用说明](mcp.md)。
 
@@ -27,9 +27,9 @@ Windows 使用 `ne.exe` 或 `noending.exe cli install --dir <目录>`，生成 `
 
 ## 内置技能
 
-桌面应用启动时在技能库分别提供 `noending-memory` 和 `noending-collaboration`，默认不为任何 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载技能。
+桌面应用启动时在技能库分别提供 `noending-memory`、`noending-task` 和 `noending-mailbox`，默认不为任何 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载技能。
 
-记忆技能负责按会话、项目、任务或本机范围回忆与维护上下文；协作技能负责创建与调整任务、项目关联、已有会话的任务跟踪及进展汇总。两者可独立启停、卸载；任务摘要仍属于记忆范围。当前协作接口不提供新建／继续会话或消息发送。
+记忆技能负责按会话、项目、任务或本机范围回忆与维护上下文；协作技能负责创建与调整任务、项目关联、已有会话的任务跟踪及进展汇总。三者可独立启停、卸载；任务摘要仍属于记忆范围。协作接口支持通过运行中的桌面应用新建／继续终端；信箱技能负责查收、标记与发送消息，数据操作无需桌面运行。
 
 内置技能的 `references/access.json` 提供固定到当前 Home 的 CLI 绝对路径，入口随技能分发，不修改全局 PATH，也不自动配置 MCP。该入口已带 `--home`，调用时不重复追加；独立安装的普通 `ne` 命令仍可按本文方式选择 Home。已有 MCP 连接应核对 `status.home` 与技能 Home 一致。
 
@@ -56,6 +56,7 @@ ne session list --title "摘要" --path /absolute/path
 ne task list --title "任务名称"
 ne project list --path /absolute/path
 ne search --query "关键词" --project <id>
+ne session resolve --agent codex --native-id <原生线程id>
 ne session show <id>
 ne session summary <id>
 ne session summary <id> --item 2 --revision 3
@@ -99,6 +100,10 @@ ne summary config set --agent none
 
 `summary config show/set` 复用设置页的提取配置。`set` 只修改提供的字段；切换 Agent 时先清除旧 Agent 的运行参数，再应用本次参数，同一 Agent 的别名不视为切换。模型、provider 和 effort 传空字符串恢复 Agent 默认值。`--agent none` 停用提取；不能同时设置非空运行参数。当前提取支持 Codex、Claude Code 和 Pi，参数字段遵守各自能力约束。允许预先保存尚未安装的 Agent 配置，不自动选择其他 Agent；实际提取仍会重新检查 CLI 并报告调用结果。保存配置本身不触发同步或提取。
 
+`session resolve --agent AGENT --native-id NATIVE_ID` 按 Agent 与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`agent`、标题、项目 `project_id`、跟踪任务 `task_ids` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。Agent 名称与 `agent list` 一致，接受已有别名，例如 `claude`。
+
+此查询无需桌面在线，不扫描、不启动终端，也不自动同步；尚未摄入或 Home 不匹配时返回 `not_found`。应由调用方明确传入自己的原生身份，不读取 MCP 服务进程的会话环境来猜测调用者，也不按目录、标题或最新活动推断。Codex 使用线程 ID，文件名中回退版本的后缀 ID 不是独立会话身份；内部子 Agent 的 ID 不自动映射为主会话。
+
 ## 编辑与归档
 
 ```sh
@@ -129,9 +134,47 @@ path register 要求目录已存在且为绝对路径，不创建磁盘目录，
 
 桌面应用运行时会观察这些写操作的数据库提交并刷新。CLI 不提供原始消息编辑、原生会话标题改写、项目身份修改或永久删除。
 
+## 会话终端控制
+
+这些命令需要同一 Home 的桌面应用运行，只控制 NoEnding 内嵌终端：
+
+```sh
+ne session new --agent codex --cwd /absolute/project --message "开始工作" --task TASK_ID
+ne session new --agent pi --cwd /absolute/project --file prompt.txt
+ne session terminals --session SESSION_ID
+```
+
+`--task` 可重复；可用 `--model`、`--provider`、`--effort` 覆盖运行参数。省略消息只打开 TUI。新建先返回终端 ID、`session_id=null` 和 `binding=pending`；原生会话被摄入后通过 terminals 查询实际绑定，不猜测 ID。一个会话最多一个有效的 NoEnding 运行终端。
+
+## 会话信箱
+
+所有会话都能收信，包括没有终端 TUI 的 Agent。信箱持久化，数据命令无需桌面运行：
+
+```sh
+ne session resolve --agent codex --native-id NATIVE_ID
+ne mailbox send --session RECIPIENT --from-session SELF --file message.txt --request-id unique-id
+# 可选请求立即通知；省略或 false 时遵循普通自动通知规则
+ne mailbox send --session RECIPIENT --from-session SELF --message "请查收新的信息" --notify-immediately true
+ne mailbox list --session SELF --state unread --limit 50
+ne mailbox read --session SELF --message-id MESSAGE_ID
+ne mailbox mark --session SELF --message-id MESSAGE_ID --revision N --state read --from-session SELF
+```
+
+`list` 可用 `unread|read|all`，返回 `items`、`unread` 和 `next_cursor`；后续页保持筛选并传 `--cursor`。读取不会自动已读，标记必须提供真正读到的 revision，冲突时重读。改回未读使用 `--state unread`。已读只代表查阅，不代表完成任务。
+
+发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 必须解析出有效来源会话，不能使用 user、external 或匿名来源。内嵌终端继承 `NOENDING_TERMINAL_ID` 时按实际绑定核对；外部 Agent 用原生 ID 解析后提供 `--from-session`。上下文与显式来源冲突会拒绝，不按目录猜测。会话 ID 用于本地关联，不是认证凭证。
+
+发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
+
+桌面运行期间，新消息可唤醒可恢复的 TUI 会话，首条输入仅为“noending信箱中有 N 条未读信息，请查收”；应用启动不为历史未读补唤醒。运行中的终端由用户控制自动通知，开关不持久化，不能由模型设置。普通自动通知在 Idle／Completed／Unknown 时使用原生排队快捷键。发件会话可用 `--notify-immediately true` 请求立即通知：仍须用户开启自动通知，在 Idle／Completed／Unknown／Working 可发送，Waiting 时不发送；提醒使用与手动通知相同的原生插队快捷键，内容仍为统一的未读数量，多条请求与普通查收提醒合并，不指定单条消息，不改变消息顺序。开启自动通知时会检查已有未读消息及立即通知请求，写入前复查未读状态；已读或删除的请求不再允许 Working 例外。手动查收提醒同样只发未读数量，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动提醒。Unknown 允许开启并尝试自动通知，状态保持未知，不代表输入框已就绪；Failed／Interrupted 会关闭自动通知。用户须保持聊天输入框干净可用。提醒不等待送达确认，也不自动重启终端重发。
+
+右侧栏只显示未读，模型标记已读后自动移除；会话详情只读展示全部消息。自动通知关闭时用户可以编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
+
+收发和标记的 Agent 操作规则见独立的 `noending-mailbox` 技能。技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
+
 ## 摘要
 
-摘要以 `summary.items` 列表返回，每个事项包含 `title`、`description`、`details` 和必填的 `title_locked`。界面可锁定或解锁标题；锁定后 Agent 仍可更新描述和细则，但不能通过改名、删除或合并使锁定标题消失；保留标题时可融合相关描述和细则。CLI 和 MCP 仅开放任务摘要的显式加锁／解锁；会话和项目摘要不开放该入口。未锁定事项可自由调整、合并、拆分、增删和排序。版本号仍属于整份摘要，事项没有固定 ID。
+摘要以 `summary.items` 列表返回，每个事项包含 `id`、`title`、`description`、`details` 和必填的 `title_locked`。界面可锁定或解锁标题；锁定后 Agent 仍可更新描述和细则，但不能通过改名、删除或合并使锁定标题消失；保留标题时可融合相关描述和细则。CLI 和 MCP 仅开放任务摘要的显式加锁／解锁；会话和项目摘要不开放该入口。未锁定事项可自由调整、合并、拆分、增删和排序。版本号仍属于整份摘要，每项还有稳定的 `id`；已有事项编辑、改名或重排时保留 ID，合并保留一个延续 ID，拆分仅一个沿用原 ID；新增事项省略 ID，由程序分配。
 
 ```sh
 ne summary search --query "关键词" --project <id> --scope all
@@ -160,7 +203,28 @@ ne summary unlock task <id> --item 1 --revision <当前版本>
 
 `summary lock task` / `summary unlock task` 显式切换一个任务事项的标题锁，必须提供当前 `--revision` 和从 1 开始的 `--item`，返回新版本及完整摘要。它不修改描述、细则或提取消费位置；普通 `summary set` 仍不得改变锁状态。多项操作逐次采用新版本，版本冲突时重新读取并定位，不能复用旧序号。
 
-从历史提取摘要时保留已有锁；发布待办时先写入，再锁定对应标题。确认待办完成后先写回结果，再显式解锁，让后续摘要可以合并和整理。未完成或仍待验收时保留锁，不把所有锁定事项都视为待办。加锁／解锁失败需单独报告，不把部分成功说成整个流程完成。
+发布、完成和废弃任务待办使用专用接口，分别在事务内执行发布锁定、完成解锁保留或废弃删除，不再分别调用 `summary set` 和锁接口：
+
+```sh
+ne task todo publish TASK_ID --file todo.json --revision 0
+ne task todo publish TASK_ID --item 1 --file todo.json --revision 1
+ne task todo complete TASK_ID --item 1 --revision 2
+# 如需同时回写结果，可选增加 --file result.json
+# 废弃另一个待办时，使用它当前的序号和版本
+ne task todo discard TASK_ID --item NUMBER --revision N
+```
+
+发布文件只需 `{"title":"修复会话同步"}`，可选增加 `description` 描述目标与必要边界，不接受 `details` 或锁字段。新事项描述省略时为空，细则初始化为空数组。省略 `--item` 时追加；指定时修改该事项标题与已提供的描述并锁定，保留已有细则和未提供的描述；显式传空字符串可清空描述，已锁定标题不能改名。
+
+待办事项的 `details` 记录本事项已确认的进展、结果、阻碍和验证情况，不是待办子项或执行步骤清单。推进时通过普通摘要编辑维护细则，保留其他事项与锁；不虚构进展，不按细则条数判断完成。
+
+完成操作默认只解锁标题，保留原有标题、描述和进展细则，使其成为普通摘要事项。可选传 `--file result.json` 回写结果，例如 `{"description":"同步异常已修复并验证","details":["回归验证通过，已有消息保持完整"]}`；提供时完整替换描述和细则，结果至少一处非空，所需旧背景和有效进展应一并保留。
+
+`task todo discard` 直接移除指定事项的标题、描述和细则，不保留废弃标记或占位，也可删除最后一项并清空任务摘要。完成和废弃均要求目标标题已锁定；这些是处理动作，不新增事项状态，不归档任务，不触发 Agent 或提取。其他事项、提取消费位置和任务归档状态保持原样。
+
+返回处理对象的 `item`、新 `revision` 与完整 `summary`。版本冲突或校验失败不会部分写入；通过 `--request-id` 去重，同一请求重试保持编号和全部参数，避免重复删除序号移位后的其他事项。每次操作后的序号都可能变化，冲突时重读，不复用旧序号。
+
+普通历史提取保留已有锁，不主动发布、完成或废弃待办。完成需核实实际结果；废弃需明确放弃对应工作，受阻、暂缓或未完成都不等于废弃。标题锁不是完成状态，不把所有锁定结论视为待办，也不把普通未锁定事项视为已完成。单独锁定／解锁仍用于显式调整标题保护。
 
 更新和重新生成等待配置的 Agent 调用及后端校验、入库全部完成后，直接返回最终结果。失败时 `ok=false` 并返回非零退出码；部分完成状态仍需检查结果字段。`update` 沿用旧摘要，`regenerate` 忽略目标旧摘要，遵守现有提取和并发规则。同一会话参与的独立和批量提取共用跨进程锁，桌面与 CLI 不能重叠提取。Ctrl+C 会取消当前命令并结束它启动的 headless Agent 进程树；同步在安全边界停止，已提交数据保留。强制杀进程无法保证执行清理，未确认完成的写请求需要核对业务状态后再操作。
 
@@ -192,6 +256,8 @@ ne sync --session <会话id>
 
 `sync` 增量同步全部已注册来源，`--source` 只同步指定来源，`--session` 只刷新指定会话，后二者互斥。命令等待同步完成，返回 `discovered`、`messages` 和 `failures`；全部来源有部分失败时返回 `sync_partial_failure`，统计放在 `error.details` 中。同步不触发摘要提取。桌面同时运行时会观察数据库提交并刷新显示。
 
+Codex 以转录头声明的线程 ID 识别会话；回退产生的文件版本仍归属同一会话，显示当前有效转录文件路径。同步会按历史引用的截止位置读取前序消息，再接入当前文件；真正具有独立线程 ID 的分叉保留为独立会话。普通和压缩转录都适用。无法确认当前版本或历史引用不完整时报告同步失败，保留已入库内容。
+
 ## 返回与数据目录
 
 成功：`{"schema_version":1,"ok":true,"data":...}`，退出码 0。
@@ -207,6 +273,8 @@ ne request show create-task-1
 
 同一数据目录下，以相同编号及完全相同参数重试会返回原结果，不再次执行；编号用于其他操作时返回 `request_conflict`。失败结果也保留，准备重新执行时使用新编号。记录保存在 `runtime/cli-requests/`，跨 CLI 进程保留，不随命令退出而清空。`request show` 返回 `running`、`completed` 或 `interrupted`。进程异常退出而未写完回执时，重试返回 `request_interrupted`，需要核对业务状态；不自动重复可能已经提交的操作。清理运行目录会失去对应的去重记录。
 
-默认按 `NOENDING_HOME`、应用保存的当前存储位置、默认存储目录依次定位数据，`--home <目录>` 可明确指定 Home；待迁移位置由桌面启动处理，CLI 不执行目录搬迁。桌面、CLI 和 MCP 共用数据库身份、版本及结构检查入口；不兼容时保留数据并返回错误。桌面或 CLI 使用数据目录期间会持有共享锁，目录迁移必须等待这些进程释放访问。`--connection <文件>` 仅用于提取查询，不能用于普通业务命令。
+默认按 `NOENDING_HOME`、应用保存的当前存储位置、默认存储目录依次定位数据，`--home <目录>` 可明确指定 Home；待迁移位置由桌面启动处理，CLI 不执行目录搬迁。桌面、CLI 和 MCP 共用数据库身份、基线、格式版本及开发结构检查入口；不兼容时保留数据并返回错误。格式版本独立于应用版本，只在承诺兼容的发布中递增；本地开发结构调整按 AGENTS.md 的草案规则处理。桌面或 CLI 使用数据目录期间会持有共享锁，目录迁移必须等待这些进程释放访问。`--connection <文件>` 仅用于提取查询，不能用于普通业务命令。
 
 摘要提取为 Agent 提供完整可执行文件路径及一次性连接，只开放 `extraction inputs/read/search`，不能通过该连接调用通用编辑命令；不提供 SQL、原始消息编辑或 `extraction submit`。提取结果仍由后端根据最终回复校验并保存。
+
+事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个事项、标题锁及待办操作都需要当前 `revision`。序号仍只属于对应摘要版本。查询和待办操作返回事项 ID；摘要全量编辑须保留延续事项的 `id`，新增事项可省略 `id`，由 NoEnding 生成。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。

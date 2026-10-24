@@ -141,11 +141,12 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     let files = fixture(&f, &id);
     let b = bridge(&f, &files);
     // Changes after scope creation are visible when queried, not cached bodies.
+    let updated = crate::domain::Summary::single("查询时摘要");
     f.db()
         .write()
         .execute(
-            "UPDATE session_contexts SET summary='{\"items\":[{\"title\":\"查询时摘要\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}' WHERE session_id=?1",
-            [&id],
+            "UPDATE session_contexts SET summary=?2 WHERE session_id=?1",
+            rusqlite::params![&id, &updated],
         )
         .unwrap();
     append(&f, &id, "截止位置之外", false);
@@ -161,7 +162,7 @@ fn queries_read_current_database_bodies_but_keep_message_frontier_and_detect_rew
     .unwrap();
     assert_eq!(
         page["records"][0]["record"]["current_summary"],
-        json!(crate::domain::Summary::single("查询时摘要"))
+        json!(updated)
     );
     assert_eq!(page["records"][0]["record"]["through_sequence"], 2);
     assert_eq!(page["records"][1]["record"]["content"], "本次消息");

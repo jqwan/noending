@@ -12,9 +12,11 @@ pub mod error;
 pub mod ingestion;
 pub mod launcher;
 pub mod lifecycle;
+pub mod mailbox;
 mod mcp;
 pub mod platform;
 pub mod search;
+pub mod session_control;
 pub mod skills;
 pub mod storage;
 pub mod sync;
@@ -96,6 +98,14 @@ pub fn run() {
             // touching app state from a thread.
             app.manage(terminal::TerminalRegistry::new(Some(app.handle().clone())));
 
+            {
+                let state=app.state::<commands::AppState>();
+                app.state::<terminal::TerminalRegistry>().initialize_mailboxes(&state.db)?;
+                let handle = app.handle().clone();
+                let host = session_control::DesktopHost::start(&home, move |command, sender| session_control::dispatch(&handle, command, sender.as_deref()))?;
+                app.manage(host);
+            }
+
             // Standalone CLI mutations are observed through SQLite data_version.
             {
                 let state: tauri::State<commands::AppState> = app.state();
@@ -103,9 +113,11 @@ pub fn run() {
                 let watcher = cli::watch_changes(state.db.clone(), move || {
                     let state: tauri::State<commands::AppState> = handle.state();
                     handle.state::<terminal::TerminalRegistry>().bind_discovered(&state.db);
+                    handle.state::<terminal::TerminalRegistry>().kick_notifications("");
                     let _ = handle.emit("cli-data-changed", ());
                 });
                 app.manage(watcher);
+                app.state::<terminal::TerminalRegistry>().kick_notifications("");
             }
 
             {
@@ -113,12 +125,17 @@ pub fn run() {
                 if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_memory_skill(&state.db,&home,&executable)) {
                     eprintln!("[noending] Memory skill unavailable: {error}");
                 }
-                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_collaboration_skill(&state.db,&home,&executable)) {
-                    eprintln!("[noending] Collaboration skill unavailable: {error}");
+                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_task_skill(&state.db,&home,&executable)) {
+                    eprintln!("[noending] Task skill unavailable: {error}");
                 }
-                if let Err(error) = skills::Roots::current().and_then(|roots| assistant::ensure_workspace(&state.db, &home, &layer, &roots)) {
+                if let Err(error) = assistant::ensure_workspace(&state.db, &home, &layer) {
                     eprintln!("[noending] Assistant workspace unavailable: {error}");
                 }
+            }
+
+            {
+                let state=app.state::<commands::AppState>();
+                if let Err(error)=cli::executable().map_err(|e|error::other(e.to_string())).and_then(|exe|skills::prepare_mailbox_skill(&state.db,&home,&exe)) {eprintln!("[mailbox skill] {error}");}
             }
 
             // Application Reconcile: at every startup, queue a background
@@ -262,7 +279,15 @@ pub fn run() {
             commands::terminal_for_session,
             commands::terminal_attach,
             commands::terminal_activity_seen,
+            commands::mailbox_list,
+            commands::mailbox_notification_hint,
+            commands::mailbox_send,
+            commands::mailbox_edit,
+            commands::mailbox_remind,
+            commands::terminal_notifications,
+            commands::terminal_auto_notifications,
             commands::terminal_input,
+            commands::terminal_cache_image,
             commands::terminal_acknowledge_output,
             commands::terminal_release_output,
             commands::terminal_resize,

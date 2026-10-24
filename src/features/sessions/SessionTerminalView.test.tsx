@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
 import { disposeTerminal, liveTerminals } from "./terminalCache";
 import { api } from "../../api";
+import { viewState } from "../../hooks/useViewState";
 import { sessionPages, sessionTerminals } from "./sessionNavigation";
 import type { TerminalBound, TerminalOutput, TerminalSnapshot } from "../../types";
 import { listen } from "@tauri-apps/api/event";
@@ -14,6 +15,10 @@ vi.mock("../../api", () => ({
   api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
+    terminalNotifications: vi.fn(async (terminalId: string) => ({ terminal_id: terminalId, session_id: "s", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 0, enabled: false, writing:false, error:null })),
+    terminalAutoNotifications: vi.fn(),
+    mailboxList: vi.fn().mockResolvedValue({items:[],unread:0,next_cursor:null}), mailboxSend: vi.fn(), mailboxRemind: vi.fn(), mailboxEdit: vi.fn(), mailboxNotificationHint:vi.fn().mockResolvedValue(false),
+    getSessionTracking: vi.fn().mockResolvedValue({ tracked_workstreams: [], available_workstreams: [] }),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
     getSessionDetail: vi.fn().mockResolvedValue({
       session: { agent: "codex", source_kind: "codex", archived_at: null, title: "会话" },
@@ -39,7 +44,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 const { readTextMock, copyMock } = vi.hoisted(() => ({ readTextMock: vi.fn(), copyMock: vi.fn() }));
-vi.mock("../../components/common", () => ({ copyToClipboard: copyMock }));
+vi.mock("../../components/common", async importOriginal => ({ ...await importOriginal<typeof import("../../components/common")>(), copyToClipboard: copyMock }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   readText: readTextMock,
   writeText: vi.fn().mockResolvedValue(undefined),
@@ -68,10 +73,12 @@ const { FakeTerminal } = vi.hoisted(() => {
     loadAddon() {}
     input(data: string) { this.dataHandler(data); }
     refresh() {}
-    focus() {}
+    focus() { this.textarea.focus(); }
+    blur() { this.textarea.blur(); }
     clearTextureAtlas() {}
     open(container: HTMLElement) {
       container.appendChild(this.element);
+      this.element.appendChild(this.textarea);
     }
     write(data: string | Uint8Array) {
       this.written.push(data);
@@ -101,16 +108,19 @@ const { FakeTerminal } = vi.hoisted(() => {
     compositionStartHandler: (() => void) | null = null;
     compositionEndHandler: (() => void) | null = null;
     pasteHandler: ((e: unknown) => void) | null = null;
-    textarea = {
-      removeEventListener() {},
-      value: "",
-      addEventListener: (type: string, handler: (e: unknown) => void) => {
+    textarea: HTMLTextAreaElement = (() => {
+      const textarea = document.createElement("textarea");
+      textarea.setAttribute("aria-label", "终端输入");
+      const addEventListener = textarea.addEventListener.bind(textarea);
+      textarea.addEventListener = ((type: string, handler: (e: unknown) => void, options?: boolean | AddEventListenerOptions) => {
         if (type === "paste") FakeTerminal.last!.pasteHandler = handler;
         if (type === "input") FakeTerminal.last!.inputHandler = handler;
         if (type === "compositionstart") FakeTerminal.last!.compositionStartHandler = handler as () => void;
         if (type === "compositionend") FakeTerminal.last!.compositionEndHandler = handler as () => void;
-      },
-    };
+        addEventListener(type, handler, options);
+      }) as typeof textarea.addEventListener;
+      return textarea;
+    })();
     capturePasteHandler: ((e: unknown) => void) | null = null;
     captureInputHandler: ((e: unknown) => void) | null = null;
     element: HTMLElement = (() => {
@@ -156,7 +166,8 @@ beforeEach(() => {
   Object.values(removedTargets).forEach(ids => ids.clear());
   const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   restoreUserAgent = () => userAgent.mockRestore();
-  sessionPages.clear(); sessionTerminals.clear();
+  sessionPages.clear(); sessionTerminals.clear(); viewState.clear();
+  vi.mocked(api.terminalNotifications).mockReset().mockImplementation(async terminalId => ({ terminal_id: terminalId, session_id: "s", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 1, enabled: false, writing:false, error:null }));
   vi.mocked(listen).mockReset().mockImplementation((event, handler) => {
     eventHandlers.set(event, handler as (e: unknown) => void);
     return Promise.resolve(() => {
@@ -273,7 +284,7 @@ it("attaches by terminal ID, replays scrollback and forwards input", async () =>
   ).toBe("hello-pty");
 
   FakeTerminal.last!.handlers.forEach((h) => h("q"));
-  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q", undefined));
+  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "q", undefined, 0));
 });
 
 it("retains output and exit events emitted while the attach snapshot is in flight", async () => {
@@ -446,7 +457,7 @@ it("the route seed renders the final header on the first frame — no 新会话 
   expect(entry.disabled).toBe(false);
   expect(screen.queryByText("新会话")).toBeNull();
   await act(async () => attach.resolve(snapshot({ session_id: "s1", session_title: null })));
-  expect(screen.getByRole("heading").textContent).toBe("修复布局");
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("修复布局");
 });
 
 it("a bound snapshot shows the session-detail entry enabled from the start", async () => {
@@ -472,7 +483,7 @@ it("waits for identity, output and exit subscriptions before attaching", async (
   const subscriptions = new Map(events.map(event => [event, deferred<void>()]));
   const register = vi.mocked(listen).getMockImplementation()!;
   vi.mocked(listen).mockImplementation((event, handler) =>
-    subscriptions.get(event)!.promise.then(() => register(event, handler)),
+    (subscriptions.get(event)?.promise ?? Promise.resolve()).then(() => register(event, handler)),
   );
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_title: "当前会话" }));
   renderView();
@@ -497,7 +508,7 @@ it("follows A to B without rebuilding the terminal and ignores old or duplicate 
 
   pushIdentity("b", 2);
   expect(screen.queryByText("任务 A")).toBeNull();
-  expect(screen.getByRole("heading").textContent).toBe("");
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("");
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "b", initialAgent: "codex" }));
   await act(async () => { pendingB.resolve(detail("任务 B")); });
@@ -601,7 +612,7 @@ it("delivers clipboard text once on supported paste shortcuts", async () => {
   await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
   const term = FakeTerminal.last!;
   expect(term.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: () => {} })).toBe(false);
-  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text", undefined));
+  await waitFor(() => expect(api.terminalInput).toHaveBeenCalledWith("t-1", "pasted text", undefined, 0));
   expect(api.terminalInput).toHaveBeenCalledTimes(1);
   expect(term.pasted).toEqual(["pasted text"]);
 });
@@ -724,7 +735,7 @@ it("IME direct-commit punctuation is delivered from the input payload", async ()
   // 直提交的怪癖，差分永远读空），载荷路径也立即交付。
   term.keyHandler!({ type: "keyup", keyCode: 229 });
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
-  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined);
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined, 0);
 });
 
 it("first direct-commit arms on the bare Shift keydown (probe log sequence)", async () => {
@@ -774,7 +785,7 @@ it("a re-dispatched identical payload for one insertion is delivered once", asyn
   // 第一次派发：插入落地（textarea 变为 "？"），交付一次。
   term.textarea.value = "？";
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
-  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined);
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined, 0);
   // 按住修饰键连打时 WebKit 会对同一次插入重复派发：载荷相同且 textarea
   // 未再变化 → 不再交付。
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
@@ -826,14 +837,14 @@ it("the diff shim ignores non-IME typing and mid-composition states", async () =
   term.textarea.value = "a";
   term.captureInputHandler!({ inputType: "insertText", data: "a", stopImmediatePropagation: () => {} });
   await tick();
-  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "a", undefined);
+  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "a", undefined, 0);
   // 候选窗中间态（composition 未结束）不投递。
   term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
   term.compositionStartHandler!();
   term.textarea.value = "ni";
   term.captureInputHandler!({ inputType: "insertCompositionText", data: "ni", stopImmediatePropagation: () => {} });
   await tick();
-  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "ni", undefined);
+  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "ni", undefined, 0);
 });
 
 it("shows the exit banner with the exit code for an exited terminal", async () => {
@@ -843,6 +854,9 @@ it("shows the exit banner with the exit code for an exited terminal", async () =
   renderView();
   await screen.findByText(/Agent 已退出/);
   expect(screen.getByText(/退出码 7/)).toBeTruthy();
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "终端输入" })).toHaveProperty("readOnly", true));
+  FakeTerminal.last!.focus();
+  expect(document.activeElement).not.toBe(FakeTerminal.last!.textarea);
 });
 
 it("attaching by terminal id never launches and never navigates away on bind", async () => {
@@ -923,4 +937,76 @@ it("keeps a terminal usable when closing fails", async () => {
   await waitFor(() => expect(toastMock).toHaveBeenCalledWith(expect.stringContaining("close failed")));
   expect(current.disposed).toBe(false);
   expect(navigate).not.toHaveBeenCalled();
+});
+
+it("collapses the status sidebar without changing ownership or losing a composer draft", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  const view = renderView();
+  const input = await screen.findByRole("textbox", { name: "发送消息" });
+  fireEvent.change(input, { target: { value: "keep this draft" } });
+  fireEvent.click(screen.getByRole("button", { name: "收起状态栏" }));
+  expect(screen.queryByRole("complementary", { name: "终端状态栏" })).toBeNull();
+  expect(api.terminalAutoNotifications).not.toHaveBeenCalled();
+  view.unmount();
+  renderView();
+  await screen.findByRole("button", { name: "展开状态栏" });
+  fireEvent.click(screen.getByRole("button", { name: "展开状态栏" }));
+  expect((screen.getByRole("textbox", { name: "发送消息" }) as HTMLTextAreaElement).value).toBe("keep this draft");
+  expect(screen.getByRole("region", { name: "跟踪任务" })).toBeTruthy();
+});
+it("managed terminals block user input but still answer terminal queries and restore manual input on exit", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  renderView();
+  await waitFor(() => expect(liveTerminals.get("t-1")?.inputReady).toBe(true));
+  const term = FakeTerminal.last!;
+  term.focus();
+  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "终端输入" }));
+  const base = await api.terminalNotifications("t-1");
+  vi.mocked(api.terminalAutoNotifications).mockResolvedValueOnce({ ...base, revision: 1, input_revision: 1, enabled:true });
+  const enter = screen.getByRole("button", { name: "开启自动通知" });
+  enter.focus();
+  fireEvent.click(enter);
+  fireEvent.click((await screen.findAllByRole("button", { name: "开启自动通知" })).slice(-1)[0]!);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" })));
+  expect(term.textarea.readOnly).toBe(true);
+  term.focus();
+  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" }));
+  vi.mocked(api.terminalInput).mockClear();
+  act(() => { FakeTerminal.last!.dataHandler("user typing"); FakeTerminal.last!.dataHandler("\x1b[1;1R"); });
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "\x1b[1;1R", undefined, 1);
+  expect(api.terminalInput).not.toHaveBeenCalledWith("t-1", "user typing", undefined, 1);
+  act(() => (vi.mocked(api.terminalNotifications).mockResolvedValue({ ...base, revision: 2, input_revision: 2, enabled:false }), eventHandlers.get("terminal-notifications-changed")?.({ payload: null })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "终端输入" })));
+  expect(term.textarea.readOnly).toBe(false);
+  act(() => FakeTerminal.last!.dataHandler("manual input"));
+  expect(api.terminalInput).toHaveBeenCalledWith("t-1", "manual input", undefined, 2);
+});
+it("restores managed focus routing after remount and keeps a collapsed sidebar from taking focus", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  const base = { ...await api.terminalNotifications("t-1"), enabled:true, active_terminal_id: "t-1" };
+  vi.mocked(api.terminalNotifications).mockResolvedValue(base);
+  const first = renderView();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" })));
+  first.unmount();
+  renderView();
+  await waitFor(() => expect(liveTerminals.get("t-1")?.onManagedFocus).toBeTypeOf("function"));
+  const input = screen.getByRole("textbox", { name: "发送消息" });
+  FakeTerminal.last!.focus();
+  expect(document.activeElement).toBe(input);
+  fireEvent.click(screen.getByRole("button", { name: "收起状态栏" }));
+  FakeTerminal.last!.focus();
+  expect(document.activeElement).not.toBe(input);
+  expect(document.activeElement).not.toBe(FakeTerminal.last!.textarea);
+  act(() => (vi.mocked(api.terminalNotifications).mockResolvedValue({ ...base, revision: 2, input_revision:2, enabled:false }), eventHandlers.get("terminal-notifications-changed")?.({ payload: null })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "终端输入" })));
+});
+it("preserves an unsent sidebar draft when its Session gets a replacement terminal", async () => {
+  vi.mocked(api.terminalAttach).mockImplementation(async id => snapshot({terminal_id:id}));
+  const first=render(<SessionTerminalView terminalId="t-1" navigate={vi.fn()} />);
+  const input=await screen.findByRole("textbox",{name:"发送消息"});
+  await waitFor(()=>expect(input).toHaveProperty("disabled",false));
+  fireEvent.change(input,{target:{value:"keep my unsent draft"}});
+  first.unmount();
+  render(<SessionTerminalView terminalId="t-new" navigate={vi.fn()} />);
+  await waitFor(()=>expect(screen.getByRole("textbox",{name:"发送消息"})).toHaveProperty("value","keep my unsent draft"));
 });

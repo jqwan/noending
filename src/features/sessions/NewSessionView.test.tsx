@@ -11,6 +11,15 @@ import type { PathProbe, ProjectCardData, WorkstreamCardData } from "../../types
 
 const probeFixture: PathProbe = {raw: "/tmp/workspace", status: "ok", canonical_path: "/tmp/workspace", exists: true, git_state: "none", git_kind: null, project: null};
 
+/** 任务选项收在 picker 里（项目下的任务数量没有上限），断言 checkbox 前先展开它。 */
+const openTaskMenu = () => fireEvent.click(screen.getByRole("button", { name: /^跟踪任务/ }));
+
+/** 「新建任务」动作挂在菜单底部，和项目菜单的「新增项目」一致。 */
+const openNewTaskForm = () => {
+  openTaskMenu();
+  fireEvent.click(screen.getByRole("button", { name: "新建任务" }));
+};
+
 const mockAgentStatus = {
   codex: {
     name: "Codex",
@@ -212,24 +221,16 @@ describe("New session optional first message", () => {
     expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "empty-terminal" });
   });
 
-  it("keeps an over-limit paste intact, blocks submission, and allows editing back to the limit", async () => {
-    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "limit-terminal", launched_via: "embedded", command_line: "codex", note: "" });
+  it("passes a long first message intact to the backend file transport", async () => {
+    vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "long-terminal", launched_via: "embedded", command_line: "codex", note: "" });
     render(<NewSessionView navigate={vi.fn()} />);
     const input = screen.getByLabelText("首条消息");
-    const boundary = "中".repeat(1998) + "😀";
-    const tooLong = boundary + "!";
-    fireEvent.change(input, { target: { value: tooLong } });
-    await waitFor(() => expect(api.prepareNewSession).toHaveBeenCalled());
-    expect(input).toHaveProperty("value", tooLong);
-    expect(input.getAttribute("aria-invalid")).toBe("true");
-    expect(screen.getByRole("alert").textContent).toContain("2001");
-    expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", true);
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
-    fireEvent.change(input, { target: { value: boundary } });
+    const message = "中".repeat(1998) + "😀!";
+    fireEvent.change(input, { target: { value: message } });
     await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", false));
+    expect(input).toHaveProperty("value", message);
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", boundary, NATIVE_RUNTIME));
+    await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", message, NATIVE_RUNTIME));
   });
 });
 
@@ -336,7 +337,7 @@ describe("NewSessionView task and project selection", () => {
     render(<NewSessionView navigate={vi.fn()} />);
 
     await waitFor(() => expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("chat"));
-    fireEvent.click(screen.getByRole("button", { name: "新建跟踪任务" }));
+    openNewTaskForm();
 
     expect(await screen.findByRole("heading", { name: "新建任务" })).toBeTruthy();
   });
@@ -347,14 +348,18 @@ describe("NewSessionView task and project selection", () => {
     vi.mocked(api.createWorkstream).mockResolvedValue(created);
     vi.mocked(api.listWorkstreamCards).mockResolvedValue([]);
     render(<NewSessionView projectId="p-1" navigate={vi.fn()}/>);
-    await waitFor(() => expect(screen.getByRole("button", { name: "新建跟踪任务" })).not.toHaveProperty("disabled", true));
-    fireEvent.click(screen.getByRole("button", { name: "新建跟踪任务" }));
+    await screen.findByRole("option", { name: "Project 1" });
+    openTaskMenu();
+    const addTask = screen.getByRole("button", { name: "新建任务" });
+    await waitFor(() => expect(addTask).not.toHaveProperty("disabled", true));
+    fireEvent.click(addTask);
     fireEvent.click(await screen.findByRole("button", {name:"移除项目 Project 1"}));
     fireEvent.change(screen.getByRole("textbox", {name:"标题"}), {target:{value:"独立任务"}});
     vi.mocked(api.listWorkstreamCards).mockResolvedValue([{...created,projects:[],last_activity_at:null,session_count:0,latest_session:null}]);
     fireEvent.submit(screen.getByRole("textbox", {name:"标题"}).closest("form")!);
     await waitFor(()=>expect(api.createWorkstream).toHaveBeenCalledWith("独立任务","",[]));
     await waitFor(()=>expect(screen.queryByRole("dialog")).toBeNull());
+    openTaskMenu();
     expect(screen.queryByRole("checkbox", {name:"独立任务"})).toBeNull();
   });
 
@@ -573,8 +578,11 @@ it("offers only tasks associated with the selected project", async () => {
   render(<NewSessionView navigate={vi.fn()}/>);
 
   await waitFor(()=>expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("chat"));
+  openTaskMenu();
   expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+  expect(screen.getByText("该项目下还没有跟踪任务")).toBeTruthy();
   await act(async()=>{fireEvent.change(screen.getByLabelText("所属项目"), {target:{value:"p-1"}});});
+  openTaskMenu();
   expect(screen.getAllByRole("checkbox")).toHaveLength(1);
   expect(screen.getByRole("checkbox", {name:"可跟踪任务"})).toBeTruthy();
 });
@@ -624,6 +632,7 @@ it("uses the first project of a multi-project task as its default", async () => 
   render(<NewSessionView workstreamId="multi" navigate={vi.fn()} />);
 
   await waitFor(() => expect((screen.getByLabelText("所属项目") as HTMLSelectElement).value).toBe("p-1"));
+  openTaskMenu();
   expect(screen.getByRole("checkbox", {name:"跨项目任务"})).toHaveProperty("checked", true);
   await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", ["multi"], "/repo/project-1", NATIVE_RUNTIME));
 });
@@ -798,6 +807,7 @@ describe("NewSessionView saved choices and drafts", () => {
     render(<NewSessionView navigate={vi.fn()} />);
     await chooseProjectAndDirectory();
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "pi" } });
+    openTaskMenu();
     fireEvent.click(screen.getByRole("checkbox", { name: "开发任务" }));
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "代码草稿\n保留换行" } });
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", ["task"], "/repo/worktree", NATIVE_RUNTIME));
@@ -805,6 +815,7 @@ describe("NewSessionView saved choices and drafts", () => {
     restart();
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", ["task"], "/repo/worktree", NATIVE_RUNTIME));
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "代码草稿\n保留换行");
+    openTaskMenu();
     expect(screen.getByRole("checkbox", { name: "开发任务" })).toHaveProperty("checked", true);
 
     restart({ projectId: "chat", agent: "claude_code" });
@@ -822,6 +833,7 @@ describe("NewSessionView saved choices and drafts", () => {
     await act(async () => { fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "repo" } }); });
     expect(screen.getByLabelText("项目目录")).toHaveProperty("value", "/repo/worktree");
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "代码草稿\n保留换行");
+    openTaskMenu();
     expect(screen.getByRole("checkbox", { name: "开发任务" })).toHaveProperty("checked", false);
     expect(api.setDefaultAgent).not.toHaveBeenCalled();
   });
@@ -889,15 +901,18 @@ it("launches with multiple checked tasks and keeps only shared tasks after chang
   ] as WorkstreamCardData[]);
   vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "multi-task-terminal", note: "", command_line: "", launched_via: "embedded" });
   render(<NewSessionView navigate={vi.fn()} />);
+  openTaskMenu();
   fireEvent.click(await screen.findByRole("checkbox", { name: "界面优化" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "发布检查" }));
   expect(screen.queryByRole("checkbox", { name: "旧任务" })).toBeNull();
   await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", ["first", "shared"], "/tmp/workspace", NATIVE_RUNTIME));
   fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "repo" } });
+  openTaskMenu();
   expect(screen.queryByRole("checkbox", { name: "界面优化" })).toBeNull();
   expect(screen.getByRole("checkbox", { name: "发布检查" })).toHaveProperty("checked", true);
   await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", ["shared"], "/repo/main", NATIVE_RUNTIME));
   fireEvent.change(screen.getByLabelText("所属项目"), { target: { value: "chat" } });
+  openTaskMenu();
   fireEvent.click(screen.getByRole("checkbox", { name: "界面优化" }));
   fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始这两项工作" } });
   await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).not.toHaveProperty("disabled", true));

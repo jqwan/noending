@@ -10,34 +10,23 @@ const task = (id: string, visibility: Workstream["visibility"] = "normal"): Work
 const data = (): SessionTracking => ({ session: { id: "s", project_id: "p", tracked_workstream_ids: ["existing"] } as SessionTracking["session"], tracked_workstreams: [task("existing", "archived")], available_workstreams: [task("first"), task("second")] });
 beforeEach(() => { vi.resetAllMocks(); viewState.clear(); vi.mocked(api.getSessionTracking).mockResolvedValue(data()); });
 afterEach(cleanup);
-it("hides with the session page and remembers open and closed state across navigation", async () => {
+it("shows tracked tasks inline and follows the containing sidebar visibility", async () => {
   const navigate = vi.fn();
-  const layout = (visible = true) => <div hidden={!visible}><SessionTaskTracking sessionId="s" navigate={navigate} /></div>;
+  const layout = (visible = true) => <aside hidden={!visible}><SessionTaskTracking sessionId="s" navigate={navigate} /></aside>;
   const view = render(layout());
-  expect(api.getSessionTracking).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   fireEvent.click(await screen.findByRole("button", { name: "existing" }));
   expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "existing", initialTitle: "existing" });
-  fireEvent.mouseDown(document.body);
-  expect(screen.getByRole("complementary")).toBeTruthy();
-  // AppShell keeps the session page mounted but hidden in other sections.
   view.rerender(layout(false));
-  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(screen.queryByRole("region", { name: "跟踪任务" })).toBeNull();
   view.rerender(layout());
-  expect(screen.getByRole("complementary")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "existing" })).toBeTruthy();
   view.unmount();
-  const restored = render(layout());
-  expect(screen.getByRole("complementary")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
-  expect(screen.queryByRole("complementary")).toBeNull();
-  restored.unmount();
   render(layout());
-  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(await screen.findByRole("button", { name: "existing" })).toBeTruthy();
 });
 
 it("opens task selection modal, supports multi-select checkboxes and quick untracking", async () => {
   render(<SessionTaskTracking sessionId="s" navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   await screen.findByRole("button", { name: "existing" });
 
   // Open modal via plus button
@@ -57,7 +46,6 @@ it("opens task selection modal, supports multi-select checkboxes and quick untra
 
 it("refreshes external changes and preserves a failed mutation's error in modal", async () => {
   render(<SessionTaskTracking sessionId="s" navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", { name: "跟踪任务" }));
   await screen.findByRole("button", { name: "existing" });
   vi.mocked(api.getSessionTracking).mockResolvedValue({ ...data(), tracked_workstreams: [task("changed")] });
   act(() => { window.dispatchEvent(new Event(EVT_SYNCED)); });

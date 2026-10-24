@@ -14,12 +14,14 @@ use crate::error::{other, Result};
 // attach each live in their own impl file rather than growing this monolith.
 pub mod context_repo;
 pub mod freshness;
+pub mod mailbox;
 pub mod message_query;
 pub mod project_context_repo;
 pub mod schema;
 pub mod session_lifecycle;
 pub mod session_paths;
 mod session_queries;
+mod source_identity;
 mod summary;
 pub mod workspace;
 pub mod workstream_projects;

@@ -14,8 +14,11 @@
 mod activity;
 #[cfg(any(windows, test))]
 mod flow;
+pub mod images;
 pub use activity::TerminalActivity;
 pub mod identity;
+pub mod messaging;
+pub mod notifications;
 pub mod spawn;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -164,7 +167,11 @@ struct TerminalRecord {
     scrollback: Scrollback,
     cols: u16,
     rows: u16,
-    writer: Option<Box<dyn std::io::Write + Send>>,
+    writer: Option<std::sync::Arc<Mutex<Box<dyn std::io::Write + Send>>>>,
+    notification: notifications::NotificationState,
+    observed_inputs: HashSet<String>,
+    runtime_files: Vec<crate::platform::runtime_file::RuntimeFile>,
+    started_turns: u64,
     master: Box<dyn portable_pty::MasterPty + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
@@ -184,18 +191,30 @@ pub struct TerminalRegistry {
     /// Prevent close/switch from racing the first binding's task tracking write.
     /// Database work happens without holding a terminal record or PTY lock.
     identity_mutations: Mutex<()>,
-    /// Serializes NoEnding's own Resume launches; Agent-reported identity
-    /// changes do not acquire this lock or impose exclusive Session ownership.
+    /// Serializes Session startup and excludes conflicting native bindings.
     /// Always acquired before `records`; never held across a process spawn.
     resume_reservations: Mutex<HashSet<String>>,
+    mailbox_frontier: Mutex<i64>,
+    waking_sessions: Mutex<HashSet<String>>,
+    notification_actions: Mutex<()>,
+    notification_worker: std::sync::atomic::AtomicBool,
+    notification_dirty: std::sync::atomic::AtomicBool,
     app: Option<AppHandle>,
 }
-
 /// A pending Resume claim. Every return path, including a failed spawn,
 /// releases it; a successful spawn has registered its live record by then.
 pub struct ResumeReservation<'a> {
     registry: &'a TerminalRegistry,
     session_id: String,
+    stopped_terminals: Vec<String>,
+}
+
+impl ResumeReservation<'_> {
+    pub(crate) fn finish_reconnect(&self) {
+        for id in &self.stopped_terminals {
+            self.registry.close(id);
+        }
+    }
 }
 
 impl Drop for ResumeReservation<'_> {
@@ -206,7 +225,27 @@ impl Drop for ResumeReservation<'_> {
     }
 }
 
+impl Drop for TerminalRegistry {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
+}
+
 impl TerminalRegistry {
+    pub fn retain_runtime_file(
+        &self,
+        id: &str,
+        file: crate::platform::runtime_file::RuntimeFile,
+    ) -> Result<()> {
+        let records = self.records.lock().unwrap();
+        let mut r = records
+            .get(id)
+            .ok_or_else(|| other("终端不存在"))?
+            .lock()
+            .unwrap();
+        r.runtime_files.push(file);
+        Ok(())
+    }
     pub fn new(app: Option<AppHandle>) -> Self {
         Self {
             records: Mutex::new(HashMap::new()),
@@ -214,6 +253,11 @@ impl TerminalRegistry {
             output_flows: Mutex::new(HashMap::new()),
             identity_mutations: Mutex::new(()),
             resume_reservations: Mutex::new(HashSet::new()),
+            mailbox_frontier: Mutex::new(0),
+            waking_sessions: Mutex::new(HashSet::new()),
+            notification_actions: Mutex::new(()),
+            notification_worker: std::sync::atomic::AtomicBool::new(false),
+            notification_dirty: std::sync::atomic::AtomicBool::new(false),
             app,
         }
     }
@@ -293,39 +337,52 @@ impl TerminalRegistry {
         Ok(ResumeReservation {
             registry: self,
             session_id: session_id.to_string(),
+            stopped_terminals: Vec::new(),
         })
     }
 
-    /// Restart exactly this terminal's current Session. Other terminals bound
-    /// to that Session are independent and stay alive. Keep the stopped record
-    /// until spawn succeeds, so failures retain scrollback and can be retried.
+    /// Stop all terminals of the verified Session before starting its replacement.
+    /// Keep stopped records on failure for inspection and retry.
     pub fn reserve_reconnect(
         &self,
         expected: &TerminalSummary,
         session_id: &str,
     ) -> Result<ResumeReservation<'_>> {
-        let (bridge, exit_code) = {
-            let mut reservations = self
-                .resume_reservations
-                .lock()
-                .map_err(|_| other("terminal reservation lock poisoned"))?;
-            if reservations.contains(session_id) {
-                return Err(other("该会话正在连接，请稍后重试"));
-            }
-            let records = self
-                .records
-                .lock()
-                .map_err(|_| other("terminal registry lock poisoned"))?;
+        let _identity = self
+            .identity_mutations
+            .lock()
+            .map_err(|_| other("终端状态不可用"))?;
+        let mut reservations = self
+            .resume_reservations
+            .lock()
+            .map_err(|_| other("terminal reservation lock poisoned"))?;
+        if reservations.contains(session_id) {
+            return Err(other("该会话正在连接，请稍后重试"));
+        }
+        let records = self
+            .records
+            .lock()
+            .map_err(|_| other("terminal registry lock poisoned"))?;
+        {
             let record = records
                 .get(&expected.terminal_id)
                 .ok_or_else(|| other("终端已关闭，无法重新连接"))?;
-            let mut record = record
+            let record = record
                 .lock()
                 .map_err(|_| other("terminal record lock poisoned"))?;
             if record.summary.session_id.as_deref() != Some(session_id)
                 || record.summary.identity_revision != expected.identity_revision
             {
                 return Err(other("终端会话已切换，请重试重新连接"));
+            }
+        }
+        let mut stopped_terminals = Vec::new();
+        for record in records.values() {
+            let mut record = record
+                .lock()
+                .map_err(|_| other("terminal record lock poisoned"))?;
+            if record.summary.session_id.as_deref() != Some(session_id) {
+                continue;
             }
             if record.summary.live {
                 record
@@ -335,20 +392,26 @@ impl TerminalRegistry {
             }
             record.summary.live = false;
             record.writer = None;
-            reservations.insert(session_id.to_owned());
-            (record.identity_bridge.take(), record.summary.exit_code)
-        };
-        drop(bridge);
+            record.notification.reset();
+            record.identity_bridge.take();
+            stopped_terminals.push(record.summary.terminal_id.clone());
+            if let Some(app) = &self.app {
+                let _ = app.emit(
+                    &format!("{EVENT_EXIT_PREFIX}{}", record.summary.terminal_id),
+                    TerminalExit {
+                        exit_code: record.summary.exit_code,
+                    },
+                );
+            }
+        }
+        reservations.insert(session_id.to_owned());
         if let Some(app) = &self.app {
-            let _ = app.emit(
-                &format!("{EVENT_EXIT_PREFIX}{}", expected.terminal_id),
-                TerminalExit { exit_code },
-            );
             let _ = app.emit(EVENT_CHANGED, ());
         }
         Ok(ResumeReservation {
             registry: self,
             session_id: session_id.to_owned(),
+            stopped_terminals,
         })
     }
 
@@ -371,10 +434,12 @@ impl TerminalRegistry {
             .unwrap_or(false);
         if changed {
             self.emit_activity();
+            self.kick_notifications(terminal_id);
         }
     }
 
     fn emit_identity(&self, summary: &TerminalSummary) {
+        self.kick_notifications(&summary.terminal_id);
         if let Some(app) = &self.app {
             let _ = app.emit(
                 EVENT_BOUND,
@@ -389,8 +454,35 @@ impl TerminalRegistry {
         }
     }
 
-    /// A native fact may rebind an existing terminal, even when other terminals
-    /// or an in-flight NoEnding Resume already refer to the same Session.
+    fn stop_conflicting_terminal(&self, record: &mut TerminalRecord, owner: &str) {
+        if record.summary.live {
+            let _ = record.killer.kill();
+        }
+        record.summary.live = false;
+        record.writer = None;
+        record.notification.reset();
+        let text = format!("\r\n[NoEnding] 目标会话已在终端 {owner} 中运行，已停止当前终端。\r\n");
+        let offset = record.scrollback.output_offset;
+        record.scrollback.push(text.as_bytes());
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                &format!("{EVENT_OUTPUT_PREFIX}{}", record.summary.terminal_id),
+                TerminalOutput {
+                    offset,
+                    data: base64::engine::general_purpose::STANDARD.encode(text),
+                },
+            );
+            let _ = app.emit(
+                &format!("{EVENT_EXIT_PREFIX}{}", record.summary.terminal_id),
+                TerminalExit {
+                    exit_code: record.summary.exit_code,
+                },
+            );
+            let _ = app.emit(EVENT_CHANGED, ());
+        }
+    }
+
+    /// A native fact may rebind a terminal only if its target is unoccupied.
     /// Clear the old Session immediately; resolving the new ID is a separate,
     /// version-checked step so slow ingestion cannot resurrect an old identity.
     pub fn report_native_identity(
@@ -399,10 +491,57 @@ impl TerminalRegistry {
         terminal_id: &str,
         event: &identity::NativeIdentityEvent,
     ) -> Option<TerminalSummary> {
+        self.apply_native_identity(db, terminal_id, event)
+            .map(|(summary, _)| summary)
+    }
+
+    /// Native hooks only schedule history work. The ingestion worker owns all
+    /// source reads and database updates, independently of mailbox notifications.
+    fn native_ingest_request(
+        &self,
+        db: &crate::storage::Db,
+        terminal_id: &str,
+        event: &identity::NativeIdentityEvent,
+    ) -> Option<crate::commands::ingestion::IngestScope> {
+        let (current, new_input) = self.apply_native_identity(db, terminal_id, event)?;
+        if let Some(session) = current.session_id.as_ref().filter(|_| new_input) {
+            // Reuse the cursor-based member refresh. Claude/Pi must not discover
+            // every neighboring transcript whenever a new input starts.
+            return Some(crate::commands::ingestion::IngestScope::RefreshSession(
+                session.clone(),
+            ));
+        }
+        // A user input can start while the Agent is already Working. Conversely,
+        // a new model invocation alone is not a new input (notably Antigravity).
+        if current.session_id.is_some()
+            && !new_input
+            && (event.input.is_some()
+                || event.activity.as_ref().is_some_and(|signal| {
+                    matches!(
+                        signal.state,
+                        activity::ActivityState::Working | activity::ActivityState::Waiting
+                    )
+                }))
+        {
+            return None;
+        }
+        Some(crate::commands::ingestion::IngestScope::ReconcileNative {
+            agent: current.agent,
+            native_id: event.native_id.clone(),
+            source_path: event.source_path.clone(),
+        })
+    }
+
+    fn apply_native_identity(
+        &self,
+        db: &crate::storage::Db,
+        terminal_id: &str,
+        event: &identity::NativeIdentityEvent,
+    ) -> Option<(TerminalSummary, bool)> {
         if event.native_id.trim().is_empty() {
             return None;
         }
-        let (summary, changed) = {
+        let (summary, changed, new_input) = {
             let _identity = self.identity_mutations.lock().ok()?;
             let records = self.records.lock().ok()?;
             let mut record = records.get(terminal_id)?.lock().ok()?;
@@ -413,7 +552,7 @@ impl TerminalRegistry {
             }
             if (matches!(
                 event.source.as_deref(),
-                Some("Stop" | "agent_end" | "agent_settled")
+                Some("Stop" | "agent_end" | "agent_settled" | "message_start" | "user_message")
             ) || event
                 .activity
                 .as_ref()
@@ -423,6 +562,20 @@ impl TerminalRegistry {
                     .as_deref()
                     .is_some_and(|id| id != event.native_id)
             {
+                return None;
+            }
+            let conflict = records
+                .iter()
+                .filter(|(id, _)| id.as_str() != terminal_id)
+                .find_map(|(id, peer)| {
+                    let peer = peer.lock().ok()?;
+                    (peer.summary.live
+                        && peer.summary.agent == record.summary.agent
+                        && peer.root_agent_session_id.as_deref() == Some(&event.native_id))
+                    .then(|| id.clone())
+                });
+            if let Some(owner) = conflict {
+                self.stop_conflicting_terminal(&mut record, &owner);
                 return None;
             }
             let identity_changed =
@@ -461,13 +614,38 @@ impl TerminalRegistry {
             if identity_changed || cwd_changed {
                 record.summary.identity_revision += 1;
             }
+            if identity_changed {
+                record.observed_inputs.clear();
+                record.notification.reset();
+                record.started_turns = 0;
+            }
+            if event
+                .activity
+                .as_ref()
+                .is_some_and(|signal| signal.starts_turn)
+            {
+                record.started_turns += 1;
+            }
             let activity_changed = event
                 .activity
                 .as_ref()
                 .is_some_and(|signal| record.summary.activity.apply(signal));
+            let new_input = event.input.as_ref().is_some_and(|input| {
+                let key = input
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| record.summary.activity.revision.to_string());
+                if record.observed_inputs.len() >= 256 {
+                    record.observed_inputs.clear();
+                }
+                record.observed_inputs.insert(key)
+            });
+            let state = record.summary.activity.state;
+            record.notification.observe(state);
             (
                 record.summary.clone(),
                 (identity_changed || cwd_changed, activity_changed),
+                new_input,
             )
         };
         if changed.0 {
@@ -478,9 +656,10 @@ impl TerminalRegistry {
         if summary.session_id.is_none() {
             self.resolve_native_identity(db, &summary, &event.native_id);
         }
+        self.kick_notifications(terminal_id);
         self.attach(terminal_id)
             .ok()
-            .map(|snapshot| snapshot.summary)
+            .map(|snapshot| (snapshot.summary, new_input))
     }
 
     fn resolve_native_identity(
@@ -506,6 +685,9 @@ impl TerminalRegistry {
         let Ok(identity_guard) = self.identity_mutations.lock() else {
             return;
         };
+        let Ok(reservations) = self.resume_reservations.lock() else {
+            return;
+        };
         let owner = {
             let Ok(records) = self.records.lock() else {
                 return;
@@ -522,6 +704,23 @@ impl TerminalRegistry {
                 || record.summary.agent != session.agent
                 || session.root_agent_session_id != native_id
             {
+                return;
+            }
+            let conflict = records
+                .iter()
+                .filter(|(id, _)| id.as_str() != expected.terminal_id)
+                .find_map(|(id, peer)| {
+                    let peer = peer.lock().ok()?;
+                    (peer.summary.live && peer.summary.session_id.as_deref() == Some(&session.id))
+                        .then(|| id.clone())
+                });
+            if conflict.is_some() || reservations.contains(&session.id) {
+                drop(record);
+                let mut record = records[&expected.terminal_id].lock().unwrap();
+                self.stop_conflicting_terminal(
+                    &mut record,
+                    conflict.as_deref().unwrap_or("正在启动的新终端"),
+                );
                 return;
             }
             record
@@ -550,8 +749,11 @@ impl TerminalRegistry {
             record.pending_tracking = None;
             record.summary.session_title = session.title.clone();
             record.summary.identity_revision += 1;
+            let state = record.summary.activity.state;
+            record.notification.observe(state);
             record.summary.clone()
         };
+        drop(reservations);
         drop(identity_guard);
         self.emit_identity(&bound);
     }
@@ -615,6 +817,13 @@ impl TerminalRegistry {
         for id in &ids {
             self.close_locked(id);
         }
+
+        if let Some(app) = &self.app {
+            if let Some(home) = crate::commands::noending_home(app) {
+                let state = app.state::<crate::commands::AppState>();
+                images::cleanup(&home, &state.db, session_id, None);
+            }
+        }
         Ok((result, ids))
     }
 
@@ -635,7 +844,9 @@ impl TerminalRegistry {
             };
             if record.summary.live {
                 let _ = record.killer.kill();
+                record.summary.live = false;
             }
+            record.notification.reset();
             (record.summary.clone(), record.identity_bridge.take())
         };
         drop(bridge);
@@ -712,7 +923,7 @@ impl TerminalRegistry {
     /// (xterm.js owns key encoding); an exited terminal refuses input with a
     /// stated reason instead of dropping bytes silently.
     pub fn write(&self, terminal_id: &str, data: &str) -> Result<()> {
-        self.write_bytes(terminal_id, data.as_bytes())
+        self.write_bytes(terminal_id, data.as_bytes(), None)
     }
 
     /// xterm onBinary uses one Unicode codepoint per raw byte, not UTF-8.
@@ -721,10 +932,32 @@ impl TerminalRegistry {
             .chars()
             .map(|ch| u8::try_from(ch as u32).map_err(|_| other("无效的终端字节输入")))
             .collect::<Result<Vec<_>>>()?;
-        self.write_bytes(terminal_id, &bytes)
+        self.write_bytes(terminal_id, &bytes, None)
     }
 
-    fn write_bytes(&self, terminal_id: &str, data: &[u8]) -> Result<()> {
+    pub fn write_guarded(
+        &self,
+        terminal_id: &str,
+        data: &str,
+        binary: bool,
+        revision: u64,
+    ) -> Result<()> {
+        let bytes = if binary {
+            data.chars()
+                .map(|ch| u8::try_from(ch as u32).map_err(|_| other("无效的终端字节输入")))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            data.as_bytes().to_vec()
+        };
+        self.write_bytes(terminal_id, &bytes, Some(revision))
+    }
+
+    fn write_bytes(
+        &self,
+        terminal_id: &str,
+        data: &[u8],
+        input_revision: Option<u64>,
+    ) -> Result<()> {
         let records = self
             .records
             .lock()
@@ -734,15 +967,33 @@ impl TerminalRegistry {
             .ok_or_else(|| other("终端不存在"))?
             .clone();
         drop(records);
-        let mut record = record
+        let writer = {
+            let record = record.lock().map_err(|_| other("终端不可用"))?;
+            if !record.summary.live {
+                return Err(other("该终端中的 Agent 已退出"));
+            }
+            record
+                .writer
+                .clone()
+                .ok_or_else(|| other("终端输入流不可用"))?
+        };
+        let mut writer = writer.lock().map_err(|_| other("终端输入流不可用"))?;
+        let record = record
             .lock()
             .map_err(|_| other("terminal record lock poisoned"))?;
         if !record.summary.live {
             return Err(other("该终端中的 Agent 已退出"));
         }
-        let Some(writer) = record.writer.as_mut() else {
-            return Err(other("终端输出流不可用"));
-        };
+        let reply = messaging::terminal_reply(data);
+        if !reply
+            && (record.notification.enabled
+                || record.notification.writing
+                || input_revision.is_some_and(|epoch| epoch != record.notification.input_revision))
+        {
+            return Err(other("终端自动通知已开启或输入状态已变化，请使用信箱"));
+        }
+        drop(record);
+        // Never hold a record lock across blocking PTY I/O.
         writer
             .write_all(data)
             .and_then(|_| writer.flush())
@@ -795,10 +1046,13 @@ impl TerminalRegistry {
             let Ok(mut record) = record.lock() else {
                 continue;
             };
+            record.notification.reset();
             if record.summary.live {
                 let _ = record.killer.kill();
+                record.summary.live = false;
             }
         }
+        drop(records);
     }
 
     /// Insert a freshly spawned terminal and start its reader/wait threads.
@@ -815,7 +1069,7 @@ impl TerminalRegistry {
         killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
         reader: Box<dyn Read + Send>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
-    ) -> TerminalSummary {
+    ) -> Result<TerminalSummary> {
         let terminal_id = summary.terminal_id.clone();
         #[cfg(windows)]
         let output_flow = {
@@ -839,12 +1093,41 @@ impl TerminalRegistry {
             scrollback,
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
-            writer: Some(writer),
+            writer: Some(std::sync::Arc::new(Mutex::new(writer))),
+            notification: notifications::NotificationState::default(),
+            observed_inputs: HashSet::new(),
+            runtime_files: Vec::new(),
+            started_turns: 0,
             master,
             killer,
         }));
-        if let Ok(mut records) = self.records.lock() {
-            records.insert(terminal_id.clone(), record.clone());
+        let conflict = {
+            let _identity = self.identity_mutations.lock().unwrap();
+            let mut records = self.records.lock().unwrap();
+            let incoming = record.lock().unwrap();
+            let conflict = records.iter().find_map(|(id, peer)| {
+                let peer = peer.lock().ok()?;
+                (peer.summary.live
+                    && (summary.session_id.is_some()
+                        && peer.summary.session_id == summary.session_id
+                        || incoming.root_agent_session_id.is_some()
+                            && peer.summary.agent == summary.agent
+                            && peer.root_agent_session_id == incoming.root_agent_session_id))
+                    .then(|| id.clone())
+            });
+            drop(incoming);
+            if let Some(owner) = &conflict {
+                self.stop_conflicting_terminal(&mut record.lock().unwrap(), owner);
+            } else {
+                records.insert(terminal_id.clone(), record.clone());
+            }
+            conflict
+        };
+        #[cfg(windows)]
+        if conflict.is_some() {
+            if let Some(flow) = self.output_flows.lock().unwrap().remove(&terminal_id) {
+                flow.close();
+            }
         }
         // The live set grew: sidebar and other list consumers refetch once.
         if let Some(app) = &self.app {
@@ -860,6 +1143,8 @@ impl TerminalRegistry {
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut chunk = [0u8; 4096];
+            #[cfg(windows)]
+            let mut startup_query = spawn::StartupQuery::default();
             loop {
                 #[cfg(windows)]
                 if !output_flow.wait() {
@@ -868,17 +1153,45 @@ impl TerminalRegistry {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
+                        let data = &chunk[..n];
+                        #[cfg(windows)]
+                        let data = {
+                            let (output, reply) = startup_query.feed(data);
+                            if reply {
+                                let writer = reader_record
+                                    .lock()
+                                    .ok()
+                                    .and_then(|record| record.writer.clone());
+                                if let Some(writer) = writer {
+                                    let Ok(mut writer) = writer.lock() else {
+                                        break;
+                                    };
+                                    use std::io::Write;
+                                    if writer
+                                        .write_all(b"\x1b[1;1R")
+                                        .and_then(|_| writer.flush())
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            output
+                        };
+                        if data.is_empty() {
+                            continue;
+                        }
                         let encoded = {
                             let Ok(mut record) = reader_record.lock() else {
                                 break;
                             };
                             let offset = record.scrollback.output_offset;
-                            record.scrollback.push(&chunk[..n]);
+                            record.scrollback.push(&data);
                             #[cfg(windows)]
                             output_flow.produced(record.scrollback.output_offset);
                             TerminalOutput {
                                 offset,
-                                data: base64::engine::general_purpose::STANDARD.encode(&chunk[..n]),
+                                data: base64::engine::general_purpose::STANDARD.encode(&data),
                             }
                         };
                         if let Some(app) = &reader_app {
@@ -903,6 +1216,7 @@ impl TerminalRegistry {
                 record.summary.live = false;
                 record.summary.exit_code = exit_code;
                 record.writer = None;
+                record.notification.reset();
                 record.identity_bridge.take()
             } else {
                 None
@@ -917,7 +1231,11 @@ impl TerminalRegistry {
             }
         });
 
-        summary
+        if conflict.is_some() {
+            Err(other("该会话已有运行终端，已停止重复启动的终端"))
+        } else {
+            Ok(summary)
+        }
     }
 }
 
@@ -967,13 +1285,18 @@ pub fn spawn_embedded(
     }
     // The webview uses xterm; a GUI launch may have no TERM or inherit "dumb",
     // which makes Codex stop before its lifecycle hooks can run.
+    wrapped.env(crate::session_control::CALLER_TERMINAL_ENV, &terminal_id);
     wrapped.env("TERM", "xterm-256color");
     #[cfg(windows)]
     wrapped.env("COLORTERM", "truecolor");
     let child = pty.spawn_command(&wrapped)?;
     let pid = child.process_id();
-    let reader = pty.take_reader()?;
-    let writer = pty.take_writer()?;
+    let reader = pty
+        .take_reader()
+        .map_err(|e| crate::error::AppError::AgentLaunchUncertain(e.to_string()))?;
+    let writer = pty
+        .take_writer()
+        .map_err(|e| crate::error::AppError::AgentLaunchUncertain(e.to_string()))?;
     #[cfg(windows)]
     let killer = spawn::process_tree_killer(child.as_ref());
     #[cfg(not(windows))]
@@ -994,44 +1317,28 @@ pub fn spawn_embedded(
     };
 
     let bridge = prepared_identity.map(|prepared| std::sync::Arc::new(prepared.bridge));
-    let summary = target.registry.register(
-        summary,
-        target.root_agent_session_id.map(str::to_string),
-        bridge.clone(),
-        Scrollback::default(),
-        pty.into_master(),
-        writer,
-        killer,
-        reader,
-        child,
-    );
+    let summary = target
+        .registry
+        .register(
+            summary,
+            target.root_agent_session_id.map(str::to_string),
+            bridge.clone(),
+            Scrollback::default(),
+            pty.into_master(),
+            writer,
+            killer,
+            reader,
+            child,
+        )
+        .map_err(|e| crate::error::AppError::AgentLaunchUncertain(e.to_string()))?;
 
     if let (Some(bridge), Some(app)) = (bridge, target.registry.app.clone()) {
         let terminal_id = summary.terminal_id.clone();
         bridge.activate(std::sync::Arc::new(move |event| {
             let registry = app.state::<TerminalRegistry>();
             let state = app.state::<crate::commands::AppState>();
-            if let Some(current) = registry.report_native_identity(&state.db, &terminal_id, &event)
-            {
-                // Tool/permission activity must not enqueue a source rescan.
-                if current.session_id.is_some()
-                    && event.activity.as_ref().is_some_and(|signal| {
-                        matches!(
-                            signal.state,
-                            activity::ActivityState::Working | activity::ActivityState::Waiting
-                        )
-                    })
-                {
-                    return;
-                }
-                crate::commands::ingestion::enqueue(
-                    &app,
-                    crate::commands::ingestion::IngestScope::ReconcileNative {
-                        agent: current.agent,
-                        native_id: event.native_id.clone(),
-                        source_path: event.source_path.clone(),
-                    },
-                );
+            if let Some(scope) = registry.native_ingest_request(&state.db, &terminal_id, &event) {
+                crate::commands::ingestion::enqueue(&app, scope);
             }
         }));
     }
@@ -1111,6 +1418,7 @@ mod tests {
             let text = read();
             if !answered && text.contains("\x1b[6n") {
                 registry.write(&id, "\x1b[1;1R").unwrap();
+                registry.write(&id, "\x1b[I").unwrap();
                 answered = true;
             }
             text.contains("MOUSE-READY").then_some(text)
@@ -1420,7 +1728,11 @@ mod tests {
             scrollback: Scrollback::default(),
             cols: INITIAL_COLS,
             rows: INITIAL_ROWS,
-            writer: Some(writer),
+            writer: Some(std::sync::Arc::new(Mutex::new(writer))),
+            notification: notifications::NotificationState::default(),
+            observed_inputs: HashSet::new(),
+            runtime_files: Vec::new(),
+            started_turns: 0,
             master: pty.into_master(),
             killer: Box::new(NoopChildKiller),
         };
@@ -1439,6 +1751,7 @@ mod tests {
             source_path: None,
             source: None,
             activity: None,
+            input: None,
         }
     }
 
@@ -1511,7 +1824,7 @@ mod tests {
         let db = binding_db();
         let registry = registry();
         let first = identity_terminal(&registry, Agent::Codex, Some("a"), None);
-        let peer = identity_terminal(&registry, Agent::Codex, Some("a"), None);
+        let peer = identity_terminal(&registry, Agent::Codex, Some("peer-native"), None);
         let notify = |id: &str, native: &str, turn: &str, state, starts_turn| {
             let mut event = native_event(native);
             event.activity = Some(ActivitySignal {
@@ -1522,7 +1835,7 @@ mod tests {
             registry.report_native_identity(&db, id, &event);
         };
         notify(&first, "a", "1", Working, true);
-        notify(&peer, "a", "peer", Working, true);
+        notify(&peer, "peer-native", "peer", Working, true);
         notify(&first, "a", "1", Waiting, false);
         assert_eq!(
             registry.attach(&first).unwrap().summary.activity.state,
@@ -1536,6 +1849,12 @@ mod tests {
             Working
         );
         registry.mark_activity_seen(&first, completed.revision);
+        assert!(!registry.attach(&first).unwrap().summary.activity.unread);
+        notify(&first, "a", "1", Completed, false);
+        assert_eq!(
+            registry.attach(&first).unwrap().summary.activity.state,
+            Idle
+        );
         assert!(!registry.attach(&first).unwrap().summary.activity.unread);
         notify(&first, "a", "2", Working, true);
         notify(&first, "a", "1", Completed, false);
@@ -1659,7 +1978,8 @@ mod tests {
             attach_fixture_paths(&db);
             registry.bind_discovered(&db);
             assert_eq!(owner(&db, &a), None);
-            // Switching to another conversation reads that conversation's current task.
+            registry.close(&other).unwrap();
+            // Switching to an unoccupied conversation preserves its current task.
             let current = registry
                 .report_native_identity(&db, &terminal, &native_event("native-b"))
                 .unwrap();
@@ -1995,71 +2315,59 @@ mod tests {
     }
 
     #[test]
-    fn native_discovery_binds_multiple_terminals_even_with_a_pending_resume() {
+    fn native_discovery_respects_pending_startup_then_allows_one_binding() {
         let registry = registry();
         let db = binding_db();
         let session = ingested_native(&db, Agent::Codex, "shared-native");
         let pending = registry.reserve_resume(&session.id).unwrap();
-        let first = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
-        let second = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
-
-        attach_fixture_paths(&db);
+        let conflicting = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
         registry.bind_discovered(&db);
-        for id in [&first, &second] {
-            let summary = registry.attach(id).unwrap().summary;
-            assert_eq!(summary.session_id.as_deref(), Some(session.id.as_str()));
-            assert_eq!(summary.identity_revision, 1);
-        }
-        assert_eq!(registry.list().len(), 2);
-        assert!(registry
-            .resume_reservations
-            .lock()
-            .unwrap()
-            .contains(&session.id));
+        let stopped = registry.attach(&conflicting).unwrap().summary;
+        assert!(!stopped.live);
+        assert!(stopped.session_id.is_none());
         drop(pending);
-        assert!(registry.has_live(&session.id));
-        assert!(registry.reserve_resume(&session.id).is_err());
+        let owner = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry.for_session(&session.id).unwrap().terminal_id,
+            owner
+        );
+        let duplicate = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
+        registry.bind_discovered(&db);
+        assert!(!registry.attach(&duplicate).unwrap().summary.live);
+        assert!(registry
+            .attach(&duplicate)
+            .unwrap()
+            .summary
+            .session_id
+            .is_none());
+        assert!(registry.attach(&owner).unwrap().summary.live);
     }
 
     #[test]
-    fn native_notification_rebinds_a_to_b_despite_another_terminal_and_pending_resume() {
+    fn native_switch_to_an_occupied_session_stops_incoming_terminal_and_preserves_owner() {
         let registry = registry();
         let db = binding_db();
         let a = ingested_native(&db, Agent::Pi, "native-a");
         let b = ingested_native(&db, Agent::Pi, "native-b");
-        let terminal = identity_terminal(&registry, Agent::Pi, Some("native-a"), Some(&a.id));
-        let pending = registry.reserve_resume(&b.id).unwrap();
-        let other = identity_terminal(&registry, Agent::Pi, Some("native-b"), Some(&b.id));
-        let before = registry.attach(&terminal).unwrap().summary;
-        let mut event = native_event("native-b");
-        event.cwd = Some(format!("{}/other", fixture_cwd()));
-
-        let rebound = registry
-            .report_native_identity(&db, &terminal, &event)
-            .unwrap();
-        assert_eq!(rebound.session_id.as_deref(), Some(b.id.as_str()));
-        assert!(rebound.identity_revision > before.identity_revision);
-        assert_eq!(rebound.cwd, event.cwd);
-        assert_eq!(rebound.session_title.as_deref(), Some("native-b"));
-        assert!(registry.for_session(&a.id).is_none());
+        let incoming = identity_terminal(&registry, Agent::Pi, Some("native-a"), Some(&a.id));
+        let owner = identity_terminal(&registry, Agent::Pi, Some("native-b"), Some(&b.id));
+        assert!(registry
+            .report_native_identity(&db, &incoming, &native_event("native-b"))
+            .is_none());
+        assert!(!registry.attach(&incoming).unwrap().summary.live);
+        assert_eq!(registry.for_session(&b.id).unwrap().terminal_id, owner);
+        assert!(registry.attach(&owner).unwrap().summary.live);
+        registry.close(&owner).unwrap();
+        let free = identity_terminal(&registry, Agent::Pi, None, None);
         assert_eq!(
             registry
-                .attach(&other)
+                .report_native_identity(&db, &free, &native_event("native-b"))
                 .unwrap()
-                .summary
                 .session_id
                 .as_deref(),
             Some(b.id.as_str())
         );
-        assert_eq!(
-            registry
-                .list()
-                .iter()
-                .filter(|t| t.session_id.as_deref() == Some(b.id.as_str()))
-                .count(),
-            2
-        );
-        drop(pending);
     }
 
     #[test]
@@ -2428,6 +2736,9 @@ mod tests {
             .summary
             .live = false;
         let keep = identity_terminal(&registry, Agent::Codex, Some("keep-b"), Some(&b.id));
+        let mail = db
+            .mailbox_send(&a.id, None, "retained until deletion commits")
+            .unwrap();
         // Unarchived deletion fails without dropping a terminal or its output.
         assert!(registry
             .with_session_removal(&a.id, || crate::lifecycle::permanently_delete_session(
@@ -2435,6 +2746,10 @@ mod tests {
             ))
             .is_err());
         assert_eq!(registry.list().len(), 3);
+        assert_eq!(
+            db.mailbox_read(&a.id, &mail.id).unwrap().body,
+            "retained until deletion commits"
+        );
         crate::lifecycle::archive_session(&db, &a.id).unwrap();
         let (outcome, removed) = registry
             .with_session_removal(&a.id, || {
@@ -2448,18 +2763,27 @@ mod tests {
         assert!(registry.attach(&live).is_err() && registry.attach(&exited).is_err());
         assert!(registry.attach(&keep).unwrap().summary.live);
         assert!(db.get_session(&b.id).unwrap().is_some());
+        assert!(db.mailbox_read(&a.id, &mail.id).is_err());
+        // Rediscovering the same native identity cannot resurrect deleted work.
     }
 
     #[test]
-    fn reconnect_reserves_and_stops_only_its_own_terminal_and_can_be_retried() {
+    fn reconnect_stops_all_bound_terminals_preserves_other_sessions_and_can_be_retried() {
         let registry = registry();
         let old = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
         let other = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let unrelated = identity_terminal(
+            &registry,
+            Agent::Codex,
+            Some("other-native"),
+            Some("other-session"),
+        );
         let expected = registry.attach(&old).unwrap().summary;
         let claim = registry.reserve_reconnect(&expected, "session").unwrap();
         assert!(!registry.attach(&old).unwrap().summary.live);
-        assert!(registry.attach(&other).unwrap().summary.live);
-        assert_eq!(registry.for_session("session").unwrap().terminal_id, other);
+        assert!(!registry.attach(&other).unwrap().summary.live);
+        assert!(registry.attach(&unrelated).unwrap().summary.live);
+        assert!(registry.for_session("session").is_none());
         assert!(registry.reserve_reconnect(&expected, "session").is_err());
         assert!(registry.reserve_resume("session").is_err());
         drop(claim);
@@ -2506,7 +2830,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn terminal_conpty_startup_query_survives_attach_and_unblocks_on_reply() {
+    fn terminal_conpty_launch_runs_without_opening_the_terminal_page() {
         let registry = registry();
         let cmd = AgentCommand {
             program: "cmd.exe".into(),
@@ -2515,39 +2839,24 @@ mod tests {
         };
         let outcome = spawn_embedded(&cmd, &target(&registry, "s-conpty")).unwrap();
         let id = outcome.terminal_id.unwrap();
-        struct Cleanup<'a>(&'a TerminalRegistry, &'a str);
+        struct Cleanup<'a>(&'a TerminalRegistry);
         impl Drop for Cleanup<'_> {
             fn drop(&mut self) {
-                let _ = self.0.write(self.1, "\x1b[1;1R");
                 self.0.kill_all();
             }
         }
-        let _cleanup = Cleanup(&registry, &id);
-        let snapshot = until("ConPTY startup cursor query", || {
+        let _cleanup = Cleanup(&registry);
+        let output = until("command output without frontend replies", || {
             let snapshot = registry.attach(&id).ok()?;
             let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&snapshot.scrollback)
-                .ok()?;
-            bytes
-                .windows(4)
-                .any(|part| part == b"\x1b[6n")
-                .then_some(snapshot)
-        });
-        let initial = base64::engine::general_purpose::STANDARD
-            .decode(&snapshot.scrollback)
-            .unwrap();
-        assert_eq!(snapshot.output_offset, initial.len() as u64);
-        assert!(!String::from_utf8_lossy(&initial).contains("NOENDING_CONPTY_READY"));
-        registry.write(&id, "\x1b[1;1R").unwrap();
-        until("command output after cursor reply", || {
-            let current = registry.attach(&id).ok()?;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&current.scrollback)
+                .decode(snapshot.scrollback)
                 .ok()?;
             String::from_utf8_lossy(&bytes)
                 .contains("NOENDING_CONPTY_READY")
-                .then_some(())
+                .then_some(bytes)
         });
+        assert!(!output.windows(4).any(|bytes| bytes == b"\x1b[6n"));
+        registry.kill_all();
     }
 
     #[cfg(unix)]
@@ -2612,10 +2921,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_declares_the_xterm_environment_to_the_agent() {
+    fn terminal_exports_xterm_and_its_own_id_to_agent_child_processes() {
         let registry = registry();
         let outcome = spawn_embedded(
-            &sh(r#"printf 'term=%s' "$TERM""#),
+            &sh(r#"printf 'term=%s;caller=%s' "$TERM" "$(sh -c 'printf %s "$NOENDING_TERMINAL_ID"')""#),
             &target(&registry, "s-term"),
         )
         .unwrap();
@@ -2626,7 +2935,7 @@ mod tests {
                 .decode(snapshot.scrollback)
                 .ok()?;
             String::from_utf8_lossy(&bytes)
-                .contains("term=xterm-256color")
+                .contains(&format!("term=xterm-256color;caller={id}"))
                 .then_some(())
         });
     }
@@ -2667,27 +2976,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn for_session_prefers_the_live_terminal_over_a_newer_exited_one() {
+    fn duplicate_spawn_is_refused_and_a_session_can_restart_after_its_owner_exits() {
         let registry = registry();
         let live = spawn_embedded(&sh("sleep 30"), &target(&registry, "s-two")).unwrap();
-        let exited = spawn_embedded(&sh("exit 0"), &target(&registry, "s-two")).unwrap();
-
-        // Wait until the second terminal is a recorded EXIT first — before
-        // that, for_session legitimately returns the newer (still-live)
-        // second terminal and the preference is unobservable.
-        until("exited terminal to be recorded", || {
-            registry
-                .attach(&exited.terminal_id.clone().unwrap())
-                .ok()
-                .filter(|s| !s.summary.live)
-        });
-        let summary = registry.for_session("s-two").unwrap();
+        assert!(spawn_embedded(&sh("sleep 30"), &target(&registry, "s-two")).is_err());
         assert_eq!(
-            summary.terminal_id,
-            live.terminal_id.clone().unwrap(),
-            "a live terminal must win over a newer exited one"
+            registry.for_session("s-two").unwrap().terminal_id,
+            live.terminal_id.clone().unwrap()
         );
-        registry.kill_all();
+        assert_eq!(registry.list().len(), 1);
+        registry
+            .close(live.terminal_id.as_deref().unwrap())
+            .unwrap();
+        let replacement = spawn_embedded(&sh("sleep 30"), &target(&registry, "s-two")).unwrap();
+        assert_eq!(
+            registry.for_session("s-two").unwrap().terminal_id,
+            replacement.terminal_id.unwrap()
+        );
     }
 
     #[cfg(unix)]
@@ -2796,6 +3101,544 @@ mod tests {
         assert!(registry.for_session("s-live").is_none());
         assert!(registry.attach(&id).is_err());
         assert!(registry.close(&id).is_none(), "closing twice is a no-op");
+    }
+    struct ReminderWriter(std::sync::Arc<Mutex<Vec<u8>>>, bool);
+    impl std::io::Write for ReminderWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.1 {
+                return Err(std::io::Error::other("fixture disconnected"));
+            }
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn mailbox_terminal(
+        agent: Agent,
+    ) -> (
+        TerminalRegistry,
+        crate::storage::Db,
+        String,
+        String,
+        std::sync::Arc<Mutex<Vec<u8>>>,
+    ) {
+        let registry = registry();
+        let db = binding_db();
+        let session = ingested_native(&db, agent, "mailbox-native");
+        let terminal =
+            identity_terminal(&registry, agent, Some("mailbox-native"), Some(&session.id));
+        let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
+        registry.records.lock().unwrap()[&terminal]
+            .lock()
+            .unwrap()
+            .writer = Some(std::sync::Arc::new(Mutex::new(Box::new(ReminderWriter(
+            bytes.clone(),
+            false,
+        )))));
+        let mut event = native_event("mailbox-native");
+        event.activity = Some(activity::ActivitySignal {
+            state: activity::ActivityState::Idle,
+            turn_id: None,
+            starts_turn: false,
+        });
+        registry.report_native_identity(&db, &terminal, &event);
+        registry.initialize_mailboxes(&db).unwrap();
+        (registry, db, terminal, session.id, bytes)
+    }
+    #[test]
+    fn automatic_reminders_merge_new_mail_and_do_not_wait_for_agent_receipts_or_repeat_old_unread()
+    {
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let identity = registry.attach(&id).unwrap().summary.identity_revision;
+        registry
+            .set_auto_notifications(&db, &id, identity, true)
+            .unwrap();
+        let first = db.mailbox_send(&session, None, "private body one").unwrap();
+        db.mailbox_send(&session, None, "private body two").unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            &*bytes.lock().unwrap(),
+            "\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~\t".as_bytes()
+        );
+        assert!(db
+            .mailbox_read(&session, &first.id)
+            .unwrap()
+            .read_at
+            .is_none());
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.lock().unwrap().clone())
+                .unwrap()
+                .matches("请查收")
+                .count(),
+            1
+        );
+        db.mailbox_send(&session, None, "three").unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.lock().unwrap().clone())
+                .unwrap()
+                .matches("请查收")
+                .count(),
+            2
+        );
+    }
+    #[test]
+    fn manual_reminders_use_steering_in_working_or_unconfirmed_states_and_skip_read_mail() {
+        use activity::ActivityState::*;
+        for state in [Working, Unknown, Interrupted, Failed] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let m = db
+                .mailbox_send(&session, None, "not pasted into terminal")
+                .unwrap();
+            let mut e = native_event("mailbox-native");
+            e.activity = Some(activity::ActivitySignal {
+                state,
+                turn_id: Some("turn".into()),
+                starts_turn: state == Working,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            registry.check_mailboxes(&db).unwrap();
+            assert!(bytes.lock().unwrap().is_empty());
+            registry.request_reminder(&id).unwrap();
+            // Another native status notice must not discard a user's manual request.
+            registry.report_native_identity(&db, &id, &e);
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(
+                &*bytes.lock().unwrap(),
+                "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r".as_bytes()
+            );
+            assert_eq!(registry.attach(&id).unwrap().summary.activity.state, state);
+            assert!(!registry.notification_state(&id).unwrap().enabled);
+            db.mailbox_mark(&session, &m.id, m.revision, true).unwrap();
+            let before = bytes.lock().unwrap().clone();
+            registry.request_reminder(&id).unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(*bytes.lock().unwrap(), before);
+            e.activity = Some(activity::ActivitySignal {
+                state: Waiting,
+                turn_id: Some("turn".into()),
+                starts_turn: false,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            assert!(registry.request_reminder(&id).is_err());
+            assert!(registry
+                .remind(&db, &id, notifications::ReminderKind::Manual)
+                .is_err());
+        }
+    }
+    #[test]
+    fn unknown_allows_auto_reminders_and_keeps_pending_requests_without_claiming_idle() {
+        use activity::ActivityState::*;
+        for immediate in [false, true] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            let mut event = native_event("mailbox-native");
+            event.activity = Some(activity::ActivitySignal {
+                state: Unknown,
+                turn_id: None,
+                starts_turn: false,
+            });
+            registry.report_native_identity(&db, &id, &event);
+            let first = db
+                .mailbox_send_with_notification(&session, Some(&session), "first", immediate)
+                .unwrap();
+            assert!(
+                registry
+                    .set_auto_notifications(&db, &id, identity, true)
+                    .unwrap()
+                    .enabled
+            );
+            // Identity-only native notices must not cancel notifications while activity remains unknown.
+            event.activity = None;
+            registry.report_native_identity(&db, &id, &event);
+            registry.check_mailboxes(&db).unwrap();
+            let key = if immediate { "\r" } else { "\t" };
+            let first_frame = format!("\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~{key}");
+            assert_eq!(*bytes.lock().unwrap(), first_frame.as_bytes());
+            assert_eq!(
+                registry.attach(&id).unwrap().summary.activity.state,
+                Unknown
+            );
+            assert!(registry.notification_state(&id).unwrap().enabled);
+            let seen = registry.attach(&id).unwrap().summary.activity;
+            registry.mark_activity_seen(&id, seen.revision);
+            assert_eq!(
+                registry.attach(&id).unwrap().summary.activity.state,
+                Unknown
+            );
+            assert!(db
+                .mailbox_read(&session, &first.id)
+                .unwrap()
+                .read_at
+                .is_none());
+            event.activity = Some(activity::ActivitySignal {
+                state: Waiting,
+                turn_id: None,
+                starts_turn: false,
+            });
+            registry.report_native_identity(&db, &id, &event);
+            db.mailbox_send_with_notification(&session, Some(&session), "second", immediate)
+                .unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(*bytes.lock().unwrap(), first_frame.as_bytes());
+            event.activity.as_mut().unwrap().state = Unknown;
+            registry.report_native_identity(&db, &id, &event);
+            registry.check_mailboxes(&db).unwrap();
+            let frames =
+                format!("{first_frame}\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~{key}");
+            assert_eq!(*bytes.lock().unwrap(), frames.as_bytes());
+            assert!(registry.notification_state(&id).unwrap().enabled);
+            assert_eq!(
+                registry.attach(&id).unwrap().summary.activity.state,
+                Unknown
+            );
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(*bytes.lock().unwrap(), frames.as_bytes());
+        }
+    }
+    #[test]
+    fn failed_and_interrupted_disable_automatic_notifications_and_return_to_idle_when_viewed() {
+        use activity::ActivityState::*;
+        for state in [Interrupted, Failed] {
+            let (registry, db, id, _, _) = mailbox_terminal(Agent::Codex);
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            let mut e = native_event("mailbox-native");
+            e.activity = Some(activity::ActivitySignal {
+                state,
+                turn_id: None,
+                starts_turn: false,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            assert!(!registry.notification_state(&id).unwrap().enabled);
+            assert!(registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .is_err());
+            let seen = registry.attach(&id).unwrap().summary.activity;
+            registry.mark_activity_seen(&id, seen.revision);
+            assert_eq!(registry.attach(&id).unwrap().summary.activity.state, Idle);
+            assert!(!registry.notification_state(&id).unwrap().enabled);
+            e.activity = Some(activity::ActivitySignal {
+                state: Working,
+                turn_id: Some("next".into()),
+                starts_turn: true,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            assert_eq!(
+                registry.attach(&id).unwrap().summary.activity.state,
+                Working
+            );
+            registry.mark_activity_seen(&id, seen.revision);
+            assert_eq!(
+                registry.attach(&id).unwrap().summary.activity.state,
+                Working
+            );
+        }
+    }
+    #[test]
+    fn disabled_auto_notifications_allow_editing_both_senders_and_failed_reminders_leave_mail_unread(
+    ) {
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let sender = ingested_native(&db, Agent::Pi, "sender");
+        let m = db.mailbox_send(&session, Some(&sender.id), "old").unwrap();
+        let identity = registry.attach(&id).unwrap().summary.identity_revision;
+        registry
+            .set_auto_notifications(&db, &id, identity, true)
+            .unwrap();
+        assert!(registry
+            .edit_mailbox(&db, &id, identity, &m.id, m.revision, Some("new"))
+            .is_err());
+        registry
+            .set_auto_notifications(&db, &id, identity, false)
+            .unwrap();
+        let edited = registry
+            .edit_mailbox(&db, &id, identity, &m.id, m.revision, Some("new"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.body, "new");
+        assert_eq!(edited.sender_session_id, Some(sender.id));
+        registry.records.lock().unwrap()[&id].lock().unwrap().writer = Some(std::sync::Arc::new(
+            Mutex::new(Box::new(ReminderWriter(bytes, true))),
+        ));
+        assert!(registry
+            .remind(&db, &id, notifications::ReminderKind::Manual)
+            .is_err());
+        assert!(db.mailbox_read(&session, &m.id).unwrap().read_at.is_none());
+        assert!(!registry.notification_state(&id).unwrap().enabled);
+        registry
+            .edit_mailbox(&db, &id, identity, &m.id, edited.revision, None)
+            .unwrap();
+        assert!(db.mailbox_read(&session, &m.id).is_err());
+    }
+
+    #[test]
+    fn pending_manual_checks_merge_and_override_automatic_queue_submission() {
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let identity = registry.attach(&id).unwrap().summary.identity_revision;
+        registry
+            .set_auto_notifications(&db, &id, identity, true)
+            .unwrap();
+        db.mailbox_send(&session, None, "one").unwrap();
+        db.mailbox_send(&session, None, "two").unwrap();
+        registry.request_reminder(&id).unwrap();
+        registry.request_reminder(&id).unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            &*bytes.lock().unwrap(),
+            "\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~\r".as_bytes()
+        );
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            String::from_utf8(bytes.lock().unwrap().clone())
+                .unwrap()
+                .matches("请查收")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn automatic_reminders_recheck_enabled_and_unread_before_first_write() {
+        use notifications::ReminderKind::{Automatic, Manual};
+        for (immediate, mark_read) in [(false, false), (true, false), (true, true)] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let registry = std::sync::Arc::new(registry);
+            let db = std::sync::Arc::new(db);
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            let mail = db
+                .mailbox_send_with_notification(&session, Some(&session), "one", immediate)
+                .unwrap();
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            let writer = registry.records.lock().unwrap()[&id]
+                .lock()
+                .unwrap()
+                .writer
+                .clone()
+                .unwrap();
+            let gate = writer.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let r = registry.clone();
+            let d = db.clone();
+            let t = id.clone();
+            let worker = std::thread::spawn(move || {
+                tx.send(()).unwrap();
+                r.remind(&d, &t, Automatic)
+            });
+            rx.recv().unwrap();
+            if mark_read {
+                db.mailbox_mark(&session, &mail.id, mail.revision, true)
+                    .unwrap();
+            } else {
+                registry
+                    .set_auto_notifications(&db, &id, identity, false)
+                    .unwrap();
+            }
+            drop(gate);
+            worker.join().unwrap().unwrap();
+            assert!(bytes.lock().unwrap().is_empty());
+            if !mark_read {
+                registry.remind(&db, &id, Manual).unwrap();
+                assert!(!bytes.lock().unwrap().is_empty());
+            }
+        }
+    }
+    #[test]
+    fn immediate_requests_merge_with_ordinary_mail_in_working_and_keep_mailbox_arrival_order() {
+        use activity::ActivityState::*;
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let identity = registry.attach(&id).unwrap().summary.identity_revision;
+        registry
+            .set_auto_notifications(&db, &id, identity, true)
+            .unwrap();
+        let mut e = native_event("mailbox-native");
+        e.activity = Some(activity::ActivitySignal {
+            state: Waiting,
+            turn_id: Some("t".into()),
+            starts_turn: false,
+        });
+        registry.report_native_identity(&db, &id, &e);
+        let ordinary = db.mailbox_send(&session, None, "first ordinary").unwrap();
+        let requested = db
+            .mailbox_send_with_notification(&session, Some(&session), "second immediate", true)
+            .unwrap();
+        let requested_two = db
+            .mailbox_send_with_notification(&session, Some(&session), "third immediate", true)
+            .unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        assert!(bytes.lock().unwrap().is_empty());
+        e.activity.as_mut().unwrap().state = Working;
+        e.activity.as_mut().unwrap().starts_turn = true;
+        registry.report_native_identity(&db, &id, &e);
+        registry.check_mailboxes(&db).unwrap();
+        let expected = "\x1b[200~noending信箱中有3条未读信息，请查收\x1b[201~\r";
+        assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
+        let page = db.mailbox_list(&session, "unread", None, 50).unwrap();
+        assert_eq!(
+            page.items.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                ordinary.id.as_str(),
+                requested.id.as_str(),
+                requested_two.id.as_str()
+            ]
+        );
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
+        // An old, still-unread request must not grant the Working exception to a new ordinary message.
+        db.mailbox_send(&session, None, "fourth ordinary").unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
+        e.activity.as_mut().unwrap().state = Idle;
+        e.activity.as_mut().unwrap().starts_turn = false;
+        registry.report_native_identity(&db, &id, &e);
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            *bytes.lock().unwrap(),
+            format!("{expected}\x1b[200~noending信箱中有4条未读信息，请查收\x1b[201~\t").as_bytes()
+        );
+    }
+    #[test]
+    fn immediate_requests_require_auto_notifications_and_steer_in_each_allowed_state() {
+        use activity::ActivityState::*;
+        for state in [Idle, Completed, Working, Unknown] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            db.mailbox_send_with_notification(&session, Some(&session), "request", true)
+                .unwrap();
+            registry.initialize_mailboxes(&db).unwrap();
+            let mut e = native_event("mailbox-native");
+            e.activity = Some(activity::ActivitySignal {
+                state,
+                turn_id: None,
+                starts_turn: state == Working,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            registry.check_mailboxes(&db).unwrap();
+            assert!(bytes.lock().unwrap().is_empty());
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            registry
+                .set_auto_notifications(&db, &id, identity, false)
+                .unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            assert!(bytes.lock().unwrap().is_empty());
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            let expected = "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r";
+            assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
+        }
+    }
+    #[test]
+    fn read_or_deleted_immediate_requests_do_not_release_other_unread_mail_while_working() {
+        use activity::ActivityState::*;
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let identity = registry.attach(&id).unwrap().summary.identity_revision;
+        registry
+            .set_auto_notifications(&db, &id, identity, true)
+            .unwrap();
+        let mut e = native_event("mailbox-native");
+        e.activity = Some(activity::ActivitySignal {
+            state: Waiting,
+            turn_id: Some("t".into()),
+            starts_turn: false,
+        });
+        registry.report_native_identity(&db, &id, &e);
+        db.mailbox_send(&session, None, "ordinary").unwrap();
+        let read = db
+            .mailbox_send_with_notification(&session, Some(&session), "read", true)
+            .unwrap();
+        let deleted = db
+            .mailbox_send_with_notification(&session, Some(&session), "deleted", true)
+            .unwrap();
+        registry.check_mailboxes(&db).unwrap();
+        db.mailbox_mark(&session, &read.id, read.revision, true)
+            .unwrap();
+        db.mailbox_delete(&session, &deleted.id, deleted.revision)
+            .unwrap();
+        e.activity.as_mut().unwrap().state = Working;
+        e.activity.as_mut().unwrap().starts_turn = true;
+        registry.report_native_identity(&db, &id, &e);
+        registry.check_mailboxes(&db).unwrap();
+        assert!(bytes.lock().unwrap().is_empty());
+        e.activity.as_mut().unwrap().state = Idle;
+        e.activity.as_mut().unwrap().starts_turn = false;
+        registry.report_native_identity(&db, &id, &e);
+        registry.check_mailboxes(&db).unwrap();
+        assert_eq!(
+            *bytes.lock().unwrap(),
+            "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\t".as_bytes()
+        );
+    }
+    #[test]
+    fn failed_and_interrupted_cancel_immediate_requests_until_user_enables_auto_again() {
+        use activity::ActivityState::*;
+        for state in [Interrupted, Failed] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            let mut e = native_event("mailbox-native");
+            e.activity = Some(activity::ActivitySignal {
+                state: Waiting,
+                turn_id: Some("t".into()),
+                starts_turn: false,
+            });
+            registry.report_native_identity(&db, &id, &e);
+            db.mailbox_send_with_notification(&session, Some(&session), "request", true)
+                .unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            e.activity.as_mut().unwrap().state = state;
+            e.activity.as_mut().unwrap().starts_turn = false;
+            registry.report_native_identity(&db, &id, &e);
+            registry.check_mailboxes(&db).unwrap();
+            assert!(!registry.notification_state(&id).unwrap().enabled);
+            assert!(bytes.lock().unwrap().is_empty());
+            e.activity.as_mut().unwrap().state = Idle;
+            registry.report_native_identity(&db, &id, &e);
+            registry.check_mailboxes(&db).unwrap();
+            assert!(bytes.lock().unwrap().is_empty());
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(
+                *bytes.lock().unwrap(),
+                "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r".as_bytes()
+            );
+        }
+    }
+    #[test]
+    fn native_inputs_trigger_history_sync_even_while_already_working_and_tools_do_not() {
+        let (registry, db, id, session, _) = mailbox_terminal(Agent::Codex);
+        let mut event = native_event("mailbox-native");
+        event.activity = Some(activity::ActivitySignal {
+            state: activity::ActivityState::Working,
+            turn_id: Some("t".into()),
+            starts_turn: true,
+        });
+        for input in ["one", "two"] {
+            event.input = Some(identity::NativeInput {
+                id: Some(input.into()),
+            });
+            assert!(
+                matches!(registry.native_ingest_request(&db,&id,&event),Some(crate::commands::ingestion::IngestScope::RefreshSession(s)) if s==session)
+            );
+        }
+        assert!(registry.native_ingest_request(&db, &id, &event).is_none());
+        event.input = None;
+        event.activity.as_mut().unwrap().starts_turn = false;
+        assert!(registry.native_ingest_request(&db, &id, &event).is_none());
     }
 }
 

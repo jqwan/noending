@@ -274,6 +274,26 @@ pub(crate) fn is_root_conversation(store_root: &Path, conversation_id: &str) -> 
         .is_some_and(|parent| parent.is_none_or(|id| id.trim().is_empty()))
 }
 
+/// Last user input already present in the trajectory seen by this invocation.
+/// Inputs beyond this boundary must not trigger history ingestion for this invocation.
+pub(crate) fn invocation_user_input(
+    store_root: &Path,
+    conversation_id: &str,
+    initial_steps: u64,
+) -> Option<(i64, String)> {
+    let conn = open_read_only(
+        &store_root
+            .join("conversations")
+            .join(format!("{conversation_id}.db")),
+    )
+    .ok()?;
+    let (idx, payload): (i64, Vec<u8>) = conn.query_row(
+        "SELECT idx, step_payload FROM steps WHERE step_type = 14 AND idx < ?1 ORDER BY idx DESC LIMIT 1",
+        [i64::try_from(initial_steps).ok()?], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).ok()?;
+    Some((idx, user_text(&payload)?))
+}
+
 /// One conversation DB's facts for discovery: start time from its metadata
 /// blob, title / parent from the summaries store, and cwd from the summary,
 /// metadata or CLI user-step context, in that order.
@@ -714,6 +734,25 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
         })
+    }
+
+    fn build_resume_message_command(
+        &self,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &crate::adapters::ExecOptions,
+        agent_session_id: &str,
+        cwd: Option<&Path>,
+        source_path: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<AgentCommand> {
+        let mut command =
+            self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
+        if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
+            command
+                .args
+                .extend(["--prompt-interactive".into(), message.to_string()]);
+        }
+        Ok(command)
     }
 
     fn build_exec_command(

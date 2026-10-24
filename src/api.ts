@@ -258,8 +258,17 @@ export const api = {
     invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId, consumerId }),
   terminalActivitySeen: (terminalId: string, revision: number) =>
     invoke<void>("terminal_activity_seen", { terminalId, revision }),
-  terminalInput: (terminalId: string, data: string, binary = false) =>
-    invoke<void>("terminal_input", { terminalId, data, binary }),
+  terminalInput: (terminalId: string, data: string, binary = false, inputRevision = 0) =>
+    invoke<void>("terminal_input", { terminalId, data, binary, inputRevision }),
+  terminalNotifications: (terminalId: string) => invoke<import("./types").TerminalNotifications>("terminal_notifications", { terminalId }),
+  terminalAutoNotifications: (terminalId: string, identityRevision: number, enabled: boolean) => invoke<import("./types").TerminalNotifications>("terminal_auto_notifications", { terminalId, identityRevision, enabled }),
+  mailboxList: (session: string, filter = "unread", cursor: number | null = null, limit = 50) => invoke<import("./types").MailboxPage>("mailbox_list", { session, filter, cursor, limit }),
+  mailboxSend: (session: string, body: string) => invoke<import("./types").MailboxMessage>("mailbox_send", { session, body }),
+  mailboxEdit: (terminalId: string, identityRevision: number, messageId: string, revision: number, body: string | null) => invoke<import("./types").MailboxMessage | null>("mailbox_edit", { terminalId, identityRevision, messageId, revision, body }),
+  mailboxRemind: (terminalId: string) => invoke<void>("mailbox_remind", { terminalId }),
+  mailboxNotificationHint: (skip?: boolean) => invoke<boolean>("mailbox_notification_hint", { skip }),
+  terminalCacheImage: (terminalId: string, image: { mime: string; data_base64: string }) =>
+    invoke<string>("terminal_cache_image", { terminalId, image }),
   terminalAcknowledgeOutput: (terminalId: string, offset: number, consumerId: string) =>
     invoke<void>("terminal_acknowledge_output", { terminalId, offset, consumerId }),
   terminalReleaseOutput: (terminalId: string, consumerId: string) =>

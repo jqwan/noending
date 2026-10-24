@@ -12,6 +12,9 @@ pub struct Summary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SummaryItem {
+    /// Stable within this summary; omit for a newly created item.
+    #[serde(default)]
+    pub id: String,
     pub title: String,
     pub description: String,
     pub details: Vec<String>,
@@ -22,6 +25,7 @@ impl Summary {
     pub fn single(title: impl Into<String>) -> Self {
         Self {
             items: vec![SummaryItem {
+                id: uuid::Uuid::new_v4().to_string(),
                 title: title.into(),
                 description: String::new(),
                 details: Vec::new(),
@@ -39,34 +43,76 @@ impl Summary {
             .map(|item| item.title.as_str())
             .collect()
     }
-    /// Extraction owns descriptions/details; title locks change through explicit actions.
-    /// Titles are the protected value, so matching does not require durable item IDs.
+    /// Allocate missing IDs only when writing, never while reading stored data.
+    pub fn resolve_ids(mut self) -> Result<Self> {
+        for item in &mut self.items {
+            if item.id.is_empty() {
+                item.id = uuid::Uuid::new_v4().to_string();
+            }
+        }
+        if self.is_empty() {
+            Ok(self)
+        } else {
+            self.validated()
+        }
+    }
+    pub fn resolve_extracted_ids(self, previous: &Self) -> Result<Self> {
+        for item in &self.items {
+            if !item.id.is_empty() && !previous.items.iter().any(|old| old.id == item.id) {
+                return Err(other("提取结果包含未知事项 ID；新事项应省略 ID"));
+            }
+        }
+        self.resolve_ids()
+    }
+    pub fn identities(&self) -> Vec<serde_json::Value> {
+        self.items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.id, "title": item.title, "title_locked": item.title_locked,
+                })
+            })
+            .collect()
+    }
+    /// Extraction owns descriptions/details; explicit actions own title locks.
     pub fn preserve_title_locks(&mut self, previous: &Self) -> Result<()> {
-        for title in previous.locked_titles() {
+        for old in previous.items.iter().filter(|item| item.title_locked) {
             let item = self
                 .items
                 .iter_mut()
-                .find(|item| !item.title_locked && item.title == title)
+                .find(|item| item.id == old.id && item.title == old.title)
                 .ok_or_else(|| other("不能修改、删除或合并已锁定的事项标题"))?;
             item.title_locked = true;
         }
         Ok(())
     }
     pub fn validate_title_locks(&self, previous: &Self) -> Result<()> {
-        let mut before = previous.locked_titles();
-        let mut after = self.locked_titles();
-        before.sort_unstable();
-        after.sort_unstable();
-        if before != after {
+        let locked = |s: &Self| {
+            s.items
+                .iter()
+                .filter(|i| i.title_locked)
+                .map(|i| (i.id.clone(), i.title.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if locked(self) != locked(previous) {
             return Err(other(
                 "Agent 不能改变事项标题锁定状态，或修改、删除、合并锁定标题",
             ));
         }
         Ok(())
     }
+    pub fn validated(self) -> Result<Self> {
+        let mut ids = std::collections::HashSet::new();
+        for item in &self.items {
+            if uuid::Uuid::parse_str(&item.id).is_err() || !ids.insert(&item.id) {
+                return Err(other("事项 ID 必须是非空且不重复的 UUID"));
+            }
+        }
+        self.validated_content()
+    }
     /// Normalize surrounding whitespace, rejecting malformed or empty output.
     /// An empty summary is represented by absence, never a successful extraction.
-    pub fn validated(mut self) -> Result<Self> {
+    pub fn validated_content(mut self) -> Result<Self> {
         if self.is_empty() {
             return Err(other("摘要至少需要一个事项"));
         }

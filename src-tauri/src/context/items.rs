@@ -36,6 +36,7 @@ pub struct SummaryHit {
     pub title: String,
     pub revision: i64,
     pub item_number: usize,
+    pub item_id: String,
     pub item: SummaryItem,
 }
 
@@ -121,13 +122,15 @@ pub fn search_page(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     raw.into_iter()
         .map(|(kind, id, title, revision, item_number, raw)| {
+            let item: SummaryItem = serde_json::from_str(&raw)?;
             Ok(SummaryHit {
                 kind,
                 id,
                 title,
                 revision,
                 item_number,
-                item: serde_json::from_str(&raw)?,
+                item_id: item.id.clone(),
+                item,
             })
         })
         .collect()
@@ -169,4 +172,33 @@ pub fn read_item(
         .and_then(|row| row.1)
         .ok_or_else(|| other("摘要事项不存在"))?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+/// ID resolution uses the caller's document revision. A concurrent reordering
+/// between this read and a mutation is rejected by the mutation's revision guard.
+pub fn resolve_number(
+    db: &Db,
+    kind: &str,
+    id: &str,
+    revision: i64,
+    number: Option<usize>,
+    item_id: Option<&str>,
+) -> Result<usize> {
+    if revision < 0 || number.is_some() == item_id.is_some() {
+        return Err(other("需要当前摘要版本，并且只提供事项 ID 或序号之一"));
+    }
+    let summary = super::query::target_summary(&db.read(), kind, id, revision)?.unwrap_or_default();
+    if let Some(number) = number {
+        if number == 0 || number > summary.items.len() {
+            return Err(other("事项序号无效"));
+        }
+        Ok(number)
+    } else {
+        summary
+            .items
+            .iter()
+            .position(|i| Some(i.id.as_str()) == item_id)
+            .map(|i| i + 1)
+            .ok_or_else(|| other("摘要事项 ID 不存在"))
+    }
 }

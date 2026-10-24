@@ -12,7 +12,9 @@
 - [MCP 使用说明](guides/mcp.md)：stdio 服务接入、工具与请求语义。
 - [NoEnding 记忆技能](../src-tauri/skills/noending-memory/SKILL.md)：内置、按项目或用户级启用的技能，按会话、项目、任务或本机范围回忆与维护上下文；具体命令按需阅读其操作参考。
 
-- [NoEnding 协作技能](../src-tauri/skills/noending-collaboration/SKILL.md)：独立启用的任务管理、项目关联、会话跟踪和进展汇总技能。
+- [NoEnding 任务技能](../src-tauri/skills/noending-task/SKILL.md)：独立启用的任务管理、项目关联、当前会话跟踪、进展记录和验收收尾技能。
+
+- [NoEnding 信箱技能](../src-tauri/skills/noending-mailbox/SKILL.md)：查收、标记及发送会话消息；与记忆和任务协作技能独立启用。
 
 ## 开发约定
 
@@ -31,4 +33,4 @@
 - 正式 `docs/` 正常受版本控制，不使用整个目录的忽略规则或单文件白名单；临时材料通过放入 `.tmp/docs/` 区分。
 - 调查和历史材料标注日期或适用版本，不将旧方案中的“必须”当成当前规则。
 - 临时日志、测试产物和原始样本同样放在 `.tmp/`，不放入正式文档目录。
-- 移动文档时同步修正仓库链接及代码中的 `include_str!` 等引用。CLI 手册会作为内置助手的资源打包，源文件在 `guides/cli.md`，助手技能中的 `references/cli.md` 路径保持稳定。
+- 移动文档时同步修正仓库链接及代码中的 `include_str!` 等引用。CLI 手册在 `guides/cli.md`，与 CLI 和 MCP 的实际接口保持一致。

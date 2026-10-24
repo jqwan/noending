@@ -4,6 +4,19 @@ use crate::storage::{now, Db};
 use crate::workspace::home::NoEndingHome;
 use std::sync::Arc;
 
+#[test]
+fn launch_failures_distinguish_io_rejection_from_an_initial_message_that_may_have_started() {
+    let unsent = CliError::from(crate::error::AppError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "agent executable missing",
+    )));
+    assert_eq!(unsent.code, "io_error");
+    let uncertain = CliError::from(crate::error::AppError::AgentLaunchUncertain(
+        "setup failed after process creation".into(),
+    ));
+    assert_eq!(uncertain.code, "delivery_uncertain");
+}
+
 struct Fixture {
     root: PathBuf,
     home: NoEndingHome,
@@ -101,6 +114,116 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+#[test]
+fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
+    let f = Fixture::new();
+    let sid = f.session();
+    let session = f.db().get_session(&sid).unwrap().unwrap();
+    let native = &session.root_agent_session_id;
+    let other = f
+        .db()
+        .upsert_logical_session(
+            Agent::ClaudeCode,
+            native,
+            None,
+            Some("同原生 ID 的其他 Agent"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "test",
+            "/test/other",
+            &json!({}),
+        )
+        .unwrap()
+        .0;
+    let task = f
+        .call(&["task", "create", "--title", "身份关联任务"])
+        .unwrap();
+    let tid = task["task"]["id"].as_str().unwrap();
+    link_project(&f, tid, &sid);
+    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
+    let resolve = || {
+        f.call(&[
+            "session",
+            "resolve",
+            "--agent",
+            "codex",
+            "--native-id",
+            native,
+        ])
+        .unwrap()
+    };
+    let found = resolve();
+    assert_eq!(found["id"], sid);
+    assert_eq!(found["agent"], "codex");
+    assert_eq!(found["native_id"], *native);
+    assert_eq!(found["project_id"], session.project_id.unwrap());
+    assert_eq!(found["task_ids"], json!([tid]));
+    assert!(found["archived_at"].is_null());
+    f.call(&["session", "archive", &sid]).unwrap();
+    let archived = resolve();
+    assert_eq!(archived["id"], sid);
+    assert!(archived["archived_at"].is_string());
+    for spelling in ["claude", "claude_code"] {
+        assert_eq!(
+            f.call(&[
+                "session",
+                "resolve",
+                "--agent",
+                spelling,
+                "--native-id",
+                native
+            ])
+            .unwrap()["id"],
+            other
+        );
+    }
+    for (agent, id) in [
+        ("pi", native.as_str()),
+        ("codex", sid.as_str()),
+        ("codex", "unseen-native"),
+    ] {
+        assert_eq!(
+            f.call(&["session", "resolve", "--agent", agent, "--native-id", id])
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+    }
+    for args in [
+        vec!["session", "resolve", "--native-id", native],
+        vec!["session", "resolve", "--agent", "codex"],
+        vec![
+            "session",
+            "resolve",
+            "--agent",
+            "unknown",
+            "--native-id",
+            native,
+        ],
+        vec!["session", "resolve", "--agent", "codex", "--native-id", " "],
+    ] {
+        assert_eq!(f.call(&args).unwrap_err().code, "invalid_arguments");
+    }
+    let separate = Fixture::new();
+    assert_eq!(
+        separate
+            .call(&[
+                "session",
+                "resolve",
+                "--agent",
+                "codex",
+                "--native-id",
+                native
+            ])
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+}
+
 #[test]
 fn cli_pages_search_whole_messages_preserve_order_cutoff_and_reject_rewritten_history() {
     let f = Fixture::new();
@@ -1034,7 +1157,247 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
 }
 
 #[test]
-fn cli_task_title_locks_protect_edits_and_unlock_completed_items_without_exposing_other_scopes() {
+fn cli_task_todos_save_content_and_locks_together_and_retries_do_not_republish_completed_work() {
+    let f = Fixture::new();
+    let task = f.call(&["task", "create", "--title", "待办接口"]).unwrap()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let content_path = f.root.join("todo.json");
+    std::fs::write(&content_path, json!({"title":"检查同步"}).to_string()).unwrap();
+    let publish = [
+        "task",
+        "todo",
+        "publish",
+        &task,
+        "--file",
+        content_path.to_str().unwrap(),
+        "--revision",
+        "0",
+        "--request-id",
+        "todo-publish",
+    ];
+    let published = f.call(&publish).unwrap();
+    assert_eq!(published["revision"], 1);
+    assert_eq!(published["item"], 1);
+    assert_eq!(
+        published["summary"]["items"],
+        json!([{"id":published["item_id"],"title":"检查同步","description":"","details":[],"title_locked":true}])
+    );
+    assert_eq!(f.call(&publish).unwrap()["revision"], 1);
+    assert_eq!(
+        f.call(&[
+            "task",
+            "todo",
+            "publish",
+            &task,
+            "--file",
+            content_path.to_str().unwrap(),
+            "--revision",
+            "0"
+        ])
+        .unwrap_err()
+        .code,
+        "stale_result"
+    );
+    std::fs::write(
+        &content_path,
+        json!({"title":"检查同步","description":"覆盖所有来源"}).to_string(),
+    )
+    .unwrap();
+    let updated = f
+        .call(&[
+            "task",
+            "todo",
+            "publish",
+            &task,
+            "--file",
+            content_path.to_str().unwrap(),
+            "--revision",
+            "1",
+            "--item",
+            "1",
+        ])
+        .unwrap();
+    assert_eq!(updated["revision"], 2);
+    assert_eq!(updated["summary"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        updated["summary"]["items"][0]["description"],
+        "覆盖所有来源"
+    );
+    let result_path = f.root.join("result.json");
+    std::fs::write(
+        &result_path,
+        json!({"description":"已验证完成","details":["各来源均可同步"]}).to_string(),
+    )
+    .unwrap();
+    assert!(f
+        .call(&[
+            "task",
+            "todo",
+            "complete",
+            &task,
+            "--file",
+            result_path.to_str().unwrap(),
+            "--revision",
+            "2"
+        ])
+        .is_err());
+    let complete = [
+        "task",
+        "todo",
+        "complete",
+        &task,
+        "--file",
+        result_path.to_str().unwrap(),
+        "--revision",
+        "2",
+        "--item",
+        "1",
+        "--request-id",
+        "todo-complete",
+    ];
+    let completed = f.call(&complete).unwrap();
+    assert_eq!(completed["revision"], 3);
+    assert_eq!(
+        completed["summary"]["items"],
+        json!([{"id":published["item_id"],"title":"检查同步","description":"已验证完成","details":["各来源均可同步"],"title_locked":false}])
+    );
+    assert_eq!(f.call(&complete).unwrap()["revision"], 3);
+    // Restoring the original request also restores its exact payload.
+    std::fs::write(&content_path, json!({"title":"检查同步"}).to_string()).unwrap();
+    assert_eq!(f.call(&publish).unwrap()["revision"], 1);
+    let read = f.call(&["task", "summary", &task]).unwrap();
+    assert_eq!(read["revision"], 3);
+    assert_eq!(read["summary"], completed["summary"]);
+    std::fs::write(
+        &content_path,
+        json!({"title":"不允许手动控制锁","description":"","details":[],"title_locked":false})
+            .to_string(),
+    )
+    .unwrap();
+    assert!(f
+        .call(&[
+            "task",
+            "todo",
+            "publish",
+            &task,
+            "--file",
+            content_path.to_str().unwrap(),
+            "--revision",
+            "3"
+        ])
+        .is_err());
+    std::fs::write(
+        &content_path,
+        json!({"title":"不从发布接口更新进展","details":["已定位原因"]}).to_string(),
+    )
+    .unwrap();
+    assert!(f
+        .call(&[
+            "task",
+            "todo",
+            "publish",
+            &task,
+            "--file",
+            content_path.to_str().unwrap(),
+            "--revision",
+            "3"
+        ])
+        .is_err());
+    assert_eq!(f.call(&["task", "summary", &task]).unwrap(), read);
+}
+
+#[test]
+fn cli_task_todo_actions_keep_completed_body_and_discard_last_item_once() {
+    let f = Fixture::new();
+    let id = f.call(&["task", "create", "--title", "后续处理"]).unwrap()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = f.root.join("action-todo.json");
+    std::fs::write(
+        &path,
+        json!({"title":"待办事项","description":"原有目标"}).to_string(),
+    )
+    .unwrap();
+    f.call(&[
+        "task",
+        "todo",
+        "publish",
+        &id,
+        "--file",
+        path.to_str().unwrap(),
+        "--revision",
+        "0",
+    ])
+    .unwrap();
+    let completed = f
+        .call(&[
+            "task",
+            "todo",
+            "complete",
+            &id,
+            "--item",
+            "1",
+            "--revision",
+            "1",
+        ])
+        .unwrap();
+    assert_eq!(completed["revision"], 2);
+    assert_eq!(
+        completed["summary"]["items"],
+        json!([{"id":completed["item_id"],"title":"待办事项","description":"原有目标","details":[],"title_locked":false}])
+    );
+    f.call(&[
+        "task",
+        "todo",
+        "publish",
+        &id,
+        "--file",
+        path.to_str().unwrap(),
+        "--item",
+        "1",
+        "--revision",
+        "2",
+    ])
+    .unwrap();
+    assert_eq!(
+        f.call(&["summary", "search", "--kind", "task", "--query", "待办事项"])
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let args = [
+        "task",
+        "todo",
+        "discard",
+        &id,
+        "--item",
+        "1",
+        "--revision",
+        "3",
+        "--request-id",
+        "discard-last",
+    ];
+    let discarded = f.call(&args).unwrap();
+    assert_eq!(discarded["revision"], 4);
+    assert_eq!(discarded["summary"], json!({"items":[]}));
+    assert_eq!(f.call(&args).unwrap()["revision"], 4);
+    let stored = f.call(&["task", "summary", &id]).unwrap();
+    assert_eq!(stored["revision"], 4);
+    assert!(stored["summary"].is_null());
+    assert_eq!(
+        f.call(&["summary", "search", "--kind", "task", "--query", "待办事项"])
+            .unwrap()["items"],
+        json!([])
+    );
+}
+
+#[test]
+fn cli_task_title_locks_protect_edits_without_exposing_other_scopes() {
     let f = Fixture::new();
     let session = f.session();
     let project = f.call(&["project", "list"]).unwrap()["items"][0]["id"]
@@ -1081,7 +1444,7 @@ fn cli_task_title_locks_protect_edits_and_unlock_completed_items_without_exposin
     let body = crate::domain::Summary::single("用户锁定的标题");
     crate::context::edit_summary(f.db(), kind, &id, 0, &serde_json::to_string(&body).unwrap())
         .unwrap();
-    let request = format!("publish-todo-{kind}");
+    let request = format!("title-lock-{kind}");
     let lock_args = [
         "summary",
         "lock",
@@ -1222,4 +1585,107 @@ fn cli_task_title_locks_protect_edits_and_unlock_completed_items_without_exposin
         f.call(&[kind, "summary", &id]).unwrap()["summary"]["items"][0]["title"],
         "已完成事项"
     );
+}
+
+#[test]
+fn cli_summary_item_ids_locate_renamed_items_after_reordering_and_guard_stale_versions() {
+    let f = Fixture::new();
+    let sid = f.session();
+    let created = crate::context::edit_summary(
+        f.db(),
+        "session",
+        &sid,
+        0,
+        &json!({"items":[
+            {"title":"同步策略","description":"保持内容","details":[],"title_locked":false},
+            {"title":"其他结论","description":"独立事项","details":[],"title_locked":false}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let id = created.summary.items[0].id.clone();
+    let mut reordered = created.summary;
+    reordered.items.reverse();
+    reordered.items[1].title = "同步策略已修正".into();
+    crate::context::save_summary(f.db(), "session", &sid, 1, reordered).unwrap();
+    let read = f
+        .call(&[
+            "session",
+            "summary",
+            &sid,
+            "--item-id",
+            &id,
+            "--revision",
+            "2",
+        ])
+        .unwrap();
+    assert_eq!(read["item_id"], id);
+    assert_eq!(read["item_number"], 2);
+    assert_eq!(read["item"]["title"], "同步策略已修正");
+    assert_eq!(
+        f.call(&[
+            "session",
+            "summary",
+            &sid,
+            "--item-id",
+            &id,
+            "--revision",
+            "1"
+        ])
+        .unwrap_err()
+        .code,
+        "stale_result"
+    );
+    assert!(f
+        .call(&[
+            "session",
+            "summary",
+            &sid,
+            "--item-id",
+            &id,
+            "--item",
+            "1",
+            "--revision",
+            "2"
+        ])
+        .is_err());
+    let search = f
+        .call(&["summary", "search", "--query", "同步策略已修正"])
+        .unwrap();
+    assert_eq!(search["items"][0]["item_id"], id);
+    let task = f
+        .call(&["task", "create", "--title", "事项 ID 协作"])
+        .unwrap()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = f.root.join("item-id-todo.json");
+    std::fs::write(&file, r#"{"title":"验证定位"}"#).unwrap();
+    let published = f
+        .call(&[
+            "task",
+            "todo",
+            "publish",
+            &task,
+            "--file",
+            file.to_str().unwrap(),
+            "--revision",
+            "0",
+        ])
+        .unwrap();
+    let todo = published["item_id"].as_str().unwrap();
+    let completed = f
+        .call(&[
+            "task",
+            "todo",
+            "complete",
+            &task,
+            "--item-id",
+            todo,
+            "--revision",
+            "1",
+        ])
+        .unwrap();
+    assert_eq!(completed["item_id"], todo);
+    assert_eq!(completed["summary"]["items"][0]["title_locked"], false);
 }

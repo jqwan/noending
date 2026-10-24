@@ -17,18 +17,24 @@
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  padding-top: 24px;
+  gap: 32px;
+  padding: 24px 0 8px;
 }
+/* 标题组与输入框当成一组整体居中：两侧 auto 外边距分摊剩余高度，
+   内容超出时退化为 0，不会像 justify-content: center 那样裁掉顶部。 */
 .new-session-heading {
-  flex: 1;
+  flex: none;
+  margin-top: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 20px;
-  padding: 24px 0 32px;
+  gap: 16px;
+  padding: 0;
   text-align: center;
 }
+/* 签名级尺寸：字标占 H1 的三分之一，靠尺寸退后，不靠降低不透明度——
+   品牌的颜色必须与 --accent 保持一致，调暗会破坏这条约定。 */
 .new-session-heading h1 {
   font-size: clamp(24px, 3vw, 36px);
   font-weight: 500;
@@ -36,67 +42,54 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+/* 跟踪任务并入 composer 顶栏：和项目、目录一样回答「这次会话挂在哪」。
+   一个项目下的任务没有上限，所以选项收进 picker，顶栏只留一个摘要标签——
+   全部铺开会把输入框挤下去，二十个任务更是没法看。 */
 .new-session-tasks {
-  width: min(640px, 100%);
-  text-align: left;
-  background: var(--bg-app);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  padding: 14px 16px;
-  box-shadow: var(--shadow-sm);
-}
-.new-session-tasks-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 550;
+  flex: 0 1 auto;
+  min-width: 0;
 }
-.new-session-tasks-title {
+.new-session-task-picker {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
+  flex: 0 1 auto;
+  min-width: 84px;
+  max-width: 220px;
 }
-.new-session-tasks-title .ui-icon {
-  width: 15px;
-  height: 15px;
-  color: var(--text-secondary);
+.new-session-task-picker > .new-session-picker {
+  flex: 1;
+  min-width: 0;
 }
-.new-session-task-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
-  gap: 8px;
-  max-height: 180px;
-  overflow-y: auto;
+/* 项目、目录总归有值，任务不是——挂上任务这件事本身是「新信息」，值得用强调色标出来。 */
+.new-session-context .new-session-picker.is-set,
+.new-session-context .new-session-picker.is-set:hover:not(:has(:disabled)) {
+  color: var(--accent);
 }
-.new-session-task-list > p {
-  margin: 6px 0;
+.new-session-context .new-session-picker.is-set .ui-icon {
+  color: var(--accent);
 }
 .new-session-task-option {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  width: 100%;
   min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  color: var(--text-secondary);
-  background: var(--bg-panel);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
   font-size: 13px;
-  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  transition: background .1s ease, color .1s ease;
 }
 .new-session-task-option:hover {
   background: var(--bg-hover);
-  border-color: var(--border-default);
 }
 .new-session-task-option.selected {
   color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-wash);
   font-weight: 550;
 }
 .new-session-task-option:has(:disabled) {
@@ -105,10 +98,20 @@
 }
 .new-session-task-option input {
   flex: none;
+  width: 13px;
+  height: 13px;
+  margin: 0;
   accent-color: var(--accent);
+}
+.new-session-menu-empty {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 12.5px;
 }
 .new-session-form {
   flex: none;
+  margin-bottom: auto;
   padding: 0 0 4px;
 }
 .new-session-context {
@@ -238,7 +241,9 @@
   color: var(--text-secondary);
 }
 .new-session-project { flex: 0 1 auto; max-width: 40%; }
-.new-session-dir { flex: 1 1 auto; min-width: 140px; }
+/* 目录框跟着内容走，不占满整行：默认目录通常一眼就够，
+   长路径由标签自身的中间省略负责，完整路径在 title 里。 */
+.new-session-dir { flex: 0 1 auto; min-width: 140px; max-width: 320px; }
 
 /* Custom dropdown menu matching reference design */
 .new-session-dropdown-menu {
@@ -348,6 +353,13 @@
 .new-session-menu-action:hover {
   background: var(--bg-hover);
 }
+.new-session-menu-action:disabled {
+  opacity: .45;
+  cursor: default;
+}
+.new-session-menu-action:disabled:hover {
+  background: transparent;
+}
 .new-session-menu-action:active {
   background: var(--bg-active);
 }
@@ -395,13 +407,16 @@
 }
 .new-session-composer textarea::placeholder { color: var(--text-muted); }
 .new-session-composer textarea:focus-visible { outline: none; }
+/* 顶栏（落在哪）/ 输入区 / 底栏（用谁跑）靠间距分组。
+   这里不画分隔线：面板内部 --border-subtle 与底色差不到 1.3:1，
+   画了等于没画；改用 --border-default 又比全局线重一档。 */
 .new-session-composer-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
-  padding-top: 6px;
+  padding-top: 10px;
 }
 .new-session-agent {
   flex: none;
@@ -461,7 +476,8 @@
 .new-session-spinner { width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: new-session-spin .8s linear infinite; }
 @keyframes new-session-spin { to { transform: rotate(360deg); } }
 @media (max-width: 600px) {
-  .new-session-heading { margin-bottom: 24px; gap: 6px; }
+  .new-session-content { gap: 20px; }
+  .new-session-heading { gap: 8px; }
   .new-session-context { align-items: stretch; flex-direction: column; gap: 6px; }
   .new-session-project, .new-session-dir, .new-session-path { max-width: 100%; }
   .new-session-composer { padding: 14px 14px 10px; border-radius: var(--radius-lg); }

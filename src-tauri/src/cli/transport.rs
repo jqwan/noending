@@ -1,4 +1,4 @@
-//! Local file IPC for run-scoped extraction tools. Business commands run locally.
+//! Private file IPC for run-scoped extraction tools and desktop terminal control.
 use super::{CliError, CliResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,6 +99,14 @@ pub(crate) fn serve_pending(connection: &Connection, dispatch: impl Fn(Value) ->
 }
 
 pub(crate) fn request(path: &Path, command: Value) -> CliResult<Value> {
+    request_with_timeout(path, command, Duration::from_secs(5))
+}
+
+pub(crate) fn request_with_timeout(
+    path: &Path,
+    command: Value,
+    timeout: Duration,
+) -> CliResult<Value> {
     let text = std::fs::read_to_string(path)
         .map_err(|_| CliError::new("connection_unavailable", "提取连接不可用或已结束"))?;
     let connection: Connection = serde_json::from_str(&text)?;
@@ -139,7 +147,7 @@ pub(crate) fn request(path: &Path, command: Value) -> CliResult<Value> {
                 })();
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if !active.exists() || start.elapsed() > Duration::from_secs(5) {
+                if !active.exists() || start.elapsed() > timeout {
                     break Err(CliError::new(
                         "request_timeout",
                         "NoEnding 连接已结束或请求超时；写操作请查询当前状态后再决定是否重试",

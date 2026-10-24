@@ -56,6 +56,8 @@ struct GeneratedSummary {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GeneratedItem {
+    #[serde(default)]
+    id: String,
     title: String,
     description: String,
     details: Vec<String>,
@@ -206,6 +208,7 @@ impl ExtractionFiles {
                 .items
                 .into_iter()
                 .map(|item| crate::domain::SummaryItem {
+                    id: item.id,
                     title: item.title,
                     description: item.description,
                     details: item.details,
@@ -213,7 +216,7 @@ impl ExtractionFiles {
                 })
                 .collect(),
         }
-        .validated()?;
+        .validated_content()?;
         Ok(SessionContextFields { summary })
     }
     pub(super) fn read_text_result(&self, path: &Path) -> Result<String> {
@@ -255,7 +258,7 @@ pub fn session_prompt(input: &Path, result: &Path, templates: &PromptTemplates) 
         quoted(input), quoted(result), TIME_RULES, templates.session
     )
 }
-const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。输入 locked_titles 中的每个标题必须原样保留，不能修改、删除或合并，描述和细则仍需根据材料更新；重新生成同样遵守。锁定标题优先于项数精简目标，锁定状态由程序管理，结果不输出 title_locked。";
+const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。输入 item_identities 提供现有事项的 ID、标题及标题锁。延续事项保留原 ID，即使改名或重排；合并保留一个延续事项 ID，拆分只有一个沿用原 ID，新增事项省略 ID，不编造 ID。仅 title_locked=true 的事项必须保留原 ID 和原标题，不得修改、删除或合并，描述和细则仍可更新；重新生成同样遵守。锁定标题优先于项数精简目标，锁定状态由程序管理，结果不输出 title_locked。";
 pub fn batch_prompt(
     kind: &str,
     input: &Path,

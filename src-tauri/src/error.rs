@@ -16,6 +16,10 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Other(String),
+    /// A process was created with an initial message before launch setup failed.
+    /// Its prompt may already have been consumed, so callers must not retry it.
+    #[error("{0}")]
+    AgentLaunchUncertain(String),
     /// A failed explicit Context update, carrying the distinguishable reason
     /// the UI needs to offer the right retry.
     #[error("context: {0:?}")]

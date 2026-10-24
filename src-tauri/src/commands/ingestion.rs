@@ -7,8 +7,9 @@
 //! Triggers:
 //! * App startup → `ReconcileAll`
 //! * Return to foreground past the freshness threshold → `ReconcileAll`
-//! * Agent lifecycle notification → exact native root, including metadata
-//!   updates after binding (independent of global discovery)
+//! * New native user input → incremental refresh of the bound Session
+//! * Lifecycle/identity and turn completion notifications → exact native root
+//!   (independent of global discovery)
 //! * Resume launch success → `RefreshSession`
 //! * Advanced maintenance page → `ReconcileAll` / `ReconcileSource` /
 //!   `ReingestSource`
@@ -86,6 +87,30 @@ impl IngestionCoordinator {
     /// independent of a global discovery pass.
     fn enqueue(&self, scope: IngestScope) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let IngestScope::ReconcileNative {
+            agent,
+            native_id,
+            source_path,
+        } = &scope
+        {
+            let queued = inner.queue.iter_mut().find(|queued| {
+                matches!(queued,
+                IngestScope::ReconcileNative {agent: queued_agent, native_id: queued_id, ..}
+                    if queued_agent == agent && queued_id == native_id)
+            });
+            if let Some(IngestScope::ReconcileNative {
+                source_path: queued_path,
+                ..
+            }) = queued
+            {
+                // Codex may move to a new rollout while the worker is busy.
+                // Keep one follow-up for this native root with its newest path.
+                if source_path.is_some() {
+                    *queued_path = source_path.clone();
+                }
+                return false;
+            }
+        }
         if inner.queue.contains(&scope) {
             // The queued task already belongs to the active worker. Returning
             // true here would start a second worker against the same queue.
@@ -310,6 +335,42 @@ mod tests {
             Some(IngestScope::ReconcileSource("custom".into()))
         );
         assert_eq!(coordinator.next(), Some(IngestScope::ReconcileAll));
+    }
+
+    #[test]
+    fn native_sync_bursts_keep_one_followup_with_the_latest_path_without_merging_other_sessions() {
+        use crate::domain::Agent;
+        let coordinator = IngestionCoordinator::default();
+        let scope = |agent, native_id: &str, path: Option<&str>| IngestScope::ReconcileNative {
+            agent,
+            native_id: native_id.into(),
+            source_path: path.map(str::to_owned),
+        };
+        assert!(coordinator.enqueue(scope(Agent::Codex, "thread", Some("old.jsonl"))));
+        assert_eq!(
+            coordinator.next(),
+            Some(scope(Agent::Codex, "thread", Some("old.jsonl")))
+        );
+        // A notification arriving during the running pass must survive that pass.
+        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", Some("old.jsonl"))));
+        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", Some("new.jsonl"))));
+        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", None)));
+        assert!(!coordinator.enqueue(scope(Agent::Codex, "another-thread", Some("other.jsonl"))));
+        assert!(!coordinator.enqueue(scope(Agent::Pi, "thread", Some("pi.jsonl"))));
+        coordinator.finish(1, 2, None, false);
+        assert_eq!(
+            coordinator.next(),
+            Some(scope(Agent::Codex, "thread", Some("new.jsonl")))
+        );
+        assert_eq!(
+            coordinator.next(),
+            Some(scope(Agent::Codex, "another-thread", Some("other.jsonl")))
+        );
+        assert_eq!(
+            coordinator.next(),
+            Some(scope(Agent::Pi, "thread", Some("pi.jsonl")))
+        );
+        assert_eq!(coordinator.next(), None);
     }
 
     #[test]

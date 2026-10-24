@@ -7,6 +7,10 @@ import "@xterm/xterm/css/xterm.css";
 import "./sessions.css";
 import PageHeader from "../../layout/PageHeader";
 import SessionSubpageTabs from "./SessionSubpageTabs";
+import SessionTaskTracking from "./SessionTaskTracking";
+import TerminalMailbox from "./TerminalMailbox";
+import { useMailbox, isTerminalReply } from "./useMailbox";
+import { useViewState } from "../../hooks/useViewState";
 import { DesktopContinueButton } from "./SessionHeaderActions";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { copyToClipboard } from "../../components/common";
@@ -17,7 +21,7 @@ import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
 import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
 import { type Route } from "../../app/routes";
-import { liveTerminals, disposeTerminal } from "./terminalCache";
+import { liveTerminals, disposeTerminal, applyNotificationInputOwnership } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
 import { connectTerminalInput } from "./terminalInput";
 import { connectWindowsClipboard, isWindowsTerminal } from "./terminalWindows";
@@ -73,6 +77,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
 }) {
   const [state, setState] = useState<TerminalState>({ kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const notificationInputRef = useRef<HTMLTextAreaElement>(null);
+  const inputOwnership = useRef<{ terminalId: string; managed: boolean } | null>(null);
+  const focusMailboxInput = useCallback(() => {
+    const input = notificationInputRef.current;
+    if (input && !input.closest("[hidden]")) input.focus();
+  }, []);
   // 路由种子只填首帧；任何权威快照/事件（包括 null）都会替换它。
   const [identity, setIdentity] = useState<BoundIdentity>({
     revision: -1,
@@ -85,6 +95,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [closing, setClosing] = useState(false);
+  const [statusOpen, setStatusOpen] = useViewState(`terminal.${terminalId}.status.open`, true);
+  const { notification, error: mailboxError, apply: applyNotification, refresh: refreshMailbox } = useMailbox(terminalId);
   const closingRef = useRef(false);
   const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(null);
   const mountedRef = useRef(true);
@@ -211,11 +223,18 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       } : {}) });
       const stopTheme = observeTerminalTheme(term, (data) => {
         if (!snapshot.live || liveTerminals.get(id)?.exited) return;
-        void api.terminalInput(id, data).catch(() => {});
+        void api.terminalInput(id, data, false, liveTerminals.get(id)?.inputRevision ?? 0).catch(() => {});
       }, windows);
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(container);
+      const guardFocus = () => {
+        const live = liveTerminals.get(id);
+        if (!live || !live.managed && !live.exited) return;
+        term.blur();
+        if (live.managed) live.onManagedFocus?.();
+      };
+      term.textarea?.addEventListener("focus", guardFocus);
       let stopViewport = () => {};
       let output: ReturnType<typeof createTerminalOutput> | undefined;
       const renderer = createTerminalRenderer(term);
@@ -229,10 +248,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const stopLinks = connectTerminalLinks(term, isMacTerminal(), api.openRemoteUrl);
       const stopKeyboard = windows ? connectWindowsClipboard(term, {
         read: api.readClipboardForTerminal, copy: api.writeClipboardForTerminal,
-        live: () => !liveTerminals.get(id)?.exited && liveTerminals.has(id),
+        live: () => !liveTerminals.get(id)?.exited && !liveTerminals.get(id)?.managed && !!liveTerminals.get(id)?.inputReady,
       }) : connectTerminalKeyboard(term, {
         mac: isMacTerminal(),
-        writable: () => !liveTerminals.get(id)?.exited && liveTerminals.has(id),
+        writable: () => !liveTerminals.get(id)?.exited && !liveTerminals.get(id)?.managed && !!liveTerminals.get(id)?.inputReady,
         readClipboard: api.readClipboardForTerminal,
         copy: copyToClipboard,
       });
@@ -241,7 +260,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const stopInput = connectTerminalInput(term, (data, binary) => {
         const liveNow = liveTerminals.get(id);
         if (!liveNow || liveNow.exited) return;
-        api.terminalInput(id, data, binary).catch(() => {
+        if (!isTerminalReply(data) && (liveNow.managed || !liveNow.inputReady)) return;
+        api.terminalInput(id, data, binary, liveNow.inputRevision ?? 0).catch(() => {
           // 已退出的终端拒绝输入：横幅已说明，不再打扰。
         });
       }, windows);
@@ -251,7 +271,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         fit,
         renderer,
         dimensions: { cols: snapshot.cols, rows: snapshot.rows },
-        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, stopViewport, () => output?.dispose(), () => renderer.dispose(), () => stream.dispose()],
+        unlisteners: [stopTheme, stopInput, stopKeyboard, stopLinks, stopViewport, () => term.textarea?.removeEventListener("focus", guardFocus), () => output?.dispose(), () => renderer.dispose(), () => stream.dispose()],
         exited: !snapshot.live || stream.exited,
         onExit: null,
       };
@@ -269,6 +289,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       if (entry.term.element) container.appendChild(entry.term.element);
     }
     const live = entry;
+    live.onManagedFocus = focusMailboxInput;
 
     // 横幅与实例的退出事实同步：挂载时读一次，之后由 exit 事件推送。
     setState((prev) =>
@@ -287,7 +308,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     if (isWindowsTerminal()) {
       const stopLayout = connectTerminalLayout(live.term, live.fit, container,
         (cols, rows) => live.exited ? Promise.resolve() : api.terminalResize(id, cols, rows), snapshot);
-      return () => { live.onExit = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); stopLayout(); };
+      return () => { live.onExit = null; live.onManagedFocus = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); stopLayout(); };
     }
 
     const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {
@@ -304,10 +325,33 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
 
     return () => {
       live.onExit = null;
+      live.onManagedFocus = null;
       live.renderer.onDimensionsChange = null;
       layout.dispose();
     };
-  }, [snapshot, stream]);
+  }, [snapshot, stream, focusMailboxInput]);
+
+  useEffect(() => {
+    const live = liveTerminals.get(terminalId);
+    if (!notification || !live) return;
+    applyNotificationInputOwnership(terminalId, notification);
+    if (live.exited) live.term.blur();
+    const previous = inputOwnership.current;
+    if (!previous || previous.terminalId !== terminalId || previous.managed !== (notification.enabled || notification.writing)) {
+      inputOwnership.current = { terminalId, managed: (notification.enabled || notification.writing) };
+      // The takeover dialog restores its previous focus when it closes. Apply
+      // the new input owner's focus after that cleanup, without moving the TUI cursor.
+      requestAnimationFrame(() => {
+        if (!mountedRef.current || liveTerminals.get(terminalId) !== live || live.managed !== (notification.enabled || notification.writing)) return;
+        if ((notification.enabled || notification.writing)) {
+          live.term.blur();
+          focusMailboxInput();
+        } else if (previous?.terminalId === terminalId && previous.managed && !live.exited) {
+          live.term.focus();
+        }
+      });
+    }
+  }, [notification, snapshot, exited, terminalId, focusMailboxInput]);
 
   // 未绑定的终端以「新会话」为名；绑定后标题换成会话本名。agent 在
   // attach 回来前用路由种子，避免首帧丢失图标。
@@ -335,6 +379,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
               terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
+            <button className={`btn ghost icon-button${statusOpen ? " on" : ""}`} aria-label={statusOpen ? "收起状态栏" : "展开状态栏"}
+              title={`${statusOpen ? "收起状态栏" : "展开状态栏"}${notification?.enabled ? " · 自动通知开启，终端只读" : ""}`} aria-expanded={statusOpen} aria-controls={`terminal-status-${terminalId}`}
+              onClick={() => setStatusOpen(value => !value)}><Icon name="panelRight" /></button>
             <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
               title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || terminalBusy || state.kind === "loading"}
               onClick={() => void closeTerminal()}><Icon name="close" /></button>
@@ -367,9 +414,15 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           )}
           <div className="terminal-body">
             <div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} />
+            <aside className="terminal-status-panel" id={`terminal-status-${terminalId}`} aria-label="终端状态栏" hidden={!statusOpen}>
+              <SessionTaskTracking key={boundSessionId} sessionId={boundSessionId} navigate={navigate} />
+              <TerminalMailbox key={notification?.session_id ?? terminalId} terminalId={terminalId} notification={notification} error={mailboxError}
+                apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} />
+            </aside>
           </div>
         </>
       )}
+
     </div>
   );
 }

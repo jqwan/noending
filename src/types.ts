@@ -310,6 +310,7 @@ export interface WorkstreamContext {
 // （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 Agent。
 
 export interface SummaryItem {
+  id: string;
   title: string;
   description: string;
   details: string[];
@@ -693,4 +694,26 @@ export type SummaryPromptTemplates = Record<SummaryPromptKind, string>;
 export interface SummaryPromptSettings {
   templates: SummaryPromptTemplates;
   defaults: SummaryPromptTemplates;
+}
+
+export interface MailboxMessage {
+  notify_immediately: boolean;
+  id: string;
+  recipient_session_id: string;
+  sender_session_id: string | null;
+  body: string;
+  created_at: string;
+  read_at: string | null;
+  revision: number;
+}
+export interface MailboxPage { items: MailboxMessage[]; unread: number; next_cursor: number | null }
+export interface TerminalNotifications {
+  terminal_id: string;
+  session_id: string | null;
+  enabled: boolean;
+  writing: boolean;
+  revision: number;
+  input_revision: number;
+  identity_revision: number;
+  error: string | null;
 }

@@ -17,6 +17,7 @@ import type {
 // 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
+    mailboxList: vi.fn().mockResolvedValue({items:[],unread:0,next_cursor:null}),
     saveSummary: vi.fn(),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
@@ -58,6 +59,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
+  vi.mocked(api.mailboxList).mockResolvedValue({items:[],unread:0,next_cursor:null});
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
@@ -353,7 +355,7 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
 it("renders summary, supports copying, and updates context on pending increment", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: { items: [{ title: "前端入口重构", description: "**正在重构前端入口**，删掉 Context Intelligence 开关。", title_locked: false, details: ["下一步补测试。"] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-1", title: "前端入口重构", description: "**正在重构前端入口**，删掉 Context Intelligence 开关。", title_locked: false, details: ["下一步补测试。"] }] },
     },
     pending: true,
     revision: 3,
@@ -381,7 +383,7 @@ it("renders summary, supports copying, and updates context on pending increment"
 it("allows regenerating a current summary without pending messages", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: { items: [{ title: "已完成", description: "", title_locked: false, details: [] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-2", title: "已完成", description: "", title_locked: false, details: [] }] },
     },
     pending: false,
     revision: 1,
@@ -474,7 +476,7 @@ it("renders cached summary immediately without flashing 暂无摘要", async () 
   sessionDetailCache.set("me", d);
   sessionContextCache.set("me", contextView({
     fields: {
-      summary: { items: [{ title: "这是已缓存的会话摘要", description: "", title_locked: false, details: [] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-3", title: "这是已缓存的会话摘要", description: "", title_locked: false, details: [] }] },
     },
   }));
   vi.mocked(api.getSessionDetail).mockResolvedValue(d);
@@ -535,11 +537,11 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   vi.mocked(api.getSessionDetail).mockReturnValueOnce(new Promise(done => { resolve = done; }));
   const navigate = vi.fn();
   render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialAgent="codex" navigate={navigate} />);
-  expect(screen.getByRole("heading").textContent).toBe("稳定标题");
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("稳定标题");
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
   await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
-  expect(screen.getByRole("heading").textContent).toBe("稳定标题");
+  expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("稳定标题");
 });
 
 it("blocks continue when working directory does not exist", async () => {

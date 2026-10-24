@@ -64,8 +64,8 @@ export default function WorkstreamDetailView({
     target: ctxState?.workstream_id === workstreamId ? { kind: "task", id: workstreamId, revision: ctxState.context_revision } : undefined,
     summary: ctxState?.summary,
     disabled: Boolean(ctxUpdating),
-    onChange: (result, removedIndex) => {
-      summaryExpansion.preserve(result.summary, removedIndex);
+    onChange: (result) => {
+      summaryExpansion.preserve(result.summary);
       if (currentWorkstreamId.current !== workstreamId) return;
       setCtxState(previous => {
         if (!previous || previous.context_revision > result.revision) return previous;

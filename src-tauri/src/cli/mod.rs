@@ -4,7 +4,7 @@ mod arguments;
 pub(crate) mod extraction_settings;
 mod installation;
 mod messages;
-mod receipts;
+pub(crate) mod receipts;
 mod search;
 pub(crate) mod service;
 mod summaries;
@@ -61,6 +61,7 @@ impl From<crate::error::AppError> for CliError {
             AppError::Io(_) => "io_error",
             AppError::Json(_) => "invalid_json",
             AppError::Other(_) => "operation_rejected",
+            AppError::AgentLaunchUncertain(_) => "delivery_uncertain",
         };
         Self::new(code, &error)
     }

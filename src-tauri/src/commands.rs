@@ -7,7 +7,7 @@
 //! submodules borrow.
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
@@ -54,7 +54,7 @@ fn launcher_for(app: &AppHandle) -> crate::launcher::SessionLauncher {
 }
 
 /// The Home the app is actually running on, for the few commands that need it.
-fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome> {
+pub(crate) fn noending_home(app: &AppHandle) -> Option<crate::workspace::home::NoEndingHome> {
     app.try_state::<crate::workspace::home::NoEndingHome>()
         .map(|h| h.inner().clone())
 }
@@ -704,6 +704,33 @@ pub fn terminal_for_session(
     Ok(terminal.for_session(&session_id))
 }
 
+pub(crate) fn launch_mailbox_terminal(
+    app: &AppHandle,
+    session: &str,
+    message: &str,
+) -> Result<String> {
+    let state = app.state::<AppState>();
+    let terminal = app.state::<crate::terminal::TerminalRegistry>();
+    let launcher = launcher_for(app);
+    let workspace = launch_workspace(app);
+    if let Some(live) = terminal.for_session(session) {
+        return Ok(live.terminal_id);
+    }
+    let mut prepared = launcher.prepare_resume_in(&state.db, session, &workspace)?;
+    prepared.desktop_open = None;
+    prepared.embedded = true;
+    prepared.initial_message = Some(message.to_owned());
+    let embedded = crate::launcher::EmbeddedSpawn {
+        registry: &terminal,
+        reconnect: None,
+        spawn: crate::terminal::spawn_embedded,
+    };
+    launcher
+        .launch_prepared_in(&state.db, &prepared, &workspace, Some(&embedded))?
+        .terminal_id
+        .ok_or_else(|| other("未获得会话终端"))
+}
+
 /// Explicitly restart the Agent for the terminal's current, verified Session.
 /// Prepare validates archive/source/runtime state before touching the old PTY.
 #[tauri::command]
@@ -789,12 +816,23 @@ pub fn terminal_input(
     terminal_id: String,
     data: String,
     binary: Option<bool>,
+    input_revision: u64,
 ) -> Result<()> {
-    if binary.unwrap_or(false) {
-        state.write_binary(&terminal_id, &data)
-    } else {
-        state.write(&terminal_id, &data)
-    }
+    state.write_guarded(&terminal_id, &data, binary.unwrap_or(false), input_revision)
+}
+
+#[tauri::command]
+pub async fn terminal_cache_image(
+    app: AppHandle,
+    terminal_id: String,
+    image: crate::terminal::images::ClipboardImage,
+) -> Result<String> {
+    run_on_blocking_worker(move || {
+        app.state::<crate::terminal::TerminalRegistry>()
+            .cache_image(&terminal_id, image)
+            .map_err(|e| other(e.message))
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -1109,10 +1147,7 @@ pub async fn assistant_workspace(
     let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 未初始化"))?;
     let db = state.db.clone();
     let layer = layer.inner().clone();
-    run_on_blocking_worker(move || {
-        crate::assistant::ensure_workspace(&db, &home, &layer, &crate::skills::Roots::current()?)
-    })
-    .await?
+    run_on_blocking_worker(move || crate::assistant::ensure_workspace(&db, &home, &layer)).await?
 }
 
 /// The async seam test: the refresh command's blocking CLI probe must run on
@@ -1176,4 +1211,85 @@ mod agent_runtime_refresh_seam_tests {
             assert!(err.to_string().contains("http"), "{bad}: {err}");
         }
     }
+}
+
+#[tauri::command]
+pub fn mailbox_list(
+    state: State<AppState>,
+    session: String,
+    filter: String,
+    cursor: Option<i64>,
+    limit: usize,
+) -> Result<crate::storage::mailbox::MailboxPage> {
+    state.db.mailbox_list(&session, &filter, cursor, limit)
+}
+#[tauri::command]
+pub fn mailbox_send(
+    app: AppHandle,
+    state: State<AppState>,
+    session: String,
+    body: String,
+) -> Result<crate::storage::mailbox::MailboxMessage> {
+    let m = state.db.mailbox_send(&session, None, &body)?;
+    let _ = app.emit("mailbox-changed", ());
+    app.state::<crate::terminal::TerminalRegistry>()
+        .kick_notifications("");
+    Ok(m)
+}
+#[tauri::command]
+pub fn terminal_notifications(
+    terminal: State<crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+) -> Result<crate::terminal::notifications::NotificationSnapshot> {
+    terminal.notification_state(&terminal_id)
+}
+#[tauri::command]
+pub fn terminal_auto_notifications(
+    state: State<AppState>,
+    terminal: State<crate::terminal::TerminalRegistry>,
+    terminal_id: String,
+    identity_revision: u64,
+    enabled: bool,
+) -> Result<crate::terminal::notifications::NotificationSnapshot> {
+    terminal.set_auto_notifications(&state.db, &terminal_id, identity_revision, enabled)
+}
+#[tauri::command]
+pub fn mailbox_remind(app: AppHandle, terminal_id: String) -> Result<()> {
+    app.state::<crate::terminal::TerminalRegistry>()
+        .request_reminder(&terminal_id)
+}
+#[tauri::command]
+pub fn mailbox_edit(
+    app: AppHandle,
+    state: State<AppState>,
+    terminal_id: String,
+    identity_revision: u64,
+    message_id: String,
+    revision: i64,
+    body: Option<String>,
+) -> Result<Option<crate::storage::mailbox::MailboxMessage>> {
+    app.state::<crate::terminal::TerminalRegistry>()
+        .edit_mailbox(
+            &state.db,
+            &terminal_id,
+            identity_revision,
+            &message_id,
+            revision,
+            body.as_deref(),
+        )
+}
+
+#[tauri::command]
+pub fn mailbox_notification_hint(state: State<AppState>, skip: Option<bool>) -> Result<bool> {
+    if let Some(skip) = skip {
+        state.db.set_setting(
+            "mailbox.skip_notification_hint",
+            if skip { "true" } else { "false" },
+        )?;
+    }
+    Ok(state
+        .db
+        .get_setting("mailbox.skip_notification_hint")?
+        .as_deref()
+        == Some("true"))
 }

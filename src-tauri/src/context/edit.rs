@@ -2,7 +2,25 @@
 use crate::domain::Summary;
 use crate::error::{other, Result};
 use crate::storage::{context_repo as repo, project_context_repo, Db};
+use rmcp::schemars;
 use rusqlite::params;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TaskTodoContent {
+    pub title: String,
+    /// Optional goal/scope description. Omission preserves an existing item's description.
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TaskTodoResult {
+    /// Complete replacement body, including confirmed results and necessary context.
+    pub description: String,
+    /// Confirmed progress, outcomes and verification, not a checklist of child tasks.
+    pub details: Vec<String>,
+}
 
 #[derive(serde::Serialize)]
 pub struct SummaryEditResult {
@@ -15,12 +33,17 @@ pub fn edit_summary(
     id: &str,
     expected_revision: i64,
     text: &str,
-) -> Result<i64> {
+) -> Result<SummaryEditResult> {
     // CLI/MCP require a nonempty document; the desktop editor also supports
     // explicitly removing the last item without changing extraction progress.
     let summary: Summary = serde_json::from_str(text)?;
-    save_summary(db, kind, id, expected_revision, summary.validated()?)
-        .map(|result| result.revision)
+    save_summary(
+        db,
+        kind,
+        id,
+        expected_revision,
+        summary.validated_content()?,
+    )
 }
 
 pub fn save_summary(
@@ -33,9 +56,10 @@ pub fn save_summary(
     let summary = if summary.is_empty() {
         summary
     } else {
-        summary.validated()?
+        summary.validated_content()?
     };
     mutate_summary(db, kind, id, expected_revision, |previous| {
+        let summary = summary.resolve_ids()?;
         summary.validate_title_locks(&previous)?;
         Ok(summary)
     })
@@ -60,6 +84,87 @@ pub fn set_summary_title_lock(
         item.title_locked = locked;
         Ok(summary)
     })
+}
+
+/// Publish one explicit item without replacing the surrounding task summary.
+pub fn publish_task_todo(
+    db: &Db,
+    id: &str,
+    expected_revision: i64,
+    item_number: Option<usize>,
+    content: TaskTodoContent,
+) -> Result<SummaryEditResult> {
+    mutate_summary(db, "task", id, expected_revision, |mut summary| {
+        let title = content.title.trim().to_string();
+        if let Some(number) = item_number {
+            let previous = task_item_mut(&mut summary, number)?;
+            if previous.title_locked && previous.title != title {
+                return Err(other("不能通过发布待办修改已锁定的事项标题"));
+            }
+            previous.title = title;
+            if let Some(description) = content.description {
+                previous.description = description;
+            }
+            previous.title_locked = true;
+        } else {
+            summary.items.push(crate::domain::SummaryItem {
+                id: crate::storage::new_id(),
+                title,
+                description: content.description.unwrap_or_default(),
+                details: Vec::new(),
+                title_locked: true,
+            });
+        }
+        summary.validated()
+    })
+}
+
+/// Completion unlocks the title, optionally committing a replacement body together.
+pub fn complete_task_todo(
+    db: &Db,
+    id: &str,
+    expected_revision: i64,
+    item_number: usize,
+    result: Option<TaskTodoResult>,
+) -> Result<SummaryEditResult> {
+    mutate_summary(db, "task", id, expected_revision, |mut summary| {
+        let item = task_item_mut(&mut summary, item_number)?;
+        if !item.title_locked {
+            return Err(other("完成待办要求目标事项标题已锁定"));
+        }
+        if let Some(result) = result {
+            if result.description.trim().is_empty() && result.details.is_empty() {
+                return Err(other("提供完成结果时内容不能为空"));
+            }
+            item.description = result.description;
+            item.details = result.details;
+        }
+        item.title_locked = false;
+        summary.validated()
+    })
+}
+
+/// Discard is an explicit removal action, not a persisted item status.
+pub fn discard_task_todo(
+    db: &Db,
+    id: &str,
+    expected_revision: i64,
+    item_number: usize,
+) -> Result<SummaryEditResult> {
+    mutate_summary(db, "task", id, expected_revision, |mut summary| {
+        if !task_item_mut(&mut summary, item_number)?.title_locked {
+            return Err(other("废弃待办要求目标事项标题已锁定"));
+        }
+        summary.items.remove(item_number - 1);
+        Ok(summary)
+    })
+}
+
+fn task_item_mut(summary: &mut Summary, number: usize) -> Result<&mut crate::domain::SummaryItem> {
+    number
+        .checked_sub(1)
+        .and_then(|index| summary.items.get_mut(index))
+        .ok_or_else(|| other("事项不存在，序号须从 1 开始并对应当前摘要版本"))
 }
 
 fn mutate_summary(

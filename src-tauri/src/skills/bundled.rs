@@ -24,12 +24,22 @@ const MEMORY: BundledSkill = BundledSkill {
     content: include_str!("../../skills/noending-memory/SKILL.md"),
     operations: include_str!("../../skills/noending-memory/references/operations.md"),
 };
-const COLLABORATION: BundledSkill = BundledSkill {
-    name: "noending-collaboration",
-    initialized: "skills.collaboration_initialized",
-    content: include_str!("../../skills/noending-collaboration/SKILL.md"),
-    operations: include_str!("../../skills/noending-collaboration/references/operations.md"),
+const TASK: BundledSkill = BundledSkill {
+    name: "noending-task",
+    initialized: "skills.task_initialized",
+    content: include_str!("../../skills/noending-task/SKILL.md"),
+    operations: include_str!("../../skills/noending-task/references/operations.md"),
 };
+
+const MAILBOX: BundledSkill = BundledSkill {
+    name: "noending-mailbox",
+    initialized: "skills.mailbox_initialized",
+    content: include_str!("../../skills/noending-mailbox/SKILL.md"),
+    operations: include_str!("../../skills/noending-mailbox/references/operations.md"),
+};
+pub fn prepare_mailbox_skill(db: &Db, home: &NoEndingHome, executable: &Path) -> Result<()> {
+    prepare(db, home, executable, &MAILBOX)
+}
 
 fn owned(path: &Path, skill: &BundledSkill) -> bool {
     let marker = path.join(format!(".{}", skill.name));
@@ -84,8 +94,8 @@ pub fn prepare_memory_skill(db: &Db, home: &NoEndingHome, executable: &Path) -> 
     prepare(db, home, executable, &MEMORY)
 }
 
-pub fn prepare_collaboration_skill(db: &Db, home: &NoEndingHome, executable: &Path) -> Result<()> {
-    prepare(db, home, executable, &COLLABORATION)
+pub fn prepare_task_skill(db: &Db, home: &NoEndingHome, executable: &Path) -> Result<()> {
+    prepare(db, home, executable, &TASK)
 }
 
 /// Update only application-owned files. A removed installed skill stays removed;
