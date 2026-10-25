@@ -1,0 +1,47 @@
+.package-card.ws-card { height: 100%; }
+/* 列表行的操作按钮组固定在行尾，不参与 flex 收缩。 */
+.package-list-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.package-error { color: var(--danger); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 12px; }
+.package-warnings { margin-bottom: 16px; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.package-warnings summary { cursor: pointer; }
+.package-description { font-size: 13px; color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.package-detail-page .page-title { display: flex; align-items: center; gap: 8px; }
+.package-detail-page .page-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.package-detail-page .page-title > .ui-icon { width: 16px; height: 16px; color: var(--text-secondary); }
+.package-detail-page .detail-layout { margin-top: 18px; }
+.package-detail-page .detail-section > p { margin: 0; line-height: 1.7; }
+.package-agent { display: inline-flex; align-items: center; gap: 6px; }
+.package-contents { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.package-dialog-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin: 0 0 12px; }
+.package-dialog-actions { justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.agent-packages { margin-top: 16px; }
+.agent-package-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; font-size: 13px; border-bottom: 1px solid var(--border-subtle); }
+.agent-package-row:last-child { border-bottom: none; }
+.agent-package-row .package-open { flex-direction: row; align-items: center; gap: 8px; }
+.package-check { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; }
+.package-check input { width: auto; margin: 0; }
+.package-scope-state { display: inline-flex; align-items: center; gap: 8px; }
+.package-list-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.package-preview { border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 12px; margin: 10px 0 2px; background: var(--bg-panel); }
+.package-preview-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.package-preview-head .ui-icon { width: 15px; height: 15px; color: var(--text-secondary); flex: none; }
+.package-preview-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.package-preview-desc { margin: 6px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.55; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.package-preview-agent { margin: 8px 0 0; }
+.package-market-option { padding: 4px 0 8px; border-bottom: 1px solid var(--border-subtle); }
+.package-market-option:last-child { border-bottom: none; padding-bottom: 0; }
+.package-market-plugin-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.package-scope-state { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.package-scope-path { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; cursor: pointer; }
+.package-card-version { display: flex; min-width: 0; }
+.package-version-text { font-size: 11.5px; color: var(--text-muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.package-version { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.package-card-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Inline spans wrapping svg icons sit on the text baseline and gain a descent
+   gap; inline-flex removes it so the icon centers against the title. */
+.package-card .ws-card-title > span[role="img"],
+.package-list-title > span[role="img"] { display: inline-flex; align-items: center; }
+.package-scope-state { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.package-scope-state > .badge { flex: none; }
+.package-scope-path { margin-top: 6px; }
+.package-pick-btn { white-space: nowrap; flex: none; }

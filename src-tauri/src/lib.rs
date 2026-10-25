@@ -14,6 +14,7 @@ pub mod launcher;
 pub mod lifecycle;
 pub mod mailbox;
 mod mcp;
+pub mod packages;
 pub mod platform;
 pub mod search;
 pub mod session_control;
@@ -194,6 +195,14 @@ pub fn run() {
             commands::skills::disable_skill_projects,
             commands::skills::skill_uninstall_preview,
             commands::skills::uninstall_skill,
+            commands::packages::list_packages,
+            commands::packages::get_package_detail,
+            commands::packages::preview_import_package,
+            commands::packages::install_local_package,
+            commands::packages::install_local_marketplace,
+            commands::packages::uninstall_package,
+            commands::packages::enable_package,
+            commands::packages::disable_package,
             // Projects derive membership from paths; lifecycle is user managed.
             commands::project::list_projects,
             commands::project::list_project_cards,

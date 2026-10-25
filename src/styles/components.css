@@ -39,6 +39,128 @@
 .row { display: flex; align-items: center; gap: 10px; }
 .row.between { justify-content: space-between; }
 
+/* ---------- Board cards & toolbar controls (shared across boards) ----------
+   所有看板共用的卡片基样式与搜索/筛选工具栏。放在 main.tsx 全量加载的
+   components.css 里：此前它们只在 workstreams.css，除工作区/项目外的看板
+   （会话、Agent、技能、插件包）都靠该样式表恰好被加载过才得到卡片外观。 */
+.ws-stack { display: flex; flex-direction: column; gap: 14px; }
+.ws-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 1000px) {
+  .ws-grid:not(.board-grid) { grid-template-columns: 1fr; }
+}
+.ws-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-app);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 132px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 132px;
+}
+.ws-card:hover {
+  background: var(--bg-app);
+  border-color: var(--border-default);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+.ws-card.compact { padding: 10px 14px; min-height: unset; }
+.ws-card.full { min-height: 132px; }
+
+.ws-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+}
+.ws-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-card-title .ui-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.ws-card-side {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ws-card-project { color: var(--text-muted); }
+
+.ws-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.ws-card-desc,
+p.ws-card-body {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+}
+.ws-card-desc.muted,
+p.ws-card-body.muted { color: var(--text-muted); }
+
+.ws-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 11.5px;
+  min-height: 32px;
+}
+.ws-card-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.ws-card-error { color: var(--warning); }
+
+.ws-btn { display: inline-flex; align-items: center; gap: 6px; }
+.ws-btn .agent-icon { flex: none; }
+/* Resume is the highest-frequency action on Home — slightly stronger than New */
+.ws-btn.resume-primary { border-color: var(--text-primary); font-weight: 550; }
+
+.ws-search { margin: 4px 0 14px; max-width: 460px; }
+.ws-controls { gap: 18px; }
+.ws-control { display: flex; align-items: center; gap: 8px; }
+.ws-control select { width: auto; padding: 4px 8px; font-size: 12.5px; }
+
 /* ---------- Toast ---------- */
 .toast-host {
   position: fixed;

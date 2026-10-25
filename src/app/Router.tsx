@@ -17,6 +17,8 @@ const SettingsView = lazy(() => import("../features/settings/SettingsView"));
 const AgentsView = lazy(() => import("../features/agents/AgentsView"));
 const SkillsView = lazy(() => import("../features/skills/SkillsView"));
 const SkillDetailView = lazy(() => import("../features/skills/SkillDetailView"));
+const PackagesView = lazy(() => import("../features/packages/PackagesView"));
+const PackageDetailView = lazy(() => import("../features/packages/PackageDetailView"));
 
 
 export function preloadCommonRoutes() {
@@ -139,6 +141,10 @@ function renderRoute(
       return <SkillsView key={route.projectId ?? "user"} initialProjectId={route.projectId} navigate={navigate} />;
     case "skill":
       return <SkillDetailView key={`${route.resourceId}:${route.projectId ?? ""}:${route.workspacePathId ?? ""}`} {...route} navigate={navigate} />;
+    case "packages":
+      return <PackagesView navigate={navigate} />;
+    case "package":
+      return <PackageDetailView key={route.packageId} packageId={route.packageId} initialTitle={route.initialTitle} agent={route.agent} navigate={navigate} />;
     case "settings":
       return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
     default:

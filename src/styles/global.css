@@ -257,6 +257,17 @@ label.field span { display: block; font-size: 12px; color: var(--text-muted); ma
 
 .ui-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
 
+/* 插件包启停按钮：启用蓝色图标加淡蓝底、停用置灰无底色，靠色相加底色双重区分。
+   颜色与底色要压过 button.btn.ghost（含其 hover 规则），所以选择器带全 .btn 链
+   并在其后定义。 */
+button.btn.icon-button.is-on,
+button.btn.icon-button.is-on:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+button.btn.icon-button.is-off,
+button.btn.icon-button.is-off:hover:not(:disabled) { color: var(--text-muted); }
+
 .brand-lockup {
   display: inline-block;
   flex-shrink: 0;

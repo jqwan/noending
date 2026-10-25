@@ -33,6 +33,51 @@ export interface SkillRegistrationPreview { source_path: string; target_path: st
 export interface SkillRegistrationResult { message: string; source_path: string; resource_id: string; name: string; description: string }
 export interface SkillOperationResult { message: string }
 
+/** Plugin packages — mirror of src-tauri/src/packages (offline discovery). */
+export type PackageOrigin = "market" | "bundled" | "noending_managed" | "local" | "profile";
+export type PackageScope = "user" | "project" | "local";
+export type PackageToggleState = "enabled" | "disabled" | "unset" | "unknown";
+export interface PackageScopeState {
+  scope: PackageScope;
+  state: PackageToggleState;
+  config_path: string;
+  /** False when the scope was never written and the file is only the
+   *  registry-derived location where a toggle would land. */
+  config_exists: boolean;
+  project_path: string | null;
+}
+export interface PackageCapabilities { uninstall: boolean; toggle: boolean }
+export interface PackageEntry {
+  id: string;
+  agent: Agent | null;
+  name: string;
+  version: string;
+  description: string;
+  origin: PackageOrigin;
+  marketplace: string | null;
+  install_path: string | null;
+  scopes: PackageScopeState[];
+  capabilities: PackageCapabilities;
+  revision: string;
+  error: string | null;
+}
+export interface PackageContents { skills: string[]; mcp_files: string[] }
+export interface PackageDetail { entry: PackageEntry; contents: PackageContents; root: string | null }
+export interface PackageInventory { packages: PackageEntry[]; warnings: string[] }
+export interface PackageOperationResult { message: string }
+export interface PackageMarketplacePlugin { name: string; description: string }
+export interface PackageImportOption {
+  agent: Agent;
+  manifest: string;
+  /** Package name, or the marketplace's own name. */
+  name: string;
+  description: string;
+  /** Empty for single packages; the marketplace's plugin list otherwise. */
+  plugins: PackageMarketplacePlugin[];
+}
+export type PackageImportKind = "package" | "marketplace";
+export interface PackageImportPreview { path: string; kind: PackageImportKind; options: PackageImportOption[] }
+
 /** Task archive state; there is no active/completed classification. */
 export type WorkstreamVisibility = "normal" | "archived";
 /** `missing` = Git evidence is gone; ordinary projects retain their identity. */

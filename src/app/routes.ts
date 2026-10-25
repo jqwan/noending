@@ -44,6 +44,8 @@ export type Route =
   | { view: "agents"; agent?: Agent }
   | { view: "skills"; projectId?: string }
   | { view: "skill"; resourceId: string; initialTitle?: string; projectId?: string; workspacePathId?: string }
+  | { view: "packages" }
+  | { view: "package"; packageId: string; initialTitle?: string; agent?: Agent }
   | { view: "projects"; scope?: "unarchived" | "archived" }
   | { view: "project"; projectId: string; initialTitle?: string }
   | { view: "settings"; section?: SettingsSection | LegacySettingsSection };

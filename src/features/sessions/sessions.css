@@ -613,14 +613,16 @@ button.btn.conversation-jump:active {
 .task-list,
 .project-list,
 .agent-list,
-.skill-list {
+.skill-list,
+.package-list {
   border-top: 1px solid var(--border-subtle);
 }
 .session-list-row,
 .task-list-row,
 .project-list-row,
 .agent-list-row,
-.skill-list-row {
+.skill-list-row,
+.package-list-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -640,14 +642,17 @@ button.btn.conversation-jump:active {
 .agent-list-row:hover,
 .agent-list-row:focus-within,
 .skill-list-row:hover,
-.skill-list-row:focus-within {
+.skill-list-row:focus-within,
+.package-list-row:hover,
+.package-list-row:focus-within {
   background: var(--bg-panel);
 }
 .session-open,
 .task-open,
 .project-open,
 .agent-open,
-.skill-open {
+.skill-open,
+.package-open {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -665,7 +670,8 @@ button.btn.conversation-jump:active {
 .task-list-title,
 .project-list-title,
 .agent-list-title,
-.skill-list-title {
+.skill-list-title,
+.package-list-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -677,7 +683,8 @@ button.btn.conversation-jump:active {
 .task-list-title > span,
 .project-list-title > span,
 .agent-list-title > span,
-.skill-list-title > span {
+.skill-list-title > span,
+.package-list-title > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -687,7 +694,8 @@ button.btn.conversation-jump:active {
 .task-list-meta,
 .project-list-meta,
 .agent-list-meta,
-.skill-list-meta {
+.skill-list-meta,
+.package-list-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;

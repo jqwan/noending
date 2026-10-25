@@ -194,12 +194,13 @@ pub fn cli_names(agent: Agent) -> Vec<&'static str> {
         Agent::Qoder => vec![],
         // Electron GUI: only /Applications/WorkBuddy.app/Contents/MacOS/Electron.
         Agent::WorkBuddy => vec![],
-        // dsh HAS a CLI (`dsh --profile <name> …`, bin `@deepseek-ai/dsh`), but
-        // every invocation must name a profile that lives under
-        // `$DSH_HOME/profiles`; the name is the user's own setup, and NoEnding
-        // cannot know it. Guessing one would boot the wrong tree — or nothing —
-        // so launching waits until a profile can be chosen deliberately.
-        Agent::Dsh => vec![],
+        // dsh's CLI ships inside the app bundle (not on PATH by default).
+        // Boot-style launches still need a user-chosen profile and stay
+        // unavailable; the `plugin --profile desktop` subcommand, however,
+        // names its profile explicitly and is safe to resolve here.
+        // macOS uses the bundled absolute path; Windows is PATH-only until
+        // the in-bundle path is verified on a real install.
+        Agent::Dsh => dsh_cli_names(),
         // Desktop app: its runtime lives inside the bundle (`zcode.cjs`) and
         // is not usable standalone — the app hosts it.
         Agent::ZCode => vec![],
@@ -315,5 +316,19 @@ mod tests {
         } else {
             assert_eq!(names, vec!["git".to_string()]);
         }
+    }
+}
+
+/// dsh executable candidates: PATH first, then the bundled CLI inside the
+/// app install (macOS). Windows stays PATH-only until verified on a real
+/// install.
+fn dsh_cli_names() -> Vec<&'static str> {
+    if cfg!(target_os = "windows") {
+        vec!["dsh"]
+    } else {
+        vec![
+            "dsh",
+            "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
+        ]
     }
 }

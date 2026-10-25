@@ -54,6 +54,9 @@ const paths = {
   inbox: "M3.5 3.5h11l1.5 6v4a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-4L3.5 3.5ZM2 9.5h4l1.5 2h3l1.5-2h4",
   collapseAll: "M4 4.5l5 3.5 5-3.5M4 13.5l5-3.5 5 3.5",
   expandAll: "M4 8l5-3.5 5 3.5M4 10l5 3.5 5-3.5",
+  puzzle: "M3.5 6h2.6a1.5 1.5 0 1 1 2.8 0H12v2.6a1.5 1.5 0 1 1 0 2.8V14H3.5Z",
+  // 电源符号：插件包启停按钮，停用时整钮置灰。
+  power: "M13.77 4.98a6.75 6.75 0 1 1-9.54 0M9 1.5v7.5",
 };
 
 export type IconName = keyof typeof paths;

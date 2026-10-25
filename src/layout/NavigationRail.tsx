@@ -4,7 +4,7 @@ import type { Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
 import { preloadAgentsCache } from "../features/agents/agentsCache";
 
-export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "skills" | "settings";
+export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "skills" | "packages" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
@@ -16,6 +16,7 @@ export function getRouteSection(route: Route): RailSection | null {
   if (route.view === "projects" || route.view === "project") return "projects";
   if (route.view === "agents") return "agents";
   if (route.view === "skills" || route.view === "skill") return "skills";
+  if (route.view === "packages" || route.view === "package") return "packages";
   if (route.view === "settings") return "settings";
   return null;
 }
@@ -32,6 +33,8 @@ export function getSectionRootRoute(section: RailSection): Route {
       return { view: "agents" };
     case "skills":
       return { view: "skills" };
+    case "packages":
+      return { view: "packages" };
     case "settings":
       return { view: "settings" };
   }
@@ -84,6 +87,7 @@ export default function NavigationRail({ route, navigate }: {
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
     { section: "agents", label: "Agent", icon: "agent", active: route.view === "agents" },
     { section: "skills", label: "技能", icon: "skill", active: currentSection === "skills" },
+    { section: "packages", label: "插件包", icon: "puzzle", active: currentSection === "packages" },
   ];
 
   return (

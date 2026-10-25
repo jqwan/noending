@@ -43,6 +43,22 @@ export const api = {
     invoke<import("./types").SkillRegistrationPreview>("skill_registration_preview", { id }),
   registerDiscoveredSkill: (id: string, migrateSource: boolean) =>
     invoke<import("./types").SkillRegistrationResult>("register_discovered_skill", { id, migrateSource }),
+  listPackages: () =>
+    invoke<import("./types").PackageInventory>("list_packages"),
+  getPackageDetail: (id: string) =>
+    invoke<import("./types").PackageDetail | null>("get_package_detail", { id }),
+  previewImportPackage: (path: string) =>
+    invoke<import("./types").PackageImportPreview>("preview_import_package", { path }),
+  uninstallPackage: (id: string) =>
+    invoke<import("./types").PackageOperationResult>("uninstall_package", { id }),
+  enablePackage: (id: string, revision: string) =>
+    invoke<import("./types").PackageOperationResult>("enable_package", { id, revision }),
+  disablePackage: (id: string, revision: string) =>
+    invoke<import("./types").PackageOperationResult>("disable_package", { id, revision }),
+  installLocalPackage: (path: string, agents: Agent[]) =>
+    invoke<import("./types").PackageOperationResult>("install_local_package", { path, agents }),
+  installLocalMarketplace: (path: string, selections: { agent: Agent; plugins: string[] }[]) =>
+    invoke<import("./types").PackageOperationResult>("install_local_marketplace", { path, selections }),
   getSessionTerminalStates: (sessionIds: string[]) =>
     invoke<Record<string, import("./types").TerminalResumeState>>("get_session_terminal_states", { sessionIds }),
   // Project membership derives from paths; archive state is independent.

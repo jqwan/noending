@@ -14,12 +14,14 @@ export default function AgentConfiguration({
   entry,
   reload,
   navigate,
+  packagesSection,
   sourcesSection,
 }: {
   agent: Agent;
   entry?: AgentStatusEntry;
   reload: () => Promise<void>;
   navigate: (route: Route) => void;
+  packagesSection?: React.ReactNode;
   sourcesSection?: React.ReactNode;
 }) {
   const runtime = useAgentRuntime(agent, Boolean(entry?.terminal_cli));
@@ -75,6 +77,8 @@ export default function AgentConfiguration({
       <div className="agent-detail-layout">
         <div className="agent-detail-main">
           {sourcesSection}
+
+          {packagesSection}
 
           <section className="card agent-settings-section">
             <div className="row between" style={{ alignItems: "center" }}>

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Icon from "./Icon";
 import { api } from "../api";
@@ -194,4 +194,54 @@ export async function openRemoteUrl(url: string): Promise<boolean> {
     showToast(`无法打开链接：${String(e)}`);
     return false;
   }
+}
+
+/** Label-above-value fact row with an optional copy button — the shared
+ *  detail-aside pattern (session info, plugin package properties). */
+export function Field({
+  label,
+  copyValue,
+  copyTitle,
+  action,
+  children,
+}: {
+  label: string;
+  copyValue?: string | null;
+  copyTitle?: string;
+  /** Right-aligned control on the label row (e.g. the primary toggle). */
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = async () => {
+    if (!copyValue) return;
+    const ok = await copyToClipboard(copyValue);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+    showToast(ok ? "已复制" : "复制失败");
+  };
+
+  return (
+    <>
+      <div className="session-field-label-row">
+        <span className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</span>
+        {action && <span className="session-field-action" style={{ marginLeft: "auto" }}>{action}</span>}
+        {copyValue && (
+          <button
+            type="button"
+            className={`btn ghost icon-button small session-field-copy-btn${copied ? " copied" : ""}`}
+            title={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
+            aria-label={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
+            onClick={onCopy}
+          >
+            <Icon name={copied ? "check" : "copy"} />
+          </button>
+        )}
+      </div>
+      <div style={{ minWidth: 0 }}>{children}</div>
+    </>
+  );
 }
