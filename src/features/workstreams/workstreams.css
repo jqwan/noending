@@ -1,5 +1,12 @@
 /* NoEnding - Workstreams Feature Styles */
 
+.task-description {
+  margin: 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .workstream-project-chips {
   display: flex;
   flex-wrap: wrap;
@@ -349,3 +356,40 @@
 }
 .activity-row:first-of-type { border-top: 0; }
 .activity-row .when { color: var(--text-muted); flex: none; width: 44px; font-family: var(--mono); font-size: 11px; }
+
+button.btn.task-item-status.is-completed,
+button.btn.task-item-status.is-completed:hover:not(:disabled) { color: var(--success); }
+
+.task-item-editor { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.task-item-editor input,
+.task-item-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  transition: border-color 120ms, background 120ms;
+}
+.task-item-editor input:focus, .task-item-editor textarea:focus { border-color: var(--accent); }
+.task-item-editor textarea { display: block; resize: none; overflow: hidden; min-height: 29px; }
+.task-item-editor input.task-edit-title { min-height: 36px; padding: 6px 8px; font-weight: 600; color: var(--text-primary); }
+.md-body .task-edit-details { list-style: none; padding: 0 0 0 16px; margin: 0; }
+.md-body .task-edit-details > li { display: flex; gap: 4px; align-items: flex-start; margin: 4px 0; position: relative; }
+.task-edit-details > li::before { content: "•"; position: absolute; left: -12px; top: 4px; color: var(--text-muted); }
+.task-edit-details > li > textarea { flex: 1; }
+.task-edit-details > li > button { flex: none; margin-top: 2px; }
+.task-edit-footer { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-top: 2px; }
+.task-edit-extra-actions, .task-edit-save-actions { display: flex; align-items: center; gap: 4px; }
+.task-edit-save-actions { margin-left: auto; }
+.task-edit-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.task-edit-error > button { margin-left: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .task-item-editor input, .task-item-editor textarea { transition: none; }
+}

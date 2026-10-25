@@ -373,6 +373,18 @@ const CURRENT_SCHEMA: &str = r#"
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS task_items (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+      title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+      description TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(details) AND json_type(details)='array'),
+      completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS task_items_by_task ON task_items(task_id,created_at,id);
     -- The Logical Session: user-visible conversation + lifecycle + tracking.
     -- Identity is (agent, root_agent_session_id): the root source's real
     -- Resume identity. A session IS its root source: exactly one source, one

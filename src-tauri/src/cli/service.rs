@@ -56,6 +56,23 @@ pub(crate) enum Command {
         agent: String,
         native_id: String,
     },
+    ExtractionContext {
+        kind: Kind,
+        id: String,
+        mode: context::interactive::Mode,
+    },
+    ReadExtraction {
+        context_id: String,
+        input: String,
+        cursor: usize,
+        limit: usize,
+        query: Option<String>,
+    },
+    SubmitExtraction {
+        context_id: String,
+        reply: Value,
+        results: std::collections::HashMap<String, Value>,
+    },
     ExtractionSettings,
     ConfigureExtraction {
         patch: super::extraction_settings::Patch,
@@ -112,38 +129,28 @@ pub(crate) enum Command {
         cursor: Option<String>,
         limit: usize,
     },
-    EditSummary {
-        kind: Kind,
-        id: String,
-        revision: i64,
-        content: String,
+    TaskItems {
+        task: String,
     },
-    SetTaskSummaryTitleLock {
-        id: String,
-        revision: i64,
-        item: Option<usize>,
-        item_id: Option<String>,
-        locked: bool,
+    CreateTaskItem {
+        task: String,
+        content: crate::workspace::task_items::CreateItem,
     },
-    PublishTaskTodo {
-        id: String,
+    UpdateTaskItem {
+        task: String,
+        item_id: String,
         revision: i64,
-        item: Option<usize>,
-        item_id: Option<String>,
-        content: context::TaskTodoContent,
+        patch: crate::workspace::task_items::ItemPatch,
     },
-    CompleteTaskTodo {
-        id: String,
-        revision: i64,
-        item: Option<usize>,
-        item_id: Option<String>,
-        result: Option<context::TaskTodoResult>,
+    AppendTaskItemNote {
+        task: String,
+        item_id: String,
+        text: String,
     },
-    DiscardTaskTodo {
-        id: String,
+    DeleteTaskItem {
+        task: String,
+        item_id: String,
         revision: i64,
-        item: Option<usize>,
-        item_id: Option<String>,
     },
     Extract {
         kind: Kind,
@@ -199,12 +206,12 @@ impl Command {
                 | Self::MailboxMark(_)
                 | Self::ConfigureExtraction { .. }
                 | Self::Sync { .. }
-                | Self::EditSummary { .. }
-                | Self::SetTaskSummaryTitleLock { .. }
-                | Self::PublishTaskTodo { .. }
-                | Self::CompleteTaskTodo { .. }
-                | Self::DiscardTaskTodo { .. }
+                | Self::CreateTaskItem { .. }
+                | Self::UpdateTaskItem { .. }
+                | Self::AppendTaskItemNote { .. }
+                | Self::DeleteTaskItem { .. }
                 | Self::Extract { .. }
+                | Self::SubmitExtraction { .. }
                 | Self::CreateTask { .. }
                 | Self::UpdateTask { .. }
                 | Self::Archive { .. }
@@ -326,6 +333,30 @@ impl Service {
                 value["native_id"] = json!(session.root_agent_session_id);
                 Ok(value)
             }
+            Command::ExtractionContext { kind, id, mode } => {
+                self.require(kind, &id)?;
+                context::interactive::context(&self.db, &self.home, kind.name(), &id, mode)
+            }
+            Command::ReadExtraction {
+                context_id,
+                input,
+                cursor,
+                limit,
+                query,
+            } => context::interactive::read(
+                &self.db,
+                &self.home,
+                &context_id,
+                &input,
+                cursor,
+                limit,
+                query.as_deref(),
+            ),
+            Command::SubmitExtraction {
+                context_id,
+                reply,
+                results,
+            } => context::interactive::submit(&self.db, &self.home, &context_id, reply, results),
             Command::ExtractionSettings => Ok(serde_json::to_value(
                 crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
             )?),
@@ -505,104 +536,34 @@ impl Service {
                     limit,
                 )
             }
-            Command::EditSummary {
-                kind,
-                id,
-                revision,
-                content,
-            } => {
-                self.require(kind, &id)?;
-                let result = context::edit_summary(&self.db, kind.name(), &id, revision, &content)?;
-                Ok(json!({"kind":kind,"id":id,"revision":result.revision,"summary":result.summary}))
+            Command::TaskItems { task } => {
+                Ok(json!({"items": crate::workspace::task_items::list(&self.db, &task)?}))
             }
-            Command::SetTaskSummaryTitleLock {
-                id,
-                revision,
-                item,
+            Command::CreateTaskItem { task, content } => Ok(serde_json::to_value(
+                crate::workspace::task_items::create(&self.db, &task, content)?,
+            )?),
+            Command::UpdateTaskItem {
+                task,
                 item_id,
-                locked,
-            } => {
-                self.require(Kind::Task, &id)?;
-                let item = context::items::resolve_number(
-                    &self.db,
-                    "task",
-                    &id,
-                    revision,
-                    item,
-                    item_id.as_deref(),
-                )?;
-                let result =
-                    context::set_summary_title_lock(&self.db, "task", &id, revision, item, locked)?;
-                Ok(
-                    json!({"kind":"task","id":id,"item_id":result.summary.items[item-1].id,"revision":result.revision,"summary":result.summary}),
-                )
-            }
-            Command::PublishTaskTodo {
-                id,
                 revision,
-                item,
+                patch,
+            } => Ok(serde_json::to_value(crate::workspace::task_items::update(
+                &self.db, &task, &item_id, revision, patch,
+            )?)?),
+            Command::AppendTaskItemNote {
+                task,
                 item_id,
-                content,
-            } => {
-                self.require(Kind::Task, &id)?;
-                let item = if item.is_some() || item_id.is_some() {
-                    Some(context::items::resolve_number(
-                        &self.db,
-                        "task",
-                        &id,
-                        revision,
-                        item,
-                        item_id.as_deref(),
-                    )?)
-                } else {
-                    None
-                };
-                let result = context::publish_task_todo(&self.db, &id, revision, item, content)?;
-                Ok(
-                    json!({"kind":"task","id":id,"item":item.unwrap_or(result.summary.items.len()),"item_id":result.summary.items[item.unwrap_or(result.summary.items.len())-1].id,"revision":result.revision,"summary":result.summary}),
-                )
-            }
-            Command::CompleteTaskTodo {
-                id,
+                text,
+            } => Ok(serde_json::to_value(
+                crate::workspace::task_items::append_note(&self.db, &task, &item_id, &text)?,
+            )?),
+            Command::DeleteTaskItem {
+                task,
+                item_id,
                 revision,
-                item,
-                item_id,
-                result,
             } => {
-                self.require(Kind::Task, &id)?;
-                let item = context::items::resolve_number(
-                    &self.db,
-                    "task",
-                    &id,
-                    revision,
-                    item,
-                    item_id.as_deref(),
-                )?;
-                let result = context::complete_task_todo(&self.db, &id, revision, item, result)?;
-                Ok(
-                    json!({"kind":"task","id":id,"item":item,"item_id":result.summary.items[item-1].id,"revision":result.revision,"summary":result.summary}),
-                )
-            }
-            Command::DiscardTaskTodo {
-                id,
-                revision,
-                item,
-                item_id,
-            } => {
-                self.require(Kind::Task, &id)?;
-                let item = context::items::resolve_number(
-                    &self.db,
-                    "task",
-                    &id,
-                    revision,
-                    item,
-                    item_id.as_deref(),
-                )?;
-                let removed = context::items::read_item(&self.db, "task", &id, revision, item)?;
-                let result = context::discard_task_todo(&self.db, &id, revision, item)?;
-                Ok(
-                    json!({"kind":"task","id":id,"item":item,"item_id":removed.id,"revision":result.revision,"summary":result.summary}),
-                )
+                crate::workspace::task_items::delete(&self.db, &task, &item_id, revision)?;
+                Ok(json!({"task_id":task,"item_id":item_id,"deleted":true}))
             }
             Command::Extract {
                 kind,

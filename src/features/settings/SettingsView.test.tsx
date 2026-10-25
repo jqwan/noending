@@ -37,9 +37,6 @@ vi.mock("../../api", () => ({
     setExtractionSettings: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
     refreshAgentRuntimeOptions: vi.fn(),
-    getSummaryPromptSettings: vi.fn(),
-    setSummaryPromptTemplate: vi.fn(),
-    previewSummaryPrompt: vi.fn(),
   },
 }));
 
@@ -77,59 +74,12 @@ it("opens modal to change data storage directory and can submit new path", async
   expect(api.setNoendingHome).toHaveBeenCalledWith("/custom/storage/dir");
 });
 
-const templates = {session: "默认会话要求", task: "默认任务要求", project: "默认项目要求"};
 beforeEach(() => {
   viewState.clear(); localStorage.clear(); clearRuntimeCatalog();
   vi.mocked(api.getExtractionSettings).mockReset().mockResolvedValue({ agent: "codex", runtime: { model: null, provider: null, effort: null } });
   vi.mocked(api.setExtractionSettings).mockReset();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async agent => runtimeFixture(agent));
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
-  vi.mocked(api.getSummaryPromptSettings).mockReset().mockResolvedValue({templates: {...templates}, defaults: {...templates}});
-  vi.mocked(api.setSummaryPromptTemplate).mockReset();
-  vi.mocked(api.previewSummaryPrompt).mockReset().mockResolvedValue("完整提示词预览与文件协议");
-});
-
-it("keeps drafts across summary types, previews the draft and saves only the selected template", async () => {
-  render(<SettingsView navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", {name: "查看与编辑"}));
-  const session = await screen.findByRole("textbox", {name: "会话摘要要求模板"});
-  fireEvent.change(session, {target: {value: "会话草稿"}});
-  fireEvent.click(screen.getByRole("tab", {name: "任务摘要"}));
-  fireEvent.change(screen.getByRole("textbox", {name: "任务摘要要求模板"}), {target: {value: "任务草稿"}});
-  fireEvent.click(screen.getByRole("button", {name: "预览完整提示词"}));
-  await screen.findByText("完整提示词预览与文件协议");
-  expect(api.previewSummaryPrompt).toHaveBeenCalledWith("task", {...templates, task: "任务草稿"});
-  expect(api.setSummaryPromptTemplate).not.toHaveBeenCalled();
-  vi.mocked(api.setSummaryPromptTemplate).mockResolvedValue({templates: {...templates, task: "任务草稿"}, defaults: {...templates}});
-  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
-  await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
-  expect(api.setSummaryPromptTemplate).toHaveBeenCalledWith("task", "任务草稿");
-  fireEvent.click(screen.getByRole("tab", {name: "会话摘要"}));
-  fireEvent.click(screen.getByRole("button", {name: "编辑模板"}));
-  expect(screen.getByRole("textbox", {name: "会话摘要要求模板"})).toHaveProperty("value", "会话草稿");
-  fireEvent.click(screen.getByRole("button", {name: "撤销修改"}));
-  expect(screen.getByRole("textbox", {name: "会话摘要要求模板"})).toHaveProperty("value", templates.session);
-
-});
-
-it("restores defaults explicitly, retains edits after save failure and rejects an empty draft", async () => {
-  vi.mocked(api.getSummaryPromptSettings).mockResolvedValue({templates: {...templates, session: "自定义模板"}, defaults: {...templates}});
-  render(<SettingsView navigate={vi.fn()} />);
-  fireEvent.click(screen.getByRole("button", {name: "查看与编辑"}));
-  const editor = await screen.findByRole("textbox", {name: "会话摘要要求模板"});
-  fireEvent.click(screen.getByRole("button", {name: "恢复默认"}));
-  expect(editor).toHaveProperty("value", templates.session);
-  expect(api.setSummaryPromptTemplate).not.toHaveBeenCalled();
-  vi.mocked(api.setSummaryPromptTemplate).mockRejectedValueOnce("无法保存");
-  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
-  await screen.findByRole("alert");
-  expect(editor).toHaveProperty("value", templates.session);
-  vi.mocked(api.setSummaryPromptTemplate).mockResolvedValue({templates: {...templates}, defaults: {...templates}});
-  fireEvent.click(screen.getByRole("button", {name: "保存模板"}));
-  await waitFor(() => expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true));
-  expect(api.setSummaryPromptTemplate).toHaveBeenLastCalledWith("session", templates.session);
-  fireEvent.change(editor, {target: {value: "  "}});
-  expect(screen.getByRole("button", {name: "保存模板"})).toHaveProperty("disabled", true);
 });
 
 it("saves extraction settings immediately on selection and handles disable extraction", async () => {
@@ -154,5 +104,5 @@ it("saves extraction settings immediately on selection and handles disable extra
   fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });
   await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(noneExpected));
   expect(screen.queryByRole("button", { name: "模型与推理设置" })).toBeNull();
-  expect(screen.getByText(/已停用提取/)).toBeTruthy();
+  expect(screen.getByText(/已停用后台提取/)).toBeTruthy();
 });

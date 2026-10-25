@@ -14,6 +14,7 @@ use crate::error::{other, Result};
 use crate::storage::Db;
 
 pub mod ingestion;
+pub mod packages;
 pub mod project;
 pub mod session_lifecycle;
 pub mod session_workspace;
@@ -130,34 +131,6 @@ pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
 }
 
 // ---------------- Explicit Context update ----------------
-
-/// Explicit desktop edits preserve extraction coverage, including when cleared.
-#[tauri::command]
-pub fn save_summary(
-    state: State<AppState>,
-    kind: String,
-    id: String,
-    revision: i64,
-    summary: crate::domain::Summary,
-) -> Result<crate::context::SummaryEditResult> {
-    with_db(&state, |db| {
-        crate::context::save_summary(db, &kind, &id, revision, summary)
-    })
-}
-
-#[tauri::command]
-pub fn set_summary_title_lock(
-    state: State<AppState>,
-    kind: String,
-    id: String,
-    revision: i64,
-    item_number: usize,
-    locked: bool,
-) -> Result<crate::context::SummaryEditResult> {
-    with_db(&state, |db| {
-        crate::context::set_summary_title_lock(db, &kind, &id, revision, item_number, locked)
-    })
-}
 
 /// Read persisted sync observations and summary coverage without scanning.
 #[tauri::command]
@@ -293,32 +266,6 @@ pub async fn regenerate_project_context(
         crate::context::regenerate_project(&db, &project_id, home.as_ref())
     })
     .await?
-}
-
-/// Summary templates and previews are pure reads; previews never invoke an Agent.
-#[tauri::command]
-pub fn get_summary_prompt_settings(
-    state: State<AppState>,
-) -> Result<crate::context::prompts::PromptSettings> {
-    with_db(&state, crate::context::prompts::settings)
-}
-#[tauri::command]
-pub fn set_summary_prompt_template(
-    state: State<AppState>,
-    kind: crate::context::prompts::PromptKind,
-    template: Option<String>,
-) -> Result<crate::context::prompts::PromptSettings> {
-    with_db(&state, |db| {
-        crate::context::prompts::save(db, kind, template.as_deref())
-    })
-}
-#[tauri::command]
-pub fn preview_summary_prompt(
-    kind: crate::context::prompts::PromptKind,
-    templates: crate::context::prompts::PromptTemplates,
-) -> Result<String> {
-    templates.validate()?;
-    Ok(crate::context::summary::preview_prompt(kind, &templates))
 }
 
 /// Open the active Home's summary extraction log folder.
@@ -1292,4 +1239,13 @@ pub fn mailbox_notification_hint(state: State<AppState>, skip: Option<bool>) -> 
         .get_setting("mailbox.skip_notification_hint")?
         .as_deref()
         == Some("true"))
+}
+
+#[tauri::command]
+pub fn get_operation_status(
+    state: State<AppState>,
+) -> Result<Vec<crate::operations::OperationStatus>> {
+    let mut operations = crate::operations::list(&state.db)?;
+    operations.extend(state.ingestion.operations(&state.db)?);
+    Ok(operations)
 }

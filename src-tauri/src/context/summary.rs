@@ -1,5 +1,5 @@
 //! Scoped lazy database queries and result protocol for session, task and project summaries.
-use super::prompts::{PromptKind, PromptTemplates};
+use super::prompts::PromptTemplates;
 use super::query::Input;
 use super::SessionSnapshot;
 use crate::domain::SessionContextFields;
@@ -212,7 +212,6 @@ impl ExtractionFiles {
                     title: item.title,
                     description: item.description,
                     details: item.details,
-                    title_locked: false,
                 })
                 .collect(),
         }
@@ -258,7 +257,7 @@ pub fn session_prompt(input: &Path, result: &Path, templates: &PromptTemplates) 
         quoted(input), quoted(result), TIME_RULES, templates.session
     )
 }
-const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。输入 item_identities 提供现有事项的 ID、标题及标题锁。延续事项保留原 ID，即使改名或重排；合并保留一个延续事项 ID，拆分只有一个沿用原 ID，新增事项省略 ID，不编造 ID。仅 title_locked=true 的事项必须保留原 ID 和原标题，不得修改、删除或合并，描述和细则仍可更新；重新生成同样遵守。锁定标题优先于项数精简目标，锁定状态由程序管理，结果不输出 title_locked。";
+const TIME_RULES: &str = "started_at 是会话起始时间，last_message_at 是本次材料最后消息时间，summary_through_at 是旧摘要覆盖的最后消息时间；均可能为空。判断事实新旧以具体消息 timestamp、内容和明确修正关系为依据，不将会话最后消息时间当作其中所有事实的发生时间。已有摘要与消息共同构成材料，输出完整摘要而非增量补丁。输入 item_identities 提供现有事项的 ID 和标题。延续事项保留原 ID，即使改名或重排；合并保留一个延续事项 ID，拆分只有一个沿用原 ID，新增事项省略 ID，不编造 ID。";
 pub fn batch_prompt(
     kind: &str,
     input: &Path,
@@ -278,15 +277,4 @@ pub fn batch_prompt(
         "先更新会话摘要，再综合生成{label}摘要。\n输入查询名称：{}\n结果文件：{}\n{background}\n清单按 last_message_at 从早到晚排列，未知时间在前，顺序不代表结论优先级。{}\n逐个完整读取 need_update=true 的会话输入，成功摘要写到 result_file；无需更新的会话复用 current_summary。每份会话摘要只依据自身材料。失败会话有旧摘要就复用，否则暂不纳入；继续处理其他会话。\n综合时核对重要历史变更：提供的 history_input_file 也可用于核对原始事实；检索后完整读取命中消息及前后讨论，结合 timestamp 综合。不仅比较摘要名称，没有原始证据时保留必要不确定性，不扫描工作目录。\n## 会话摘要要求\n{}\n## {label}摘要要求\n{requirements}",
         quoted(input), quoted(result), TIME_RULES, templates.session
     )
-}
-/// Preview the skill, protocol and the same requirements used at runtime.
-pub fn preview_prompt(kind: PromptKind, templates: &PromptTemplates) -> String {
-    let input = Path::new("{{输入查询名称}}");
-    let result = Path::new("{{结果文件路径}}");
-    let requirements = match kind {
-        PromptKind::Session => session_prompt(input, result, templates),
-        PromptKind::Task => batch_prompt("task", input, result, templates),
-        PromptKind::Project => batch_prompt("project", input, result, templates),
-    };
-    super::tools::preview(&requirements)
 }

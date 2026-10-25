@@ -34,7 +34,8 @@ pub struct Read {
 pub struct Send {
     pub session: String,
     pub message: String,
-    pub from_session: Option<String>,
+    /// Explicit sender Session ID; an inherited terminal binding takes precedence.
+    pub from_session: String,
     /// Request a merged unread reminder, also allowed in Working when automatic notifications are enabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notify_immediately: bool,
@@ -56,9 +57,7 @@ pub(crate) fn actor(db: &Db, home: &NoEndingHome, claimed: Option<&str>) -> CliR
     let session = if terminal.is_some() {
         crate::session_control::request(
             home,
-            crate::session_control::ControlCommand::Identity {
-                claimed: claimed.map(str::to_owned),
-            },
+            crate::session_control::ControlCommand::Identity { claimed: None },
             None,
         )?["session_id"]
             .as_str()
@@ -78,7 +77,7 @@ pub(crate) fn actor(db: &Db, home: &NoEndingHome, claimed: Option<&str>) -> CliR
     Ok(session)
 }
 pub(crate) fn send(db: &Db, home: &NoEndingHome, p: Send) -> CliResult<serde_json::Value> {
-    let sender = actor(db, home, p.from_session.as_deref())?;
+    let sender = actor(db, home, Some(&p.from_session))?;
     let m = db.mailbox_send_with_notification(
         &p.session,
         Some(&sender),
@@ -91,7 +90,14 @@ pub(crate) fn send(db: &Db, home: &NoEndingHome, p: Send) -> CliResult<serde_jso
     )
 }
 pub(crate) fn mark(db: &Db, home: &NoEndingHome, p: Mark) -> CliResult<serde_json::Value> {
-    if actor(db, home, p.from_session.as_deref())? != p.session {
+    let current = actor(db, home, p.from_session.as_deref())?;
+    if p.from_session.as_deref().is_some_and(|id| id != current) {
+        return Err(CliError::new(
+            "sender_identity_changed",
+            "来源会话与当前终端绑定不一致",
+        ));
+    }
+    if current != p.session {
         return Err(CliError::new("identity_mismatch", "只能标记自己信箱的消息"));
     }
     let read = match p.state.as_str() {

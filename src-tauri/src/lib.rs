@@ -14,6 +14,7 @@ pub mod launcher;
 pub mod lifecycle;
 pub mod mailbox;
 mod mcp;
+pub mod operations;
 pub mod packages;
 pub mod platform;
 pub mod search;
@@ -100,43 +101,45 @@ pub fn run() {
             app.manage(terminal::TerminalRegistry::new(Some(app.handle().clone())));
 
             {
-                let state=app.state::<commands::AppState>();
-                app.state::<terminal::TerminalRegistry>().initialize_mailboxes(&state.db)?;
+                let state = app.state::<commands::AppState>();
+                app.state::<terminal::TerminalRegistry>()
+                    .initialize_mailboxes(&state.db)?;
                 let handle = app.handle().clone();
-                let host = session_control::DesktopHost::start(&home, move |command, sender| session_control::dispatch(&handle, command, sender.as_deref()))?;
+                let host = session_control::DesktopHost::start(&home, move |command, sender| {
+                    session_control::dispatch(&handle, command, sender.as_deref())
+                })?;
                 app.manage(host);
             }
 
-            // Standalone CLI mutations are observed through SQLite data_version.
+            // Observe standalone CLI writes for binding, notifications and UI refresh.
             {
-                let state: tauri::State<commands::AppState> = app.state();
+                let state = app.state::<commands::AppState>();
                 let handle = app.handle().clone();
                 let watcher = cli::watch_changes(state.db.clone(), move || {
-                    let state: tauri::State<commands::AppState> = handle.state();
-                    handle.state::<terminal::TerminalRegistry>().bind_discovered(&state.db);
-                    handle.state::<terminal::TerminalRegistry>().kick_notifications("");
+                    let state = handle.state::<commands::AppState>();
+                    let registry = handle.state::<terminal::TerminalRegistry>();
+                    registry.bind_discovered(&state.db);
+                    registry.kick_notifications("");
                     let _ = handle.emit("cli-data-changed", ());
                 });
                 app.manage(watcher);
-                app.state::<terminal::TerminalRegistry>().kick_notifications("");
+                app.state::<terminal::TerminalRegistry>()
+                    .kick_notifications("");
             }
 
             {
-                let state: tauri::State<commands::AppState> = app.state();
-                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_memory_skill(&state.db,&home,&executable)) {
-                    eprintln!("[noending] Memory skill unavailable: {error}");
-                }
-                if let Err(error) = cli::executable().map_err(|error|error::other(error.to_string())).and_then(|executable| skills::prepare_task_skill(&state.db,&home,&executable)) {
-                    eprintln!("[noending] Task skill unavailable: {error}");
+                let state = app.state::<commands::AppState>();
+                if let Err(error) = cli::executable()
+                    .map_err(|error| error::other(error.to_string()))
+                    .and_then(|executable| {
+                        skills::prepare_noending_skill(&state.db, &home, &executable)
+                    })
+                {
+                    eprintln!("[noending] NoEnding skill unavailable: {error}");
                 }
                 if let Err(error) = assistant::ensure_workspace(&state.db, &home, &layer) {
                     eprintln!("[noending] Assistant workspace unavailable: {error}");
                 }
-            }
-
-            {
-                let state=app.state::<commands::AppState>();
-                if let Err(error)=cli::executable().map_err(|e|error::other(e.to_string())).and_then(|exe|skills::prepare_mailbox_skill(&state.db,&home,&exe)) {eprintln!("[mailbox skill] {error}");}
             }
 
             // Application Reconcile: at every startup, queue a background
@@ -230,8 +233,10 @@ pub fn run() {
             // Explicit summary reads and user-triggered extraction.
             commands::get_session_context,
             commands::get_freshness,
-            commands::set_summary_title_lock,
-            commands::save_summary,
+            commands::workstream::list_task_items,
+            commands::workstream::create_task_item,
+            commands::workstream::update_task_item,
+            commands::workstream::delete_task_item,
             commands::get_workstream_context_state,
             commands::get_project_context_state,
             commands::update_project_context,
@@ -241,9 +246,6 @@ pub fn run() {
             commands::update_workstream_context,
             commands::regenerate_workstream_context,
             commands::open_context_extraction_logs,
-            commands::get_summary_prompt_settings,
-            commands::set_summary_prompt_template,
-            commands::preview_summary_prompt,
             commands::open_remote_url,
             commands::open_path,
             commands::get_workstream_context,
@@ -270,6 +272,7 @@ pub fn run() {
             commands::ingestion::refresh_session,
             commands::ingestion::app_foreground,
             commands::ingestion::get_ingestion_status,
+            commands::get_operation_status,
             commands::list_ingest_sources,
             commands::add_ingest_source,
             commands::remove_ingest_source,

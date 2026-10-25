@@ -31,13 +31,12 @@ fn capabilities_are_the_backend_contract_not_the_discovery_result() {
 #[test]
 #[ignore = "requires at least one installed Agent CLI for discovery"]
 fn real_agents_answer_discovery_or_warn() {
-    // Only Agents with a CLI can be asked anything: a history-only Agent has
-    // no catalog and no effort vocabulary to report.
+    // Management-only CLIs do not provide a session runtime catalog.
     let mut checked = 0;
     for agent in Agent::all()
         .iter()
         .copied()
-        .filter(|a| !noending::platform::exec_resolver::cli_names(*a).is_empty())
+        .filter(|a| noending::adapters::adapter_for(*a).has_terminal_cli())
     {
         if noending::platform::exec_resolver::resolve(agent).is_err() {
             continue;
@@ -68,14 +67,14 @@ fn real_agents_answer_discovery_or_warn() {
     );
 }
 
-/// The other half of that contract: an Agent with no CLI answers
+/// The other half of that contract: an Agent without terminal integration answers
 /// `unavailable` instead of probing (and must not panic doing it).
 #[test]
-fn agents_without_a_cli_report_an_unavailable_catalog() {
+fn agents_without_terminal_integration_report_an_unavailable_catalog() {
     for agent in Agent::all()
         .iter()
         .copied()
-        .filter(|a| noending::platform::exec_resolver::cli_names(*a).is_empty())
+        .filter(|a| !noending::adapters::adapter_for(*a).has_terminal_cli())
     {
         let d = noending::agent_runtime::discover_runtime_options(agent);
         assert_eq!(d.model_source, "unavailable", "{agent:?}");

@@ -238,7 +238,10 @@ pub fn reveal_file(path: &std::path::Path) -> crate::error::Result<()> {
 }
 
 fn run_file_manager(opener: DirectoryOpener) -> crate::error::Result<()> {
-    run_opener(opener, "系统文件管理器")
+    run_opener(opener, "系统文件管理器")?;
+    #[cfg(target_os = "macos")]
+    super::finder::foreground_target()?;
+    Ok(())
 }
 
 fn run_opener(opener: DirectoryOpener, subject: &str) -> crate::error::Result<()> {
@@ -294,14 +297,22 @@ fn directory_opener(path: &std::path::Path, platform: DirectoryPlatform) -> Dire
     };
     DirectoryOpener {
         program,
-        args: vec![path.as_os_str().to_owned()],
+        args: if matches!(platform, DirectoryPlatform::MacOs) {
+            vec!["-g".into(), path.as_os_str().to_owned()]
+        } else {
+            vec![path.as_os_str().to_owned()]
+        },
         wait_for_exit,
     }
 }
 
 fn file_revealer(path: &std::path::Path, platform: DirectoryPlatform) -> DirectoryOpener {
     let (program, args, wait_for_exit) = match platform {
-        DirectoryPlatform::MacOs => ("open", vec!["-R".into(), path.as_os_str().to_owned()], true),
+        DirectoryPlatform::MacOs => (
+            "open",
+            vec!["-g".into(), "-R".into(), path.as_os_str().to_owned()],
+            true,
+        ),
         DirectoryPlatform::Windows => (
             "explorer.exe",
             vec!["/select,".into(), path.as_os_str().to_owned()],
@@ -472,7 +483,10 @@ mod tests {
         let unix_path = PathBuf::from("/Users/Ada/No Ending/logs/context extraction");
         let mac = directory_opener(&unix_path, DirectoryPlatform::MacOs);
         assert_eq!(mac.program, "open");
-        assert_eq!(mac.args, vec![unix_path.as_os_str().to_owned()]);
+        assert_eq!(
+            mac.args,
+            vec!["-g".into(), unix_path.as_os_str().to_owned()]
+        );
         assert!(mac.wait_for_exit);
 
         let windows_path =
@@ -490,7 +504,7 @@ mod tests {
         assert_eq!(mac.program, "open");
         assert_eq!(
             mac.args,
-            vec!["-R".into(), unix_path.as_os_str().to_owned()]
+            vec!["-g".into(), "-R".into(), unix_path.as_os_str().to_owned()]
         );
         assert!(mac.wait_for_exit);
 

@@ -73,6 +73,15 @@ pub(crate) fn request(
     command: ControlCommand,
     request_id: Option<String>,
 ) -> CliResult<Value> {
+    let sender_terminal = std::env::var(CALLER_TERMINAL_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    if matches!(command, ControlCommand::Identity { .. }) && sender_terminal.is_none() {
+        return Err(CliError::new(
+            "terminal_context_missing",
+            "当前命令未继承 NoEnding 终端上下文，请使用宿主提供的原生会话 ID 解析身份",
+        ));
+    }
     let lease = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -88,9 +97,7 @@ pub(crate) fn request(
         serde_json::to_value(Request {
             command,
             request_id,
-            sender_terminal: std::env::var(CALLER_TERMINAL_ENV)
-                .ok()
-                .filter(|s| !s.is_empty()),
+            sender_terminal,
         })?,
         Duration::from_secs(30),
     )

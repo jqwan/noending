@@ -47,6 +47,7 @@ pub mod probe;
 pub mod project;
 pub mod resolver;
 pub mod session;
+pub mod task_items;
 pub mod wiring;
 pub mod workstream;
 

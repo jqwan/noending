@@ -17,7 +17,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("../../api", () => ({
-  api: { matchObjects: vi.fn().mockResolvedValue([]),
+  api: {
+    getOperationStatus: vi.fn().mockResolvedValue([]), matchObjects: vi.fn().mockResolvedValue([]),
     listPackages: vi.fn(async () => ({ packages: [], warnings: [] })),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn(),

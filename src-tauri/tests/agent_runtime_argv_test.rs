@@ -6,17 +6,16 @@
 
 use noending::adapters::{adapter_for, ExecOptions};
 use noending::domain::Agent;
-use noending::platform::exec_resolver::{cli_names, AgentInstallation};
+use noending::platform::exec_resolver::AgentInstallation;
 use noending_lib as noending;
 
-/// The argv contract only exists for Agents that HAVE a CLI. Qoder is
-/// IDE-hosted: there is no command line to render, and its builders must fail
-/// instead of inventing one.
+/// Session argv applies only to Agents whose terminal integration is supported.
+/// A management CLI alone (such as DSH plugins) is not a session launcher.
 fn launchable() -> Vec<Agent> {
     Agent::all()
         .iter()
         .copied()
-        .filter(|a| !cli_names(*a).is_empty())
+        .filter(|a| adapter_for(*a).has_terminal_cli())
         .collect()
 }
 
@@ -282,23 +281,23 @@ fn pi_keeps_at_prefixed_messages_textual_instead_of_attaching_files() {
     );
 }
 
-/// An Agent without a CLI must fail loudly. Returning an empty argv (or a
-/// guessed program) would look like a successful launch and hand the user a
+/// An Agent without terminal integration must fail loudly. Returning empty
+/// argv (or a guessed program) would look like a successful launch and hand the user a
 /// terminal that never opens — the failure mode "Agent owns defaults" exists
 /// to prevent.
 #[test]
-fn agents_without_a_cli_refuse_to_build_a_command() {
-    let cli_less: Vec<Agent> = Agent::all()
+fn agents_without_terminal_integration_refuse_to_build_a_command() {
+    let without_terminal: Vec<Agent> = Agent::all()
         .iter()
         .copied()
-        .filter(|a| cli_names(*a).is_empty())
+        .filter(|a| !adapter_for(*a).has_terminal_cli())
         .collect();
     assert!(
-        !cli_less.is_empty(),
-        "the roster is expected to contain at least one history-only Agent"
+        !without_terminal.is_empty(),
+        "the roster is expected to contain an Agent without terminal integration"
     );
 
-    for agent in cli_less {
+    for agent in without_terminal {
         for built in [
             adapter_for(agent).build_new_command(&install(agent), &ExecOptions::default(), None),
             adapter_for(agent).build_resume_command(

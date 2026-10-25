@@ -100,19 +100,19 @@ fn recipient_deletion_removes_mail_while_sender_deletion_preserves_other_inboxes
 fn pagination_and_new_message_frontiers_do_not_confuse_edits_or_reused_counts_with_new_mail() {
     let f = Fixture::new();
     let db = f.db();
+    let empty = db.mailbox_list("b", "all", None, 1).unwrap();
+    assert_eq!((empty.total, empty.unread), (0, 0));
     let a = db.mailbox_send("b", None, "one").unwrap();
     let b = db.mailbox_send("b", Some("a"), "two").unwrap();
+    db.mailbox_send("a", Some("b"), "another inbox").unwrap();
     let frontier = db.mailbox_frontier().unwrap();
     let page = db.mailbox_list("b", "unread", None, 1).unwrap();
     assert_eq!(page.items[0].id, a.id);
+    assert_eq!((page.total, page.unread), (2, 2));
     let cursor = page.next_cursor.unwrap();
-    assert_eq!(
-        db.mailbox_list("b", "unread", Some(cursor), 1)
-            .unwrap()
-            .items[0]
-            .id,
-        b.id
-    );
+    let next = db.mailbox_list("b", "unread", Some(cursor), 1).unwrap();
+    assert_eq!(next.items[0].id, b.id);
+    assert_eq!((next.total, next.unread), (2, 2));
     db.mailbox_edit("b", &a.id, a.revision, "edit").unwrap();
     db.mailbox_mark("b", &b.id, b.revision, true).unwrap();
     assert!(db.mailbox_arrivals(frontier).unwrap().is_empty());
@@ -123,4 +123,11 @@ fn pagination_and_new_message_frontiers_do_not_confuse_edits_or_reused_counts_wi
         db.mailbox_list("b", "unread", None, 50).unwrap().items[1].id,
         c.id
     );
+    for state in ["all", "unread", "read"] {
+        let page = db.mailbox_list("b", state, None, 1).unwrap();
+        assert_eq!((page.total, page.unread), (3, 2));
+    }
+    db.mailbox_delete("b", &c.id, c.revision).unwrap();
+    let page = db.mailbox_list("b", "all", None, 1).unwrap();
+    assert_eq!((page.total, page.unread), (2, 1));
 }

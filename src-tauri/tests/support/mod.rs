@@ -220,3 +220,5 @@ pub fn search_messages(
     .map(|r| r.hit)
     .collect())
 }
+
+pub mod summary;

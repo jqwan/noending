@@ -27,9 +27,9 @@ Windows 使用 `ne.exe` 或 `noending.exe cli install --dir <目录>`，生成 `
 
 ## 内置技能
 
-桌面应用启动时在技能库分别提供 `noending-memory`、`noending-task` 和 `noending-mailbox`，默认不为任何 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载技能。
+桌面应用启动时在技能库提供统一的 `noending` 技能，默认不为 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载。
 
-记忆技能负责按会话、项目、任务或本机范围回忆与维护上下文；协作技能负责创建与调整任务、项目关联、已有会话的任务跟踪及进展汇总。三者可独立启停、卸载；任务摘要仍属于记忆范围。协作接口支持通过运行中的桌面应用新建／继续终端；信箱技能负责查收、标记与发送消息，数据操作无需桌面运行。
+统一入口按请求选择记忆检索、任务管理、会话信箱和摘要提取参考，共用身份发现、访问入口及写入规则。检索不自动创建任务、发信或刷新摘要；后台委托提取和当前会话自主提取均保留。桌面应用只为终端控制等交互功能提供运行入口，数据操作可独立执行。
 
 内置技能的 `references/access.json` 提供固定到当前 Home 的 CLI 绝对路径，入口随技能分发，不修改全局 PATH，也不自动配置 MCP。该入口已带 `--home`，调用时不重复追加；独立安装的普通 `ne` 命令仍可按本文方式选择 Home。已有 MCP 连接应核对 `status.home` 与技能 Home 一致。
 
@@ -141,10 +141,13 @@ path register 要求目录已存在且为绝对路径，不创建磁盘目录，
 ```sh
 ne session new --agent codex --cwd /absolute/project --message "开始工作" --task TASK_ID
 ne session new --agent pi --cwd /absolute/project --file prompt.txt
+ne session identity
 ne session terminals --session SESSION_ID
 ```
 
 `--task` 可重复；可用 `--model`、`--provider`、`--effort` 覆盖运行参数。省略消息只打开 TUI。新建先返回终端 ID、`session_id=null` 和 `binding=pending`；原生会话被摄入后通过 terminals 查询实际绑定，不猜测 ID。一个会话最多一个有效的 NoEnding 运行终端。
+
+`ne session identity` 只查询当前命令继承的 NoEnding 终端身份，返回 `data.session_id`，不接收显式身份参数，不需要自行读取环境变量或筛选终端列表。缺少终端上下文返回 `terminal_context_missing`，外部会话再用宿主提供的原生 ID 执行 `session resolve`；尚未绑定返回 `sender_unbound`，等待摄入后重试。桌面不可用返回 `desktop_unavailable`，终端失效返回 `sender_unavailable`，不回退到其他会话。此查询不启动、同步或修改会话，也不需要请求编号。
 
 ## 会话信箱
 
@@ -160,9 +163,9 @@ ne mailbox read --session SELF --message-id MESSAGE_ID
 ne mailbox mark --session SELF --message-id MESSAGE_ID --revision N --state read --from-session SELF
 ```
 
-`list` 可用 `unread|read|all`，返回 `items`、`unread` 和 `next_cursor`；后续页保持筛选并传 `--cursor`。读取不会自动已读，标记必须提供真正读到的 revision，冲突时重读。改回未读使用 `--state unread`。已读只代表查阅，不代表完成任务。
+`list` 可用 `unread|read|all`，返回 `items`、`total`、`unread` 和 `next_cursor`；total 和 unread 分别统计整个信箱的全部及未读消息，不受筛选和分页影响。后续页保持筛选并传 `--cursor`。读取不会自动已读，标记必须提供真正读到的 revision，冲突时重读。改回未读使用 `--state unread`。已读只代表查阅，不代表完成任务。
 
-发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 必须解析出有效来源会话，不能使用 user、external 或匿名来源。内嵌终端继承 `NOENDING_TERMINAL_ID` 时按实际绑定核对；外部 Agent 用原生 ID 解析后提供 `--from-session`。上下文与显式来源冲突会拒绝，不按目录猜测。会话 ID 用于本地关联，不是认证凭证。
+发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 发信必须显式提供有效来源会话，内嵌终端也不能省略 `--from-session` / `from_session`，不能使用 user、external 或匿名来源。内嵌终端先用 `session identity` 查询自身会话，外部 Agent 用宿主原生 ID 解析；内嵌终端发信时，后端以实际绑定覆盖传入的来源，外部调用则使用并校验传入 ID。标记消息时，内嵌终端仍可省略来源，由绑定确定，显式来源与绑定冲突则拒绝；共享 MCP 调用显式提供已确认的来源。不按目录猜测身份，会话 ID 用于本地关联，不是认证凭证。
 
 发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
 
@@ -170,11 +173,11 @@ ne mailbox mark --session SELF --message-id MESSAGE_ID --revision N --state read
 
 右侧栏只显示未读，模型标记已读后自动移除；会话详情只读展示全部消息。自动通知关闭时用户可以编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
 
-收发和标记的 Agent 操作规则见独立的 `noending-mailbox` 技能。技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
+收发和标记的 Agent 操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
 
 ## 摘要
 
-摘要以 `summary.items` 列表返回，每个事项包含 `id`、`title`、`description`、`details` 和必填的 `title_locked`。界面可锁定或解锁标题；锁定后 Agent 仍可更新描述和细则，但不能通过改名、删除或合并使锁定标题消失；保留标题时可融合相关描述和细则。CLI 和 MCP 仅开放任务摘要的显式加锁／解锁；会话和项目摘要不开放该入口。未锁定事项可自由调整、合并、拆分、增删和排序。版本号仍属于整份摘要，每项还有稳定的 `id`；已有事项编辑、改名或重排时保留 ID，合并保留一个延续 ID，拆分仅一个沿用原 ID；新增事项省略 ID，由程序分配。
+摘要以 `summary.items` 返回，每个事项包含 `id`、`title`、`description`、`details`。事项可自由融合、拆分、改名、删除和排序；延续事项保留 ID，新增省略 ID，由程序生成。摘要没有标题保护和执行状态；任务的任务事项独立管理。版本号属于整份摘要。
 
 ```sh
 ne summary search --query "关键词" --project <id> --scope all
@@ -188,47 +191,39 @@ ne project summary <id> --item 1 --revision 2
 
 按序号读取时必须同时提供 `--item` 和检索结果中的 `--revision`，避免摘要重组后读取错位内容。摘要版本变化返回 `stale_result`；分页范围或摘要版本变化返回 `stale_cursor`，需要重新检索。事项序号仅在对应摘要版本内有效。
 
-桌面详情页支持逐项编辑摘要：点击事项旁的编辑按钮修改标题、描述和细则，标题栏的「＋」添加事项。编辑状态可以删除未锁定事项，也可删除最后一项清空摘要；锁定标题须先解锁才能改名或删除。手动编辑保留提取进度，编辑期间当前页面的模型更新按钮暂停，版本冲突会保留草稿。
+桌面详情页只提供阅读、细则展开、复制及提取更新／重新生成。会话、任务和项目摘要均由提取维护，没有手工编辑、逐项删除、清空或完整覆盖接口。
 
-`summary set` 文件使用 UTF-8 JSON，格式为 `{"items":[{"title":"事项标题","description":"简短描述","details":["细则"],"title_locked":false}]}`，一次替换完整列表；须保留原有锁定标题及其 `title_locked=true`，不能新增、移除或转移标题锁。至少包含一个事项，标题必须是非空单行文字，描述允许为空字符串，细则允许为空数组；每条细则必须非空。旧 Markdown 正文不再接受。默认提取提示词要求会话最多 15 个事项，任务和项目最多 10 个事项，并建议标题不超过 20 字符、描述不超过 60 字符、每条细则不超过 80 字符、整个事项不超过 300 字符；这些数量和篇幅要求用于指导模型整理，后端不据此拒绝或截断提取及手动编辑结果。
+默认提取要求会话最多 15 个事项，任务和项目最多 10 个事项；建议标题不超过 20 字符、描述不超过 60 字符、每条细则不超过 80 字符、整个事项不超过 300 字符。这些用于指导整理，不据此截断或拒绝结果。延续事项保留 ID，新事项由程序生成 ID。
+
+摘要提取 CLI 进程的总运行上限为：单会话 30 分钟，任务／项目整批 90 分钟。增量更新与重新生成使用相同上限；任务／项目的上限包含关联会话摘要的处理。
 
 ```sh
 ne summary update session <id>
 ne summary regenerate task <id>
 ne summary update project <id>
-ne summary set session <id> --file summary.json --revision <当前版本>
-ne summary lock task <id> --item 1 --revision <当前版本>
-ne summary unlock task <id> --item 1 --revision <当前版本>
 ```
 
-`summary lock task` / `summary unlock task` 显式切换一个任务事项的标题锁，必须提供当前 `--revision` 和从 1 开始的 `--item`，返回新版本及完整摘要。它不修改描述、细则或提取消费位置；普通 `summary set` 仍不得改变锁状态。多项操作逐次采用新版本，版本冲突时重新读取并定位，不能复用旧序号。
+## 任务事项
 
-发布、完成和废弃任务待办使用专用接口，分别在事务内执行发布锁定、完成解锁保留或废弃删除，不再分别调用 `summary set` 和锁接口：
+任务描述保存当前目标、范围、验收要求及一两句已核实的整体现状，说明目前已具备什么、主要还缺什么；重要阶段变化时融合更新，不逐轮追加。任务事项保存具体执行进展和完成情况；任务摘要保存关联会话的背景、决策与成果。任务事项独立存储，摘要提取不会改变它们，提取也不直接读取任务事项作为输入。需要长期稳定保留的执行要求写入描述或任务事项。
+
+追加单条进展使用 `task item note`，无需读取后重写全部细则，也无需 revision。后端在当前值上事务性追加，保留已有细则和完成状态、递增事项版本。重试沿用同一 request_id，避免重复追加；需要融合、修正或精简整份进展时，读取最新细则和 revision 后用 update 替换。追加不自动整理重复内容，不将一条新记录误作完整细则提交。
 
 ```sh
-ne task todo publish TASK_ID --file todo.json --revision 0
-ne task todo publish TASK_ID --item 1 --file todo.json --revision 1
-ne task todo complete TASK_ID --item 1 --revision 2
-# 如需同时回写结果，可选增加 --file result.json
-# 废弃另一个待办时，使用它当前的序号和版本
-ne task todo discard TASK_ID --item NUMBER --revision N
+ne task item list TASK_ID
+ne task item create TASK_ID --file item.json
+ne task item note TASK_ID --item-id ITEM_ID --text "已修复重复摄入，历史数据保持完整" --request-id note-1
+ne task item update TASK_ID --item-id ITEM_ID --revision 2 --file progress.json
+ne task item complete TASK_ID --item-id ITEM_ID --revision 3
+ne task item reopen TASK_ID --item-id ITEM_ID --revision 4
+ne task item delete TASK_ID --item-id ITEM_ID --revision 5
 ```
 
-发布文件只需 `{"title":"修复会话同步"}`，可选增加 `description` 描述目标与必要边界，不接受 `details` 或锁字段。新事项描述省略时为空，细则初始化为空数组。省略 `--item` 时追加；指定时修改该事项标题与已提供的描述并锁定，保留已有细则和未提供的描述；显式传空字符串可清空描述，已锁定标题不能改名。
+创建文件只接受 `{ "title": "修复同步", "description": "重复同步不产生重复消息" }`，描述可省略。新事项为未完成，进展细则为空。更新文件可包含 `title`、`description`、`details`、`completed`，省略字段保持原值；`details` 替换该事项的进展细则，记录已确认成果、阻碍和验证依据，不是子任务。完成和重新打开只切换 completed，保留内容；删除永久移除，没有废弃状态。
 
-待办事项的 `details` 记录本事项已确认的进展、结果、阻碍和验证情况，不是待办子项或执行步骤清单。推进时通过普通摘要编辑维护细则，保留其他事项与锁；不虚构进展，不按细则条数判断完成。
+每个任务事项包含 `id`、`task_id`、`title`、`description`、`details`、`completed`、`revision`、`created_at`、`updated_at`。列表返回全部事项；桌面任务详情将未完成事项排在前面、已完成事项排在后面，状态图标支持直接切换，支持新增、编辑、完成、重新打开和二次确认删除，外部修改自动刷新。任务归档保留事项，永久删除任务时一并删除。
 
-完成操作默认只解锁标题，保留原有标题、描述和进展细则，使其成为普通摘要事项。可选传 `--file result.json` 回写结果，例如 `{"description":"同步异常已修复并验证","details":["回归验证通过，已有消息保持完整"]}`；提供时完整替换描述和细则，结果至少一处非空，所需旧背景和有效进展应一并保留。
-
-`task todo discard` 直接移除指定事项的标题、描述和细则，不保留废弃标记或占位，也可删除最后一项并清空任务摘要。完成和废弃均要求目标标题已锁定；这些是处理动作，不新增事项状态，不归档任务，不触发 Agent 或提取。其他事项、提取消费位置和任务归档状态保持原样。
-
-返回处理对象的 `item`、新 `revision` 与完整 `summary`。版本冲突或校验失败不会部分写入；通过 `--request-id` 去重，同一请求重试保持编号和全部参数，避免重复删除序号移位后的其他事项。每次操作后的序号都可能变化，冲突时重读，不复用旧序号。
-
-普通历史提取保留已有锁，不主动发布、完成或废弃待办。完成需核实实际结果；废弃需明确放弃对应工作，受阻、暂缓或未完成都不等于废弃。标题锁不是完成状态，不把所有锁定结论视为待办，也不把普通未锁定事项视为已完成。单独锁定／解锁仍用于显式调整标题保护。
-
-更新和重新生成等待配置的 Agent 调用及后端校验、入库全部完成后，直接返回最终结果。失败时 `ok=false` 并返回非零退出码；部分完成状态仍需检查结果字段。`update` 沿用旧摘要，`regenerate` 忽略目标旧摘要，遵守现有提取和并发规则。同一会话参与的独立和批量提取共用跨进程锁，桌面与 CLI 不能重叠提取。Ctrl+C 会取消当前命令并结束它启动的 headless Agent 进程树；同步在安全边界停止，已提交数据保留。强制杀进程无法保证执行清理，未确认完成的写请求需要核对业务状态后再操作。
-
-人工编辑使用 UTF-8 JSON 文件，必须提供查询得到的当前摘要版本；版本不一致时拒绝覆盖。编辑只改内容和版本，不把待处理消息标记为已提取。
+完整编辑、完成、重新打开与删除使用该任务事项的 revision（note 无需版本），不使用摘要版本或事项序号。版本冲突先重新读取；相同写操作重试保持 request-id 和全部参数。不会改动摘要、消息消费位置或其他任务事项，不启动或通知 Agent。
 
 ## 记忆更新状态
 
@@ -237,7 +232,7 @@ ne task todo discard TASK_ID --item NUMBER --revision N
 - `all_sources` 是最近一次全部来源同步的观察；`sources[].check` 是各来源扫描状态；`session_check` 只在单会话查询中提供。单会话同步不更新来源或全部来源时间，单来源同步不更新全部来源时间。
 - `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装 Agent 的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。
 - `sessions` 汇总范围内会话数量、曾成功检查数、从未成功检查数、最近检查失败／来源缺失数，以及成功检查时间的最早／最晚值；这些计数可交叉，曾成功检查的会话也可能最近失败。查询不验证当前磁盘状态。
-- `summary` 与普通摘要读取返回的 `freshness` 含义相同。`refreshed_at` 是最近成功提取并提交的时间（含保留摘要但确认材料已处理的跳过结果）；`updated_at` 仍表示编辑时间，手动编辑和标题锁定不会推进 `refreshed_at` 或消费消息。
+- `summary` 与普通摘要读取返回的 `freshness` 含义相同。`refreshed_at` 是最近成功提取并提交的时间（含保留摘要但确认材料已处理的跳过结果）；`updated_at` 表示摘要记录的更新时间，覆盖状态仍需结合消费位置判断。
 - `pending_messages` 是已入库、尚未被目标摘要消费的 user/assistant 消息数，按会话去重，不是长消息分页块数或工具事件数。任务／项目以自身消费位置计算，单独刷新子会话摘要不会将这个计数归零。新关联会话的未覆盖消息也计入，因此它不等同于按时间统计“刚刚新产生”的消息。
 - `summary_changed_sessions` 表示会话摘要版本变化、尚未汇入目标；`scope_changed` 表示关联或元数据输入变化。`history_rewritten_sessions` 表示已消费历史发生改写；`unknown_coverage_sessions` 表示消费位置无法确定。后两者非零时 `pending_messages=null`，不冒充零条新增；结合 `pending` 决定是否更新或重新提取。
 
@@ -277,4 +272,24 @@ ne request show create-task-1
 
 摘要提取为 Agent 提供完整可执行文件路径及一次性连接，只开放 `extraction inputs/read/search`，不能通过该连接调用通用编辑命令；不提供 SQL、原始消息编辑或 `extraction submit`。提取结果仍由后端根据最终回复校验并保存。
 
-事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个事项、标题锁及待办操作都需要当前 `revision`。序号仍只属于对应摘要版本。查询和待办操作返回事项 ID；摘要全量编辑须保留延续事项的 `id`，新增事项可省略 `id`，由 NoEnding 生成。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
+事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个摘要事项需要当前摘要 `revision`。序号仍只属于对应摘要版本。摘要查询返回事项 ID；提取延续事项保留原有 ID，新事项由 NoEnding 分配 ID。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
+
+## 当前会话自主提取
+
+启用 `noending` 后，当前 Agent 可自行完成提取，不调用设置中的其他 Agent，桌面应用无需运行：
+
+```sh
+ne summary context session <id> --mode update
+ne summary context task <id> --mode regenerate
+ne summary read <context_id> --input <name> --cursor 0 --limit 8
+ne summary search-input <context_id> --input <name> --query "关键词"
+ne summary submit <context_id> --file result.json --request-id extraction-1
+```
+
+`summary context` 只查询范围，返回 context_id、目标、模式、提取要求及输入清单；不会新建业务任务、启动 Agent 或后台工作进程。默认 update：保留有效旧摘要，读取未处理消息；regenerate：按完整历史重新生成。任务／项目范围由后端关联关系决定，包含已归档会话；先处理 need_update=true 的会话，再综合目标摘要。重新生成还需完整阅读清单中的 history_input_file，不以旧摘要为事实依据。
+
+`summary read` 从 cursor=0 开始，跟随 next_cursor 至 end=true，长消息完整拼接；搜索仅供辅助，不计完整阅读。范围固定截止位置，期间追加消息不纳入本次。上下文保存临时版本及阅读进度，有效期 24 小时；历史、关联或摘要版本变化返回冲突，需重新查询，不沿用旧结果。
+
+提交文件为 `{ "reply": {"status":"completed"}, "results": { "session-<id>": {"summary":{"items":[{"title":"结论","description":"说明","details":[]}]}} } }`。任务／项目使用批量 reply（包括 skipped_session_ids，部分失败还包括 failed_sessions）。results 的键为 session-ID/task-ID/project-ID；正常跳过及失败目标不提供结果。后端沿用材料阅读、输出、事项 ID 和并发校验，事务性入库并更新覆盖位置，不修改任务事项。成功后上下文被消费，同一 request_id 重试使用回执。详细规则见 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。
+
+`summary update/regenerate` 保留原行为，另外启动配置中的 Agent 并等待完成；不要将它们与当前会话自主提取混淆。

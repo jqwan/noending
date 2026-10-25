@@ -498,6 +498,10 @@ pub fn reconcile_all_report<F>(db: &Db, on_session: &F) -> Result<ReconcileRepor
 where
     F: Fn(&Session),
 {
+    let _activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::sync("all", "", None),
+    )?;
     let started = crate::storage::now();
     let before: Vec<_> = db
         .list_ingest_sources()?
@@ -565,6 +569,10 @@ pub fn reconcile_native<F>(
 where
     F: Fn(&Session),
 {
+    let _activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::native(db, agent, native_id)?,
+    )?;
     let existing = db.find_session_by_root_agent_id(agent, native_id)?;
     let source_path = source_path.or_else(|| existing.as_ref().map(|s| s.source_path.as_str()));
     let adapter = crate::adapters::adapter_for(agent);
@@ -647,6 +655,10 @@ pub fn reconcile_source<F>(
 where
     F: Fn(&Session),
 {
+    let _activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::source(db, &source.id, Some(source.agent))?,
+    )?;
     let started = crate::storage::now();
     let result = reconcile_source_inner(db, source, on_session);
     finish_source_check(db, source, &started, result.is_err())?;
@@ -781,6 +793,10 @@ pub fn reingest_source<F>(
 where
     F: Fn(&Session),
 {
+    let _activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::source(db, &source.id, Some(source.agent))?,
+    )?;
     let started = crate::storage::now();
     let result = reingest_source_inner(db, source, on_session);
     finish_source_check(db, source, &started, result.is_err())?;
@@ -822,6 +838,10 @@ fn reingest_source_inner<F: Fn(&Session)>(
 /// Refresh one Session's already-registered members incrementally. Used by the
 /// Resume-success trigger: only this Session is read, never a full Source scan.
 pub fn refresh_session(db: &Db, session_id: &str) -> Result<i64> {
+    let _activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::sync("session", session_id, None),
+    )?;
     let Some(session) = db.get_session(session_id)? else {
         return Ok(0);
     };

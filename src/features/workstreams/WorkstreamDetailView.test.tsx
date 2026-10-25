@@ -7,10 +7,11 @@ import type { WorkstreamContext, WorkstreamContextView } from "../../types";
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
   api: {
-    saveSummary: vi.fn(),
+    getOperationStatus: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
+    listTaskItems: vi.fn().mockResolvedValue([]),
     getWorkstreamContext: vi.fn(),
     getWorkstreamContextState: vi.fn().mockResolvedValue(null),
     regenerateWorkstreamContext: vi.fn(),
@@ -62,7 +63,7 @@ function context(): WorkstreamContext {
 function contextState(over: Partial<WorkstreamContextView> = {}): WorkstreamContextView {
   return {
     workstream_id: "w1",
-    summary: { items: [{ id: "WorkstreamDetailView.test-item-1", title: "任务状态", description: "**当前进展**：接口设计已确定。", title_locked: false, details: [] }] },
+    summary: { items: [{ id: "WorkstreamDetailView.test-item-1", title: "任务状态", description: "**当前进展**：接口设计已确定。", details: [] }] },
     updated_at: null,
     context_revision: 1,
     pending: false,
@@ -76,7 +77,7 @@ async function renderDetail(navigate = vi.fn()) {
   // 逐个测试独立：默认「已是最新」，pending 用例自己覆盖。
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
   return navigate;
 }
 
@@ -87,10 +88,27 @@ it("opens the new-session page with the current task selected", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+it("shows the task identity and copies its full ID", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  try {
+    await renderDetail();
+    const info = screen.getByRole("heading", { name: "任务信息" }).closest("section")!;
+    within(info).getByText("任务 ID");
+    within(info).getByText("w1");
+    fireEvent.click(within(info).getByRole("button", { name: "复制任务 ID" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("w1"));
+    within(info).getByRole("button", { name: "已复制" });
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+  }
+});
+
 it("hides the new-session entry when the task has no associated projects", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), projects: [] });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
 });
 
@@ -117,7 +135,7 @@ it("renders the returned task sessions and navigates to the selected session", a
   const navigate = vi.fn();
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
 
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
   // 只有跟踪此任务的会话会出现在这里。
   screen.getByRole("heading", { name: "关联会话（1）" });
   fireEvent.click(screen.getByText("归属于本任务的会话"));
@@ -155,7 +173,7 @@ it("shows 更新摘要 with the pending-session count and calls the explicit upd
     remaining_pending: 0,
   });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
 
   screen.getByText("有待更新内容，涉及 2 个会话");
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
@@ -179,7 +197,7 @@ it("offers a copyable operation id after a structured Context update failure", a
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
 
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
   await screen.findByText("Agent CLI 超时，请重试或检查 CLI 状态。");
@@ -194,7 +212,6 @@ it("renders structured topics and regenerates through the separate action even w
   vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0 });
   await renderDetail();
   expect(screen.getByText("当前进展").tagName).toBe("STRONG");
-  screen.getByRole("button",{name:"锁定标题：任务状态"});
   fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
   await waitFor(() => expect(api.regenerateWorkstreamContext).toHaveBeenCalledWith("w1"));
   expect(api.updateWorkstreamContext).not.toHaveBeenCalled();
@@ -218,7 +235,7 @@ it("renders separate unarchive and permanent delete buttons when workstream is a
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState());
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("任务概览");
+  await screen.findByText("任务描述");
 
   expect(screen.queryByRole("button", { name: "更多操作" })).toBeNull();
   const unarchiveBtn = screen.getByRole("button", { name: "取消归档" });
@@ -258,22 +275,12 @@ it("allows associating projects directly from task detail page", async () => {
   expect(screen.queryByRole("dialog", { name: "选择关联项目" })).toBeNull();
 });
 
-it("edits the task summary without changing the task and restores it on remount", async () => {
-  let persisted = contextState();
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
-  vi.mocked(api.getWorkstreamContextState).mockImplementation(async () => persisted);
-  vi.mocked(api.saveSummary).mockImplementation(async (kind,id,revision,summary) => {
-    expect([kind,id,revision]).toEqual(["task","w1",1]);
-    persisted = {...persisted,context_revision:2,summary};
-    return {revision:2,summary};
-  });
-  const first = render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button",{name:"编辑事项：任务状态"}));
-  fireEvent.change(screen.getByRole("textbox",{name:"事项描述"}),{target:{value:"接口实现已完成，等待验收。"}});
-  fireEvent.click(screen.getByRole("button",{name:"保存"}));
-  await screen.findByText("接口实现已完成，等待验收。");
-  first.unmount();
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("接口实现已完成，等待验收。");
-  screen.getByText("整理 API 设计");
+it("keeps the task summary readable while execution items remain separate", async () => {
+  await renderDetail();
+  const section = screen.getByRole("heading", {name:"任务摘要（1）"}).closest("section")!;
+  within(section).getByText("当前进展");
+  within(section).getByRole("button", {name:"复制摘要"});
+  within(section).getByRole("button", {name:"重新生成"});
+  expect(within(section).queryByRole("button", {name:/编辑事项|新增事项|删除事项/})).toBeNull();
+  screen.getByRole("button", {name:"新增事项"});
 });

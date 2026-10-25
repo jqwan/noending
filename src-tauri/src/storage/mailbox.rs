@@ -19,6 +19,7 @@ pub struct MailboxMessage {
 #[derive(Debug, Clone, Serialize)]
 pub struct MailboxPage {
     pub items: Vec<MailboxMessage>,
+    pub total: i64,
     pub unread: i64,
     pub next_cursor: Option<i64>,
 }
@@ -110,7 +111,11 @@ impl Db {
         let c = self.read();
         let tx = c.unchecked_transaction()?;
         require_session(&tx, session)?;
-        let unread=tx.query_row("SELECT count(*) FROM mailbox_messages WHERE recipient_session_id=?1 AND read_at IS NULL",[session],|r|r.get(0))?;
+        let (total, unread) = tx.query_row(
+            "SELECT count(*),count(*) FILTER (WHERE read_at IS NULL) FROM mailbox_messages WHERE recipient_session_id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         let mut stmt=tx.prepare(&format!("SELECT seq,{} WHERE recipient_session_id=?1 AND seq>?2 AND (?3='all' OR (?3='unread' AND read_at IS NULL) OR (?3='read' AND read_at IS NOT NULL)) ORDER BY seq LIMIT ?4",SELECT.strip_prefix("SELECT ").unwrap()))?;
         let rows = stmt
             .query_map(
@@ -124,6 +129,7 @@ impl Db {
         tx.commit()?;
         Ok(MailboxPage {
             items,
+            total,
             unread,
             next_cursor,
         })

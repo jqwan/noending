@@ -10,9 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-const SKILL: &str = include_str!("../../skills/noending-extraction/SKILL.md");
-const PROTOCOL: &str = include_str!("../../skills/noending-extraction/references/protocol.md");
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -217,18 +214,18 @@ pub(super) fn run(
         crate::cli::transport::Connection::create(files.dir.join("requests")).map_err(other)?;
     let connection_path = files.dir.join("connection.json");
     connection.publish(&connection_path).map_err(other)?;
-    let skill_dir = files.dir.join("noending-extraction");
+    let skill_dir = files.dir.join("noending");
     std::fs::create_dir_all(skill_dir.join("references"))?;
-    crate::cli::transport::private_write(&skill_dir.join("SKILL.md"), SKILL).map_err(other)?;
-    crate::cli::transport::private_write(&skill_dir.join("references/protocol.md"), PROTOCOL)
-        .map_err(other)?;
+    for (relative, content) in crate::skills::BUNDLED_FILES {
+        crate::cli::transport::private_write(&skill_dir.join(relative), content).map_err(other)?;
+    }
     crate::cli::transport::private_write(
         &skill_dir.join("references/requirements.md"),
         requirements,
     )
     .map_err(other)?;
     let exe = crate::cli::executable()?;
-    let prompt=format!("使用提取 skill：{}。先完整读取该 SKILL.md，再按其中的流程查询材料并生成结果。\nCLI 前缀：{} --connection {} extraction\n提取要求：{}\n最终回复必须是协议规定的单个状态 JSON 对象，不带 Markdown 代码块或其他说明。后端在调用正常结束后校验结果文件并入库。",serde_json::to_string(&skill_dir.join("SKILL.md"))?,executable_command(&exe),shell_quote(&connection_path),serde_json::to_string(&skill_dir.join("references/requirements.md"))?);
+    let prompt=format!("使用 NoEnding 技能执行本次后台提取：{}。先完整读取该 SKILL.md，再按其中的流程查询材料并生成结果。\nCLI 前缀：{} --connection {} extraction\n提取要求：{}\n最终回复必须是协议规定的单个状态 JSON 对象，不带 Markdown 代码块或其他说明。后端在调用正常结束后校验结果文件并入库。",serde_json::to_string(&skill_dir.join("SKILL.md"))?,executable_command(&exe),shell_quote(&connection_path),serde_json::to_string(&skill_dir.join("references/requirements.md"))?);
     let bridge = Bridge {
         db,
         files,
@@ -280,9 +277,6 @@ fn executable_command(path: &Path) -> String {
     {
         shell_quote(path)
     }
-}
-pub(super) fn preview(requirements: &str) -> String {
-    format!("{SKILL}\n\n{PROTOCOL}\n\n## 当前提取要求\n\n{requirements}")
 }
 #[cfg(test)]
 pub(super) fn input_available(path: &Path) -> bool {
@@ -340,3 +334,24 @@ pub(super) fn read_all_for_test(dir: &Path) {
 }
 #[cfg(test)]
 mod tests;
+
+/// Current sessions use the same result and complete-material validation without
+/// a live bridge or Agent subprocess. Receipts come from scoped page reads.
+pub(super) fn validate_external(
+    db: &crate::storage::Db,
+    files: &ExtractionFiles,
+    raw: &str,
+    delivered: &HashMap<String, HashSet<usize>>,
+) -> Result<()> {
+    let bridge = Bridge {
+        db,
+        files,
+        token: String::new(),
+        delivered: Mutex::new(delivered.clone()),
+    };
+    let reply = serde_json::from_str(raw).map_err(super::invalid)?;
+    bridge.validate(&reply).map_err(|error| match error {
+        crate::error::AppError::Context(_) => error,
+        other => super::invalid(other),
+    })
+}

@@ -130,515 +130,7 @@ fn summary_at(db: &Db, kind: &str, id: &str) -> (i64, crate::domain::Summary) {
     }
 }
 
-#[test]
-fn desktop_summary_edits_create_clear_and_restore_without_consuming_messages() {
-    let mut f = ServiceFixture::new();
-    let sid = f.add_session(2, 10);
-    let (project, _) = project_fixture(&f, "manual-summary-project", &[&sid]);
-    let ws = task(&f, &[&sid]);
-    let targets = [
-        ("session", sid.clone()),
-        ("task", ws.id),
-        ("project", project.id),
-    ];
-    for (kind, id) in &targets {
-        let first = save_summary(
-            f.db(),
-            kind,
-            id,
-            0,
-            crate::domain::Summary::single("用户记录的结论"),
-        )
-        .unwrap();
-        assert_eq!(first.revision, 1);
-        let locked = set_summary_title_lock(f.db(), kind, id, 1, 1, true).unwrap();
-        assert!(locked.summary.items[0].title_locked);
-        assert!(save_summary(f.db(), kind, id, 2, crate::domain::Summary::default()).is_err());
-        set_summary_title_lock(f.db(), kind, id, 2, 1, false).unwrap();
-        let cleared = save_summary(f.db(), kind, id, 3, crate::domain::Summary::default()).unwrap();
-        assert_eq!(cleared.revision, 4);
-        assert!(cleared.summary.is_empty());
-        assert!(save_summary(
-            f.db(),
-            kind,
-            id,
-            3,
-            crate::domain::Summary::single("过期草稿")
-        )
-        .is_err());
-        assert!(edit_summary(f.db(), kind, id, 4, r#"{"items":[]}"#).is_err());
-    }
-    drop(f.db.take());
-    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
-    let session = session_context_view(f.db(), &sid).unwrap();
-    assert!(session.fields.is_none());
-    assert_eq!(session.revision, 4);
-    assert_eq!(session.processed_through_seq, 0);
-    assert_eq!(session.latest_message_seq, 2);
-    assert!(session.pending);
-    assert!(session.freshness.refreshed_at.is_none());
-    assert!(workstream_context_view(f.db(), &targets[1].1)
-        .unwrap()
-        .summary
-        .is_none());
-    assert!(project_context_view(f.db(), &targets[2].1)
-        .unwrap()
-        .summary
-        .is_none());
-    for (kind, id) in &targets {
-        let restored = save_summary(
-            f.db(),
-            kind,
-            id,
-            4,
-            crate::domain::Summary::single("重新记录的结论"),
-        )
-        .unwrap();
-        assert_eq!(restored.revision, 5);
-        assert_eq!(
-            summary_at(f.db(), kind, id).1.items[0].title,
-            "重新记录的结论"
-        );
-    }
-}
-
-#[test]
-fn task_todo_publication_and_completion_preserve_other_items_and_rollback_invalid_changes() {
-    let mut f = ServiceFixture::new();
-    let sid = f.add_session(2, 10);
-    let ws = task(&f, &[&sid]);
-    let initial: crate::domain::Summary = serde_json::from_value(json!({"items":[
-        {"title":"长期约定","description":"保持独立","details":["不能因待办完成而解锁"],"title_locked":false},
-        {"title":"普通结论","description":"不是已完成待办","details":[],"title_locked":false}
-    ]})).unwrap();
-    save_summary(f.db(), "task", &ws.id, 0, initial).unwrap();
-    set_summary_title_lock(f.db(), "task", &ws.id, 1, 1, true).unwrap();
-    let content = || TaskTodoContent {
-        title: "修复同步".into(),
-        description: None,
-    };
-    let published = publish_task_todo(f.db(), &ws.id, 2, None, content()).unwrap();
-    assert_eq!(published.revision, 3);
-    assert_eq!(
-        summary_content(serde_json::to_value(&published.summary).unwrap()),
-        summary_content(json!({"items":[
-            {"title":"长期约定","description":"保持独立","details":["不能因待办完成而解锁"],"title_locked":true},
-            {"title":"普通结论","description":"不是已完成待办","details":[],"title_locked":false},
-            {"title":"修复同步","description":"","details":[],"title_locked":true}
-        ]}))
-    );
-    assert!(publish_task_todo(f.db(), &ws.id, 2, None, content()).is_err());
-    let mut renamed = content();
-    renamed.title = "擅自改名".into();
-    assert!(publish_task_todo(f.db(), &ws.id, 3, Some(3), renamed).is_err());
-    let mut malformed = content();
-    malformed.title = "  ".into();
-    assert!(publish_task_todo(f.db(), &ws.id, 3, None, malformed).is_err());
-    for number in [0, 99] {
-        assert!(publish_task_todo(f.db(), &ws.id, 3, Some(number), content()).is_err());
-        assert!(complete_task_todo(
-            f.db(),
-            &ws.id,
-            3,
-            number,
-            Some(TaskTodoResult {
-                description: "完成".into(),
-                details: vec![]
-            })
-        )
-        .is_err());
-    }
-    for result in [
-        TaskTodoResult {
-            description: "".into(),
-            details: vec![],
-        },
-        TaskTodoResult {
-            description: "完成".into(),
-            details: vec![" ".into()],
-        },
-    ] {
-        assert!(complete_task_todo(f.db(), &ws.id, 3, 3, Some(result)).is_err());
-    }
-    assert!(complete_task_todo(
-        f.db(),
-        &ws.id,
-        3,
-        2,
-        Some(TaskTodoResult {
-            description: "普通结论不能直接标记完成".into(),
-            details: vec![]
-        })
-    )
-    .is_err());
-    assert_eq!(summary_at(f.db(), "task", &ws.id), (3, published.summary));
-    // Progress is recorded through summary editing, not publication input.
-    let mut progress = summary_at(f.db(), "task", &ws.id).1;
-    progress.items[2].description = "已复现，仍待修复".into();
-    progress.items[2].details = vec!["已定位来源同步异常".into()];
-    save_summary(f.db(), "task", &ws.id, 3, progress).unwrap();
-    let republished = publish_task_todo(f.db(), &ws.id, 4, Some(3), content()).unwrap();
-    assert_eq!(republished.revision, 5);
-    assert_eq!(republished.summary.items[2].description, "已复现，仍待修复");
-    assert_eq!(
-        republished.summary.items[2].details,
-        vec!["已定位来源同步异常"]
-    );
-    let updated = publish_task_todo(
-        f.db(),
-        &ws.id,
-        5,
-        Some(3),
-        TaskTodoContent {
-            description: Some("实现完成，仍待验证".into()),
-            ..content()
-        },
-    )
-    .unwrap();
-    assert_eq!(updated.revision, 6);
-    assert_eq!(updated.summary.items.len(), 3);
-    assert_eq!(updated.summary.items[2].description, "实现完成，仍待验证");
-    assert!(updated.summary.items[2].title_locked);
-    assert_eq!(updated.summary.items[2].details, vec!["已定位来源同步异常"]);
-    let completed = complete_task_todo(
-        f.db(),
-        &ws.id,
-        6,
-        3,
-        Some(TaskTodoResult {
-            description: "已修复并验证".into(),
-            details: vec!["增量同步回归通过".into()],
-        }),
-    )
-    .unwrap();
-    assert_eq!(completed.revision, 7);
-    drop(f.db.take());
-    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
-    let (revision, summary) = summary_at(f.db(), "task", &ws.id);
-    assert_eq!(revision, 7);
-    assert_eq!(
-        summary_content(serde_json::to_value(summary).unwrap()),
-        summary_content(json!({"items":[
-            {"title":"长期约定","description":"保持独立","details":["不能因待办完成而解锁"],"title_locked":true},
-            {"title":"普通结论","description":"不是已完成待办","details":[],"title_locked":false},
-            {"title":"修复同步","description":"已修复并验证","details":["增量同步回归通过"],"title_locked":false}
-        ]}))
-    );
-    let session = session_context_view(f.db(), &sid).unwrap();
-    assert_eq!(session.processed_through_seq, 0);
-    assert_eq!(session.latest_message_seq, 2);
-    assert!(workstream_context_view(f.db(), &ws.id)
-        .unwrap()
-        .freshness
-        .refreshed_at
-        .is_none());
-    assert_eq!(
-        f.db().get_workstream(&ws.id).unwrap().unwrap().visibility,
-        "normal"
-    );
-}
-
-#[test]
-fn task_todo_actions_retain_completed_content_remove_discarded_items_and_allow_empty_summaries() {
-    let mut f = ServiceFixture::new();
-    let sid = f.add_session(1, 10);
-    let ws = task(&f, &[&sid]);
-    let initial = serde_json::from_value(json!({"items":[
-        {"title":"已完成工作","description":"修复已验证","details":["回归通过"],"title_locked":false},
-        {"title":"不再实施的方案","description":"已被替换","details":["旧方案已有调查记录"],"title_locked":false},
-        {"title":"普通结论","description":"必须保留","details":[],"title_locked":false}
-    ]})).unwrap();
-    save_summary(f.db(), "task", &ws.id, 0, initial).unwrap();
-    set_summary_title_lock(f.db(), "task", &ws.id, 1, 1, true).unwrap();
-    set_summary_title_lock(f.db(), "task", &ws.id, 2, 2, true).unwrap();
-    let completed = complete_task_todo(f.db(), &ws.id, 3, 1, None).unwrap();
-    assert_eq!(completed.revision, 4);
-    assert_eq!(
-        summary_content(serde_json::to_value(&completed.summary).unwrap()),
-        summary_content(json!({"items":[
-            {"title":"已完成工作","description":"修复已验证","details":["回归通过"],"title_locked":false},
-            {"title":"不再实施的方案","description":"已被替换","details":["旧方案已有调查记录"],"title_locked":true},
-            {"title":"普通结论","description":"必须保留","details":[],"title_locked":false}
-        ]}))
-    );
-    assert!(discard_task_todo(f.db(), &ws.id, 3, 2).is_err());
-    for number in [0, 1, 3, 99] {
-        assert!(discard_task_todo(f.db(), &ws.id, 4, number).is_err());
-    }
-    assert_eq!(summary_at(f.db(), "task", &ws.id), (4, completed.summary));
-    let discarded = discard_task_todo(f.db(), &ws.id, 4, 2).unwrap();
-    assert_eq!(discarded.revision, 5);
-    assert_eq!(
-        summary_content(serde_json::to_value(discarded.summary).unwrap()),
-        summary_content(json!({"items":[
-            {"title":"已完成工作","description":"修复已验证","details":["回归通过"],"title_locked":false},
-            {"title":"普通结论","description":"必须保留","details":[],"title_locked":false}
-        ]}))
-    );
-    let empty_task = f.add_workstream("discard-last-item");
-    publish_task_todo(
-        f.db(),
-        &empty_task.id,
-        0,
-        None,
-        TaskTodoContent {
-            title: "废弃最后一项".into(),
-            description: None,
-        },
-    )
-    .unwrap();
-    let cleared = discard_task_todo(f.db(), &empty_task.id, 1, 1).unwrap();
-    assert_eq!(cleared.revision, 2);
-    assert!(cleared.summary.items.is_empty());
-    drop(f.db.take());
-    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
-    let view = workstream_context_view(f.db(), &empty_task.id).unwrap();
-    assert_eq!(view.context_revision, 2);
-    assert!(view.summary.is_none());
-    let (revision, summary) = summary_at(f.db(), "task", &ws.id);
-    assert_eq!(revision, 5);
-    assert_eq!(
-        summary
-            .items
-            .iter()
-            .map(|item| item.title.as_str())
-            .collect::<Vec<_>>(),
-        vec!["已完成工作", "普通结论"]
-    );
-    assert_eq!(
-        session_context_view(f.db(), &sid)
-            .unwrap()
-            .processed_through_seq,
-        0
-    );
-    assert_eq!(
-        f.db().get_workstream(&ws.id).unwrap().unwrap().visibility,
-        "normal"
-    );
-    let fresh = publish_task_todo(
-        f.db(),
-        &empty_task.id,
-        2,
-        None,
-        TaskTodoContent {
-            title: "新的待办".into(),
-            description: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(fresh.summary.items.len(), 1);
-    assert_eq!(fresh.summary.items[0].title, "新的待办");
-}
-
-#[test]
-fn title_locks_persist_in_all_scopes_allow_body_edits_and_require_user_unlock_for_renames() {
-    let mut f = ServiceFixture::new();
-    let sid = f.add_session(1, 10);
-    let (project, _) = project_fixture(&f, "title-lock-project", &[&sid]);
-    let ws = task(&f, &[&sid]);
-    let targets = [("session", sid), ("task", ws.id), ("project", project.id)];
-    let original = json!({"items":[{"title":"用户固定的标题","description":"旧描述","details":["旧细则"],"title_locked":false}]});
-    for (kind, id) in &targets {
-        edit_summary(f.db(), kind, id, 0, &original.to_string()).unwrap();
-        let locked = set_summary_title_lock(f.db(), kind, id, 1, 1, true).unwrap();
-        assert_eq!(locked.revision, 2);
-        assert_eq!(locked.summary.items[0].description, "旧描述");
-        let updated = json!({"items":[{"id":locked.summary.items[0].id,"title":"用户固定的标题","description":"Agent 更新的描述","details":["Agent 更新的细则"],"title_locked":true}]});
-        edit_summary(f.db(), kind, id, 2, &updated.to_string()).unwrap();
-        for invalid in [
-            json!({"items":[{"title":"擅自改名","description":"新描述","details":[],"title_locked":true}]}),
-            json!({"items":[{"title":"用户固定的标题","description":"新描述","details":[],"title_locked":false}]}),
-            json!({"items":[{"title":"其他事项","description":"","details":[],"title_locked":false}]}),
-        ] {
-            assert!(edit_summary(f.db(), kind, id, 3, &invalid.to_string()).is_err());
-        }
-        assert!(set_summary_title_lock(f.db(), kind, id, 2, 1, false).is_err());
-        assert!(set_summary_title_lock(f.db(), kind, id, 3, 0, false).is_err());
-        assert!(set_summary_title_lock(f.db(), kind, id, 3, 2, false).is_err());
-        let (revision, summary) = summary_at(f.db(), kind, id);
-        assert_eq!(revision, 3);
-        assert_eq!(summary.items[0].description, "Agent 更新的描述");
-        assert_eq!(summary.items[0].details, vec!["Agent 更新的细则"]);
-    }
-    drop(f.db.take());
-    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
-    for (kind, id) in &targets {
-        let (revision, summary) = summary_at(f.db(), kind, id);
-        assert_eq!(revision, 3);
-        assert!(summary.items[0].title_locked);
-        assert_eq!(summary.items[0].title, "用户固定的标题");
-        let unlocked = set_summary_title_lock(f.db(), kind, id, 3, 1, false).unwrap();
-        assert!(!unlocked.summary.items[0].title_locked);
-        let mut renamed = unlocked.summary;
-        renamed.items[0].title = "解锁后可改名".into();
-        edit_summary(
-            f.db(),
-            kind,
-            id,
-            4,
-            &serde_json::to_string(&renamed).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            summary_at(f.db(), kind, id).1.items[0].title,
-            "解锁后可改名"
-        );
-    }
-}
-
-#[test]
-fn session_extraction_updates_locked_title_bodies_in_increment_regeneration_and_rewritten_history()
-{
-    let f = ServiceFixture::new();
-    let home = f.home();
-    let id = f.add_session(1, 10);
-    seed(&f, &id, "固定标题");
-    set_summary_title_lock(f.db(), "session", &id, 1, 1, true).unwrap();
-    for (regenerate, rewrite) in [(false, false), (true, false), (false, true)] {
-        append(&f, &id, "需要更新描述和细则的新证据", rewrite);
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-            let header = records(&dir.join(format!("session-{id}.jsonl"))).remove(0);
-            assert_eq!(header["locked_titles"], json!(["固定标题"]));
-            if regenerate || rewrite {
-                assert!(header["current_summary"].is_null());
-            }
-            std::fs::write(
-                dir.join(format!("session-{id}.result.json")),
-                json!({"summary":{"items":[
-                    {"title":"新事项","description":"可新增其他事项","details":[]},
-                    {"id":header["item_identities"].as_array().unwrap().iter().find(|i| i["title"]=="固定标题").unwrap()["id"],"title":"固定标题","description":"新的结论","details":["新的细则"]}
-                ]}})
-                .to_string(),
-            )
-            .unwrap();
-            Ok(r#"{"status":"completed"}"#.into())
-        };
-        extract_session(f.db(), &id, Some(&home), regenerate, &mut runner).unwrap();
-        let (_, summary) = summary_at(f.db(), "session", &id);
-        assert!(!summary.items[0].title_locked);
-        assert_eq!(summary.items[1].title, "固定标题");
-        assert_eq!(summary.items[1].description, "新的结论");
-        assert_eq!(summary.items[1].details, vec!["新的细则"]);
-        assert!(summary.items[1].title_locked);
-    }
-    let before = summary_at(f.db(), "session", &id);
-    for generated in [
-        json!({"items":[{"title":"被改名","description":"","details":[]}]}),
-        json!({"items":[{"title":"固定标题","description":"","details":[],"title_locked":false}]}),
-    ] {
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-            std::fs::write(
-                dir.join(format!("session-{id}.result.json")),
-                json!({"summary":generated}).to_string(),
-            )
-            .unwrap();
-            Ok(r#"{"status":"completed"}"#.into())
-        };
-        assert_eq!(
-            code(extract_session(f.db(), &id, Some(&home), true, &mut runner)),
-            "invalid_output"
-        );
-        assert_eq!(summary_at(f.db(), "session", &id), before);
-    }
-}
-
-#[test]
-fn batch_extraction_protects_session_and_target_titles_while_refreshing_their_bodies() {
-    for kind in ["task", "project"] {
-        let f = ServiceFixture::new();
-        let home = f.home();
-        let sid = f.add_session(1, 10);
-        let (project, _) = project_fixture(&f, "locked-batch", &[&sid]);
-        let ws = task(&f, &[&sid]);
-        let id = if kind == "task" { &ws.id } else { &project.id };
-        seed(&f, &sid, "固定会话标题");
-        set_summary_title_lock(f.db(), "session", &sid, 1, 1, true).unwrap();
-        edit_summary(
-            f.db(),
-            kind,
-            id,
-            0,
-            &serde_json::to_string(&crate::domain::Summary::single("固定汇总标题")).unwrap(),
-        )
-        .unwrap();
-        set_summary_title_lock(f.db(), kind, id, 1, 1, true).unwrap();
-        for regenerate in [false, true] {
-            append(&f, &sid, "新结论", false);
-            let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-                let input = records(&dir.join(format!("{kind}-{id}.jsonl")));
-                assert_eq!(input[0]["locked_titles"], json!(["固定汇总标题"]));
-                let session = input
-                    .iter()
-                    .find(|record| record["session_id"] == sid)
-                    .unwrap();
-                if regenerate {
-                    assert!(input[0]["current_summary"].is_null());
-                    let history =
-                        records(Path::new(session["history_input_file"].as_str().unwrap()));
-                    assert_eq!(history[0]["from_sequence"], 1);
-                    assert_eq!(history[0]["message_count"], 3);
-                    assert_eq!(history[1]["content"], "xxxxxxxxxx");
-                } else {
-                    assert!(session["history_input_file"].is_null());
-                }
-                let header = records(&dir.join(format!("session-{sid}.jsonl"))).remove(0);
-                assert_eq!(header["locked_titles"], json!(["固定会话标题"]));
-                for (scope, target, title) in [
-                    ("session", &sid, "固定会话标题"),
-                    (kind, id, "固定汇总标题"),
-                ] {
-                    std::fs::write(dir.join(format!("{scope}-{target}.result.json")),json!({"summary":{"items":[{"id":if scope=="session" { &header["item_identities"][0]["id"] } else { &input[0]["item_identities"][0]["id"] },"title":title,"description":"更新后的描述","details":["更新后的细则"]}]}}).to_string()).unwrap();
-                }
-                Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
-            };
-            if kind == "task" {
-                extract_task(f.db(), id, Some(&home), regenerate, &mut runner).unwrap();
-            } else {
-                project::extract_project(f.db(), id, Some(&home), regenerate, &mut runner).unwrap();
-            }
-            for (scope, target, title) in [
-                ("session", &sid, "固定会话标题"),
-                (kind, id, "固定汇总标题"),
-            ] {
-                let (_, summary) = summary_at(f.db(), scope, target);
-                assert_eq!(summary.items[0].title, title);
-                assert!(summary.items[0].title_locked);
-                assert_eq!(summary.items[0].description, "更新后的描述");
-                assert_eq!(summary.items[0].details, vec!["更新后的细则"]);
-            }
-        }
-    }
-}
-
-#[test]
-fn locking_a_title_during_extraction_rejects_the_stale_result_and_preserves_the_user_lock() {
-    let f = ServiceFixture::new();
-    let home = f.home();
-    let id = f.add_session(1, 10);
-    seed(&f, &id, "用户保留的标题");
-    append(&f, &id, "新增材料", false);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        set_summary_title_lock(f.db(), "session", &id, 1, 1, true).unwrap();
-        result(dir, "session", &id, "提取期间擅自改名");
-        Ok(r#"{"status":"completed"}"#.into())
-    };
-    assert_eq!(
-        code(extract_session(
-            f.db(),
-            &id,
-            Some(&home),
-            false,
-            &mut runner
-        )),
-        "stale_snapshot"
-    );
-    let (revision, summary) = summary_at(f.db(), "session", &id);
-    assert_eq!(revision, 2);
-    assert_eq!(summary.items[0].title, "用户保留的标题");
-    assert!(summary.items[0].title_locked);
-    assert!(session_context_view(f.db(), &id).unwrap().pending);
-}
-fn task(f: &ServiceFixture, ids: &[&str]) -> Workstream {
+pub(super) fn task(f: &ServiceFixture, ids: &[&str]) -> Workstream {
     let ws = f.add_workstream("task-test");
     for id in ids {
         crate::storage::seed_tracking(&f.db(), id, Some(&ws.id)).unwrap();
@@ -743,7 +235,8 @@ fn session_full_input_increment_regeneration_and_long_summary() {
     let long = "**结论**：".repeat(500);
     let mut calls = 0;
     let mut invocation = PathBuf::new();
-    let mut runner = |cli: &CliExtractor, prompt: &str, dir: &Path| {
+    let mut runner = |cli: Option<&CliExtractor>, prompt: &str, dir: &Path| {
+        let cli = cli.unwrap();
         assert_eq!(cli.agent, Agent::Codex);
         assert_eq!(cli.opts.model.as_deref(), Some("extraction-model"));
         assert_eq!(cli.opts.effort.as_deref(), Some("high"));
@@ -777,7 +270,7 @@ fn session_full_input_increment_regeneration_and_long_summary() {
     assert!(!invocation.exists());
     assert!(fixed.join(format!("session-{id}.result.json")).is_file());
     append(&f, &id, "验证完成", false);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
         assert_eq!(
             summary_content(&input[0]["current_summary"]),
@@ -792,7 +285,7 @@ fn session_full_input_increment_regeneration_and_long_summary() {
     };
     extract_session(f.db(), &id, Some(&home), false, &mut runner).unwrap();
     assert!(!session_context_view(f.db(), &id).unwrap().pending);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert_eq!(input[0]["message_count"], 51);
@@ -819,7 +312,7 @@ fn session_full_input_increment_regeneration_and_long_summary() {
         ),
         summary_content(crate::domain::Summary::single("重新整理"))
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert_eq!(input[0]["from_sequence"], 1);
@@ -860,7 +353,7 @@ fn skip_advances_progress_preserves_valid_summary_and_avoids_repeat_calls() {
     let id = f.add_session(1, 10);
     seed(&f, &id, "有效旧摘要");
     append(&f, &id, "谢谢", false);
-    let mut skip = |_: &CliExtractor, _: &str, _: &Path| {
+    let mut skip = |_: Option<&CliExtractor>, _: &str, _: &Path| {
         Ok(r#"{"status":"skipped","reason":"no_summary_content"}"#.into())
     };
     let out = extract_session(f.db(), &id, Some(&home), false, &mut skip).unwrap();
@@ -872,8 +365,9 @@ fn skip_advances_progress_preserves_valid_summary_and_avoids_repeat_calls() {
         summary_content(crate::domain::Summary::single("有效旧摘要"))
     );
     assert_eq!(view.processed_through_seq, 2);
-    let mut never =
-        |_: &CliExtractor, _: &str, _: &Path| panic!("no increment must not launch an Agent");
+    let mut never = |_: Option<&CliExtractor>, _: &str, _: &Path| {
+        panic!("no increment must not launch an Agent")
+    };
     assert_eq!(
         extract_session(f.db(), &id, Some(&home), false, &mut never)
             .unwrap()
@@ -889,10 +383,19 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
     let a = f.add_session(1, 10);
     let b = f.add_session(1, 20);
     let ws = task(&f, &[&a, &b]);
+    let work = crate::workspace::task_items::create(
+        f.db(),
+        &ws.id,
+        crate::workspace::task_items::CreateItem {
+            title: "需要人工验收".into(),
+            description: None,
+        },
+    )
+    .unwrap();
     seed(&f, &b, "旧的可用结论");
     append(&f, &b, "尚未处理的新信息", false);
     let mut calls = 0;
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         calls += 1;
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(input[0]["current_summary"], Value::Null);
@@ -920,7 +423,7 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
         summary_content(crate::domain::Summary::single("旧的可用结论"))
     );
     assert!(session_context_view(f.db(), &b).unwrap().pending);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         assert!(!tools::input_available(
             &dir.join(format!("session-{a}.jsonl"))
         ));
@@ -940,8 +443,12 @@ fn task_batch_once_partial_preserves_failed_summary_then_retries_only_failed_ses
         Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
     };
     extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
+    assert_eq!(
+        crate::workspace::task_items::list(f.db(), &ws.id).unwrap(),
+        vec![work]
+    );
     assert!(!workstream_context_view(f.db(), &ws.id).unwrap().pending);
-    let mut never = |_: &CliExtractor, _: &str, _: &Path| {
+    let mut never = |_: Option<&CliExtractor>, _: &str, _: &Path| {
         panic!("pure read and clean task must not invoke Agent")
     };
     assert_eq!(
@@ -960,7 +467,7 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
     let ws = task(&f, &[&id]);
     seed(&f, &id, "旧摘要");
     append(&f, &id, "谢谢", false);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "task", &ws.id, "任务当前结论");
         Ok(json!({"status":"completed","skipped_session_ids":[id]})
             .to_string()
@@ -981,7 +488,7 @@ fn task_skip_retains_session_summary_and_marks_it_checked() {
         ),
         summary_content(crate::domain::Summary::single("旧摘要"))
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert!(!tools::input_available(
@@ -1007,7 +514,7 @@ fn task_changes_keep_summaries_until_update_and_rebuild_rewritten_sessions() {
     let a = f.add_session(1, 10);
     let b = f.add_session(1, 10);
     let ws = task(&f, &[&a, &b]);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "session", &a, "A");
         result(dir, "session", &b, "B");
         result(dir, "task", &ws.id, "旧任务摘要");
@@ -1026,7 +533,7 @@ fn task_changes_keep_summaries_until_update_and_rebuild_rewritten_sessions() {
         ),
         summary_content(crate::domain::Summary::single("A"))
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("task-{}.jsonl", ws.id)));
         assert_eq!(
             summary_content(&input[0]["current_summary"]),
@@ -1071,7 +578,7 @@ fn malformed_or_missing_batch_outputs_roll_back_all_summaries() {
             r#"{"summary":{"items":[{"title":"valid","description":"","details":[]}]}}"#,
         ),
     ] {
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
             result(dir, "session", &a, "valid");
             std::fs::write(dir.join(format!("task-{}.result.json", ws.id)), task_body).unwrap();
             Ok(reply.into())
@@ -1104,8 +611,8 @@ fn batch_and_standalone_share_locks_and_cleanup_after_failure() {
     let home = f.home();
     let id = f.add_session(1, 10);
     let ws = task(&f, &[&id]);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let mut never = |_: &CliExtractor, _: &str, _: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut never = |_: Option<&CliExtractor>, _: &str, _: &Path| {
             panic!("overlapping extraction must not invoke Agent")
         };
         assert_eq!(
@@ -1132,7 +639,7 @@ fn batch_and_standalone_share_locks_and_cleanup_after_failure() {
     assert!(!diagnostics::runtime_dir(&home)
         .join(format!("task-{}", ws.id))
         .exists());
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "session", &id, "retry works");
         Ok(r#"{"status":"completed"}"#.into())
     };
@@ -1144,7 +651,7 @@ fn appends_during_extraction_remain_pending_but_rewrites_and_owner_changes_rejec
     let f = ServiceFixture::new();
     let home = f.home();
     let id = f.add_session(1, 10);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         append(&f, &id, "late message", false);
         result(dir, "session", &id, "snapshot summary");
         Ok(r#"{"status":"completed"}"#.into())
@@ -1153,7 +660,7 @@ fn appends_during_extraction_remain_pending_but_rewrites_and_owner_changes_rejec
     let view = session_context_view(f.db(), &id).unwrap();
     assert!(view.pending);
     assert_eq!(view.processed_through_seq, 1);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         append(&f, &id, "rewritten", true);
         result(dir, "session", &id, "stale");
         Ok(r#"{"status":"completed"}"#.into())
@@ -1173,7 +680,7 @@ fn appends_during_extraction_remain_pending_but_rewrites_and_owner_changes_rejec
         1
     );
     let ws = task(&f, &[&id]);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         crate::storage::seed_tracking(&f.db(), &id, None).unwrap();
         result(dir, "session", &id, "stale");
         result(dir, "task", &ws.id, "stale");
@@ -1232,8 +739,9 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
         r#"{"summary":{"items":[]},"summary":{"items":[]}}"#,
         r#"{"summary":{"items":[{"title":"事项","description":"","details":[]}]},"revision":10}"#,
         r#"{"error":"failure"}"#,
+        r#"{"summary":{"items":[{"id":"unknown-item","title":"事项","description":"","details":[]}]}}"#,
     ] {
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
             std::fs::write(dir.join(format!("session-{id}.result.json")), body).unwrap();
             Ok(r#"{"status":"completed"}"#.into())
         };
@@ -1255,7 +763,7 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
         assert_eq!(stored.processed_through_seq, 1);
         assert_eq!(stored.revision, 1);
     }
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         std::fs::create_dir(dir.join(format!("session-{id}.result.json"))).unwrap();
         Ok(r#"{"status":"completed"}"#.into())
     };
@@ -1277,7 +785,7 @@ fn session_result_files_are_strict_and_failed_attempts_keep_progress() {
             r#"{"summary":{"items":[{"title":"outside","description":"","details":[]}]}}"#,
         )
         .unwrap();
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
             std::os::unix::fs::symlink(&outside, dir.join(format!("session-{id}.result.json")))
                 .unwrap();
             Ok(r#"{"status":"completed"}"#.into())
@@ -1315,7 +823,7 @@ fn unconfigured_agent_never_invokes_cli_and_logs_only_operation_metadata() {
             r#"{"agent":"none","runtime":{"model":null,"provider":null,"effort":null}}"#,
         )
         .unwrap();
-    let mut never = |_: &CliExtractor, _: &str, _: &Path| panic!("no configured Agent");
+    let mut never = |_: Option<&CliExtractor>, _: &str, _: &Path| panic!("no configured Agent");
     assert_eq!(
         code(extract_session(f.db(), &id, Some(&home), false, &mut never)),
         "agent_not_configured"
@@ -1333,7 +841,7 @@ fn unconfigured_agent_never_invokes_cli_and_logs_only_operation_metadata() {
         .exists());
 }
 
-fn project_fixture(
+pub(super) fn project_fixture(
     f: &ServiceFixture,
     id: &str,
     session_ids: &[&str],
@@ -1400,13 +908,13 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
         })
         .unwrap();
     let mut calls = 0;
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         calls += 1;
-        assert!(std::fs::read_to_string(
-            dir.join("noending-extraction/references/requirements.md")
-        )
-        .unwrap()
-        .contains("项目材料"));
+        assert!(
+            std::fs::read_to_string(dir.join("noending/references/requirements.md"))
+                .unwrap()
+                .contains("项目材料")
+        );
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(input[0]["related_tasks"][0]["task_id"], ws.id);
         assert_eq!(input[0]["related_tasks"][0]["title"], ws.title);
@@ -1457,7 +965,7 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
             .map(|c| c.revision),
         None
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(
             summary_content(&input[0]["current_summary"]),
@@ -1479,8 +987,9 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
     let out = project::extract_project(f.db(), &p.id, Some(&home), false, &mut runner).unwrap();
     assert_eq!(out.updated_sessions, vec![b.clone()]);
     assert!(!project_context_view(f.db(), &p.id).unwrap().pending);
-    let mut no_call =
-        |_: &CliExtractor, _: &str, _: &Path| panic!("unchanged update must not invoke Agent");
+    let mut no_call = |_: Option<&CliExtractor>, _: &str, _: &Path| {
+        panic!("unchanged update must not invoke Agent")
+    };
     assert_eq!(
         project::extract_project(f.db(), &p.id, Some(&home), false, &mut no_call)
             .unwrap()
@@ -1495,7 +1004,7 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
             .map(|summary| summary.items[0].title.as_str()),
         Some("project searchable conclusion")
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(input[0]["current_summary"], Value::Null);
         assert!(input
@@ -1523,7 +1032,7 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
     let a = f.add_session(1, 10);
     seed(&f, &a, "A");
     let (mut p, path) = project_fixture(&f, "changes", &[&a]);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "project", &p.id, "旧项目摘要");
         Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
     };
@@ -1547,7 +1056,7 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
         Some("旧项目摘要")
     );
     assert_eq!(view.context_revision, 1);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(
             summary_content(&input[0]["current_summary"]),
@@ -1602,9 +1111,10 @@ fn project_scope_changes_and_invalid_results_roll_back_and_shared_sessions_are_l
     let a = f.add_session(1, 10);
     let ws = task(&f, &[&a]);
     let (p, _) = project_fixture(&f, "locked", &[&a]);
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let mut must_not_run =
-            |_: &CliExtractor, _: &str, _: &Path| panic!("locked extraction must not invoke Agent");
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut must_not_run = |_: Option<&CliExtractor>, _: &str, _: &Path| {
+            panic!("locked extraction must not invoke Agent")
+        };
         assert_eq!(
             code(extract_session(
                 f.db(),
@@ -1660,7 +1170,7 @@ fn project_scope_changes_and_invalid_results_roll_back_and_shared_sessions_are_l
             .context_revision,
         0
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "session", &a, "应回滚");
         result(dir, "project", &p.id, "应回滚");
         f.db()
@@ -1706,7 +1216,7 @@ fn project_merge_preserves_survivor_summary_and_cascades_retired_summary_state()
         (&p.id, "survivor current summary"),
         (&q.id, "loser current summary"),
     ] {
-        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
             result(dir, "project", id, body);
             Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
         };
@@ -1745,7 +1255,7 @@ fn project_merge_preserves_survivor_summary_and_cascades_retired_summary_state()
             .unwrap()
             .is_empty()
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("project-{}.jsonl", p.id)));
         assert_eq!(
             summary_content(&input[0]["current_summary"]),
@@ -1766,112 +1276,6 @@ fn project_merge_preserves_survivor_summary_and_cascades_retired_summary_state()
 }
 
 #[test]
-fn prompt_settings_persist_only_custom_templates_and_reset_independently() {
-    use super::prompts::{self, PromptKind};
-    let f = ServiceFixture::new();
-    let defaults = prompts::settings(f.db()).unwrap();
-    assert!(f
-        .db()
-        .get_setting("summary_prompt_templates")
-        .unwrap()
-        .is_none());
-    prompts::save(f.db(), PromptKind::Session, Some("  自定义会话要求  ")).unwrap();
-    prompts::save(f.db(), PromptKind::Task, Some("自定义任务要求")).unwrap();
-    assert!(prompts::save(f.db(), PromptKind::Project, Some("  ")).is_err());
-    let reopened = Db::open(&f.root.join("db.sqlite")).unwrap();
-    let settings = prompts::settings(&reopened).unwrap();
-    assert_eq!(settings.templates.session, "自定义会话要求");
-    assert_eq!(settings.templates.task, "自定义任务要求");
-    assert_eq!(settings.templates.project, defaults.defaults.project);
-    let stored: Value = serde_json::from_str(
-        &reopened
-            .get_setting("summary_prompt_templates")
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        stored,
-        json!({"session":"自定义会话要求","task":"自定义任务要求"})
-    );
-    let reset = prompts::save(f.db(), PromptKind::Session, None).unwrap();
-    assert_eq!(reset.templates.session, defaults.defaults.session);
-    assert_eq!(reset.templates.task, "自定义任务要求");
-    prompts::save(f.db(), PromptKind::Task, Some(&defaults.defaults.task)).unwrap();
-    assert!(f
-        .db()
-        .get_setting("summary_prompt_templates")
-        .unwrap()
-        .is_none());
-}
-
-#[test]
-fn configured_templates_reach_actual_session_task_project_calls_and_previews() {
-    use super::prompts::{self, PromptKind};
-    let f = ServiceFixture::new();
-    let home = f.home();
-    for (kind, text) in [
-        (PromptKind::Session, "SESSION CUSTOM"),
-        (PromptKind::Task, "TASK CUSTOM"),
-        (PromptKind::Project, "PROJECT CUSTOM"),
-    ] {
-        prompts::save(f.db(), kind, Some(text)).unwrap();
-    }
-    let s = f.add_session(1, 10);
-    let t = f.add_session(1, 10);
-    let p_session = f.add_session(1, 10);
-    let ws = task(&f, &[&t]);
-    let (p, _) = project_fixture(&f, "prompt-project", &[&p_session]);
-    let templates = prompts::templates(f.db()).unwrap();
-    for (kind, custom) in [
-        (PromptKind::Session, "SESSION CUSTOM"),
-        (PromptKind::Task, "TASK CUSTOM"),
-        (PromptKind::Project, "PROJECT CUSTOM"),
-    ] {
-        let preview = summary::preview_prompt(kind, &templates);
-        assert!(preview.contains(custom));
-        assert!(preview.contains("{{输入查询名称}}"));
-        assert!(preview.contains("{{结果文件路径}}"));
-        assert!(preview.contains("extraction"));
-    }
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let prompt =
-            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
-                .unwrap();
-        assert!(prompt.contains("SESSION CUSTOM"));
-        assert!(prompt.contains(&format!("session-{s}.jsonl")));
-        assert!(!prompt.contains("TASK CUSTOM"));
-        result(dir, "session", &s, "single");
-        Ok(r#"{"status":"completed"}"#.into())
-    };
-    extract_session(f.db(), &s, Some(&home), false, &mut runner).unwrap();
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let prompt =
-            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
-                .unwrap();
-        assert!(prompt.contains("SESSION CUSTOM"));
-        assert!(prompt.contains("TASK CUSTOM"));
-        assert!(!prompt.contains("PROJECT CUSTOM"));
-        result(dir, "session", &t, "task session");
-        result(dir, "task", &ws.id, "task");
-        Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
-    };
-    extract_task(f.db(), &ws.id, Some(&home), false, &mut runner).unwrap();
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let prompt =
-            std::fs::read_to_string(dir.join("noending-extraction/references/requirements.md"))
-                .unwrap();
-        assert!(prompt.contains("SESSION CUSTOM"));
-        assert!(prompt.contains("PROJECT CUSTOM"));
-        assert!(!prompt.contains("TASK CUSTOM"));
-        result(dir, "session", &p_session, "project session");
-        result(dir, "project", &p.id, "project");
-        Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
-    };
-    project::extract_project(f.db(), &p.id, Some(&home), false, &mut runner).unwrap();
-}
-
-#[test]
 fn structured_summary_updates_can_reorganize_all_fields_without_changing_extraction_frontiers() {
     let f = ServiceFixture::new();
     let home = f.home();
@@ -1880,7 +1284,7 @@ fn structured_summary_updates_can_reorganize_all_fields_without_changing_extract
         {"title":"旧方案","description":"待验证","details":["保留目录","还有重复内容"]},
         {"title":"相关事项","description":"补充背景","details":["重复内容"]}
     ]});
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         assert_eq!(
             records(&dir.join(format!("session-{id}.jsonl")))[0]["current_summary"],
             Value::Null
@@ -1896,14 +1300,10 @@ fn structured_summary_updates_can_reorganize_all_fields_without_changing_extract
     append(&f, &id, "合并两项，调整结论并删去重复细则", false);
     let retained_id = summary_at(f.db(), "session", &id).1.items[0].id.clone();
     let merged = json!({"items":[{"id":retained_id,"title":"最终方案","description":"已确认合并","details":["保留目录并统一说明"]}]});
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         let input = records(&dir.join(format!("session-{id}.jsonl")));
         assert_eq!(input[0]["current_summary"]["items"][0]["title"], "旧方案");
         assert_eq!(input[0]["current_summary"]["items"][1]["title"], "相关事项");
-        assert_eq!(
-            input[0]["current_summary"]["items"][0]["title_locked"],
-            false
-        );
         assert_eq!(input[0]["message_count"], 1);
         std::fs::write(
             dir.join(format!("session-{id}.result.json")),
@@ -1917,7 +1317,7 @@ fn structured_summary_updates_can_reorganize_all_fields_without_changing_extract
     assert_eq!(
         summary_content(serde_json::to_value(view.fields.unwrap().summary).unwrap()),
         summary_content(
-            json!({"items":[{"title":"最终方案","description":"已确认合并","details":["保留目录并统一说明"],"title_locked":false}]})
+            json!({"items":[{"title":"最终方案","description":"已确认合并","details":["保留目录并统一说明"]}]})
         )
     );
     assert_eq!(
@@ -1930,7 +1330,7 @@ fn structured_summary_updates_can_reorganize_all_fields_without_changing_extract
 }
 
 #[test]
-fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_separate() {
+fn freshness_tracks_aggregate_consumption_after_session_refresh_and_tracking_changes() {
     let mut f = ServiceFixture::new();
     let home = f.home();
     let a = f.add_session(2, 10);
@@ -1945,7 +1345,7 @@ fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_
     };
     assert_eq!(read(f.db(), "session", &a).pending_messages, Some(2));
     assert_eq!(read(f.db(), "task", &task.id).pending_messages, Some(2));
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "session", &a, "Session conclusion");
         result(dir, "task", &task.id, "Task conclusion");
         Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
@@ -1955,7 +1355,7 @@ fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_
     assert_eq!(task_refreshed.pending_messages, Some(0));
     assert!(!task_refreshed.pending);
     assert!(task_refreshed.refreshed_at.is_some());
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "project", &project.id, "Project conclusion");
         Ok(r#"{"status":"completed","skipped_session_ids":[]}"#.into())
     };
@@ -1971,7 +1371,7 @@ fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_
         read(f.db(), "project", &project.id).pending_messages,
         Some(1)
     );
-    let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
+    let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
         result(dir, "session", &a, "Updated session conclusion");
         Ok(r#"{"status":"completed"}"#.into())
     };
@@ -1985,28 +1385,6 @@ fn freshness_tracks_aggregate_consumption_after_session_refresh_and_keeps_edits_
             "a session refresh cannot advance its parent's consumed messages"
         );
         assert_eq!(info.summary_changed_sessions, 1);
-    }
-    for (kind, id) in [
-        ("session", &a),
-        ("task", &task.id),
-        ("project", &project.id),
-    ] {
-        let before = read(f.db(), kind, id);
-        let (revision, _) = summary_at(f.db(), kind, id);
-        let lock = set_summary_title_lock(f.db(), kind, id, revision, 1, true).unwrap();
-        let mut content = lock.summary;
-        content.items[0].description = "Manual clarification".into();
-        edit_summary(
-            f.db(),
-            kind,
-            id,
-            lock.revision,
-            &serde_json::to_string(&content).unwrap(),
-        )
-        .unwrap();
-        let after = read(f.db(), kind, id);
-        assert_eq!(after.refreshed_at, before.refreshed_at);
-        assert_eq!(after.pending_messages, before.pending_messages);
     }
     let new_session = f.add_session(3, 10);
     crate::storage::seed_tracking(f.db(), &new_session, Some(&task.id)).unwrap();
@@ -2041,80 +1419,4 @@ fn summary_content(value: impl serde::Serialize) -> serde_json::Value {
         }
     }
     value
-}
-
-#[test]
-fn summary_ids_survive_edits_reordering_and_reopening_and_reject_duplicate_ids() {
-    let mut f = ServiceFixture::new();
-    let sid = f.add_session(2, 10);
-    let (project, _) = project_fixture(&f, "item-identity", &[&sid]);
-    let ws = task(&f, &[&sid]);
-    let mut expected = Vec::new();
-    for (kind, id) in [("session", sid), ("task", ws.id), ("project", project.id)] {
-        let created = edit_summary(
-            f.db(),
-            kind,
-            &id,
-            0,
-            &json!({"items":[
-                {"title":"相同标题","description":"甲","details":[],"title_locked":false},
-                {"title":"相同标题","description":"乙","details":[],"title_locked":false}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let a = created.summary.items[0].id.clone();
-        let b = created.summary.items[1].id.clone();
-        assert!(uuid::Uuid::parse_str(&a).is_ok());
-        assert_ne!(a, b);
-        let mut edited = created.summary;
-        edited.items.reverse();
-        edited.items[0].title = "乙已改名".into();
-        edited.items[1].description = "甲的新说明".into();
-        let saved = save_summary(f.db(), kind, &id, 1, edited).unwrap();
-        assert_eq!(saved.summary.items[0].id, b);
-        assert_eq!(saved.summary.items[1].id, a);
-        assert_eq!(
-            items::resolve_number(f.db(), kind, &id, 2, None, Some(&a)).unwrap(),
-            2
-        );
-        assert!(items::resolve_number(f.db(), kind, &id, 1, None, Some(&a)).is_err());
-        assert!(items::resolve_number(f.db(), kind, &id, 2, Some(1), Some(&a)).is_err());
-        let mut duplicate = saved.summary.clone();
-        duplicate.items[1].id = b.clone();
-        assert!(save_summary(f.db(), kind, &id, 2, duplicate).is_err());
-        assert_eq!(summary_at(f.db(), kind, &id), (2, saved.summary.clone()));
-        expected.push((kind, id, saved.summary));
-    }
-    drop(f.db.take());
-    f.db = Some(Db::open(&f.root.join("db.sqlite")).unwrap());
-    for (kind, id, summary) in expected {
-        assert_eq!(summary_at(f.db(), kind, &id), (2, summary));
-    }
-}
-
-#[test]
-fn extraction_ids_cannot_impersonate_unknown_items_or_transfer_a_lock_between_equal_titles() {
-    let mut previous = crate::domain::Summary::single("相同标题");
-    previous.items[0].title_locked = true;
-    let mut second = previous.items[0].clone();
-    second.id = crate::storage::new_id();
-    second.title_locked = false;
-    previous.items.push(second);
-    let mut updated = previous.clone();
-    updated.items.reverse();
-    updated
-        .items
-        .iter_mut()
-        .for_each(|i| i.title_locked = false);
-    updated.preserve_title_locks(&previous).unwrap();
-    assert!(!updated.items[0].title_locked);
-    assert!(updated.items[1].title_locked);
-    let mut swapped = updated.clone();
-    swapped.items[0].title_locked = true;
-    swapped.items[1].title_locked = false;
-    assert!(swapped.validate_title_locks(&previous).is_err());
-    let mut invented = updated;
-    invented.items[0].id = crate::storage::new_id();
-    assert!(invented.resolve_extracted_ids(&previous).is_err());
 }

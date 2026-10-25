@@ -1,6 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
-import SummaryItemEditor from "./SummaryItemEditor";
-import type { SummaryEditor } from "./useSummaryEditor";
+import { useId, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { copyToClipboard } from "../../components/common";
@@ -41,49 +39,37 @@ export function useSummaryExpansion(summary: SummaryDocument | null | undefined)
       });
     },
     toggleAll() { setExpanded(allExpanded ? new Set() : new Set(expandable)); },
-    preserve(next: SummaryDocument) {
-      setExpanded(previous => new Set(next.items.filter(item => previous.has(item.id)).map(item => item.id)));
-    },
+
   };
 }
 
 type SummaryExpansion = ReturnType<typeof useSummaryExpansion>;
 
 /** Place these controls beside the summary section's existing header actions. */
-export function SummaryControls({ expansion, editor }: { expansion: SummaryExpansion; editor?: SummaryEditor }) {
+export function SummaryControls({ expansion, disabled = false }: { expansion: SummaryExpansion; disabled?: boolean }) {
   return <>
-    {editor && <button type="button" className="btn ghost icon-button small" title="新增事项" aria-label="新增事项"
-      disabled={!editor.available || editor.editing} onClick={() => editor.start(null)}><Icon name="plus" /></button>}
     {expansion.hasDetails && <button
       type="button" className="btn ghost icon-button small"
       title={expansion.allExpanded ? "全部收起" : "全部展开"}
       aria-label={expansion.allExpanded ? "全部收起" : "全部展开"}
-      disabled={editor?.editing} onClick={expansion.toggleAll}
+      disabled={disabled} onClick={expansion.toggleAll}
     ><Icon name={expansion.allExpanded ? "collapseAll" : "expandAll"} /></button>}
   </>;
 }
 
-export default function SummaryContent({ children, expansion, editor }: {
+export default function SummaryContent({ children, expansion, actions, renderEditor, editing = false }: {
   children: SummaryDocument;
   expansion: SummaryExpansion;
-  editor?: SummaryEditor;
+  actions?: (item: SummaryItem) => ReactNode;
+  renderEditor?: (item: SummaryItem) => ReactNode;
+  editing?: boolean;
 }) {
   const prefix = useId();
-  const summary = editor?.draft?.base ?? children;
-  const editButtons = useRef(new Map<number, HTMLButtonElement>());
-  const lastEdited = useRef<number | null>(null);
-  useLayoutEffect(() => {
-    if (editor?.draft) lastEdited.current = editor.draft.index ?? children.items.length;
-    else if (lastEdited.current !== null) {
-      const index = Math.min(lastEdited.current, children.items.length - 1);
-      editButtons.current.get(index)?.focus({preventScroll:true});
-      lastEdited.current = null;
-    }
-  }, [editor?.draft, children.items.length]);
   const { expanded, toggle } = expansion;
   return <div className="summary-items">
-    {summary.items.map((item, index) => {
-      if (editor?.draft?.index === index) return <section className="summary-item is-editing" key={item.id}><SummaryItemEditor editor={editor} /></section>;
+    {children.items.map((item, index) => {
+      const customEditor = renderEditor?.(item);
+      if (customEditor) return <section className="summary-item is-editing" key={item.id}>{customEditor}</section>;
       const titleId = `${prefix}-title-${index}`;
       const detailsId = `${prefix}-details-${index}`;
       const open = expanded.has(item.id);
@@ -91,18 +77,7 @@ export default function SummaryContent({ children, expansion, editor }: {
         <div className="summary-item-header">
           <h3 id={titleId}>{item.title}</h3>
           <div className="summary-item-actions">
-            {editor && <>
-              <button ref={element => { if (element) editButtons.current.set(index,element); else editButtons.current.delete(index); }}
-                type="button" className="btn ghost icon-button small" title="编辑事项" aria-label={`编辑事项：${item.title}`}
-                disabled={!editor.available || editor.editing} onClick={() => editor.start(index)}><Icon name="edit" /></button>
-              <button
-                type="button" className={`btn ghost icon-button small${item.title_locked ? " on" : ""}`}
-                title={item.title_locked ? "解锁标题（描述和细则仍可更新）" : "锁定标题（描述和细则仍可更新）"}
-                aria-label={`${item.title_locked ? "解锁" : "锁定"}标题：${item.title}`}
-                aria-pressed={item.title_locked} disabled={!editor.available || editor.editing}
-                onClick={() => void editor.toggleTitleLock(index)}
-              ><Icon name={item.title_locked ? "lock" : "unlock"} /></button>
-            </>}
+            {actions?.(item)}
             {item.details.length > 0 && <button
               type="button"
               className="btn ghost icon-button small"
@@ -110,7 +85,7 @@ export default function SummaryContent({ children, expansion, editor }: {
               aria-expanded={open}
               aria-controls={detailsId}
               aria-label={`${open ? "收起" : "展开"}${item.title}的细则`}
-              disabled={editor?.editing}
+              disabled={editing}
               onClick={() => toggle(item.id)}
             ><Icon name={open ? "chevronDown" : "chevronRight"} /></button>}
             <button
@@ -130,6 +105,5 @@ export default function SummaryContent({ children, expansion, editor }: {
         }
       </section>;
     })}
-    {editor?.draft?.index === null && <section className="summary-item is-editing"><SummaryItemEditor editor={editor} /></section>}
   </div>;
 }

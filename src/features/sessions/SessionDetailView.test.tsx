@@ -17,8 +17,8 @@ import type {
 // 已归档横幅的删除入口、「所属任务」单 Owner 入口，以及 Context 面板。
 vi.mock("../../api", () => ({
   api: {
-    mailboxList: vi.fn().mockResolvedValue({items:[],unread:0,next_cursor:null}),
-    saveSummary: vi.fn(),
+    getOperationStatus: vi.fn().mockResolvedValue([]),
+    mailboxList: vi.fn().mockResolvedValue({items:[],total:0,unread:0,next_cursor:null}),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
@@ -57,9 +57,10 @@ vi.mock("../../api", () => ({
 const originalClipboard = navigator.clipboard;
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
-  vi.mocked(api.mailboxList).mockResolvedValue({items:[],unread:0,next_cursor:null});
+  vi.mocked(api.mailboxList).mockResolvedValue({items:[],total:0,unread:0,next_cursor:null});
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
@@ -355,7 +356,7 @@ function contextView(over: Partial<SessionContextView> = {}): SessionContextView
 it("renders summary, supports copying, and updates context on pending increment", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: { items: [{ id: "SessionDetailView.test-item-1", title: "前端入口重构", description: "**正在重构前端入口**，删掉 Context Intelligence 开关。", title_locked: false, details: ["下一步补测试。"] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-1", title: "前端入口重构", description: "**正在重构前端入口**，删掉 Context Intelligence 开关。", details: ["下一步补测试。"] }] },
     },
     pending: true,
     revision: 3,
@@ -365,7 +366,6 @@ it("renders summary, supports copying, and updates context on pending increment"
   }));
 
   screen.getByText("会话摘要（1）");
-  screen.getByRole("button",{name:"锁定标题：前端入口重构"});
   expect(screen.getByText("正在重构前端入口").tagName).toBe("STRONG");
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -383,7 +383,7 @@ it("renders summary, supports copying, and updates context on pending increment"
 it("allows regenerating a current summary without pending messages", async () => {
   vi.mocked(api.getSessionContext).mockResolvedValue(contextView({
     fields: {
-      summary: { items: [{ id: "SessionDetailView.test-item-2", title: "已完成", description: "", title_locked: false, details: [] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-2", title: "已完成", description: "", details: [] }] },
     },
     pending: false,
     revision: 1,
@@ -476,7 +476,7 @@ it("renders cached summary immediately without flashing 暂无摘要", async () 
   sessionDetailCache.set("me", d);
   sessionContextCache.set("me", contextView({
     fields: {
-      summary: { items: [{ id: "SessionDetailView.test-item-3", title: "这是已缓存的会话摘要", description: "", title_locked: false, details: [] }] },
+      summary: { items: [{ id: "SessionDetailView.test-item-3", title: "这是已缓存的会话摘要", description: "", details: [] }] },
     },
   }));
   vi.mocked(api.getSessionDetail).mockResolvedValue(d);
@@ -487,7 +487,7 @@ it("renders cached summary immediately without flashing 暂无摘要", async () 
   expect(screen.getByRole("button", { name: "复制摘要" })).toBeDefined();
 });
 
-it("renders copy icon buttons next to field labels and copies values on click", async () => {
+it("copies a labeled NoEnding session ID and preserves the raw Agent ID", async () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
@@ -501,7 +501,7 @@ it("renders copy icon buttons next to field labels and copies values on click", 
   const copySessionIdBtn = screen.getByRole("button", { name: "复制会话 ID" });
   expect(copySessionIdBtn).toBeDefined();
   fireEvent.click(copySessionIdBtn);
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith("session-123"));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith("NoEnding ID：session-123"));
 
   // Copy icon button for "Agent 会话 ID"
   const copyAgentIdBtn = screen.getByRole("button", { name: "复制 Agent 会话 ID" });
@@ -582,23 +582,4 @@ it("shows the physical compressed source and uses it for copy and reveal", async
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("compressed"));
   fireEvent.click(screen.getByRole("button", { name: "复制源会话路径" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(path));
-});
-
-it("creates a session summary from an empty state and keeps it after remount", async () => {
-  let persisted = contextView();
-  vi.mocked(api.getSessionContext).mockImplementation(async () => persisted);
-  vi.mocked(api.saveSummary).mockImplementation(async (kind,id,revision,summary) => {
-    expect([kind,id,revision]).toEqual(["session","me",0]);
-    persisted = {...persisted,revision:1,fields:{summary}};
-    return {revision:1,summary};
-  });
-  await renderDetail(detail(session("me")));
-  await waitFor(() => expect(screen.getByRole("button",{name:"新增事项"}).hasAttribute("disabled")).toBe(false));
-  fireEvent.click(screen.getByRole("button",{name:"新增事项"}));
-  fireEvent.change(screen.getByRole("textbox",{name:"事项标题"}),{target:{value:"手动整理的会话结论"}});
-  fireEvent.click(screen.getByRole("button",{name:"保存"}));
-  await screen.findByRole("heading",{name:"手动整理的会话结论"});
-  cleanup();
-  await renderDetail(detail(session("me")));
-  await screen.findByRole("heading",{name:"手动整理的会话结论"});
 });

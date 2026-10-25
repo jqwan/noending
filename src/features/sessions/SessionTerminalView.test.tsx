@@ -17,7 +17,7 @@ vi.mock("../../api", () => ({
     terminalList: vi.fn().mockResolvedValue([]),
     terminalNotifications: vi.fn(async (terminalId: string) => ({ terminal_id: terminalId, session_id: "s", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 0, enabled: false, writing:false, error:null })),
     terminalAutoNotifications: vi.fn(),
-    mailboxList: vi.fn().mockResolvedValue({items:[],unread:0,next_cursor:null}), mailboxSend: vi.fn(), mailboxRemind: vi.fn(), mailboxEdit: vi.fn(), mailboxNotificationHint:vi.fn().mockResolvedValue(false),
+    mailboxList: vi.fn().mockResolvedValue({items:[],total:0,unread:0,next_cursor:null}), mailboxSend: vi.fn(), mailboxRemind: vi.fn(), mailboxEdit: vi.fn(), mailboxNotificationHint:vi.fn().mockResolvedValue(false),
     getSessionTracking: vi.fn().mockResolvedValue({ tracked_workstreams: [], available_workstreams: [] }),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
     getSessionDetail: vi.fn().mockResolvedValue({

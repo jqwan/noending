@@ -964,8 +964,9 @@ pub trait AgentAdapter: Send + Sync {
         }
     }
 
-    /// Whether the Agent ships a TUI/CLI surface. Static product fact —
-    /// the default derives from `cli_names`.
+    /// Whether NoEnding supports starting terminal sessions for this Agent.
+    /// Defaults to the presence of CLI candidates; adapters with management-only
+    /// CLI integration must override this separately.
     fn has_terminal_cli(&self) -> bool {
         !crate::platform::exec_resolver::cli_names(self.agent()).is_empty()
     }

@@ -11,12 +11,13 @@ import type {
 
   Session, SessionListItem, SessionContextView, SessionDetail, SessionTracking,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
-  SessionUpdateOutcome, SummaryPromptKind, SummaryPromptTemplates, SummaryPromptSettings, SummaryEditResult, SummaryDocument,
+  SessionUpdateOutcome,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
   WorkstreamUpdateOutcome,
 } from "./types";
 
 export const api = {
+  getOperationStatus: () => invoke<import("./types").OperationStatus[]>("get_operation_status"),
   listSkills: (scope: import("./types").SkillScope) =>
     invoke<import("./types").SkillInventory>("list_skills", { scope }),
   listSkillCatalog: () =>
@@ -191,11 +192,14 @@ export const api = {
   /** Session 摘要 + 待更新状态。纯读取，不摄入、不调用模型。 */
   getSessionContext: (sessionId: string) =>
     invoke<SessionContextView>("get_session_context", { sessionId }),
-  saveSummary: (kind: "session" | "task" | "project", id: string, revision: number, summary: SummaryDocument) =>
-    invoke<SummaryEditResult>("save_summary", { kind, id, revision, summary }),
-  setSummaryTitleLock: (kind: "session" | "task" | "project", id: string, revision: number, itemNumber: number, locked: boolean) =>
-    invoke<SummaryEditResult>("set_summary_title_lock", { kind, id, revision, itemNumber, locked }),
   /** Workstream 当前 Context + revision + 待更新状态。纯读取。 */
+  listTaskItems: (taskId: string) => invoke<import("./types").TaskItem[]>("list_task_items", { taskId }),
+  createTaskItem: (taskId: string, content: import("./types").TaskItemCreate) =>
+    invoke<import("./types").TaskItem>("create_task_item", { taskId, content }),
+  updateTaskItem: (taskId: string, itemId: string, revision: number, patch: import("./types").TaskItemPatch) =>
+    invoke<import("./types").TaskItem>("update_task_item", { taskId, itemId, revision, patch }),
+  deleteTaskItem: (taskId: string, itemId: string, revision: number) =>
+    invoke<void>("delete_task_item", { taskId, itemId, revision }),
   getWorkstreamContextState: (workstreamId: string) =>
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
   /** 当前摘要与增量消息整合，最多启动一次 Agent。 */
@@ -217,13 +221,6 @@ export const api = {
 
   regenerateWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
-
-  getSummaryPromptSettings: () =>
-    invoke<SummaryPromptSettings>("get_summary_prompt_settings"),
-  setSummaryPromptTemplate: (kind: SummaryPromptKind, template: string | null) =>
-    invoke<SummaryPromptSettings>("set_summary_prompt_template", { kind, template }),
-  previewSummaryPrompt: (kind: SummaryPromptKind, templates: SummaryPromptTemplates) =>
-    invoke<string>("preview_summary_prompt", { kind, templates }),
 
   /** 新建 Session 可预选多个跟踪任务（空数组 = 不跟踪）。 */
   prepareNewSession: (agent: Agent, initialWorkstreamIds: string[], cwd?: string, runtime?: AgentRuntimeOverrides) =>

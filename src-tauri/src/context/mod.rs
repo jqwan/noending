@@ -1,14 +1,9 @@
-//! Explicit current-summary reads and extraction. One user action launches one
-//! Agent; model replies and files validate before a snapshot-guarded transaction.
+//! Summary reads and extraction, delegated to an Agent or performed by the
+//! current session. Both paths validate before a snapshot-guarded transaction.
 pub(crate) mod diagnostics;
-mod edit;
 pub mod freshness;
+pub(crate) mod interactive;
 pub mod items;
-pub use edit::{
-    complete_task_todo, discard_task_todo, publish_task_todo, set_summary_title_lock,
-    SummaryEditResult, TaskTodoContent, TaskTodoResult,
-};
-pub use edit::{edit_summary, save_summary};
 mod project;
 pub mod prompts;
 mod query;
@@ -69,7 +64,7 @@ pub struct WorkstreamUpdateOutcome {
     pub remaining_pending: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 struct SessionSnapshot {
     session: Session,
     revision: i64,
@@ -170,10 +165,6 @@ fn read_summary_result(
         .summary
         .resolve_extracted_ids(&previous)
         .map_err(invalid)?;
-    fields
-        .summary
-        .preserve_title_locks(&previous)
-        .map_err(invalid)?;
     Ok(fields)
 }
 
@@ -235,7 +226,7 @@ pub fn workstream_context_view(db: &Db, id: &str) -> Result<WorkstreamContextVie
 }
 
 type ContextRunner<'a> = dyn FnMut(
-        &CliExtractor,
+        Option<&CliExtractor>,
         &str,
         &std::path::Path,
     ) -> std::result::Result<String, extractor::ContextCallFailure>
@@ -247,7 +238,7 @@ pub fn update_session(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<SessionUpdateOutcome> {
     extract_session(db, id, home, false, &mut |cli, prompt, dir| {
-        cli.run_context(prompt, dir)
+        cli.unwrap().run_context(prompt, dir)
     })
 }
 pub fn regenerate_session(
@@ -256,7 +247,7 @@ pub fn regenerate_session(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<SessionUpdateOutcome> {
     extract_session(db, id, home, true, &mut |cli, prompt, dir| {
-        cli.run_context(prompt, dir)
+        cli.unwrap().run_context(prompt, dir)
     })
 }
 pub fn update_workstream(
@@ -265,7 +256,7 @@ pub fn update_workstream(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<WorkstreamUpdateOutcome> {
     extract_task(db, id, home, false, &mut |cli, prompt, dir| {
-        cli.run_context(prompt, dir)
+        cli.unwrap().run_context(prompt, dir)
     })
 }
 pub fn regenerate_workstream(
@@ -274,7 +265,7 @@ pub fn regenerate_workstream(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<WorkstreamUpdateOutcome> {
     extract_task(db, id, home, true, &mut |cli, prompt, dir| {
-        cli.run_context(prompt, dir)
+        cli.unwrap().run_context(prompt, dir)
     })
 }
 fn with_operation<T>(
@@ -282,13 +273,22 @@ fn with_operation<T>(
     id: &str,
     home: Option<&crate::workspace::home::NoEndingHome>,
     kind: &'static str,
+    scope: Option<&interactive::Scope>,
     f: impl FnOnce(
         &ContextLaunchConfig,
         &mut diagnostics::ContextOperation,
+        &mut crate::operations::Operation,
     ) -> Result<(T, &'static str)>,
 ) -> Result<T> {
+    let mut activity = crate::operations::Operation::start(
+        db,
+        crate::operations::OperationStatus::summary(
+            if kind == "workstream" { "task" } else { kind },
+            id,
+        ),
+    )?;
     let mut operation = diagnostics::ContextOperation::new(kind, id, home);
-    let launch = ContextLaunchConfig::from_db(db)
+    let launch = ContextLaunchConfig::from_db(db, scope)
         .map_err(|error| AppError::ContextUpdateFailed(operation.fail(&error)))?;
     operation.record_config(&launch.raw_agent, launch.agent, launch.opts.as_ref());
     if home.is_none() {
@@ -301,7 +301,7 @@ fn with_operation<T>(
     let result = if home.is_none() {
         Err(other("context home unavailable"))
     } else {
-        f(&launch, &mut operation)
+        f(&launch, &mut operation, &mut activity)
     };
     match result {
         Ok((outcome, status)) => {
@@ -336,114 +336,129 @@ fn extract_session(
     regenerate: bool,
     runner: &mut ContextRunner<'_>,
 ) -> Result<SessionUpdateOutcome> {
-    with_operation(db, id, home, "session", |launch, operation| {
-        let session = db.get_session(id)?.ok_or_else(|| other("会话不存在"))?;
-        let snapshot = SessionSnapshot::read(db, session, regenerate)?;
-        if snapshot.latest == snapshot.from {
-            let revision = if snapshot.pending() {
-                db.tx(|tx| {
-                    snapshot.validate(tx, None)?;
-                    commit_session_context_conn(
-                        tx,
+    extract_session_using(db, id, home, regenerate, None, runner)
+}
+fn extract_session_using(
+    db: &Db,
+    id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+    regenerate: bool,
+    scope: Option<&interactive::Scope>,
+    runner: &mut ContextRunner<'_>,
+) -> Result<SessionUpdateOutcome> {
+    with_operation(
+        db,
+        id,
+        home,
+        "session",
+        scope,
+        |launch, operation, _activity| {
+            let session = db.get_session(id)?.ok_or_else(|| other("会话不存在"))?;
+            let snapshot = snapshot_for(db, session, regenerate, launch.scope.as_ref())?;
+            if snapshot.latest == snapshot.from {
+                let revision = if snapshot.pending() {
+                    db.tx(|tx| {
+                        snapshot.validate(tx, None)?;
+                        commit_session_context_conn(
+                            tx,
+                            id,
+                            &snapshot.retained(tx)?,
+                            snapshot.revision(),
+                            snapshot.generation,
+                            0,
+                        )
+                    })?
+                } else {
+                    snapshot.revision()
+                };
+                return Ok((
+                    SessionUpdateOutcome {
+                        session_id: id.into(),
+                        status: if snapshot.pending() {
+                            ContextUpdateStatus::Updated
+                        } else {
+                            ContextUpdateStatus::NoChange
+                        },
+                        revision,
+                    },
+                    if snapshot.pending() {
+                        "updated"
+                    } else {
+                        "no_change"
+                    },
+                ));
+            }
+            let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
+            files.add_session(
+                &snapshot,
+                !regenerate && snapshot.summary_generation == Some(snapshot.generation),
+                false,
+            );
+            let raw = run_context_once(
+                db,
+                launch,
+                &files.session_prompt(id, &launch.templates),
+                &files,
+                operation,
+                runner,
+            )?;
+            operation.set_stage("output_validation");
+            let reply = summary::parse_session_reply(&raw).map_err(invalid)?;
+            let (fields, status) = match reply {
+                SessionReply::Completed {} => (
+                    read_summary_result(
+                        db,
+                        &files,
+                        &files.session_result(id),
+                        "session",
                         id,
-                        &snapshot.retained(tx)?,
                         snapshot.revision(),
-                        snapshot.generation,
-                        0,
-                    )
-                })?
-            } else {
-                snapshot.revision()
+                    )?,
+                    ContextUpdateStatus::Updated,
+                ),
+                SessionReply::Skipped { .. } => {
+                    files
+                        .require_absent(&files.session_result(id))
+                        .map_err(invalid)?;
+                    (snapshot.retained(&db.read())?, ContextUpdateStatus::Skipped)
+                }
+                SessionReply::Failed { .. } => {
+                    files
+                        .require_absent(&files.session_result(id))
+                        .map_err(invalid)?;
+                    return Err(AppError::context(ContextUpdateError::ModelCallFailed(
+                        "会话摘要提取失败".into(),
+                    )));
+                }
             };
-            return Ok((
+            operation.set_stage("database_commit");
+            let revision = db.tx(|tx| {
+                snapshot.validate(tx, None)?;
+                let revision = commit_session_context_conn(
+                    tx,
+                    id,
+                    &fields,
+                    snapshot.revision(),
+                    snapshot.generation,
+                    snapshot.latest,
+                )?;
+                crate::storage::freshness::mark_refreshed(tx, id)?;
+                Ok(revision)
+            })?;
+            Ok((
                 SessionUpdateOutcome {
                     session_id: id.into(),
-                    status: if snapshot.pending() {
-                        ContextUpdateStatus::Updated
-                    } else {
-                        ContextUpdateStatus::NoChange
-                    },
+                    status,
                     revision,
                 },
-                if snapshot.pending() {
-                    "updated"
+                if status == ContextUpdateStatus::Skipped {
+                    "skipped"
                 } else {
-                    "no_change"
+                    "updated"
                 },
-            ));
-        }
-        let files = files_for(operation, &format!("session-{id}"), &[id.into()])?;
-        files.add_session(
-            &snapshot,
-            !regenerate && snapshot.summary_generation == Some(snapshot.generation),
-            false,
-        );
-        let mut cli = require_cli(launch, operation)?;
-        cli.timeout_secs = 300;
-        let raw = run_context_once(
-            db,
-            &cli,
-            &files.session_prompt(id, &launch.templates),
-            &files,
-            operation,
-            runner,
-        )?;
-        operation.set_stage("output_validation");
-        let reply = summary::parse_session_reply(&raw).map_err(invalid)?;
-        let (fields, status) = match reply {
-            SessionReply::Completed {} => (
-                read_summary_result(
-                    db,
-                    &files,
-                    &files.session_result(id),
-                    "session",
-                    id,
-                    snapshot.revision(),
-                )?,
-                ContextUpdateStatus::Updated,
-            ),
-            SessionReply::Skipped { .. } => {
-                files
-                    .require_absent(&files.session_result(id))
-                    .map_err(invalid)?;
-                (snapshot.retained(&db.read())?, ContextUpdateStatus::Skipped)
-            }
-            SessionReply::Failed { .. } => {
-                files
-                    .require_absent(&files.session_result(id))
-                    .map_err(invalid)?;
-                return Err(AppError::context(ContextUpdateError::ModelCallFailed(
-                    "会话摘要提取失败".into(),
-                )));
-            }
-        };
-        operation.set_stage("database_commit");
-        let revision = db.tx(|tx| {
-            snapshot.validate(tx, None)?;
-            let revision = commit_session_context_conn(
-                tx,
-                id,
-                &fields,
-                snapshot.revision(),
-                snapshot.generation,
-                snapshot.latest,
-            )?;
-            crate::storage::freshness::mark_refreshed(tx, id)?;
-            Ok(revision)
-        })?;
-        Ok((
-            SessionUpdateOutcome {
-                session_id: id.into(),
-                status,
-                revision,
-            },
-            if status == ContextUpdateStatus::Skipped {
-                "skipped"
-            } else {
-                "updated"
-            },
-        ))
-    })
+            ))
+        },
+    )
 }
 fn task_projects(conn: &rusqlite::Connection, id: &str) -> Result<Vec<String>> {
     crate::storage::workstream_projects::project_ids_for_workstream(conn, id)
@@ -455,55 +470,72 @@ fn extract_task(
     regenerate: bool,
     runner: &mut ContextRunner<'_>,
 ) -> Result<WorkstreamUpdateOutcome> {
-    with_operation(db, id, home, "workstream", |launch, operation| {
-        let ws = db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
-        let state = query::task_state(&db.read(), id)?;
-        let project_ids = task_projects(&db.read(), id)?;
-        let snapshots = db
-            .sessions_for_workstream(id)?
-            .into_iter()
-            .map(|s| SessionSnapshot::read(db, s, false))
-            .collect::<Result<Vec<_>>>()?;
-        let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
-        let frontiers = db.workstream_frontiers(id)?;
-        let pending = state.input_revision != state.consumed_input_revision
-            || frontiers.len() != snapshots.len()
-            || snapshots.iter().any(|s| {
-                s.pending()
-                    || frontiers
-                        .iter()
-                        .find(|f| f.session_id == s.session.id)
-                        .is_none_or(|f| f.session_context_revision != s.revision())
-            });
-        if !regenerate && !pending {
-            return Ok((
-                WorkstreamUpdateOutcome {
-                    workstream_id: id.into(),
-                    status: ContextUpdateStatus::NoChange,
-                    context_revision: state.context_revision,
-                    updated_sessions: vec![],
-                    skipped_session_ids: vec![],
-                    failed_sessions: vec![],
-                    remaining_pending: 0,
-                },
-                "no_change",
-            ));
-        }
-        let batch = run_batch(
-            db,
-            id,
-            "task",
-            serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
+    extract_task_using(db, id, home, regenerate, None, runner)
+}
+fn extract_task_using(
+    db: &Db,
+    id: &str,
+    home: Option<&crate::workspace::home::NoEndingHome>,
+    regenerate: bool,
+    scope: Option<&interactive::Scope>,
+    runner: &mut ContextRunner<'_>,
+) -> Result<WorkstreamUpdateOutcome> {
+    with_operation(
+        db,
+        id,
+        home,
+        "workstream",
+        scope,
+        |launch, operation, activity| {
+            let ws = db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
+            let state = query::task_state(&db.read(), id)?;
+            let project_ids = task_projects(&db.read(), id)?;
+            let snapshots = db
+                .sessions_for_workstream(id)?
+                .into_iter()
+                .map(|s| snapshot_for(db, s, false, launch.scope.as_ref()))
+                .collect::<Result<Vec<_>>>()?;
+            let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
+            activity.add_sessions(ids.clone())?;
+            let frontiers = db.workstream_frontiers(id)?;
+            let pending = state.input_revision != state.consumed_input_revision
+                || frontiers.len() != snapshots.len()
+                || snapshots.iter().any(|s| {
+                    s.pending()
+                        || frontiers
+                            .iter()
+                            .find(|f| f.session_id == s.session.id)
+                            .is_none_or(|f| f.session_context_revision != s.revision())
+                });
+            if !regenerate && !pending {
+                return Ok((
+                    WorkstreamUpdateOutcome {
+                        workstream_id: id.into(),
+                        status: ContextUpdateStatus::NoChange,
+                        context_revision: state.context_revision,
+                        updated_sessions: vec![],
+                        skipped_session_ids: vec![],
+                        failed_sessions: vec![],
+                        remaining_pending: 0,
+                    },
+                    "no_change",
+                ));
+            }
+            let batch = run_batch(
+                db,
+                id,
+                "task",
+                serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
             "related_projects":crate::workspace::workstream::projects_for_workstream(db,id)?}),
-            state.context_revision,
-            &snapshots,
-            regenerate,
-            launch,
-            operation,
-            runner,
-        )?;
-        operation.set_stage("database_commit");
-        let (revision, updated) = db.tx(|tx| {
+                state.context_revision,
+                &snapshots,
+                regenerate,
+                launch,
+                operation,
+                runner,
+            )?;
+            operation.set_stage("database_commit");
+            let (revision, updated) = db.tx(|tx| {
             let current = get_workstream_context_state_conn(tx, id)?;
             let current_ws: Option<(String, String)> = tx
                 .query_row(
@@ -568,30 +600,31 @@ fn extract_task(
             let revision = commit_workstream_summary_conn(tx, id, &batch.summary)?;
             Ok((revision, updated))
         })?;
-        let status = if !batch.failed.is_empty() {
-            ContextUpdateStatus::Partial
-        } else if batch.target_skipped {
-            ContextUpdateStatus::Skipped
-        } else {
-            ContextUpdateStatus::Updated
-        };
-        Ok((
-            WorkstreamUpdateOutcome {
-                workstream_id: id.into(),
-                status,
-                context_revision: revision,
-                updated_sessions: updated,
-                skipped_session_ids: batch.skipped,
-                failed_sessions: batch.failed,
-                remaining_pending: workstream_context_view(db, id)?.pending_sessions,
-            },
-            match status {
-                ContextUpdateStatus::Partial => "partial",
-                ContextUpdateStatus::Skipped => "skipped",
-                _ => "updated",
-            },
-        ))
-    })
+            let status = if !batch.failed.is_empty() {
+                ContextUpdateStatus::Partial
+            } else if batch.target_skipped {
+                ContextUpdateStatus::Skipped
+            } else {
+                ContextUpdateStatus::Updated
+            };
+            Ok((
+                WorkstreamUpdateOutcome {
+                    workstream_id: id.into(),
+                    status,
+                    context_revision: revision,
+                    updated_sessions: updated,
+                    skipped_session_ids: batch.skipped,
+                    failed_sessions: batch.failed,
+                    remaining_pending: workstream_context_view(db, id)?.pending_sessions,
+                },
+                match status {
+                    ContextUpdateStatus::Partial => "partial",
+                    ContextUpdateStatus::Skipped => "skipped",
+                    _ => "updated",
+                },
+            ))
+        },
+    )
 }
 struct BatchOutput {
     // Hold the locks and files until the transaction finishes.
@@ -617,34 +650,24 @@ fn run_batch(
     let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
     let files = files_for(operation, &format!("{kind}-{id}"), &ids)?;
     let mut targets = HashSet::new();
-    let mut ordered = snapshots.to_vec();
-    ordered.sort_by_cached_key(|s| {
-        (
-            s.last_message_at()
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .map(|ts| ts.timestamp_millis()),
-            s.session.id.clone(),
-        )
-    });
-    for s in &ordered {
-        if s.latest > s.from {
-            targets.insert(s.session.id.clone());
-            files.add_session(
-                s,
-                !regenerate && s.summary_generation == Some(s.generation),
-                false,
-            );
-        }
-        if regenerate {
-            files.add_session(s, false, true);
-        }
-    }
-    files.add_batch(kind, id, header, target_revision, regenerate, ordered);
-    let mut cli = require_cli(launch, operation)?;
-    cli.timeout_secs = 900;
+    add_batch_inputs(
+        &files,
+        kind,
+        id,
+        header,
+        target_revision,
+        regenerate,
+        snapshots,
+    );
+    targets.extend(
+        snapshots
+            .iter()
+            .filter(|s| s.latest > s.from)
+            .map(|s| s.session.id.clone()),
+    );
     let raw = run_context_once(
         db,
-        &cli,
+        launch,
         &files.batch_prompt(kind, id, &launch.templates),
         &files,
         operation,
@@ -742,6 +765,7 @@ fn run_batch(
 /// invocation. This avoids recording a different Agent/model if settings
 /// change while the extraction is being prepared.
 struct ContextLaunchConfig {
+    scope: Option<interactive::Scope>,
     templates: prompts::PromptTemplates,
     raw_agent: String,
     agent: Option<crate::domain::Agent>,
@@ -749,13 +773,24 @@ struct ContextLaunchConfig {
 }
 
 impl ContextLaunchConfig {
-    fn from_db(db: &Db) -> Result<Self> {
+    fn from_db(db: &Db, scope: Option<&interactive::Scope>) -> Result<Self> {
+        if let Some(scope) = scope {
+            scope.validate(db)?;
+            return Ok(Self {
+                scope: Some(scope.clone()),
+                templates: scope.templates.clone(),
+                raw_agent: "current-session".into(),
+                agent: None,
+                opts: None,
+            });
+        }
         let settings = ExtractionSettings::from_settings(db)?;
         let agent = crate::domain::Agent::parse(&settings.agent);
         let opts = settings.exec_options().ok().flatten().map(|(_, opts)| opts);
         let raw_agent = settings.agent;
         Ok(Self {
-            templates: prompts::templates(db)?,
+            scope: None,
+            templates: prompts::PromptTemplates::default(),
             raw_agent,
             agent,
             opts,
@@ -802,22 +837,39 @@ fn require_cli(
 
 fn run_context_once(
     db: &Db,
-    cli: &CliExtractor,
+    launch: &ContextLaunchConfig,
     prompt: &str,
     files: &ExtractionFiles,
     operation: &mut diagnostics::ContextOperation,
     runner: &mut ContextRunner<'_>,
 ) -> Result<String> {
-    operation.record_invocation_config(cli.agent, &cli.opts);
+    let cli = if launch.scope.is_some() {
+        None
+    } else {
+        let mut cli = require_cli(launch, operation)?;
+        cli.timeout_secs = if files.target.starts_with("session-") {
+            30 * 60
+        } else {
+            90 * 60
+        };
+        operation.record_invocation_config(cli.agent, &cli.opts);
+        Some(cli)
+    };
     operation.set_stage("model_call");
+    if let Some(scope) = &launch.scope {
+        let raw = runner(None, prompt, &files.dir)
+            .map_err(|e| invalid(format!("提取提交失败：{:?}", e.kind)))?;
+        tools::validate_external(db, files, &raw, &scope.delivered)?;
+        return Ok(raw);
+    }
     tools::run(db, files, prompt, |tool_prompt| {
         // Service test runners simulate the Agent; use the real query bridge
         // to acknowledge their material reads. Production reads are on demand.
         #[cfg(test)]
         tools::read_all_for_test(&files.dir);
-        match runner(cli, tool_prompt, &files.dir) {
+        match runner(cli.as_ref(), tool_prompt, &files.dir) {
             Ok(raw) => {
-                operation.set_cli_result(true, Some(0), None);
+                operation.set_cli_result(cli.is_some(), cli.as_ref().map(|_| 0), None);
                 operation.set_stage("output_validation");
                 Ok(raw)
             }
@@ -833,3 +885,56 @@ fn run_context_once(
 
 #[cfg(test)]
 mod tests;
+
+fn snapshot_for(
+    db: &Db,
+    session: Session,
+    regenerate: bool,
+    scope: Option<&interactive::Scope>,
+) -> Result<SessionSnapshot> {
+    if let Some(scope) = scope {
+        let snapshot = scope
+            .sessions
+            .iter()
+            .find(|s| s.session.id == session.id)
+            .ok_or_else(stale)?
+            .clone();
+        snapshot.validate(&db.read(), None)?;
+        Ok(snapshot)
+    } else {
+        SessionSnapshot::read(db, session, regenerate)
+    }
+}
+
+fn add_batch_inputs(
+    files: &ExtractionFiles,
+    kind: &str,
+    id: &str,
+    header: serde_json::Value,
+    target_revision: i64,
+    regenerate: bool,
+    snapshots: &[SessionSnapshot],
+) {
+    let mut ordered = snapshots.to_vec();
+    ordered.sort_by_cached_key(|s| {
+        (
+            s.last_message_at()
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.timestamp_millis()),
+            s.session.id.clone(),
+        )
+    });
+    for s in &ordered {
+        if s.latest > s.from {
+            files.add_session(
+                s,
+                !regenerate && s.summary_generation == Some(s.generation),
+                false,
+            );
+        }
+        if regenerate {
+            files.add_session(s, false, true);
+        }
+    }
+    files.add_batch(kind, id, header, target_revision, regenerate, ordered);
+}

@@ -3,7 +3,7 @@ import { timeAgo } from "../../components/common";
 import type { Route } from "../../app/routes";
 import { AGENT_LABELS, type Agent, type WorkstreamCardData } from "../../types";
 
-/** 卡片概览：显示任务概览（用户描述），不显示任务摘要。 */
+/** 卡片概览：显示任务描述（用户描述），不显示任务摘要。 */
 export function cardSummaryLine(card: WorkstreamCardData): string {
   return card.description || "";
 }

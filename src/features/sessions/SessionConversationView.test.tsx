@@ -16,6 +16,7 @@ import type {
 // 中间回复块的展开与收起。
 vi.mock("../../api", () => ({
   api: {
+    getOperationStatus: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
@@ -28,6 +29,7 @@ vi.mock("../../api", () => ({
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});

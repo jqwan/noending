@@ -1,3 +1,4 @@
+import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
@@ -33,13 +34,14 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
 }) {
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const sync = useOperationState("sync", "session", sessionId);
   const [syncing, setSyncing] = useState(false);
   const handleSync = async () => {
-    if (syncing) return;
+    if (syncing || sync.busy || sync.checking) return;
     setSyncing(true);
     try { await api.refreshSession(sessionId); showToast("正在同步最新对话…"); onChanged(); }
     catch (e) { showToast(`同步失败：${String(e)}`); }
-    finally { setSyncing(false); }
+    finally { await refreshOperationStatus(true); setSyncing(false); }
   };
   const doArchive = async () => {
     setArchiveBusy(true);
@@ -66,8 +68,8 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
   };
   return <>
     <DesktopContinueButton sessionId={sessionId} agent={agent} sourceKind={sourceKind} archived={archived} cwdExists={cwdExists} />
-    <button className="btn ghost icon-button" aria-label="增量同步" title="同步最新对话" disabled={syncing}
-      onClick={() => void handleSync()}><Icon name="refresh" /></button>
+    <button className="btn ghost icon-button" aria-label="增量同步" title={sync.error ? "无法读取同步状态" : sync.queued ? "排队同步中…" : syncing || sync.busy ? "同步中…" : "同步最新对话"} disabled={syncing || sync.busy || sync.checking}
+      onClick={() => void handleSync()}><Icon name="refresh" className={syncing || sync.busy ? "spinning" : ""} /></button>
     {!archived ? (
       <button className="btn ghost icon-button" aria-label="归档" title="归档"
         disabled={archiveBusy} onClick={() => setConfirmArchive(true)}><Icon name="archive" /></button>

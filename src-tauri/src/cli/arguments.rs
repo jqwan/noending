@@ -95,7 +95,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         if let Some(key) = arg.strip_prefix("--") {
             let value = args
                 .get(i + 1)
-                .filter(|s| key == "message" || !s.starts_with("--"))
+                .filter(|s| matches!(key, "message" | "text") || !s.starts_with("--"))
                 .ok_or_else(|| invalid(format!("--{key} 缺少值")))?;
             if options.0.contains_key(key) && !matches!(key, "path" | "path-id" | "task") {
                 return Err(invalid(format!("重复 --{key}")));
@@ -219,6 +219,9 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                 agent: options.required("agent")?,
                 native_id: options.required("native-id")?,
             },
+            "session" if action == "identity" && words.len() == 2 => Command::SessionControl {
+                command: crate::session_control::ControlCommand::Identity { claimed: None },
+            },
             "path" if action == "register" && words.len() == 2 => Command::RegisterPath {
                 path: options.required("path")?,
             },
@@ -279,7 +282,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             "mailbox" if action == "send" && words.len() == 2 => {
                 Command::MailboxSend(crate::mailbox::Send {
                     session: options.required("session")?,
-                    from_session: options.take("from-session"),
+                    from_session: options.required("from-session")?,
                     notify_immediately: options.number("notify-immediately", false)?,
                     message: options
                         .message()?
@@ -295,52 +298,48 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     from_session: options.take("from-session"),
                 })
             }
-            "task" if action == "todo" => {
-                if words.len() != 4 {
-                    return Err(invalid(
-                        "使用 task todo publish/complete/discard TASK_ID --revision N",
-                    ));
-                }
-                let id = words[3].clone();
-                let revision = options.number("revision", -1)?;
+            "task" if action == "item" && words.len() == 4 => {
+                let task = words[3].clone();
                 match words[2].as_str() {
-                    "publish" => Command::PublishTaskTodo {
-                        id,
-                        revision,
-                        item_id: options.take("item-id"),
-                        item: options
-                            .take("item")
-                            .map(|value| value.parse().map_err(|_| invalid("--item 无效")))
-                            .transpose()?,
-                        content: serde_json::from_slice(&std::fs::read(
+                    "list" => Command::TaskItems { task },
+                    "create" => Command::CreateTaskItem {
+                        task,
+                        content: serde_json::from_str(&std::fs::read_to_string(
                             options.required("file")?,
                         )?)?,
                     },
-                    "complete" => Command::CompleteTaskTodo {
-                        id,
-                        revision,
-                        item: options
-                            .take("item")
-                            .map(|v| v.parse().map_err(|_| invalid("--item 无效")))
-                            .transpose()?,
-                        item_id: options.take("item-id"),
-                        result: options
-                            .take("file")
-                            .map(|file| -> CliResult<_> {
-                                Ok(serde_json::from_slice(&std::fs::read(file)?)?)
-                            })
-                            .transpose()?,
+                    "update" => Command::UpdateTaskItem {
+                        task,
+                        item_id: options.required("item-id")?,
+                        revision: options.number("revision", -1)?,
+                        patch: serde_json::from_str(&std::fs::read_to_string(
+                            options.required("file")?,
+                        )?)?,
                     },
-                    "discard" => Command::DiscardTaskTodo {
-                        id,
-                        revision,
-                        item: options
-                            .take("item")
-                            .map(|v| v.parse().map_err(|_| invalid("--item 无效")))
-                            .transpose()?,
-                        item_id: options.take("item-id"),
+                    "note" => Command::AppendTaskItemNote {
+                        task,
+                        item_id: options.required("item-id")?,
+                        text: options.required("text")?,
                     },
-                    _ => return Err(invalid("使用 task todo publish/complete/discard")),
+                    "complete" | "reopen" => Command::UpdateTaskItem {
+                        task,
+                        item_id: options.required("item-id")?,
+                        revision: options.number("revision", -1)?,
+                        patch: crate::workspace::task_items::ItemPatch {
+                            completed: Some(words[2] == "complete"),
+                            ..Default::default()
+                        },
+                    },
+                    "delete" => Command::DeleteTaskItem {
+                        task,
+                        item_id: options.required("item-id")?,
+                        revision: options.number("revision", -1)?,
+                    },
+                    _ => {
+                        return Err(invalid(
+                            "使用 task item list/create/update/note/complete/reopen/delete TASK_ID",
+                        ))
+                    }
                 }
             }
             "session" | "task" | "project" => {
@@ -449,6 +448,52 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     _ => return Err(invalid("命令无效，使用 --help 查看用法")),
                 }
             }
+            "summary" if action == "context" && words.len() == 4 => {
+                let kind = match words[2].as_str() {
+                    "session" => Kind::Session,
+                    "task" => Kind::Task,
+                    "project" => Kind::Project,
+                    _ => return Err(invalid("目标类型必须为 session/task/project")),
+                };
+                let mode = match options.take("mode").as_deref().unwrap_or("update") {
+                    "update" => crate::context::interactive::Mode::Update,
+                    "regenerate" => crate::context::interactive::Mode::Regenerate,
+                    _ => return Err(invalid("mode 必须为 update/regenerate")),
+                };
+                Command::ExtractionContext {
+                    kind,
+                    id: words[3].clone(),
+                    mode,
+                }
+            }
+            "summary" if matches!(action, "read" | "search-input") && words.len() == 3 => {
+                Command::ReadExtraction {
+                    context_id: words[2].clone(),
+                    input: options.required("input")?,
+                    cursor: options.number("cursor", 0)?,
+                    limit: options.number("limit", 8)?,
+                    query: if action == "search-input" {
+                        Some(options.required("query")?)
+                    } else {
+                        None
+                    },
+                }
+            }
+            "summary" if action == "submit" && words.len() == 3 => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Submission {
+                    reply: Value,
+                    results: std::collections::HashMap<String, Value>,
+                }
+                let value: Submission =
+                    serde_json::from_str(&std::fs::read_to_string(options.required("file")?)?)?;
+                Command::SubmitExtraction {
+                    context_id: words[2].clone(),
+                    reply: value.reply,
+                    results: value.results,
+                }
+            }
             "summary" if action == "config" && words.len() == 3 => match words[2].as_str() {
                 "show" => Command::ExtractionSettings,
                 "set" => {
@@ -476,7 +521,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             "summary" => {
                 if words.len() != 4 {
                     return Err(invalid(
-                        "使用 summary update/regenerate/set <session|task|project> <id>，或 summary lock/unlock task <id>",
+                        "使用 summary update/regenerate <session|task|project> <id>",
                     ));
                 }
                 let kind: Kind = serde_json::from_value(json!(words[2]))
@@ -488,27 +533,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         id,
                         regenerate: action == "regenerate",
                     },
-                    "set" => Command::EditSummary {
-                        kind,
-                        id,
-                        revision: options.number("revision", -1)?,
-                        content: std::fs::read_to_string(options.required("file")?)?,
-                    },
-                    "lock" | "unlock" => {
-                        if kind != Kind::Task {
-                            return Err(invalid("仅任务摘要支持通过 CLI 加锁或解锁"));
-                        }
-                        Command::SetTaskSummaryTitleLock {
-                            id,
-                            revision: options.number("revision", -1)?,
-                            item: options
-                                .take("item")
-                                .map(|v| v.parse().map_err(|_| invalid("--item 无效")))
-                                .transpose()?,
-                            item_id: options.take("item-id"),
-                            locked: action == "lock",
-                        }
-                    }
                     _ => return Err(invalid("摘要命令无效")),
                 }
             }
@@ -551,10 +575,10 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]"],
-        Some("session") => vec!["ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
-        Some("task") => vec!["ne task todo publish ID --file FILE --revision N [--item-id ID | --item NUMBER]", "ne task todo complete ID --revision N --item NUMBER [--file FILE]", "ne task todo discard ID --revision N --item NUMBER","ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
+        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
+        Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item complete ID --item-id ID --revision N", "ne task item reopen ID --item-id ID --revision N", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item-id ID | --item NUMBER] [--revision REVISION]"],
-        Some("summary") => vec!["ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID", "ne summary set session|task|project ID --file FILE --revision REVISION", "ne summary lock task ID --item NUMBER --revision REVISION", "ne summary unlock task ID --item NUMBER --revision REVISION"],
+        Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],
         Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
         Some("agent") => vec!["ne agent list"],
         Some("source") => vec!["ne source list"],
@@ -568,6 +592,6 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         _=>return Err(invalid("未知命令")),
     };
     Ok(
-        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","home":"独立访问当前 NoEnding Home；--home 指定数据目录，无需运行桌面应用。--connection 仅用于提取查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary":"update/regenerate 等待提取及入库完成后返回最终结果；失败返回非零退出码。set 的 FILE 必须是 {items:[{id?,title,description,details,title_locked}]} JSON，并提供当前摘要版本，保留消息处理进度。task todo publish/complete/discard 原子发布、完成或废弃事项，发布 FILE 为 {title,description?}，只需标题，描述可选；新事项细则为空，发布已有事项保留细则及未提供的描述。complete 不传 --file 时只解锁并保留原内容；可选完成 FILE 为 {description,details}，details 记录事项进展、结果、阻碍和验证情况，不是待办子项。均需当前 --revision；publish 省略 --item 时追加，complete/discard 必须指定已锁定事项；discard 直接删除事项，不保存废弃标记，也可删除最后一项。set 必须保留锁定标题和锁定状态，描述和细则可更新；lock/unlock 仅显式切换任务摘要的一个标题锁，需要 --item 与 --revision，返回新版本和完整事项。摘要读取返回带稳定 id 的事项列表，已有事项编辑时保留 id，新增事项省略 id；--item-id 与 --item 二选一，并使用当前 --revision。按事项读取需同时提供 --item 与 --revision。"}),
+        json!({"usage":usage,"output":"JSON; schema_version=1; ok=false 时退出码非零","home":"独立访问当前 NoEnding Home；--home 指定数据目录，无需运行桌面应用。--connection 仅用于提取查询。","messages":"按会话 ordinal 排序；长消息分为连续 part，完整拼接后阅读；分页不包含开始查询后追加的消息。搜索是大小写敏感子串匹配。","summary":"update/regenerate 等待提取完成。摘要只允许提取更新或重新生成，不提供手工编辑。任务事项独立于摘要：task item create FILE 为 {title,description?}；update FILE 可包含 title、description、details、completed，省略字段保持原值。note --text 追加单条进展且保留已有细则，无需 revision；完整替换细则用 update 并带当前 revision。complete/reopen 只改完成状态；delete 永久删除。任务事项更新和删除使用各自 revision 与 item-id，不使用摘要版本或序号。"}),
     )
 }

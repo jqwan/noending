@@ -182,10 +182,10 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file() && (cfg!(target_os = "windows") || is_executable_unix(p))
 }
 
-/// Executable names to probe for an Agent, in order. **Empty means the Agent
-/// has no headless CLI at all** (Qoder and WorkBuddy are IDE/GUI hosted, dsh
-/// needs a user-owned profile name): its adapter still reads history, but it
-/// can never be launched or resumed.
+/// Executable names to probe for an Agent, in order. These may also serve
+/// management commands such as DSH plugins; they do not imply support for
+/// terminal sessions or headless extraction. Check those capabilities at
+/// the adapter or extraction boundary.
 pub fn cli_names(agent: Agent) -> Vec<&'static str> {
     match agent {
         Agent::Codex => vec!["codex"],

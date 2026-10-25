@@ -56,11 +56,24 @@ it("queries persisted freshness for the requested scope without synchronizing", 
   expect(vi.mocked(invoke).mock.calls).toEqual([["get_freshness", { kind: null, id: null }]]);
 });
 
-it.each(["session", "task", "project"] as const)("sends versioned summary edits and explicit clearing for %s", async kind => {
-  const summary = { items: [{ id: "api.test-item-1", title: "当前结论", description: "用户修正", details: ["已核实"], title_locked: false }] };
-  vi.mocked(invoke).mockResolvedValue({ revision: 3, summary });
-  await expect(api.saveSummary(kind, "target", 2, summary)).resolves.toEqual({ revision: 3, summary });
-  expect(invoke).toHaveBeenLastCalledWith("save_summary", { kind, id: "target", revision: 2, summary });
-  await api.saveSummary(kind, "target", 3, { items: [] });
-  expect(invoke).toHaveBeenLastCalledWith("save_summary", { kind, id: "target", revision: 3, summary: { items: [] } });
+
+it("queries active operation presence without submitting work", async () => {
+  const result = [{id:"queued",kind:"sync",state:"queued",targets:[{kind:"session",id:"one"}],agent:null}];
+  vi.mocked(invoke).mockResolvedValue(result);
+  await expect(api.getOperationStatus()).resolves.toEqual(result);
+  expect(vi.mocked(invoke).mock.calls).toEqual([["get_operation_status"]]);
+});
+
+it("uses independent task work item IDs and revisions over IPC", async () => {
+  vi.mocked(invoke).mockResolvedValue(undefined);
+  await api.listTaskItems("task");
+  await api.createTaskItem("task", { title: "验收", description: "已有数据完整" });
+  await api.updateTaskItem("task", "work", 3, { details: ["回归通过"], completed: true });
+  await api.deleteTaskItem("task", "work", 4);
+  expect(vi.mocked(invoke).mock.calls).toEqual([
+    ["list_task_items", { taskId: "task" }],
+    ["create_task_item", { taskId: "task", content: { title: "验收", description: "已有数据完整" } }],
+    ["update_task_item", { taskId: "task", itemId: "work", revision: 3, patch: { details: ["回归通过"], completed: true } }],
+    ["delete_task_item", { taskId: "task", itemId: "work", revision: 4 }],
+  ]);
 });

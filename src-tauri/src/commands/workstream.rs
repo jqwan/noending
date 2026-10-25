@@ -205,12 +205,17 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             .optional()?
             .flatten();
         let projects = workstream::projects_for_workstream(db, &w.id)?;
+        let item_activity: Option<String> = db.read().query_row(
+            "SELECT MAX(updated_at) FROM task_items WHERE task_id=?1",
+            [&w.id],
+            |r| r.get(0),
+        )?;
         // "Last active" only follows real work signals (session activity,
         // context edits) — renames or metadata touches must not make a
         // Workstream look freshly active. Sorting still falls back to
         // updated_at so a brand-new Workstream surfaces at the top.
         let mut last_activity_at = None;
-        for candidate in [&session_activity, &summary_activity] {
+        for candidate in [&session_activity, &summary_activity, &item_activity] {
             last_activity_at = later_ts(&last_activity_at, candidate);
         }
         cards.push(WorkstreamCardView {
@@ -231,4 +236,47 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
         key(b).cmp(&key(a))
     });
     Ok(cards)
+}
+
+#[tauri::command]
+pub fn list_task_items(
+    state: State<AppState>,
+    task_id: String,
+) -> Result<Vec<crate::workspace::task_items::TaskItem>> {
+    with_db(&state, |db| {
+        crate::workspace::task_items::list(db, &task_id)
+    })
+}
+#[tauri::command]
+pub fn create_task_item(
+    state: State<AppState>,
+    task_id: String,
+    content: crate::workspace::task_items::CreateItem,
+) -> Result<crate::workspace::task_items::TaskItem> {
+    with_db(&state, |db| {
+        crate::workspace::task_items::create(db, &task_id, content)
+    })
+}
+#[tauri::command]
+pub fn update_task_item(
+    state: State<AppState>,
+    task_id: String,
+    item_id: String,
+    revision: i64,
+    patch: crate::workspace::task_items::ItemPatch,
+) -> Result<crate::workspace::task_items::TaskItem> {
+    with_db(&state, |db| {
+        crate::workspace::task_items::update(db, &task_id, &item_id, revision, patch)
+    })
+}
+#[tauri::command]
+pub fn delete_task_item(
+    state: State<AppState>,
+    task_id: String,
+    item_id: String,
+    revision: i64,
+) -> Result<()> {
+    with_db(&state, |db| {
+        crate::workspace::task_items::delete(db, &task_id, &item_id, revision)
+    })
 }

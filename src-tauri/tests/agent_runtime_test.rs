@@ -217,7 +217,7 @@ fn serialized_vocabulary_is_the_ui_contract() {
 #[test]
 fn extraction_settings_persist_independently_and_name_the_actual_runtime() {
     let path = std::env::temp_dir()
-        .join(format!("noending-extraction-{}", new_id()))
+        .join(format!("noending-context-runtime-{}", new_id()))
         .join("test.db");
     let db = Db::open(&path).unwrap();
     set_runtime_overrides(

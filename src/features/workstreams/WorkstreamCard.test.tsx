@@ -41,14 +41,14 @@ it("hides the new-session action when the task has no projects", () => {
 it("displays task overview and project count without individual project names", () => {
   const cardData = {
     ...card,
-    description: "这是任务概览内容",
+    description: "这是任务描述内容",
     projects: [
       { id: "p1", name: "前端项目" },
       { id: "p2", name: "后端服务" },
     ],
   };
   render(<WorkstreamCard card={cardData} mode="full" navigate={vi.fn()} defaultAgent="codex" />);
-  expect(screen.getByText("这是任务概览内容")).toBeTruthy();
+  expect(screen.getByText("这是任务描述内容")).toBeTruthy();
   expect(screen.getByText("2 个项目")).toBeTruthy();
   expect(screen.queryByText("前端项目")).toBeNull();
   expect(screen.queryByText("后端服务")).toBeNull();

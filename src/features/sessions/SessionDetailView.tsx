@@ -1,5 +1,5 @@
+import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { MailboxHistory } from "./MailboxMessages";
-import { useSummaryEditor } from "./useSummaryEditor";
 import { removedTargets } from "../../app/removedTargets";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "./SummaryContent";
 import Icon from "../../components/Icon";
@@ -9,7 +9,7 @@ import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, openPath, timeAgo, useRefreshSignal } from "../../components/common";
+import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, Field, openPath, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
@@ -55,9 +55,10 @@ export default function SessionDetailView({
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const showSkeleton = useLoadingDelay(!detail && !failed);
-  /** Current items support explicit edits and Agent extraction. */
+  /** Current summary content is generated from session history. */
   const [sessionCtx, setSessionCtx] = useState<SessionContextView | null>(() => sessionContextCache.get(sessionId) ?? null);
   const summaryExpansion = useSummaryExpansion(sessionCtx?.fields?.summary);
+  const operation = useOperationState("summary", "session", sessionId);
   const [ctxBusy, setCtxBusy] = useState<"update" | "regenerate" | false>(false);
   const [ctxReadError, setCtxReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [ctxError, setCtxError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
@@ -74,21 +75,7 @@ export default function SessionDetailView({
    */
   const [projects, setProjects] = useState<Project[] | null>(null);
 
-  const summaryEditor = useSummaryEditor({
-    target: sessionCtx?.session_id === sessionId ? { kind: "session", id: sessionId, revision: sessionCtx.revision } : undefined,
-    summary: sessionCtx?.fields?.summary,
-    disabled: Boolean(ctxBusy),
-    onChange: (result) => {
-      summaryExpansion.preserve(result.summary);
-      if (currentSessionId.current !== sessionId) return;
-      setSessionCtx(previous => {
-        if (!previous || previous.revision > result.revision) return previous;
-        const next = {...previous,revision:result.revision,fields:result.summary.items.length ? {summary:result.summary} : null};
-        sessionContextCache.set(sessionId,next);
-        return next;
-      });
-    },
-  });
+
 
   useEffect(() => {
     setCtxError(null);
@@ -178,7 +165,7 @@ export default function SessionDetailView({
 
   /** 一次点击 → 最多启动一次 Agent → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async (regenerate = false) => {
-    if (ctxBusy || summaryEditor.editing) return;
+    if (ctxBusy || operation.busy || operation.checking) return;
     const updateSessionId = sessionId;
     setCtxBusy(regenerate ? "regenerate" : "update");
     setCtxReadError(null);
@@ -204,6 +191,7 @@ export default function SessionDetailView({
         setCtxError(contextUpdateErrorDetails(e));
       }
     } finally {
+      await refreshOperationStatus(true);
       if (currentSessionId.current === updateSessionId) setCtxBusy(false);
     }
   };
@@ -310,7 +298,7 @@ export default function SessionDetailView({
       <div className="detail-layout session-detail-layout">
         <div className="detail-main session-detail-main">
           <MailboxHistory sessionId={sessionId} />
-          {/* 编辑保留提取进度；更新合并增量，重新生成读取完整历史。 */}
+          {/* 更新合并增量，重新生成读取完整历史。 */}
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center" }}>
               <div className="detail-section-title">
@@ -318,7 +306,7 @@ export default function SessionDetailView({
                 <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
               </div>
               <div className="actions" style={{ display: "flex", gap: 8 }}>
-                <SummaryControls expansion={summaryExpansion} editor={summaryEditor} />
+                <SummaryControls expansion={summaryExpansion} />
                 {sessionCtx?.fields?.summary && (
                   <button
                     type="button"
@@ -334,24 +322,24 @@ export default function SessionDetailView({
                   <button
                     type="button"
                     className="btn ghost icon-button small"
-                    disabled={Boolean(ctxBusy) || summaryEditor.editing}
-                    title={ctxBusy === "regenerate" ? "重新生成中…" : "重新生成"}
+                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
+                    title={operation.error ? "无法读取更新状态" : ctxBusy === "regenerate" || operation.busy ? "重新生成中…" : "重新生成"}
                     aria-label="重新生成"
                     onClick={() => updateSummary(true)}
                   >
-                    <Icon name="refresh" className={ctxBusy === "regenerate" ? "spinning" : ""} />
+                    <Icon name="refresh" className={ctxBusy === "regenerate" || (operation.busy && !ctxBusy) ? "spinning" : ""} />
                   </button>
                 )}
                 {canUpdateSummary && (
                   <button
                     type="button"
                     className="btn primary icon-button small"
-                    disabled={Boolean(ctxBusy) || summaryEditor.editing}
-                    title={ctxBusy === "update" ? "更新中…" : "更新摘要"}
+                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
+                    title={operation.error ? "无法读取更新状态" : ctxBusy === "update" || operation.busy ? "更新中…" : "更新摘要"}
                     aria-label="更新摘要"
                     onClick={() => updateSummary()}
                   >
-                    <Icon name="spark" className={ctxBusy === "update" ? "spinning" : ""} />
+                    <Icon name="spark" className={ctxBusy === "update" || operation.busy ? "spinning" : ""} />
                   </button>
                 )}
               </div>
@@ -377,10 +365,10 @@ export default function SessionDetailView({
                 )}
               </div>
             )}
-            {sessionCtx && (sessionCtx.fields || summaryEditor.editing) ? (
+            {sessionCtx && sessionCtx.fields ? (
               <div className="md-body" style={{ overflowWrap: "anywhere" }}>
                 <SummaryContent expansion={summaryExpansion}
-                  editor={summaryEditor}>
+                 >
                   {sessionCtx.fields?.summary ?? {items:[]}}
                 </SummaryContent>
               </div>
@@ -614,7 +602,7 @@ export default function SessionDetailView({
                   <div className="session-source-warning">无法确认源会话状态</div>
                 )}
               </Field>
-              <Field label="会话 ID" copyValue={session.id} copyTitle="复制会话 ID">
+              <Field label="会话 ID" copyValue={`NoEnding ID：${session.id}`} copyTitle="复制会话 ID">
                 <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
                   {session.id}
                 </div>
@@ -735,49 +723,5 @@ export default function SessionDetailView({
       )}
 
     </div>
-  );
-}
-
-function Field({
-  label,
-  copyValue,
-  copyTitle,
-  children,
-}: {
-  label: string;
-  copyValue?: string | null;
-  copyTitle?: string;
-  children: React.ReactNode;
-}) {
-  const [copied, setCopied] = useState(false);
-
-  const onCopy = async () => {
-    if (!copyValue) return;
-    const ok = await copyToClipboard(copyValue);
-    if (ok) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-    showToast(ok ? "已复制" : "复制失败");
-  };
-
-  return (
-    <>
-      <div className="session-field-label-row">
-        <span className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</span>
-        {copyValue && (
-          <button
-            type="button"
-            className={`btn ghost icon-button small session-field-copy-btn${copied ? " copied" : ""}`}
-            title={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
-            aria-label={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
-            onClick={onCopy}
-          >
-            <Icon name={copied ? "check" : "copy"} />
-          </button>
-        )}
-      </div>
-      <div style={{ minWidth: 0 }}>{children}</div>
-    </>
   );
 }

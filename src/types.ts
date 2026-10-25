@@ -354,21 +354,29 @@ export interface WorkstreamContext {
 // 两个显式 AI 更新入口：Session 摘要与 Workstream 状态。读命令纯读取
 // （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 Agent。
 
+export interface TaskItem {
+  id: string;
+  task_id: string;
+  title: string;
+  description: string;
+  details: string[];
+  completed: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface TaskItemCreate { title: string; description?: string }
+export interface TaskItemPatch { title?: string; description?: string; details?: string[]; completed?: boolean }
+
 export interface SummaryItem {
   id: string;
   title: string;
   description: string;
   details: string[];
-  title_locked: boolean;
 }
 
 export interface SummaryDocument {
   items: SummaryItem[];
-}
-
-export interface SummaryEditResult {
-  revision: number;
-  summary: SummaryDocument;
 }
 
 export interface SummaryFreshness {
@@ -733,14 +741,6 @@ export interface AgentStatusEntry {
   desktop_app_present: boolean;
 }
 
-/** Summary requirements are editable; file/response protocols are fixed. */
-export type SummaryPromptKind = "session" | "task" | "project";
-export type SummaryPromptTemplates = Record<SummaryPromptKind, string>;
-export interface SummaryPromptSettings {
-  templates: SummaryPromptTemplates;
-  defaults: SummaryPromptTemplates;
-}
-
 export interface MailboxMessage {
   notify_immediately: boolean;
   id: string;
@@ -751,7 +751,7 @@ export interface MailboxMessage {
   read_at: string | null;
   revision: number;
 }
-export interface MailboxPage { items: MailboxMessage[]; unread: number; next_cursor: number | null }
+export interface MailboxPage { items: MailboxMessage[]; total: number; unread: number; next_cursor: number | null }
 export interface TerminalNotifications {
   terminal_id: string;
   session_id: string | null;
@@ -761,4 +761,13 @@ export interface TerminalNotifications {
   input_revision: number;
   identity_revision: number;
   error: string | null;
+}
+
+/** Transient operation presence; never persisted as task/domain state. */
+export interface OperationStatus {
+  id: string;
+  kind: "sync" | "summary";
+  state: "queued" | "running";
+  targets: { kind: string; id: string }[];
+  agent: Agent | null;
 }

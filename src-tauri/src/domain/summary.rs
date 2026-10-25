@@ -18,7 +18,6 @@ pub struct SummaryItem {
     pub title: String,
     pub description: String,
     pub details: Vec<String>,
-    pub title_locked: bool,
 }
 
 impl Summary {
@@ -29,19 +28,11 @@ impl Summary {
                 title: title.into(),
                 description: String::new(),
                 details: Vec::new(),
-                title_locked: false,
             }],
         }
     }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
-    }
-    pub fn locked_titles(&self) -> Vec<&str> {
-        self.items
-            .iter()
-            .filter(|item| item.title_locked)
-            .map(|item| item.title.as_str())
-            .collect()
     }
     /// Allocate missing IDs only when writing, never while reading stored data.
     pub fn resolve_ids(mut self) -> Result<Self> {
@@ -69,37 +60,10 @@ impl Summary {
             .iter()
             .map(|item| {
                 serde_json::json!({
-                    "id": item.id, "title": item.title, "title_locked": item.title_locked,
+                    "id": item.id, "title": item.title,
                 })
             })
             .collect()
-    }
-    /// Extraction owns descriptions/details; explicit actions own title locks.
-    pub fn preserve_title_locks(&mut self, previous: &Self) -> Result<()> {
-        for old in previous.items.iter().filter(|item| item.title_locked) {
-            let item = self
-                .items
-                .iter_mut()
-                .find(|item| item.id == old.id && item.title == old.title)
-                .ok_or_else(|| other("不能修改、删除或合并已锁定的事项标题"))?;
-            item.title_locked = true;
-        }
-        Ok(())
-    }
-    pub fn validate_title_locks(&self, previous: &Self) -> Result<()> {
-        let locked = |s: &Self| {
-            s.items
-                .iter()
-                .filter(|i| i.title_locked)
-                .map(|i| (i.id.clone(), i.title.clone()))
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        if locked(self) != locked(previous) {
-            return Err(other(
-                "Agent 不能改变事项标题锁定状态，或修改、删除、合并锁定标题",
-            ));
-        }
-        Ok(())
     }
     pub fn validated(self) -> Result<Self> {
         let mut ids = std::collections::HashSet::new();

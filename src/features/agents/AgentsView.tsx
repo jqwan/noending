@@ -1,3 +1,4 @@
+import { useOperationState } from "../../hooks/useOperationState";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useViewPreference, preferenceValues, useViewScroll } from "../../hooks/useViewState";
@@ -201,7 +202,9 @@ export default function AgentsView({
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(() => agentsCache.agentStatus);
   const [sources, setSources] = useState<IngestSource[]>(() => agentsCache.sources ?? []);
   const [status, setStatus] = useState<IngestTaskStatus | null>(() => agentsCache.status);
-  const [running, setRunning] = useState(false);
+  const sync = useOperationState("sync");
+  const [requestRunning, setRunning] = useState(false);
+  const running = requestRunning || sync.busy || sync.checking;
   const [error, setError] = useState("");
   const [reingestTarget, setReingestTarget] = useState<IngestSource | null>(null);
   const [surface, setSurface] = useViewPreference<SurfaceMode>("agents.surface", "tui", preferenceValues("tui", "desktop"));

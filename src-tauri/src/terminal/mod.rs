@@ -1744,6 +1744,54 @@ mod tests {
         terminal_id
     }
 
+    #[test]
+    fn current_terminal_identity_waits_for_its_exact_binding_and_rejects_exited_or_stale_context() {
+        let db = binding_db();
+        let registry = TerminalRegistry::new(None);
+        let terminal = identity_terminal(&registry, Agent::Codex, Some("current-native"), None);
+        let other = ingested_native(&db, Agent::Codex, "other-native");
+        assert_eq!(
+            crate::session_control::sender_session(&registry, &db, Some(&terminal), None)
+                .unwrap_err()
+                .code,
+            "sender_unbound"
+        );
+        let current = ingested_native(&db, Agent::Codex, "current-native");
+        assert_eq!(
+            crate::session_control::sender_session(&registry, &db, Some(&terminal), None).unwrap(),
+            Some(current.id)
+        );
+        assert_eq!(
+            crate::session_control::sender_session(
+                &registry,
+                &db,
+                Some(&terminal),
+                Some(&other.id),
+            )
+            .unwrap_err()
+            .code,
+            "sender_identity_changed"
+        );
+        registry.records.lock().unwrap()[&terminal]
+            .lock()
+            .unwrap()
+            .summary
+            .live = false;
+        assert_eq!(
+            crate::session_control::sender_session(&registry, &db, Some(&terminal), None)
+                .unwrap_err()
+                .code,
+            "sender_unavailable"
+        );
+        registry.close(&terminal);
+        assert_eq!(
+            crate::session_control::sender_session(&registry, &db, Some(&terminal), None)
+                .unwrap_err()
+                .code,
+            "sender_unavailable"
+        );
+    }
+
     fn native_event(native_id: &str) -> identity::NativeIdentityEvent {
         identity::NativeIdentityEvent {
             native_id: native_id.into(),

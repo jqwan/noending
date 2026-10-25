@@ -7,7 +7,6 @@ import { AGENT_LABELS, type AgentRuntimeOverrides, type ExtractionSettings } fro
 import { useAgentRuntime } from "../agents/useAgentRuntime";
 import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
-import { TemplateEditor } from "./SummaryPromptSettings";
 
 const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "none"] as const;
 
@@ -16,7 +15,6 @@ export default function ContextSettings() {
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const agentRef = useRef<HTMLDivElement>(null);
   const active = useRef(true);
 
@@ -106,7 +104,7 @@ export default function ContextSettings() {
   const agentLabel = !settings
     ? ""
     : settings.agent === "none"
-    ? "停用提取"
+    ? "停用后台提取"
     : (AGENT_LABELS[settings.agent] ?? settings.agent);
 
   return (
@@ -118,7 +116,7 @@ export default function ContextSettings() {
             <span>摘要</span>
           </h3>
           <p className="muted small" style={{ margin: "4px 0 0" }}>
-            会话、任务与项目摘要提取运行配置、提示词模板与更新诊断。设置自动生效。
+            会话、任务与项目摘要的后台提取运行配置与更新诊断。设置自动生效。
           </p>
         </div>
       </div>
@@ -175,7 +173,7 @@ export default function ContextSettings() {
                 >
                   {EXTRACTION_AGENTS.map((a) => (
                     <option key={a} value={a}>
-                      {a === "none" ? "停用提取" : AGENT_LABELS[a]}
+                      {a === "none" ? "停用后台提取" : AGENT_LABELS[a]}
                     </option>
                   ))}
                 </select>
@@ -185,7 +183,7 @@ export default function ContextSettings() {
                     <div className="new-session-menu-list">
                       {EXTRACTION_AGENTS.map((a) => {
                         const isSelected = a === settings.agent;
-                        const label = a === "none" ? "停用提取" : AGENT_LABELS[a];
+                        const label = a === "none" ? "停用后台提取" : AGENT_LABELS[a];
                         return (
                           <button
                             key={a}
@@ -229,7 +227,7 @@ export default function ContextSettings() {
 
           {settings.agent === "none" && (
             <div className="muted small">
-              已停用提取，将不会为会话、任务和项目提取摘要。
+              已停用后台提取，当前会话仍可通过提取技能更新摘要。
             </div>
           )}
 
@@ -242,23 +240,6 @@ export default function ContextSettings() {
       )}
 
       <div className="extraction-subtools">
-        <div className="extraction-subtool-card">
-          <div className="extraction-subtool-info">
-            <span className="extraction-subtool-title">
-              <Icon name="edit" />
-              <span>摘要提取提示词</span>
-            </span>
-            <span className="muted small">调整摘要写作要求，预览完整提示词</span>
-          </div>
-          <button
-            type="button"
-            className="btn small ghost"
-            onClick={() => setPromptEditorOpen(true)}
-          >
-            查看与编辑
-          </button>
-        </div>
-
         <div className="extraction-subtool-card">
           <div className="extraction-subtool-info">
             <span className="extraction-subtool-title">
@@ -276,11 +257,6 @@ export default function ContextSettings() {
           </button>
         </div>
       </div>
-
-
-      {promptEditorOpen && (
-        <TemplateEditor onClose={() => setPromptEditorOpen(false)} />
-      )}
     </section>
   );
 }

@@ -36,8 +36,8 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | 信箱 | `mailbox_list`、`mailbox_read`、`mailbox_send`、`mailbox_mark` |
 | 会话控制（需桌面运行） | `session_terminals`、`session_start` |
 | 历史与证据 | `session_search`、`session_messages` |
-| 事项摘要 | `summary_search`、`summary_get`、`summary_set`、`summary_update` |
-| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_session_set`、`task_summary_title_lock`、`task_todo_publish`、`task_todo_complete`、`task_todo_discard` |
+| 事项摘要 | `summary_search`、`summary_get`、`summary_update`、`summary_context`、`summary_input`、`summary_submit` |
+| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_session_set`、`task_items`、`task_item_create`、`task_item_update`、`task_item_note`、`task_item_delete` |
 | 项目与归档 | `path_register`、`project_rename`、`object_archive` |
 | 同步与配置 | `source_list`、`sync`、`summary_config_get`、`summary_config_set` |
 | 写请求状态 | `request_get` |
@@ -76,21 +76,21 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 超时或断开后，先用 `request_get` 查询原编号。`running` 表示仍在执行；`completed` 含最终响应；`interrupted` 表示无法确认完成，应核对业务状态，不换编号盲目重复写入。回执位于 Home 的 `runtime/cli-requests/`，清理该目录会丢失去重记录。
 
-`summary_set` 接受 `{items:[{title,description,details:[],title_locked:false}]}` 对象和当前 `revision`，保留现有摘要校验与并发保护。`title_locked` 必填；普通 `summary_set` 不得改变锁定状态。写入必须保留锁定标题，描述与细则仍可更新。`summary_get` 可整份读取，也可同时传 `item` 和 `revision` 读取某个事项。
+摘要只通过 `summary_update` 提取更新或重新生成，不提供手工编辑、逐项删除、清空或完整覆盖。`summary_get` 可整份读取，也可按 item_id／序号与当前摘要版本读取一项。摘要提取不改变独立任务事项。
 
-`task_summary_title_lock {id, item, revision, locked}` 显式切换任务摘要事项的标题锁：`id` 是任务 ID，`item` 为当前版本中从 1 开始的序号，`revision` 为预期版本，`locked` 为布尔值。返回新版本与完整摘要，不修改描述、细则或提取消费位置。此工具没有 `kind` 参数，不开放会话／项目摘要的加锁或解锁。这是独立的标题保护操作，不代表完成状态；发布、完成和废弃待办使用下面的专用接口。普通历史提取保留原锁。多项操作逐次采用新版本，冲突时重新读取，不能沿用旧序号；使用独立 `request_id` 处理每次写操作及其重试。
+任务事项独立于摘要，只有未完成／已完成两种状态：
 
-`task_todo_publish {id, revision, item?, content: {title, description?}}` 只用必填标题和可选描述发布并锁定任务待办，不接受 `details` 或 `title_locked`。省略 `item` 时追加，描述缺省为空、细则初始化为空数组；指定时修改该事项标题和已提供的描述，保留已有细则和未提供的描述。显式传空描述可清空描述，已锁定标题不能改名。
+| 工具 | 参数与语义 |
+| --- | --- |
+| `task_items` | `{task}`，返回全部任务事项及每项版本 |
+| `task_item_create` | `{task, content:{title,description?}}`，新增未完成事项，进展为空 |
+| `task_item_update` | `{task,item_id,revision,patch:{title?,description?,details?,completed?}}`，省略字段保持不变；details 替换该项全部进展；completed=true 完成，false 重新打开 |
+| `task_item_note` | `{task,item_id,text}`，在当前细则末尾追加一条进展，保留原内容和完成状态并递增版本；无需 revision，重试沿用 request_id；融合整理仍使用带版本的 update |
+| `task_item_delete` | `{task,item_id,revision}`，永久删除事项，不保存废弃状态 |
 
-`task_todo_complete {id, revision, item, result?: {description, details}}` 默认只解锁指定任务事项，保留原有标题、描述和进展细则。可选提供 `result`，同时完整替换描述和细则；提供的结果至少一处非空，保留必要背景和进展。调用前核实实际完成。
+写入返回变更后的任务事项及新版本；删除返回 item_id 和 deleted。任务事项的 revision 与摘要无关，始终按稳定 ID 定位。描述表达目标与验收要求，细则表达真实进展、结果、阻碍和验证依据，不是待办子项。只有实际验收通过才完成，阻碍不代表废弃。摘要提取不管理或直接读取任务事项。各写操作支持 request_id 去重，版本冲突重读，不影响其他事项或提取进度，也不启动或通知 Agent。
 
-`task_todo_discard {id, revision, item}` 直接删除指定事项的标题、描述和细则，不保留废弃标记或占位。允许删除最后一个事项并清空任务摘要。仅在明确放弃该待办时调用，受阻、暂缓或未完成不能自动当成废弃。
-
-待办事项的 `description` 概括目标与必要边界；`details` 是事项本身已确认的进展、结果、阻碍和验证情况，不是待办子项或执行步骤清单。发布接口不接收进展，推进时通过普通摘要编辑维护细则，保留其他事项与锁，不虚构进展；完成依据来自实际结果，不以细则条数计算。
-
-各接口均返回目标 `item`、新 `revision` 及完整 `summary`，完成和废弃要求目标标题已锁定；这两种处理动作不新增事项状态。保留其他事项、提取消费位置和归档状态，不启动或通知 Agent。版本过期或内容校验失败不会部分写入；序号只对给定版本有效，冲突时重读。使用 `request_id` 去重，无需再补锁接口调用。标题锁不等于待办状态，勿把所有锁定结论批量完成或废弃，或把未锁定普通事项当作已完成。
-
-`summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。客户端应为模型操作配置足够的工具调用超时。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
+`summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。提取进程总运行上限为单会话 30 分钟、任务／项目整批 90 分钟（包括关联会话摘要的处理）。客户端的工具调用超时应覆盖相应时长并留出余量。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
 
 `summary_config_set` 只修改提供的字段，切换 Agent 清空旧覆盖值；运行参数传空字符串清除覆盖，`agent=none` 停用提取。它不触发模型调用。`sync` 可指定 `source` 或 `session`，两者互斥；都不指定则处理全部已登记来源，部分失败会保留成功摄入的数据并返回明细。
 
@@ -102,19 +102,27 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 `session_start` 和 `session_terminals` 需要同一 Home 的桌面应用运行。新建复用 Agent、目录、任务和运行参数的校验，返回终端 ID，实际 NoEnding Session 需等待原生身份绑定。
 
+当前会话可通过自身执行工具运行 `ne session identity`，直接取得内嵌终端绑定的 `data.session_id`。不提供隐式读取共享 MCP 服务环境的身份工具；外部会话使用宿主原生 ID 调用 `session_resolve`，共享 MCP 发信和标记显式提供确认后的 `from_session`。
+
 信箱工具独立访问数据库，无需桌面：
 
 | 工具 | 参数与语义 |
 | --- | --- |
 | `mailbox_list` | `{session,state?:"unread"|"read"|"all",cursor?,limit?}`，分页读取，不自动标记 |
 | `mailbox_read` | `{session,message_id}`，返回正文、发件会话、服务端时间、read_at、revision 和 notify_immediately |
-| `mailbox_send` | `{session,message,from_session?,notify_immediately?:boolean}`，来源必须可识别为有效会话，成功表示持久化 |
+| `mailbox_send` | `{session,message,from_session,notify_immediately?:boolean}`，必须显式提供有效发件会话 ID，内嵌终端也不例外；成功表示持久化 |
 | `mailbox_mark` | `{session,message_id,revision,state:"read"|"unread",from_session?}`，只能标记自己的信箱 |
 
-`sender_session_id=null` 表示用户，否则是来源会话 ID。CLI/MCP 不得以 user、external 或匿名身份发送；内嵌终端继承的身份与显式来源必须一致，外部调用用 session_resolve 解析自己的原生身份后提供 from_session。消息不增加正文来源前缀。
+`sender_session_id=null` 表示用户，否则是来源会话 ID。CLI/MCP 不得以 user、external 或匿名身份发送；内嵌终端发信时使用实际绑定的身份覆盖传入来源；外部调用用 session_resolve 解析自己的原生身份后提供 from_session，后端检查其存在性。标记消息时，显式来源仍须与终端绑定一致。消息不增加正文来源前缀。
 
 读取不自动已读，标记使用实际读取到的版本，冲突后重读。发送者可用 mailbox_read 查询自己已发出消息的当前状态，不能代收件会话标记。发送成功、已读与任务完成彼此独立。写请求复用 request_id；发送／标记回执不保存另一份正文。
 
-桌面只在新消息到达时唤醒没有运行终端且支持 TUI 的收件会话。运行期自动通知由用户控制，模型无设置接口。普通自动通知在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的未读数量提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动通知，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动通知。多条请求合并，不指定单条消息或改变信箱顺序；开启自动通知时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查收提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及独立 noending-mailbox 技能。
+桌面只在新消息到达时唤醒没有运行终端且支持 TUI 的收件会话。运行期自动通知由用户控制，模型无设置接口。普通自动通知在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的未读数量提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动通知，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动通知。多条请求合并，不指定单条消息或改变信箱顺序；开启自动通知时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查收提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及统一技能中的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。
 
-事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个事项、标题锁及待办操作都需要当前 `revision`。序号仍只属于对应摘要版本。查询和待办操作返回事项 ID；摘要全量编辑须保留延续事项的 `id`，新增事项可省略 `id`，由 NoEnding 生成。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
+事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个摘要事项需要当前摘要 `revision`。序号仍只属于对应摘要版本。摘要查询返回事项 ID；提取延续事项保留原有 ID，新事项由 NoEnding 分配 ID。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
+
+### 当前会话自行提取摘要
+
+`summary_context {kind,id,mode}` 默认 mode=update，也可显式 regenerate。返回固定范围、输入名称、提取要求和 context_id，不启动 Agent。用 `summary_input {context_id,input,cursor,limit}` 连续完整分页阅读；query 仅辅助搜索。随后调用 `summary_submit {context_id,reply,results,request_id}`：results 按 session-ID/task-ID/project-ID 提供结构化摘要，reply 遵循提取状态协议。它们与 CLI 的自主提取接口共享范围、阅读进度、版本和事务校验，不依赖桌面应用或提取 Agent 配置。
+
+提取期间的新消息保留为后续待处理内容；上下文有效期 24 小时，冲突或过期需重新查询。详见 [CLI 自主提取](cli.md#当前会话自主提取) 与 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。`summary_update` 继续另外启动设置中的 Agent，适用于委托提取。

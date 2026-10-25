@@ -83,6 +83,7 @@ impl ContextOperation {
         self.agent = Some(match parsed_agent {
             Some(agent) => agent.as_str().to_string(),
             None if raw_agent == "none" => "none".into(),
+            None if raw_agent == "current-session" => "current-session".into(),
             None => "invalid".into(),
         });
         if let Some(opts) = opts {

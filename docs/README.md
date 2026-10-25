@@ -10,11 +10,7 @@
 
 - [CLI 使用说明](guides/cli.md)：独立命令的安装、查询、编辑、同步及提取。
 - [MCP 使用说明](guides/mcp.md)：stdio 服务接入、工具与请求语义。
-- [NoEnding 记忆技能](../src-tauri/skills/noending-memory/SKILL.md)：内置、按项目或用户级启用的技能，按会话、项目、任务或本机范围回忆与维护上下文；具体命令按需阅读其操作参考。
-
-- [NoEnding 任务技能](../src-tauri/skills/noending-task/SKILL.md)：独立启用的任务管理、项目关联、当前会话跟踪、进展记录和验收收尾技能。
-
-- [NoEnding 信箱技能](../src-tauri/skills/noending-mailbox/SKILL.md)：查收、标记及发送会话消息；与记忆和任务协作技能独立启用。
+- [NoEnding 统一技能](../src-tauri/skills/noending/SKILL.md)：按需读取[记忆检索](../src-tauri/skills/noending/references/memory.md)、[任务管理](../src-tauri/skills/noending/references/task.md)、[会话信箱](../src-tauri/skills/noending/references/mailbox.md)与[摘要提取](../src-tauri/skills/noending/references/extraction.md)，共用接入和身份说明。
 
 ## 开发约定
 

@@ -5,6 +5,8 @@ pub mod desktop;
 pub mod exec_resolver;
 pub mod exec_runner;
 pub mod file_lock;
+#[cfg(target_os = "macos")]
+mod finder;
 pub mod launcher;
 pub mod paths;
 #[cfg(target_os = "macos")]

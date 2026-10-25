@@ -260,64 +260,6 @@ fn cli_pages_search_whole_messages_preserve_order_cutoff_and_reject_rewritten_hi
         "stale_cursor"
     );
 }
-#[test]
-fn cli_summary_edits_preserve_pending_messages() {
-    let f = Fixture::new();
-    let sid = f.session();
-    let file = f.root.join("summary.json");
-    std::fs::write(
-        &file,
-        r#"{"items":[{"title":"主题","description":"","title_locked":false,"details":["人工修正。"]}]}"#,
-    )
-    .unwrap();
-    let path = file.to_str().unwrap();
-    assert_eq!(
-        f.call(&[
-            "summary",
-            "set",
-            "session",
-            &sid,
-            "--file",
-            path,
-            "--revision",
-            "0"
-        ])
-        .unwrap()["revision"],
-        1
-    );
-    let view = f.call(&["session", "summary", &sid]).unwrap();
-    assert_eq!(view["processed_through_seq"], 0);
-    assert_eq!(view["pending"], true);
-    assert_eq!(view["freshness"]["pending_messages"], 1);
-    assert!(view["freshness"]["refreshed_at"].is_null());
-    let state = f.call(&["freshness", "--session", &sid]).unwrap();
-    assert_eq!(state["summary"]["pending_messages"], 1);
-    assert!(state["session_check"]["checked_at"].is_null());
-    assert!(state["all_sources"]["checked_at"].is_null());
-    assert_eq!(
-        f.call(&["freshness", "--session", &sid, "--task", "t"])
-            .unwrap_err()
-            .code,
-        "invalid_arguments"
-    );
-
-    assert_eq!(
-        f.call(&[
-            "summary",
-            "set",
-            "session",
-            &sid,
-            "--file",
-            path,
-            "--revision",
-            "0"
-        ])
-        .unwrap_err()
-        .code,
-        "stale_result"
-    );
-    assert_eq!(view["summary"]["items"][0]["details"][0], "人工修正。");
-}
 
 #[test]
 fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
@@ -368,22 +310,25 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
             .len(),
         1
     );
-    let sid = f.session();
-    let file = f.root.join("summary.json");
-    std::fs::write(
-        &file,
-        r#"{"items":[{"title":"Summary","description":"","details":[],"title_locked":false}]}"#,
+    let task = first["task"]["id"].as_str().unwrap();
+    let item = crate::workspace::task_items::create(
+        f.db(),
+        task,
+        crate::workspace::task_items::CreateItem {
+            title: "Receipt progress".into(),
+            description: None,
+        },
     )
     .unwrap();
     let args = [
-        "summary",
-        "set",
-        "session",
-        &sid,
-        "--file",
-        file.to_str().unwrap(),
+        "task",
+        "item",
+        "complete",
+        task,
+        "--item-id",
+        &item.id,
         "--revision",
-        "1",
+        "99",
         "--request-id",
         "future-revision",
     ];
@@ -393,32 +338,32 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
         "stale_result"
     );
     f.call(&[
-        "summary",
-        "set",
-        "session",
-        &sid,
-        "--file",
-        file.to_str().unwrap(),
+        "task",
+        "item",
+        "complete",
+        task,
+        "--item-id",
+        &item.id,
         "--revision",
-        "0",
+        "1",
     ])
     .unwrap();
     assert_eq!(f.call(&args).unwrap_err().code, "stale_result");
     assert_eq!(
         f.call(&[
-            "summary",
-            "set",
-            "session",
-            &sid,
-            "--file",
-            file.to_str().unwrap(),
+            "task",
+            "item",
+            "reopen",
+            task,
+            "--item-id",
+            &item.id,
             "--revision",
-            "1",
+            "2",
             "--request-id",
             "fresh-edit"
         ])
         .unwrap()["revision"],
-        2
+        3
     );
 }
 #[test]
@@ -608,42 +553,18 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             json!([])
         );
     }
-    let file = f.root.join("summary.json");
-    std::fs::write(
-        &file,
-        r#"{"items":[{"title":"项目进展","description":"","title_locked":false,"details":["已建立任务。"]}]}"#,
-    )
-    .unwrap();
     for (kind, id) in [("task", tid), ("project", pid.as_str())] {
-        f.call(&[
-            "summary",
-            "set",
+        seed_summary(
+            f.db(),
             kind,
             id,
-            "--file",
-            file.to_str().unwrap(),
-            "--revision",
-            "0",
-        ])
+            1,
+            crate::domain::Summary::single("项目结论"),
+        )
         .unwrap();
         let view = f.call(&[kind, "summary", id]).unwrap();
         assert_eq!(view["revision"], 1);
         assert_eq!(view["pending"], true);
-        assert_eq!(
-            f.call(&[
-                "summary",
-                "set",
-                kind,
-                id,
-                "--file",
-                file.to_str().unwrap(),
-                "--revision",
-                "0"
-            ])
-            .unwrap_err()
-            .code,
-            "stale_result"
-        );
     }
     assert!(f.db().workstream_frontiers(tid).unwrap().is_empty());
     assert!(
@@ -904,16 +825,23 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
     let session = json!({"items":[
-        {"title":"路径同步","description":"保留目录","title_locked":false,"details":["literal_% 的文件保持不变"]},
-        {"title":"窗口修复","description":"路径同步后的行为","title_locked":false,"details":[]}
+        {"title":"路径同步","description":"保留目录","details":["literal_% 的文件保持不变"]},
+        {"title":"窗口修复","description":"路径同步后的行为","details":[]}
     ]});
-    let topic = json!({"items":[{"title":"项目与任务","description":"路径同步","title_locked":false,"details":["CaseSensitiveWord"]}]});
+    let topic = json!({"items":[{"title":"项目与任务","description":"路径同步","details":["CaseSensitiveWord"]}]});
     for (kind, id, body) in [
         ("session", sid.as_str(), &session),
         ("task", tid, &topic),
         ("project", pid.as_str(), &topic),
     ] {
-        crate::context::edit_summary(f.db(), kind, id, 0, &body.to_string()).unwrap();
+        seed_summary(
+            f.db(),
+            kind,
+            id,
+            1,
+            serde_json::from_value(body.clone()).unwrap(),
+        )
+        .unwrap();
     }
     let first = f
         .call(&["summary", "search", "--query", "路径同步", "--limit", "1"])
@@ -996,13 +924,15 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
         .as_str()
         .unwrap()
         .to_string();
-    crate::context::edit_summary(
+    seed_summary(
         f.db(),
         "session",
         &sid,
-        1,
-        &json!({"items":[{"title":"合并后的路径事项","description":"已精简","title_locked":false,"details":[]}]})
-            .to_string(),
+        2,
+        serde_json::from_value(
+            json!({"items":[{"title":"合并后的路径事项","description":"已精简","details":[]}]}),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -1029,37 +959,6 @@ fn summary_items_are_searchable_by_content_scope_and_kind_and_readable_at_a_revi
             .unwrap()["item"]["title"],
         "合并后的路径事项"
     );
-}
-
-#[test]
-fn summary_edits_reject_invalid_document_input_and_items_without_changing_revision_or_progress() {
-    let f = Fixture::new();
-    let sid = f.session();
-    let valid = json!({"items":[{"title":"保留事项","description":"原始描述","title_locked":false,"details":["原始细则"]}]});
-    crate::context::edit_summary(f.db(), "session", &sid, 0, &valid.to_string()).unwrap();
-    let before = f.call(&["session", "summary", &sid]).unwrap();
-    for invalid in [
-        "not a JSON document",
-        r#"{"items":[{"title":"缺少必填锁定字段","description":"","details":[]}]}"#,
-        r#"{"items":[]}"#,
-        r#"{"items":[{"title":" ","description":"","title_locked":false,"details":[]}]}"#,
-        r#"{"items":[{"title":"事项","description":"","title_locked":false,"details":[""]}]}"#,
-        r#"{"items":[{"id":"fixed","title":"事项","description":"","title_locked":false,"details":[]}]}"#,
-    ] {
-        assert!(crate::context::edit_summary(f.db(), "session", &sid, 1, invalid).is_err());
-    }
-    assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
-    for invalid in ["invalid JSON", "{}", "[]", r#"{"items":{}}"#] {
-        assert!(f
-            .db()
-            .read()
-            .execute(
-                "UPDATE session_contexts SET summary=?2 WHERE session_id=?1",
-                rusqlite::params![sid, invalid]
-            )
-            .is_err());
-    }
-    assert_eq!(f.call(&["session", "summary", &sid]).unwrap(), before);
 }
 
 #[test]
@@ -1157,457 +1056,15 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
 }
 
 #[test]
-fn cli_task_todos_save_content_and_locks_together_and_retries_do_not_republish_completed_work() {
-    let f = Fixture::new();
-    let task = f.call(&["task", "create", "--title", "待办接口"]).unwrap()["task"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let content_path = f.root.join("todo.json");
-    std::fs::write(&content_path, json!({"title":"检查同步"}).to_string()).unwrap();
-    let publish = [
-        "task",
-        "todo",
-        "publish",
-        &task,
-        "--file",
-        content_path.to_str().unwrap(),
-        "--revision",
-        "0",
-        "--request-id",
-        "todo-publish",
-    ];
-    let published = f.call(&publish).unwrap();
-    assert_eq!(published["revision"], 1);
-    assert_eq!(published["item"], 1);
-    assert_eq!(
-        published["summary"]["items"],
-        json!([{"id":published["item_id"],"title":"检查同步","description":"","details":[],"title_locked":true}])
-    );
-    assert_eq!(f.call(&publish).unwrap()["revision"], 1);
-    assert_eq!(
-        f.call(&[
-            "task",
-            "todo",
-            "publish",
-            &task,
-            "--file",
-            content_path.to_str().unwrap(),
-            "--revision",
-            "0"
-        ])
-        .unwrap_err()
-        .code,
-        "stale_result"
-    );
-    std::fs::write(
-        &content_path,
-        json!({"title":"检查同步","description":"覆盖所有来源"}).to_string(),
-    )
-    .unwrap();
-    let updated = f
-        .call(&[
-            "task",
-            "todo",
-            "publish",
-            &task,
-            "--file",
-            content_path.to_str().unwrap(),
-            "--revision",
-            "1",
-            "--item",
-            "1",
-        ])
-        .unwrap();
-    assert_eq!(updated["revision"], 2);
-    assert_eq!(updated["summary"]["items"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        updated["summary"]["items"][0]["description"],
-        "覆盖所有来源"
-    );
-    let result_path = f.root.join("result.json");
-    std::fs::write(
-        &result_path,
-        json!({"description":"已验证完成","details":["各来源均可同步"]}).to_string(),
-    )
-    .unwrap();
-    assert!(f
-        .call(&[
-            "task",
-            "todo",
-            "complete",
-            &task,
-            "--file",
-            result_path.to_str().unwrap(),
-            "--revision",
-            "2"
-        ])
-        .is_err());
-    let complete = [
-        "task",
-        "todo",
-        "complete",
-        &task,
-        "--file",
-        result_path.to_str().unwrap(),
-        "--revision",
-        "2",
-        "--item",
-        "1",
-        "--request-id",
-        "todo-complete",
-    ];
-    let completed = f.call(&complete).unwrap();
-    assert_eq!(completed["revision"], 3);
-    assert_eq!(
-        completed["summary"]["items"],
-        json!([{"id":published["item_id"],"title":"检查同步","description":"已验证完成","details":["各来源均可同步"],"title_locked":false}])
-    );
-    assert_eq!(f.call(&complete).unwrap()["revision"], 3);
-    // Restoring the original request also restores its exact payload.
-    std::fs::write(&content_path, json!({"title":"检查同步"}).to_string()).unwrap();
-    assert_eq!(f.call(&publish).unwrap()["revision"], 1);
-    let read = f.call(&["task", "summary", &task]).unwrap();
-    assert_eq!(read["revision"], 3);
-    assert_eq!(read["summary"], completed["summary"]);
-    std::fs::write(
-        &content_path,
-        json!({"title":"不允许手动控制锁","description":"","details":[],"title_locked":false})
-            .to_string(),
-    )
-    .unwrap();
-    assert!(f
-        .call(&[
-            "task",
-            "todo",
-            "publish",
-            &task,
-            "--file",
-            content_path.to_str().unwrap(),
-            "--revision",
-            "3"
-        ])
-        .is_err());
-    std::fs::write(
-        &content_path,
-        json!({"title":"不从发布接口更新进展","details":["已定位原因"]}).to_string(),
-    )
-    .unwrap();
-    assert!(f
-        .call(&[
-            "task",
-            "todo",
-            "publish",
-            &task,
-            "--file",
-            content_path.to_str().unwrap(),
-            "--revision",
-            "3"
-        ])
-        .is_err());
-    assert_eq!(f.call(&["task", "summary", &task]).unwrap(), read);
-}
-
-#[test]
-fn cli_task_todo_actions_keep_completed_body_and_discard_last_item_once() {
-    let f = Fixture::new();
-    let id = f.call(&["task", "create", "--title", "后续处理"]).unwrap()["task"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let path = f.root.join("action-todo.json");
-    std::fs::write(
-        &path,
-        json!({"title":"待办事项","description":"原有目标"}).to_string(),
-    )
-    .unwrap();
-    f.call(&[
-        "task",
-        "todo",
-        "publish",
-        &id,
-        "--file",
-        path.to_str().unwrap(),
-        "--revision",
-        "0",
-    ])
-    .unwrap();
-    let completed = f
-        .call(&[
-            "task",
-            "todo",
-            "complete",
-            &id,
-            "--item",
-            "1",
-            "--revision",
-            "1",
-        ])
-        .unwrap();
-    assert_eq!(completed["revision"], 2);
-    assert_eq!(
-        completed["summary"]["items"],
-        json!([{"id":completed["item_id"],"title":"待办事项","description":"原有目标","details":[],"title_locked":false}])
-    );
-    f.call(&[
-        "task",
-        "todo",
-        "publish",
-        &id,
-        "--file",
-        path.to_str().unwrap(),
-        "--item",
-        "1",
-        "--revision",
-        "2",
-    ])
-    .unwrap();
-    assert_eq!(
-        f.call(&["summary", "search", "--kind", "task", "--query", "待办事项"])
-            .unwrap()["items"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    let args = [
-        "task",
-        "todo",
-        "discard",
-        &id,
-        "--item",
-        "1",
-        "--revision",
-        "3",
-        "--request-id",
-        "discard-last",
-    ];
-    let discarded = f.call(&args).unwrap();
-    assert_eq!(discarded["revision"], 4);
-    assert_eq!(discarded["summary"], json!({"items":[]}));
-    assert_eq!(f.call(&args).unwrap()["revision"], 4);
-    let stored = f.call(&["task", "summary", &id]).unwrap();
-    assert_eq!(stored["revision"], 4);
-    assert!(stored["summary"].is_null());
-    assert_eq!(
-        f.call(&["summary", "search", "--kind", "task", "--query", "待办事项"])
-            .unwrap()["items"],
-        json!([])
-    );
-}
-
-#[test]
-fn cli_task_title_locks_protect_edits_without_exposing_other_scopes() {
-    let f = Fixture::new();
-    let session = f.session();
-    let project = f.call(&["project", "list"]).unwrap()["items"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let task = f.call(&["task", "create", "--title", "待办任务"]).unwrap()["task"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    for (kind, id) in [("session", session), ("project", project)] {
-        crate::context::edit_summary(
-            f.db(),
-            kind,
-            &id,
-            0,
-            &serde_json::to_string(&crate::domain::Summary::single("普通摘要")).unwrap(),
-        )
-        .unwrap();
-        for action in ["lock", "unlock"] {
-            assert_eq!(
-                f.call(&[
-                    "summary",
-                    action,
-                    kind,
-                    &id,
-                    "--revision",
-                    "1",
-                    "--item",
-                    "1"
-                ])
-                .unwrap_err()
-                .code,
-                "invalid_arguments"
-            );
-        }
-        assert_eq!(
-            f.call(&[kind, "summary", &id]).unwrap()["summary"]["items"][0]["title_locked"],
-            false
-        );
-    }
-    let kind = "task";
-    let id = task;
-    let body = crate::domain::Summary::single("用户锁定的标题");
-    crate::context::edit_summary(f.db(), kind, &id, 0, &serde_json::to_string(&body).unwrap())
-        .unwrap();
-    let request = format!("title-lock-{kind}");
-    let lock_args = [
-        "summary",
-        "lock",
-        kind,
-        &id,
-        "--revision",
-        "1",
-        "--item",
-        "1",
-        "--request-id",
-        &request,
-    ];
-    let locked = f.call(&lock_args).unwrap();
-    assert_eq!(locked["revision"], 2);
-    assert_eq!(locked["summary"]["items"][0]["title_locked"], true);
-    let path = f.root.join("locked-summary.json");
-    let mut changed: crate::domain::Summary =
-        serde_json::from_value(locked["summary"].clone()).unwrap();
-    changed.items[0].description = "CLI 更新描述".into();
-    changed.items[0].details = vec!["CLI 更新细则".into()];
-    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
-    f.call(&[
-        "summary",
-        "set",
-        kind,
-        &id,
-        "--revision",
-        "2",
-        "--file",
-        path.to_str().unwrap(),
-    ])
-    .unwrap();
-    let stored = f.call(&[kind, "summary", &id]).unwrap();
-    assert_eq!(stored["summary"]["items"][0]["title"], "用户锁定的标题");
-    assert_eq!(stored["summary"]["items"][0]["description"], "CLI 更新描述");
-    assert_eq!(
-        stored["summary"]["items"][0]["details"],
-        json!(["CLI 更新细则"])
-    );
-    assert_eq!(stored["summary"]["items"][0]["title_locked"], true);
-    changed.items[0].title_locked = false;
-    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
-    assert!(f
-        .call(&[
-            "summary",
-            "set",
-            kind,
-            &id,
-            "--revision",
-            "3",
-            "--file",
-            path.to_str().unwrap()
-        ])
-        .is_err());
-    changed.items[0].title_locked = true;
-    changed.items[0].title = "Agent 擅自改名".into();
-    std::fs::write(&path, serde_json::to_string(&changed).unwrap()).unwrap();
-    assert!(f
-        .call(&[
-            "summary",
-            "set",
-            kind,
-            &id,
-            "--revision",
-            "3",
-            "--file",
-            path.to_str().unwrap()
-        ])
-        .is_err());
-    assert_eq!(f.call(&[kind, "summary", &id]).unwrap(), stored);
-    assert_eq!(f.call(&lock_args).unwrap()["revision"], 2);
-    for args in [
-        vec![
-            "summary",
-            "lock",
-            kind,
-            &id,
-            "--revision",
-            "3",
-            "--item",
-            "0",
-        ],
-        vec![
-            "summary",
-            "lock",
-            kind,
-            &id,
-            "--revision",
-            "3",
-            "--item",
-            "2",
-        ],
-        vec![
-            "summary",
-            "unlock",
-            kind,
-            &id,
-            "--revision",
-            "2",
-            "--item",
-            "1",
-        ],
-        vec!["summary", "lock", kind, &id, "--item", "1"],
-    ] {
-        assert!(f.call(&args).is_err());
-    }
-    assert_eq!(f.call(&[kind, "summary", &id]).unwrap()["revision"], 3);
-    let unlocked = f
-        .call(&[
-            "summary",
-            "unlock",
-            kind,
-            &id,
-            "--revision",
-            "3",
-            "--item",
-            "1",
-        ])
-        .unwrap();
-    assert_eq!(unlocked["revision"], 4);
-    assert_eq!(unlocked["summary"]["items"][0]["title_locked"], false);
-    let mut completed: crate::domain::Summary =
-        serde_json::from_value(unlocked["summary"].clone()).unwrap();
-    completed.items[0].title = "已完成事项".into();
-    std::fs::write(&path, serde_json::to_string(&completed).unwrap()).unwrap();
-    f.call(&[
-        "summary",
-        "set",
-        kind,
-        &id,
-        "--revision",
-        "4",
-        "--file",
-        path.to_str().unwrap(),
-    ])
-    .unwrap();
-    assert_eq!(
-        f.call(&[kind, "summary", &id]).unwrap()["summary"]["items"][0]["title"],
-        "已完成事项"
-    );
-}
-
-#[test]
 fn cli_summary_item_ids_locate_renamed_items_after_reordering_and_guard_stale_versions() {
     let f = Fixture::new();
     let sid = f.session();
-    let created = crate::context::edit_summary(
-        f.db(),
-        "session",
-        &sid,
-        0,
-        &json!({"items":[
-            {"title":"同步策略","description":"保持内容","details":[],"title_locked":false},
-            {"title":"其他结论","description":"独立事项","details":[],"title_locked":false}
-        ]})
-        .to_string(),
-    )
-    .unwrap();
-    let id = created.summary.items[0].id.clone();
-    let mut reordered = created.summary;
+    let created=seed_summary(f.db(), "session", &sid, 1, serde_json::from_value(json!({"items":[{"title":"同步策略","description":"保持内容","details":[]},{"title":"其他结论","description":"独立事项","details":[]}]})).unwrap()).unwrap();
+    let id = created.items[0].id.clone();
+    let mut reordered = created;
     reordered.items.reverse();
     reordered.items[1].title = "同步策略已修正".into();
-    crate::context::save_summary(f.db(), "session", &sid, 1, reordered).unwrap();
+    seed_summary(f.db(), "session", &sid, 2, reordered).unwrap();
     let read = f
         .call(&[
             "session",
@@ -1653,39 +1110,144 @@ fn cli_summary_item_ids_locate_renamed_items_after_reordering_and_guard_stale_ve
         .call(&["summary", "search", "--query", "同步策略已修正"])
         .unwrap();
     assert_eq!(search["items"][0]["item_id"], id);
-    let task = f
-        .call(&["task", "create", "--title", "事项 ID 协作"])
-        .unwrap()["task"]["id"]
+}
+
+#[test]
+fn cli_work_items_use_independent_revisions_and_receipts_without_rewriting_summaries() {
+    let f = Fixture::new();
+    let task = f.call(&["task", "create", "--title", "工作事项"]).unwrap()["task"]["id"]
         .as_str()
         .unwrap()
-        .to_owned();
-    let file = f.root.join("item-id-todo.json");
-    std::fs::write(&file, r#"{"title":"验证定位"}"#).unwrap();
-    let published = f
+        .to_string();
+    let file = f.root.join("work.json");
+    std::fs::write(&file, r#"{"title":"实现","description":"通过回归"}"#).unwrap();
+    let args = [
+        "task",
+        "item",
+        "create",
+        &task,
+        "--file",
+        file.to_str().unwrap(),
+        "--request-id",
+        "create-work",
+    ];
+    let created = f.call(&args).unwrap();
+    assert_eq!(f.call(&args).unwrap(), created);
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(created["completed"], false);
+    std::fs::write(&file, r#"{"details":["验证通过"]}"#).unwrap();
+    let updated = f
         .call(&[
             "task",
-            "todo",
-            "publish",
+            "item",
+            "update",
             &task,
+            "--item-id",
+            id,
+            "--revision",
+            "1",
             "--file",
             file.to_str().unwrap(),
-            "--revision",
-            "0",
         ])
         .unwrap();
-    let todo = published["item_id"].as_str().unwrap();
+    assert_eq!(updated["revision"], 2);
     let completed = f
         .call(&[
             "task",
-            "todo",
+            "item",
             "complete",
             &task,
             "--item-id",
-            todo,
+            id,
             "--revision",
-            "1",
+            "2",
+            "--request-id",
+            "complete-work",
         ])
         .unwrap();
-    assert_eq!(completed["item_id"], todo);
-    assert_eq!(completed["summary"]["items"][0]["title_locked"], false);
+    assert_eq!(completed["completed"], true);
+    assert_eq!(completed["details"], json!(["验证通过"]));
+    assert_eq!(
+        f.call(&[
+            "task",
+            "item",
+            "reopen",
+            &task,
+            "--item-id",
+            id,
+            "--revision",
+            "2"
+        ])
+        .unwrap_err()
+        .code,
+        "stale_result"
+    );
+    let mut reopened = f
+        .call(&[
+            "task",
+            "item",
+            "reopen",
+            &task,
+            "--item-id",
+            id,
+            "--revision",
+            "3",
+        ])
+        .unwrap();
+    reopened.as_object_mut().unwrap().remove("request_id");
+    assert_eq!(reopened["completed"], false);
+    assert_eq!(
+        f.call(&["task", "item", "list", &task]).unwrap()["items"],
+        json!([reopened])
+    );
+    let summary = f.call(&["task", "summary", &task]).unwrap();
+    assert_eq!(summary["revision"], 0);
+    assert!(summary["summary"].is_null());
+    let delete = [
+        "task",
+        "item",
+        "delete",
+        &task,
+        "--item-id",
+        id,
+        "--revision",
+        "4",
+        "--request-id",
+        "delete-work",
+    ];
+    assert_eq!(f.call(&delete).unwrap()["deleted"], true);
+    assert_eq!(f.call(&delete).unwrap()["deleted"], true);
+    assert_eq!(
+        f.call(&["task", "item", "list", &task]).unwrap()["items"],
+        json!([])
+    );
+}
+
+pub fn seed_summary(
+    db: &crate::storage::Db,
+    kind: &str,
+    id: &str,
+    revision: i64,
+    summary: crate::domain::Summary,
+) -> crate::error::Result<crate::domain::Summary> {
+    let summary = summary.resolve_ids()?;
+    let generation = if kind == "session" {
+        db.get_session_ingest_state(id)?.0
+    } else {
+        0
+    };
+    let conn = db.write();
+    match kind {
+        "session" => {
+            conn.execute("INSERT INTO session_contexts(session_id,summary,revision,ingest_generation,updated_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session_id) DO UPDATE SET summary=?2,revision=?3",rusqlite::params![id,summary,revision,generation,crate::storage::now()])?;
+        }
+        "task" => {
+            conn.execute("INSERT INTO workstream_context_state(workstream_id,summary,context_revision) VALUES(?1,?2,?3) ON CONFLICT(workstream_id) DO UPDATE SET summary=?2,context_revision=?3",rusqlite::params![id,summary,revision])?;
+        }
+        "project" => {
+            conn.execute("INSERT INTO project_context_state(project_id,summary,context_revision) VALUES(?1,?2,?3) ON CONFLICT(project_id) DO UPDATE SET summary=?2,context_revision=?3",rusqlite::params![id,summary,revision])?;
+        }
+        _ => panic!("invalid fixture kind"),
+    }
+    Ok(summary)
 }

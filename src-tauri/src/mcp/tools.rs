@@ -240,68 +240,37 @@ struct SummarySearch {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SummarySet {
-    kind: Kind,
-    id: String,
-    /// Expected current revision from summary_get. Stale edits are rejected.
+struct TaskItems {
+    task: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskItemCreate {
+    task: String,
+    content: crate::workspace::task_items::CreateItem,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskItemUpdate {
+    task: String,
+    item_id: String,
     revision: i64,
-    content: crate::domain::Summary,
+    patch: crate::workspace::task_items::ItemPatch,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskItemDelete {
+    task: String,
+    item_id: String,
+    revision: i64,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct TaskSummaryTitleLock {
-    id: String,
-    /// Expected current revision from summary_get or the preceding write.
-    #[schemars(range(min = 0))]
-    revision: i64,
-    /// One-based item number in this revision. Never reuse after reordering.
-    #[schemars(range(min = 1))]
-    item: Option<usize>,
-    /// Stable summary item ID; use instead of item. Requires the current revision.
-    item_id: Option<String>,
-    /// True protects the title. False explicitly unlocks it; never unlock to bypass an edit failure.
-    locked: bool,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskTodoPublish {
-    id: String,
-    #[schemars(range(min = 0))]
-    revision: i64,
-    /// Omit to append. Otherwise update this one-based item in the given revision.
-    item: Option<usize>,
-    /// Stable summary item ID; use instead of item. Requires the current revision.
-    item_id: Option<String>,
-    /// Title and optional description only. Publication preserves existing progress details.
-    content: crate::context::TaskTodoContent,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskTodoComplete {
-    id: String,
-    #[schemars(range(min = 0))]
-    revision: i64,
-    #[schemars(range(min = 1))]
-    item: Option<usize>,
-    /// Stable summary item ID; use instead of item. Requires the current revision.
-    item_id: Option<String>,
-    /// Omit to keep the body. If supplied, replace it with confirmed results and retained context.
-    result: Option<crate::context::TaskTodoResult>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TaskTodoDiscard {
-    id: String,
-    #[schemars(range(min = 0))]
-    revision: i64,
-    #[schemars(range(min = 1))]
-    item: Option<usize>,
-    /// Stable summary item ID; use instead of item. Requires the current revision.
-    item_id: Option<String>,
+struct TaskItemNote {
+    task: String,
+    item_id: String,
+    text: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -312,6 +281,39 @@ struct Extract {
     /// False updates from new input. True explicitly regenerates from history.
     #[serde(default)]
     regenerate: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExtractionContext {
+    kind: Kind,
+    id: String,
+    #[serde(default = "update_mode")]
+    mode: crate::context::interactive::Mode,
+}
+fn update_mode() -> crate::context::interactive::Mode {
+    crate::context::interactive::Mode::Update
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExtractionRead {
+    context_id: String,
+    input: String,
+    #[serde(default)]
+    cursor: usize,
+    #[serde(default = "read_limit")]
+    limit: usize,
+    query: Option<String>,
+}
+fn read_limit() -> usize {
+    8
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExtractionSubmit {
+    context_id: String,
+    reply: Value,
+    results: std::collections::HashMap<String, Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -404,17 +406,20 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("session_start", "Start a new embedded Agent session. Requires the desktop app on this Home. Messages over 2000 UTF-16 units use a private UTF-8 text file. Returns terminal ID with pending binding, not a fabricated session ID. Optional tasks are tracked after native binding. Initial text is an ordinary startup prompt; subsequent cross-session messages use mailbox_send.", true, true, |p: crate::session_control::StartSession| Command::SessionControl {command: crate::session_control::ControlCommand::Start(p)}),
         Spec::new("mailbox_list", "List a Session mailbox. Reading never marks messages read. Persistent; works without desktop. Use next_cursor for more pages.",false,false,Command::MailboxList),
         Spec::new("mailbox_read", "Read one persistent mailbox message and its revision. Does not change read state. Sender is user when sender_session_id is null; otherwise reply to that Session only within authorized collaboration.",false,false,Command::MailboxRead),
-        Spec::new("mailbox_send", "Persist a message in another Session mailbox. Requires an identifiable sender Session, never user/external. from_session must match inherited terminal identity. Success means stored, not read or completed; desktop may wake/remind independently. Optional notify_immediately (default false) requests a merged unread-count reminder using the same native steering shortcut as manual reminders. Requires user-enabled automatic notifications and Idle/Completed/Unknown/Working; Waiting is excluded, Interrupted/Failed disable automatic notifications. Unknown permits best-effort notification but does not prove chat input readiness. Never changes mailbox message order or selects a particular message.",true,false,Command::MailboxSend),
+        Spec::new("mailbox_send", "Persist a message in another Session mailbox. Requires explicit from_session with a valid sender Session ID, including embedded terminals; never user/external. Inherited terminal identity overrides the supplied sender; external callers use the supplied existing Session ID. Success means stored, not read or completed; desktop may wake/remind independently. Optional notify_immediately (default false) requests a merged unread-count reminder using the same native steering shortcut as manual reminders. Requires user-enabled automatic notifications and Idle/Completed/Unknown/Working; Waiting is excluded, Interrupted/Failed disable automatic notifications. Unknown permits best-effort notification but does not prove chat input readiness. Never changes mailbox message order or selects a particular message.",true,false,Command::MailboxSend),
         Spec::new("mailbox_mark", "Explicitly mark your own mailbox message read or unread, using the revision you actually read. Reading is not task completion. No notification controls.",true,false,Command::MailboxMark),
         Spec::new("session_search", "Search ingested session titles and message bodies. Returns evidence locations; use session_messages for full text and context.", false, false, |p: Search| Command::Search {query:p.query,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,cursor:p.cursor,limit:p.limit}),
         Spec::new("session_messages", "Read or search a session's stored history by ordinal and cursor. Long messages are split into ordered parts. Does not synchronize source files.", false, false, |p: Messages| Command::Messages {id:p.id,cursor:p.cursor,query:p.query,from:p.from,to:p.to,limit:p.limit}),
         Spec::new("summary_get", "Read a structured summary and its revision, or one item using item_id (preferred) or item plus revision. Does not trigger extraction.", false, false, |p: Summary| Command::Summary {kind:p.kind,id:p.id,item:p.item,item_id:p.item_id,revision:p.revision}),
         Spec::new("summary_search", "Search summary items across sessions, tasks and projects. Results include kind, object ID, item number and revision for summary_get.", false, false, |p: SummarySearch| Command::SearchSummaries {query:p.query,kind:p.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_owned()),project:p.project,scope:p.scope.name(),cursor:p.cursor,limit:p.limit}),
-        Spec::new("summary_set", "Replace a summary with structured items using the expected revision. Preserve existing title_locked flags and locked titles; descriptions/details remain editable. Does not invoke an Agent.", true, false, |p: SummarySet| Command::EditSummary {kind:p.kind,id:p.id,revision:p.revision,content:serde_json::to_string(&p.content).expect("Summary contains only JSON fields")}),
-        Spec::new("task_summary_title_lock", "Explicitly change a TASK summary title lock when requested; a lock is not a completion status. For to-do actions use task_todo_publish/task_todo_complete/task_todo_discard: atomically publish and lock, complete and unlock, or remove an abandoned item. Never unlock to bypass summary_set protection. Session/project locks are not exposed.", true, false, |p: TaskSummaryTitleLock| Command::SetTaskSummaryTitleLock {id:p.id,revision:p.revision,item:p.item,item_id:p.item_id,locked:p.locked}),
-        Spec::new("task_todo_publish", "Atomically publish a TASK to-do using a required title and optional description, then lock its title. New items start with empty progress details. Supply item_id (or item number) to update an existing item: preserve its progress details and, if omitted, description. Locked titles cannot be renamed. Other items and extraction progress are preserved. Returns item number, new revision and full summary. Does not start or notify an Agent.", true, false, |p: TaskTodoPublish| Command::PublishTaskTodo {id:p.id,revision:p.revision,item:p.item,item_id:p.item_id,content:p.content}),
-        Spec::new("task_todo_complete", "After verifying actual completion, unlock one TASK to-do and retain it as an ordinary summary item. Omit result to preserve title, description and progress details; optionally replace its body with confirmed results. Target must be locked; supply current revision and item_id (or one-based item). Does not archive the task or advance extraction. No completion status is stored.", true, false, |p: TaskTodoComplete| Command::CompleteTaskTodo {id:p.id,revision:p.revision,item:p.item,item_id:p.item_id,result:p.result}),
-        Spec::new("task_todo_discard", "Explicitly discard one locked TASK to-do: remove the whole item including title, description and progress details in one transaction, with no discarded placeholder or status. May remove the last item. Supply current revision and item_id (or one-based item); preserves other items, extraction progress and task archive state. Only discard a to-do the user has explicitly abandoned, not an item that is merely blocked or unfinished.", true, false, |p: TaskTodoDiscard| Command::DiscardTaskTodo {id:p.id,revision:p.revision,item:p.item,item_id:p.item_id}),
+        Spec::new("task_items", "List independent work items, including completed items, with per-item IDs and revisions. These are not summary items. Does not extract or change state.", false, false, |p: TaskItems| Command::TaskItems {task:p.task}),
+        Spec::new("task_item_create", "Create an unfinished work item with title and optional goal/acceptance description. Progress starts empty. Independent of summaries; does not start or notify an Agent.", true, false, |p: TaskItemCreate| Command::CreateTaskItem {task:p.task,content:p.content}),
+        Spec::new("task_item_update", "Edit one work item at its current revision. Omitted fields stay unchanged; details replace the entire progress list and must retain valid existing facts. For one new note prefer task_item_note. Details record progress, results and blockers, not child tasks. completed=true records verified completion; false reopens. Never changes summaries or extraction progress.", true, false, |p: TaskItemUpdate| Command::UpdateTaskItem {task:p.task,item_id:p.item_id,revision:p.revision,patch:p.patch}),
+        Spec::new("task_item_note", "Append one confirmed progress note without replacing existing details or changing completion. Does not require a revision; returns the updated item and revision. Reuse request_id on retries to avoid duplicate notes. Use task_item_update with the latest revision only for deliberate consolidation.", true, false, |p: TaskItemNote| Command::AppendTaskItemNote {task:p.task,item_id:p.item_id,text:p.text}),
+        Spec::new("task_item_delete", "Permanently remove one explicitly abandoned work item at its current revision. Does not create a discarded state or change summaries. A blocker alone does not authorize deletion.", true, false, |p: TaskItemDelete| Command::DeleteTaskItem {task:p.task,item_id:p.item_id,revision:p.revision}),
+        Spec::new("summary_context", "Query extraction scope for the current session to perform itself. mode update reads retained summaries and pending history; regenerate exposes full history. Returns context_id, requirements and scoped input names. No Agent or worker starts.", false, false, |p: ExtractionContext| Command::ExtractionContext {kind:p.kind,id:p.id,mode:p.mode}),
+        Spec::new("summary_input", "Read scoped extraction input pages. Start at cursor 0 and follow next_cursor to end. Optional query searches messages and does not count as complete reading. Never mix contexts.", false, false, |p: ExtractionRead| Command::ReadExtraction {context_id:p.context_id,input:p.input,cursor:p.cursor,limit:p.limit,query:p.query}),
+        Spec::new("summary_submit", "Submit extraction produced by the calling session. Read all required scoped input first. results maps session-ID/task-ID/project-ID keys to {summary:{items:[...]}}. reply follows the extraction status protocol. Backend validates versions and commits atomically; never edits task items.", true, false, |p: ExtractionSubmit| Command::SubmitExtraction {context_id:p.context_id,reply:p.reply,results:p.results}),
         Spec::new("summary_update", "Explicitly run the configured Agent to update a summary; waits for extraction and persistence. Set regenerate only when requested. Inspect partial failures in the result.", true, true, |p: Extract| Command::Extract {kind:p.kind,id:p.id,regenerate:p.regenerate}),
         Spec::new("task_create", "Create a task with optional description and project associations. Does not launch a session.", true, false, |p: TaskCreate| Command::CreateTask {title:p.title,description:p.description,projects:p.projects}),
         Spec::new("task_update", "Edit a task title or description. Supply at least one field; omitted fields are preserved.", true, false, |p: TaskUpdate| Command::UpdateTask {id:p.id,title:p.title,description:p.description}),

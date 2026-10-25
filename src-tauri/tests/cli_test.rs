@@ -275,14 +275,11 @@ fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments
     )
     .unwrap();
     let mut entries = Vec::new();
-    for (name, prepare) in [
-        (
-            "noending-memory",
-            noending::skills::prepare_memory_skill
-                as fn(&Db, &NoEndingHome, &Path) -> noending::error::Result<()>,
-        ),
-        ("noending-task", noending::skills::prepare_task_skill),
-    ] {
+    for (name, prepare) in [(
+        "noending",
+        noending::skills::prepare_noending_skill
+            as fn(&Db, &NoEndingHome, &Path) -> noending::error::Result<()>,
+    )] {
         prepare(
             f.db.as_ref().unwrap(),
             &f.home,
@@ -349,12 +346,8 @@ fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments
     std::fs::remove_dir(&relocated.data_dir).unwrap();
     std::fs::rename(&f.home.data_dir, &relocated.data_dir).unwrap();
     let db = Db::open(&relocated.db_path).unwrap();
-    for prepare in [
-        noending::skills::prepare_memory_skill,
-        noending::skills::prepare_task_skill,
-    ] {
-        prepare(&db, &relocated, Path::new(env!("CARGO_BIN_EXE_ne"))).unwrap();
-    }
+    noending::skills::prepare_noending_skill(&db, &relocated, Path::new(env!("CARGO_BIN_EXE_ne")))
+        .unwrap();
     for entry in entries {
         let status = Command::new(entry)
             .arg("status")
@@ -375,7 +368,7 @@ fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments
             .unwrap()
             .sources
             .len(),
-        2
+        1
     );
 }
 
@@ -1088,15 +1081,35 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     use noending::session_control::{ControlCommand, DesktopHost};
     use serde_json::json;
     let f = Fixture::new();
+    f.db.as_ref().unwrap().write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('bound-session','codex','bound-native','jsonl','/bound'),('other-session','codex','other-native','jsonl','/other'),('target','codex','target-native','jsonl','/target')").unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
     let (ok, missing) = f.run(exe, &["session", "terminals"]);
     assert!(!ok);
     assert_eq!(missing["error"]["code"], "desktop_unavailable");
+    let (ok, missing_context) = f.run(exe, &["session", "identity"]);
+    assert!(!ok);
+    assert_eq!(missing_context["error"]["code"], "terminal_context_missing");
     // This fixture stands in for desktop business dispatch; process arguments,
     // Home routing and durable exactly-once launch receipts cross real IPC.
     let (submitted_tx, submitted_rx) = std::sync::mpsc::channel();
-    let host = DesktopHost::start(&f.home, move |command, _sender_terminal| match command {
-        ControlCommand::Identity { claimed } => Ok(json!({"session_id":claimed})),
+    let host = DesktopHost::start(&f.home, move |command, sender_terminal| match command {
+        ControlCommand::Identity { claimed } => match sender_terminal.as_deref() {
+            Some("bound-terminal") if claimed.as_deref().is_none_or(|id| id == "bound-session") => {
+                Ok(json!({"session_id":"bound-session"}))
+            }
+            terminal => Err(cli::CliError {
+                code: if terminal == Some("bound-terminal") {
+                    "sender_identity_changed"
+                } else if terminal == Some("pending-terminal") {
+                    "sender_unbound"
+                } else {
+                    "sender_unavailable"
+                }
+                .into(),
+                message: "terminal binding fixture".into(),
+                details: None,
+            }),
+        },
         ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
         ControlCommand::Start(options) => {
             let terminal_id = noending::storage::new_id();
@@ -1109,6 +1122,87 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     })
     .unwrap();
     assert!(DesktopHost::start(&f.home, |_, _| Ok(json!({}))).is_err());
+    for executable in [env!("CARGO_BIN_EXE_ne"), env!("CARGO_BIN_EXE_noending")] {
+        for (terminal, expected) in [
+            ("bound-terminal", None),
+            ("pending-terminal", Some("sender_unbound")),
+            ("closed-terminal", Some("sender_unavailable")),
+        ] {
+            let output = Command::new(executable)
+                .args(["session", "identity"])
+                .env("NOENDING_HOME", &f.home.root)
+                .env("NOENDING_TERMINAL_ID", terminal)
+                .output()
+                .unwrap();
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if let Some(code) = expected {
+                assert!(!output.status.success(), "{value}");
+                assert_eq!(value["error"]["code"], code);
+            } else {
+                assert!(output.status.success(), "{value}");
+                assert_eq!(value["data"]["session_id"], "bound-session");
+            }
+        }
+        for (sender, terminal, expected) in [
+            (None, "bound-terminal", Some("invalid_arguments")),
+            (Some("other-session"), "bound-terminal", None),
+            (Some("not-an-ingested-session"), "bound-terminal", None),
+            (Some("bound-session"), "bound-terminal", None),
+            (
+                Some("bound-session"),
+                "pending-terminal",
+                Some("sender_unbound"),
+            ),
+            (
+                Some("bound-session"),
+                "closed-terminal",
+                Some("sender_unavailable"),
+            ),
+        ] {
+            let mut command = Command::new(executable);
+            command.args([
+                "mailbox",
+                "send",
+                "--session",
+                "target",
+                "--message",
+                "bound sender message",
+            ]);
+            if let Some(sender) = sender {
+                command.args(["--from-session", sender]);
+            }
+            let output = command
+                .env("NOENDING_HOME", &f.home.root)
+                .env("NOENDING_TERMINAL_ID", terminal)
+                .output()
+                .unwrap();
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if let Some(code) = expected {
+                assert!(!output.status.success(), "{value}");
+                assert_eq!(value["error"]["code"], code);
+            } else {
+                assert!(output.status.success(), "{value}");
+            }
+        }
+    }
+    let received =
+        f.db.as_ref()
+            .unwrap()
+            .mailbox_list("target", "all", None, 50)
+            .unwrap();
+    assert_eq!(received.items.len(), 6);
+    assert!(received
+        .items
+        .iter()
+        .all(|m| m.sender_session_id.as_deref() == Some("bound-session")));
+    for args in [
+        vec!["session", "identity", "--from-session", "forged"],
+        vec!["session", "identity", "--request-id", "not-a-write"],
+    ] {
+        let (ok, rejected) = f.run(exe, &args);
+        assert!(!ok);
+        assert_eq!(rejected["error"]["code"], "invalid_arguments");
+    }
     let (ok, list) = f.run(exe, &["session", "terminals", "--session", "session-a"]);
     assert!(ok, "{list}");
     assert_eq!(list["data"]["session"], "session-a");
@@ -1219,7 +1313,7 @@ fn mailbox_cli_persists_without_desktop_requires_session_sender_and_uses_current
         ],
     );
     assert!(!ok);
-    assert_eq!(err["error"]["code"], "sender_unavailable");
+    assert_eq!(err["error"]["code"], "invalid_arguments");
     let args = [
         "mailbox",
         "send",
@@ -1332,11 +1426,122 @@ fn mailbox_cli_persists_without_desktop_requires_session_sender_and_uses_current
     let (ok, page) = f.run(exe, &["mailbox", "list", "--session", "target"]);
     assert!(ok, "{page}");
     assert_eq!(page["data"]["unread"], 0);
+    assert_eq!(page["data"]["total"], 2);
     assert_eq!(
         db.mailbox_list("target", "all", None, 50)
             .unwrap()
             .items
             .len(),
         2
+    );
+}
+
+#[test]
+fn cli_current_session_can_query_read_and_submit_a_task_summary_without_a_model() {
+    let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let (_, created) = f.run(
+        exe,
+        &["task", "create", "--title", "Scope of current session"],
+    );
+    let id = created["data"]["task"]["id"].as_str().unwrap();
+    let (ok, _) = f.run(exe, &["summary", "config", "set", "--agent", "none"]);
+    assert!(ok);
+    let (ok, c) = f.run(
+        exe,
+        &["summary", "context", "task", id, "--mode", "regenerate"],
+    );
+    assert!(ok, "{c}");
+    let cid = c["data"]["context_id"].as_str().unwrap();
+    let (ok, page) = f.run(
+        exe,
+        &[
+            "summary",
+            "read",
+            cid,
+            "--input",
+            &format!("task-{id}.jsonl"),
+        ],
+    );
+    assert!(ok, "{page}");
+    assert_eq!(
+        page["data"]["records"][0]["record"]["title"],
+        "Scope of current session"
+    );
+    assert_eq!(page["data"]["end"], true);
+    let file = f.root.join("submission.json");
+    std::fs::write(&file,serde_json::json!({"reply":{"status":"completed","skipped_session_ids":[]},"results":{format!("task-{id}"):{"summary":{"items":[{"title":"Confirmed task scope","description":"Read from task description","details":[]}]}}}}).to_string()).unwrap();
+    let args = [
+        "summary",
+        "submit",
+        cid,
+        "--file",
+        file.to_str().unwrap(),
+        "--request-id",
+        "self-extraction",
+    ];
+    let (ok, out) = f.run(exe, &args);
+    assert!(ok, "{out}");
+    assert_eq!(out["data"]["status"], "updated");
+    let (ok, retry) = f.run(exe, &args);
+    assert!(ok);
+    assert_eq!(retry, out);
+    let (ok, summary) = f.run(exe, &["task", "summary", id]);
+    assert!(ok);
+    assert_eq!(
+        summary["data"]["summary"]["items"][0]["title"],
+        "Confirmed task scope"
+    );
+}
+
+#[test]
+fn progress_note_cli_appends_literal_text_and_replays_without_overwriting_existing_progress() {
+    let f = Fixture::new();
+    let db = f.db.as_ref().unwrap();
+    let task =
+        noending::workspace::workstream::create_workstream(db, "CLI notes", "goal", &[]).unwrap();
+    let item = noending::workspace::task_items::create(
+        db,
+        &task.id,
+        noending::workspace::task_items::CreateItem {
+            title: "保留成果".into(),
+            description: None,
+        },
+    )
+    .unwrap();
+    noending::workspace::task_items::append_note(db, &task.id, &item.id, "先前已核实的成果")
+        .unwrap();
+    let text = "--literal \"引号\" $(保留文字)\n验证边界";
+    for exe in [env!("CARGO_BIN_EXE_ne"), env!("CARGO_BIN_EXE_noending")] {
+        let (ok, out) = f.run(
+            Path::new(exe),
+            &[
+                "task",
+                "item",
+                "note",
+                &task.id,
+                "--item-id",
+                &item.id,
+                "--text",
+                text,
+                "--request-id",
+                "append-literal",
+            ],
+        );
+        assert!(ok, "{out}");
+        assert_eq!(out["data"]["revision"], 3);
+        assert_eq!(
+            out["data"]["details"],
+            serde_json::json!(["先前已核实的成果", text])
+        );
+    }
+    let (ok, items) = f.run(
+        Path::new(env!("CARGO_BIN_EXE_ne")),
+        &["task", "item", "list", &task.id],
+    );
+    assert!(ok);
+    assert_eq!(
+        items["data"]["items"][0]["details"],
+        serde_json::json!(["先前已核实的成果", text])
     );
 }

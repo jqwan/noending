@@ -1753,3 +1753,70 @@ fn windows_unregister_removes_skill_junctions_but_keeps_source_and_ancestor_junc
     // Remove the ancestor junction explicitly so fixture cleanup cannot follow it.
     fs::remove_dir(ancestor).unwrap();
 }
+
+#[test]
+fn bundled_skill_keeps_project_enablement_and_support_files_across_refresh_and_stays_removed() {
+    let f = Fixture::new();
+    let home = noending_lib::workspace::home::NoEndingHome::new(
+        f.root.join("noending home").to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    home.ensure_dirs().unwrap();
+    let db = Db::open(&home.db_path).unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    skills::prepare_noending_skill(&db, &home, exe).unwrap();
+    let registry = skills::load_skill_registry(&db).unwrap();
+    let source = &registry.sources[0];
+    assert_eq!(registry.sources.len(), 1);
+    let directory = Path::new(&source.path).parent().unwrap();
+    for relative in [
+        "SKILL.md",
+        "references/access.md",
+        "references/identity.md",
+        "references/memory.md",
+        "references/task.md",
+        "references/mailbox.md",
+        "references/extraction.md",
+        "references/extraction-protocol.md",
+    ] {
+        assert!(!fs::read_to_string(directory.join(relative))
+            .unwrap()
+            .is_empty());
+    }
+    let before = skills::list(&f.roots, Some(&f.cwd));
+    assert!(before.resources.is_empty());
+    let location = before
+        .locations
+        .iter()
+        .find(|l| l.scope == "project" && l.agent.is_none())
+        .unwrap();
+    skills::enable_skill(
+        &f.roots,
+        Some(&f.cwd),
+        &source.id,
+        Some(&source.path),
+        &location.id,
+    )
+    .unwrap();
+    f.write(
+        &directory.join("custom-note.md"),
+        "Keep a user supporting file.",
+    );
+    skills::prepare_noending_skill(&db, &home, exe).unwrap();
+    let current = skills::list(&f.roots, Some(&f.cwd));
+    let enabled = current
+        .resources
+        .iter()
+        .find(|r| r.id == source.id)
+        .unwrap();
+    assert_eq!(enabled.locations, vec![location.id.clone()]);
+    assert_eq!(
+        fs::read_to_string(directory.join("custom-note.md")).unwrap(),
+        "Keep a user supporting file."
+    );
+    fs::remove_file(&source.path).unwrap();
+    skills::prepare_noending_skill(&db, &home, exe).unwrap();
+    assert!(!Path::new(&source.path).exists());
+    assert!(directory.join("custom-note.md").is_file());
+}

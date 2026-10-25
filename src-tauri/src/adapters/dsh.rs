@@ -431,7 +431,13 @@ impl crate::adapters::AgentAdapter for DshAdapter {
         Agent::Dsh
     }
 
-    /// Always `None`: `dsh` has a CLI, but every invocation must name a profile
+    // Plugin management can resolve `dsh`, but terminal sessions require a
+    // user-selected profile that NoEnding does not configure.
+    fn has_terminal_cli(&self) -> bool {
+        false
+    }
+
+    /// Session detection stays unavailable: starting `dsh` requires a profile
     /// under `$DSH_HOME/profiles` that only the user knows.
     fn detect(&self) -> Option<AgentInstallation> {
         None
@@ -1003,9 +1009,10 @@ mod tests {
         assert_eq!(texts, vec!["first prompt", "first reply"], "{texts:?}");
     }
 
-    /// dsh 只有桌面端这一个启动面。回归守卫：它曾被误标为 TUI/CLI。
+    /// 插件 CLI 可用不代表 NoEnding 能启动终端会话。
     #[test]
-    fn dsh_is_desktop_only() {
+    fn plugin_cli_does_not_enable_terminal_sessions() {
+        assert!(crate::platform::exec_resolver::cli_names(Agent::Dsh).contains(&"dsh"));
         assert!(!DshAdapter.has_terminal_cli());
         assert_eq!(DshAdapter.desktop_app_name(), Some("DeepSeek Harness"));
     }

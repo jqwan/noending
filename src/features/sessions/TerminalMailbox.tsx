@@ -4,7 +4,7 @@ import type { MailboxMessage, TerminalNotifications } from "../../types";
 import { Modal } from "../../components/common";
 import Icon from "../../components/Icon";
 import { useViewState } from "../../hooks/useViewState";
-import { useMailboxMessages } from "./MailboxMessages";
+import { MailboxMessagePreview, useMailboxMessages } from "./MailboxMessages";
 
 export default function TerminalMailbox({ terminalId, notification, error: loadError, apply, refresh, inputRef }: {
   terminalId: string; notification: TerminalNotifications | null; error: string;
@@ -79,12 +79,12 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     {enabled && <p className="small muted">自动通知已开启；请通过信箱输入消息。操作终端授权或菜单前请关闭自动通知。</p>}
     {!enabled && session && <p className="small muted">手动提醒会立即插队，请保持终端聊天输入框可用且没有草稿。</p>}
     {!session && <p className="small muted">终端绑定会话后可使用信箱。</p>}
-    {page?.items.map(m => <article className="mailbox-item" key={m.id} aria-label="未读消息">
-      <div className="small muted">{m.sender_session_id ? `会话 ${m.sender_session_id}` : "用户"} · {new Date(m.created_at).toLocaleString()}</div>
+    <div className="mailbox-unread-list" role="region" aria-label="未读消息列表" tabIndex={0}>
+    {page?.items.map(m => <article className="mailbox-item" key={`${session}:${m.id}`} aria-label="未读消息">
       {editing?.message.id === m.id ? <div>
         <textarea aria-label="编辑信箱消息" value={editing.text} onChange={e => setEditing({ ...editing, text: e.target.value })} disabled={busy} />
         <div className="mailbox-actions"><button className="btn small" disabled={busy || !editing.text.trim()} onClick={() => void edit(editing.message, editing.text)}>保存</button><button className="btn small ghost" onClick={() => setEditing(null)}>取消</button></div>
-      </div> : <p className="mailbox-body">{m.body}</p>}
+      </div> : <MailboxMessagePreview message={m} />}
       {mutable && <div className="mailbox-actions">
           <button className="btn ghost icon-button small" aria-label="编辑消息" disabled={busy} onClick={() => { setDeleting(null); setEditing({ message: m, text: m.body }); }}><Icon name="edit" /></button>
           {deleting === m.id ? <><button className="btn small danger" disabled={busy} onClick={() => void edit(m, null)}>确认永久删除</button><button className="btn small ghost" onClick={() => setDeleting(null)}>取消</button></>
@@ -93,6 +93,7 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     </article>)}
     {page?.items.length === 0 && <p className="small muted">暂无未读消息</p>}
     {page?.next_cursor != null && <button className="btn small" onClick={() => void more()}>加载更多</button>}
+    </div>
     <form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!session || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(session, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
       <label htmlFor={`mailbox-input-${terminalId}`} className="small">发送消息</label>
       <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!session || busy} rows={4} onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径" />

@@ -1008,7 +1008,7 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     }
     db.tx(|tx| {
         tx.execute(
-            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'{\"items\":[{\"id\":\"00000000-0000-4000-8000-000000000001\",\"title\":\"summary\",\"description\":\"\",\"details\":[],\"title_locked\":false}]}')",
+            "INSERT INTO project_context_state (project_id,summary) VALUES (?1,'{\"items\":[{\"id\":\"00000000-0000-4000-8000-000000000001\",\"title\":\"summary\",\"description\":\"\",\"details\":[]}]}')",
             [&path.project_id],
         )?;
         Ok(())

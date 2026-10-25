@@ -2,7 +2,6 @@
 //! of records previously keyed by a physical rollout ID.
 mod support;
 use noending_lib::{
-    context,
     domain::{Agent, IngestSource, Summary},
     ingestion,
     storage::{new_id, Db},
@@ -402,19 +401,19 @@ fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summarie
             &json!({}),
         )
         .unwrap();
-    context::save_summary(
+    support::summary::seed_summary(
         &f.db,
         "session",
         &canonical.id,
-        0,
+        1,
         Summary::single("原会话的人工摘要"),
     )
     .unwrap();
-    context::save_summary(
+    support::summary::seed_summary(
         &f.db,
         "session",
         &alias,
-        0,
+        1,
         Summary::single("新版本的人工摘要"),
     )
     .unwrap();
@@ -497,7 +496,8 @@ fn a_lone_rollout_alias_keeps_its_app_id_and_summary_when_the_native_identity_is
             &json!({}),
         )
         .unwrap();
-    context::save_summary(&f.db, "session", &alias, 0, Summary::single("保留人工摘要")).unwrap();
+    support::summary::seed_summary(&f.db, "session", &alias, 1, Summary::single("保留人工摘要"))
+        .unwrap();
     f.sync().unwrap();
     assert_eq!(f.session(THREAD).id, alias);
     assert!(f
@@ -554,15 +554,16 @@ fn failed_alias_absorption_rolls_back_app_owned_content_and_succeeds_on_retry() 
             &json!({}),
         )
         .unwrap();
-    context::save_summary(
+    support::summary::seed_summary(
         &f.db,
         "session",
         &canonical.id,
-        0,
+        1,
         Summary::single("原摘要"),
     )
     .unwrap();
-    context::save_summary(&f.db, "session", &alias, 0, Summary::single("版本摘要")).unwrap();
+    support::summary::seed_summary(&f.db, "session", &alias, 1, Summary::single("版本摘要"))
+        .unwrap();
     let task = support::workstream("rollback-task".into(), "保留任务");
     f.db.upsert_workstream(&task).unwrap();
     support::track(&f.db, &alias, Some(&task.id)).unwrap();

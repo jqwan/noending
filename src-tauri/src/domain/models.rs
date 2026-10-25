@@ -277,7 +277,7 @@ impl Agent {
 /// - `project_id` is a read projection of
 ///   `workspace_path_id → workspace_paths.project_id`, computed by the query.
 ///   No Project membership is stored on the Session row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
     pub agent: Agent,

@@ -71,6 +71,7 @@ pub struct IngestTaskStatus {
 #[derive(Default)]
 struct Inner {
     running: bool,
+    active_scope: Option<IngestScope>,
     queue: Vec<IngestScope>,
     status: Option<IngestTaskStatus>,
     last_success: Option<Instant>,
@@ -129,9 +130,11 @@ impl IngestionCoordinator {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if inner.queue.is_empty() {
             inner.running = false;
+            inner.active_scope = None;
             return None;
         }
         let scope = inner.queue.remove(0);
+        inner.active_scope = Some(scope.clone());
         inner.status = Some(IngestTaskStatus {
             scope: scope.label(),
             started_at: Some(crate::storage::now()),
@@ -151,6 +154,7 @@ impl IngestionCoordinator {
         is_full_reconcile: bool,
     ) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.active_scope = None;
         if let Some(status) = inner.status.as_mut() {
             status.finished_at = Some(crate::storage::now());
             status.discovered = discovered;
@@ -184,6 +188,45 @@ impl IngestionCoordinator {
             }
         }
         inner.status.clone()
+    }
+
+    /// Include queued desktop work before its ingestion function starts.
+    pub fn operations(
+        &self,
+        db: &crate::storage::Db,
+    ) -> Result<Vec<crate::operations::OperationStatus>> {
+        use crate::operations::{OperationStatus as Status, State};
+        let scopes = {
+            let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let mut scopes: Vec<_> = inner
+                .queue
+                .iter()
+                .cloned()
+                .map(|s| (s, State::Queued))
+                .collect();
+            if let Some(scope) = &inner.active_scope {
+                scopes.push((scope.clone(), State::Running));
+            }
+            scopes
+        };
+        scopes
+            .into_iter()
+            .map(|(scope, state)| {
+                let mut status = match &scope {
+                    IngestScope::ReconcileAll => Status::sync("all", "", None),
+                    IngestScope::ReconcileSource(id) | IngestScope::ReingestSource(id) => {
+                        Status::source(db, id, db.get_ingest_source(id)?.map(|s| s.agent))?
+                    }
+                    IngestScope::RefreshSession(id) => Status::sync("session", id, None),
+                    IngestScope::ReconcileNative {
+                        agent, native_id, ..
+                    } => Status::native(db, *agent, native_id)?,
+                };
+                status.id = format!("desktop:{state:?}:{}", scope.label());
+                status.state = state;
+                Ok(status)
+            })
+            .collect()
     }
 
     /// True when the foreground-return trigger should start a reconcile.
@@ -300,6 +343,36 @@ fn run_scope(app: &AppHandle, scope: &IngestScope) -> (usize, i64, Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_sync_remains_visible_until_its_worker_finishes() {
+        let root =
+            std::env::temp_dir().join(format!("ne-queued-status-{}", crate::storage::new_id()));
+        let db = crate::storage::Db::open(&root.join("test.db")).unwrap();
+        let coordinator = IngestionCoordinator::default();
+        assert!(coordinator.enqueue(IngestScope::RefreshSession("one".into())));
+        assert!(!coordinator.enqueue(IngestScope::RefreshSession("two".into())));
+        let statuses = coordinator.operations(&db).unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses
+            .iter()
+            .all(|s| s.state == crate::operations::State::Queued));
+        coordinator.next().unwrap();
+        assert!(coordinator
+            .operations(&db)
+            .unwrap()
+            .iter()
+            .any(|s| s.targets[0].id == "one" && s.state == crate::operations::State::Running));
+        coordinator.finish(0, 0, Some("source missing".into()), false);
+        let statuses = coordinator.operations(&db).unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].targets[0].id, "two");
+        coordinator.next().unwrap();
+        coordinator.finish(0, 0, None, false);
+        assert!(coordinator.operations(&db).unwrap().is_empty());
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_already_queued_scope_does_not_request_another_worker() {

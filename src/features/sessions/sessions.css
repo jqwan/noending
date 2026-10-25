@@ -169,43 +169,6 @@
 .md-body .summary-item-details > li { margin: 3px 0; }
 .md-body .summary-item-details > li > :last-child { margin-bottom: 0; }
 
-.summary-item-editor { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.summary-item-editor input,
-.summary-item-editor textarea {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  margin: 0;
-  padding: 3px 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-app);
-  color: var(--text-secondary);
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  transition: border-color 120ms, background 120ms;
-}
-.summary-item-editor input:focus, .summary-item-editor textarea:focus { border-color: var(--accent); }
-.summary-item-editor textarea { display: block; resize: none; overflow: hidden; min-height: 29px; }
-.summary-item-editor input.summary-edit-title { min-height: 36px; padding: 6px 8px; font-weight: 600; color: var(--text-primary); }
-.summary-item-editor input[readonly] { border-color: transparent; padding-left: 0; }
-.summary-edit-lock { display: flex; gap: 4px; align-items: center; }
-.summary-edit-lock .ui-icon { width: 12px; height: 12px; }
-.md-body .summary-edit-details { list-style: none; padding: 0 0 0 16px; margin: 0; }
-.md-body .summary-edit-details > li { display: flex; gap: 4px; align-items: flex-start; margin: 4px 0; position: relative; }
-.summary-edit-details > li::before { content: "•"; position: absolute; left: -12px; top: 4px; color: var(--text-muted); }
-.summary-edit-details > li > textarea { flex: 1; }
-.summary-edit-details > li > button { flex: none; margin-top: 2px; }
-.summary-edit-footer { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: space-between; margin-top: 2px; }
-.summary-edit-extra-actions, .summary-edit-save-actions { display: flex; align-items: center; gap: 4px; }
-.summary-edit-save-actions { margin-left: auto; }
-.summary-edit-error { color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
-.summary-edit-error > button { margin-left: 4px; }
-@media (prefers-reduced-motion: reduce) {
-  .summary-item-editor input, .summary-item-editor textarea { transition: none; }
-}
-
 /* ---------- Session conversation reader ---------- */
 /* 整屏阅读：页面容器不滚（.main.fill），滚动只发生在消息列上，所以打开时能锚到
    最新、向上翻页时也能原地锚住。 */
@@ -1251,16 +1214,35 @@ button.btn.ghost.terminal-exited,
 .mailbox-head, .mailbox-actions { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .mailbox-head { justify-content:space-between; }
 .mailbox-head h3 { margin:0; }
-.mailbox-item { border-bottom:1px solid var(--line); padding:12px 0; min-width:0; }
+.mailbox-item { border-bottom:1px solid var(--line); padding:4px 0; min-width:0; }
+.mailbox-item:last-child { border-bottom: 0; }
 .mailbox-body { white-space:pre-wrap; overflow-wrap:anywhere; margin:8px 0; }
 .mailbox-compose { display:flex; flex-direction:column; gap:8px; }
 .terminal-mailbox textarea { width:100%; box-sizing:border-box; min-height:90px; }
-.mailbox-history-list { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.mailbox-history { display: flex; flex-direction: column; max-height: min(400px, 60vh); }
+.mailbox-history > .detail-section-title { flex-shrink: 0; }
+.mailbox-history-list, .mailbox-unread-list { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.mailbox-history-list { display: flex; flex-direction: column; }
+.mailbox-unread-list { max-height: min(300px, 40vh); }
 .mailbox-history-entry { margin: 0; padding: 0; }
-.mailbox-history-entry + .mailbox-history-entry { border-top: 1px solid var(--border-subtle); padding-top: 12px; }
-.mailbox-history-meta { justify-content: space-between; flex-wrap: wrap; }
-.mailbox-history-sender { display: flex; align-items: baseline; gap: 8px; flex: 1 1 160px; min-width: 0; }
+.mailbox-history-entry + .mailbox-history-entry { border-top: 1px solid var(--border-subtle); }
+.mailbox-history-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-muted); font-size: 12px; }
+.mailbox-history-sender { display: flex; align-items: baseline; gap: 6px; flex: 1 1 0; min-width: 0; }
+.mailbox-history-sender > :first-child { flex-shrink: 0; }
+.mailbox-sender-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mailbox-history-status { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.mailbox-message-preview { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 8px 4px; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.mailbox-message-preview:hover { background: var(--bg-hover); }
+.mailbox-message-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mailbox-preview-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mailbox-preview-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.mailbox-preview-line > .ui-icon { flex-shrink: 0; color: var(--text-muted); }
+.mailbox-message-detail { min-width: 0; }
+.mailbox-message-detail .mailbox-history-meta { flex-wrap: wrap; }
+.mailbox-message-detail .mailbox-history-sender { flex-basis: 200px; }
+.mailbox-message-id { margin-top: 12px; overflow-wrap: anywhere; }
+.mailbox-message-detail .mailbox-sender-id { white-space: normal; overflow-wrap: anywhere; }
+.mailbox-message-detail .mailbox-body { margin-top: 20px; line-height: 1.7; }
 .mailbox-history-error { overflow-wrap: anywhere; }
 .mailbox-history-loading { height: 48px; border-radius: var(--radius-md); }
 .mailbox-history-footer { display: flex; justify-content: flex-end; }

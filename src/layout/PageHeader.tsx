@@ -5,7 +5,12 @@
  *
  * `data-tauri-drag-region="deep"` 是拖动窗口的关键：这条 band 的 z-index 盖住了 AppShell
  * 里那条 `.window-drag-region`。取 `deep` 而非裸值——裸值只认"正好点在这个元素上"，
- * 标题文字与按钮间的空隙都会落空。子元素里的 button 会被 Tauri 判为可点元素、自动不拖。
+ * 标题与按钮之间的空隙都会落空。子元素里的 button 会被 Tauri 判为可点元素、自动不拖。
+ *
+ * 标题自身反过来标 `="false"` 把它从拖动区里摘出去：标题是内容不是窗口边框，
+ * 按一下不该把整个窗口带走（也顺带去掉双击标题最大化）。tauri 的 drag.js 沿
+ * composed path 上溯，遇到 `="false"` 直接返回——所以标题里的图标、文字一起豁免，
+ * 而两者之间的空白仍是可拖的标题栏。
  */
 export default function PageHeader({ back, onBack, title, sub, actions, children }: {
   back?: string;
@@ -18,7 +23,13 @@ export default function PageHeader({ back, onBack, title, sub, actions, children
   return (
     <>
       <div className="page-head" data-tauri-drag-region="deep">
-        <h1 className="page-title" title={typeof title === "string" ? title : undefined}>{title}</h1>
+        <h1
+          className="page-title"
+          data-tauri-drag-region="false"
+          title={typeof title === "string" ? title : undefined}
+        >
+          {title}
+        </h1>
         {actions && <div className="actions">{actions}</div>}
       </div>
       {back && onBack && (

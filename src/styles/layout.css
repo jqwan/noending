@@ -289,7 +289,8 @@
    左右用负 margin 抵消 .main 的内边距，背景才能盖住滚过去的正文。
    它的 z-index（6）盖住了 AppShell 的 .window-drag-region（4），所以它自己必须是拖动区：
    见 PageHeader 上的 data-tauri-drag-region="deep"。里面的按钮由 tauri 的脚本判定为
-   可点元素而自动豁免，不必再写 no-drag（那是 Electron 的写法，这里不生效）。 */
+   可点元素而自动豁免，标题则靠自己的 ="false" 主动退出拖动区，不必再写 no-drag
+   （那是 Electron 的写法，这里不生效）。 */
 .page-head {
   position: sticky;
   top: 0;
