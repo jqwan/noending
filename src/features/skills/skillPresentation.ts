@@ -18,8 +18,13 @@ export function under(path: string, root: string) {
 }
 
 export function locationSupportsAgent(location: SkillLocation, agent: Agent) {
+  // Mirrors supports_user_agent/supports_project_agent in the backend: the
+  // shared (agent-less) root covers everyone but Claude and WorkBuddy at
+  // user level, plus Antigravity only at project level.
+  const sharedReader = agent === "codex" || agent === "pi"
+    || agent === "zcode" || agent === "dsh" || agent === "qoder";
   return location.agent === agent || (!location.agent
-    && (agent === "codex" || agent === "pi" || location.scope === "project" && agent === "antigravity"));
+    && (sharedReader || location.scope === "project" && agent === "antigravity"));
 }
 
 export function skillDetailRoute(resource: SkillResource, projectId?: string, workspacePathId?: string): Route {

@@ -82,22 +82,41 @@ fn links_inside(dir: &Path, source_dir: &Path) -> bool {
     true
 }
 
-/// Agents supported by Skill management. `Agent::all()` also
-/// contains history-only adapters that never scan skill directories.
-const ENABLE_AGENTS: [Agent; 4] = [
+/// Agents supported by Skill management. ZCode, DSH and Qoder read the
+/// shared `~/.agents/skills/` root (user-verified; DSH inherits it through
+/// its pi-based agent); WorkBuddy does not, so it carries its own locations.
+const ENABLE_AGENTS: [Agent; 8] = [
     Agent::Codex,
     Agent::ClaudeCode,
     Agent::Pi,
     Agent::Antigravity,
+    Agent::ZCode,
+    Agent::Dsh,
+    Agent::Qoder,
+    Agent::WorkBuddy,
 ];
 
 fn supports_user_agent(loc: &Location, agent: Agent) -> bool {
-    loc.agent == Some(agent) || (loc.agent.is_none() && matches!(agent, Agent::Codex | Agent::Pi))
+    loc.agent == Some(agent)
+        || (loc.agent.is_none()
+            && matches!(
+                agent,
+                Agent::Codex | Agent::Pi | Agent::ZCode | Agent::Dsh | Agent::Qoder
+            ))
 }
 
 fn supports_project_agent(loc: &Location, agent: Agent) -> bool {
     loc.agent == Some(agent)
-        || (loc.agent.is_none() && matches!(agent, Agent::Codex | Agent::Pi | Agent::Antigravity))
+        || (loc.agent.is_none()
+            && matches!(
+                agent,
+                Agent::Codex
+                    | Agent::Pi
+                    | Agent::Antigravity
+                    | Agent::ZCode
+                    | Agent::Dsh
+                    | Agent::Qoder
+            ))
 }
 
 fn supports_scope_agent(loc: &Location, scope: &str, agent: Agent) -> bool {
@@ -763,11 +782,15 @@ pub fn enable_skill_all(
                 continue;
             }
             let redundant = supported.iter().any(|index| !remaining[*index]);
+            // Coverage first: with five Agents reading the shared root,
+            // double-covering one already-covered Agent beats fragmenting
+            // into per-Agent links. Redundancy only breaks ties between
+            // equally covering locations.
             let better = best
                 .as_ref()
                 .map_or(true, |(_, best_hits, best_redundant)| {
-                    (usize::from(!redundant), hits.len())
-                        > (usize::from(!*best_redundant), best_hits.len())
+                    (hits.len(), usize::from(!redundant))
+                        > (best_hits.len(), usize::from(!*best_redundant))
                 });
             if better {
                 best = Some((loc, hits, redundant));
@@ -864,11 +887,14 @@ fn project_targets(inventory: &Inventory, row: Option<&Resource>) -> (Vec<String
                 continue;
             }
             let redundant = supported.iter().any(|index| !remaining[*index]);
+            // Same coverage-first rule as the user-scope selector: the
+            // shared root covers six Agents here, so double-covering one
+            // already-covered Agent beats fragmenting into per-Agent links.
             let better = best
                 .as_ref()
                 .map_or(true, |(_, best_hits, best_redundant)| {
-                    (usize::from(!redundant), hits.len())
-                        > (usize::from(!*best_redundant), best_hits.len())
+                    (hits.len(), usize::from(!redundant))
+                        > (best_hits.len(), usize::from(!*best_redundant))
                 });
             if better {
                 best = Some((loc, hits, redundant));

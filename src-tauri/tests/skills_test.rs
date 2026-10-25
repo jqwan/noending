@@ -464,15 +464,21 @@ fn enable_all_uses_shared_for_codex_and_pi_and_skips_their_own_dirs() {
     assert!(f
         .roots
         .home
-        .join(".gemini/antigravity-cli/skills/review")
+        .join(".gemini/config/skills/review")
         .is_symlink());
+    // WorkBuddy has no shared-root support and needs its own link.
+    assert!(f.roots.home.join(".workbuddy/skills/review").is_symlink());
     assert!(!f.roots.codex.join("skills/review").exists());
     assert!(!f.roots.pi.join("skills/review").exists());
-    assert!(!f.roots.home.join(".gemini/config/skills/review").exists());
+    assert!(!f
+        .roots
+        .home
+        .join(".gemini/antigravity-cli/skills/review")
+        .exists());
     let inventory = skills::list(&f.roots, None);
     assert_eq!(inventory.resources.len(), 1);
     let row = &inventory.resources[0];
-    assert_eq!(row.entry_paths.len(), 3);
+    assert_eq!(row.entry_paths.len(), 4);
     assert!(row.entry_links.iter().all(|link| *link));
     assert!(source.join("SKILL.md").exists());
 }
@@ -498,16 +504,19 @@ fn enable_all_does_not_add_a_shared_entry_for_an_agent_that_is_already_covered()
     )
     .unwrap();
     assert!(f.roots.pi.join("skills/review").is_symlink());
-    assert!(f.roots.codex.join("skills/review").is_symlink());
-    assert!(!f.roots.home.join(".agents/skills/review").exists());
+    // Pi is covered, but the shared root still wins for Codex/ZCode/DSH/
+    // Qoder — agent-specific dirs stay untouched.
+    assert!(f.roots.home.join(".agents/skills/review").is_symlink());
+    assert!(!f.roots.codex.join("skills/review").exists());
     assert!(f.roots.claude.join("skills/review").is_symlink());
     assert!(f
         .roots
         .home
-        .join(".gemini/antigravity-cli/skills/review")
+        .join(".gemini/config/skills/review")
         .is_symlink());
+    assert!(f.roots.home.join(".workbuddy/skills/review").is_symlink());
     let row = &skills::list(&f.roots, None).resources[0];
-    assert_eq!(row.entry_paths.len(), 4);
+    assert_eq!(row.entry_paths.len(), 5);
 }
 
 #[cfg(unix)]
@@ -527,11 +536,7 @@ fn disable_all_removes_user_links_and_keeps_the_source() {
     skills::disable_skill_all(&f.roots, &id).unwrap();
     assert!(!f.roots.home.join(".agents/skills/review").exists());
     assert!(!f.roots.claude.join("skills/review").exists());
-    assert!(!f
-        .roots
-        .home
-        .join(".gemini/antigravity-cli/skills/review")
-        .exists());
+    assert!(!f.roots.home.join(".gemini/config/skills/review").exists());
     assert!(source.join("SKILL.md").exists());
     assert!(skills::list(&f.roots, None).resources.is_empty());
 }
@@ -549,7 +554,7 @@ fn a_physical_user_entry_is_skipped_but_other_links_still_toggle() {
     let id = skills::source_id(file.to_string_lossy().as_ref());
     skills::enable_skill_all(&f.roots, &[], &id, Some(file.to_string_lossy().as_ref())).unwrap();
     let claude = f.roots.claude.join("skills/review");
-    let antigravity = f.roots.home.join(".gemini/antigravity-cli/skills/review");
+    let antigravity = f.roots.home.join(".gemini/config/skills/review");
     assert!(dir.join("SKILL.md").exists());
     assert!(claude.exists());
     assert!(antigravity.exists());
@@ -632,6 +637,9 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
         assert!(cwd.join(".claude/skills/review/SKILL.md").is_file());
         assert!(!cwd.join(".pi/skills/review").exists());
     }
+    for cwd in &cwds {
+        assert!(cwd.join(".workbuddy/skills/review/SKILL.md").is_file());
+    }
     let scopes = project_scopes(&f, &[("a", cwds[0].clone()), ("b", cwds[1].clone())], &id);
     let scope = &scopes[0];
     assert!(scope.enabled);
@@ -642,7 +650,7 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
             .iter()
             .map(|workspace| workspace.entries.len())
             .collect::<Vec<_>>(),
-        vec![2, 2]
+        vec![3, 3]
     );
     assert!(scope.workspaces[0]
         .entries
@@ -701,8 +709,8 @@ fn project_inventory_merges_entries_from_every_working_directory() {
         skills::list(&f.roots, Some(&cwds[1])),
     ]);
     let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
-    assert_eq!(row.entry_paths.len(), 4);
-    assert_eq!(row.locations.len(), 4);
+    assert_eq!(row.entry_paths.len(), 6);
+    assert_eq!(row.locations.len(), 6);
     assert!(row.entry_links.iter().all(|link| *link));
     let detail = skills::detail_project(&f.roots, &cwds, &id).unwrap();
     assert!(detail.content.contains("# Instructions"));

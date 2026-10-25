@@ -36,17 +36,24 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
             roots.pi.join("skills"),
             "Pi Skills",
         ),
-        location(
-            Some(Agent::Antigravity),
-            "user",
-            roots.home.join(".gemini/antigravity-cli/skills"),
-            "Antigravity Skills",
-        ),
+        // agy's own embedded docs name ~/.gemini/config/skills as THE
+        // user-level skill root (workspace level rides the shared
+        // <workspace>/.agents/skills); the desktop shares this config dir.
+        // The old antigravity-cli/skills target had no reader and was
+        // removed.
         location(
             Some(Agent::Antigravity),
             "user",
             roots.home.join(".gemini/config/skills"),
-            "Antigravity 兼容目录",
+            "Antigravity Skills",
+        ),
+        // WorkBuddy does not read the shared ~/.agents root; its own user
+        // skills directory is the only link target for it.
+        location(
+            Some(Agent::WorkBuddy),
+            "user",
+            roots.home.join(".workbuddy/skills"),
+            "WorkBuddy Skills",
         ),
     ];
     if let Some(cwd) = cwd {
@@ -60,6 +67,11 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
                 "Claude Code Skills",
             ),
             (Some(Agent::Pi), ".pi/skills", "Pi Skills"),
+            (
+                Some(Agent::WorkBuddy),
+                ".workbuddy/skills",
+                "WorkBuddy Skills",
+            ),
         ] {
             rows.push(location(agent, "project", cwd.join(rel), label));
         }
