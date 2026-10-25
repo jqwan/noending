@@ -9,6 +9,7 @@ import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
 import { agentsCache, clearAgentsCache } from "./agentsCache";
 
 import AgentConfiguration from "./AgentConfiguration";
+import AgentPackagesSection from "../packages/AgentPackagesSection";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
@@ -496,6 +497,7 @@ export default function AgentsView({
             entry={entry}
             reload={reloadAgents}
             navigate={navigate}
+            packagesSection={<AgentPackagesSection agent={initialAgent} navigate={navigate} />}
             sourcesSection={
               <section className="card agent-settings-section agent-detail-sources">
                 <h2>
