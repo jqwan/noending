@@ -754,6 +754,10 @@ CREATE TABLE IF NOT EXISTS collaboration_participations (
   run_id TEXT NOT NULL REFERENCES collaboration_runs(id) ON DELETE CASCADE,
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   holder TEXT NOT NULL CHECK (holder IN ('cli','mcp')),
+  -- The concrete holder instance (an MCP server connection or the CLI
+  -- resident kind), so a new connection takes over instead of reusing a
+  -- lease its own process cannot renew.
+  holder_instance TEXT NOT NULL DEFAULT '',
   phase TEXT CHECK (phase IS NULL OR phase IN ('listening','processing')),
   -- When the current phase began, so the UI can show processing duration
   -- instead of mistaking the renewing heartbeat for a work start.

@@ -289,10 +289,20 @@ pub(crate) struct Service {
     pub db: Arc<Db>,
     pub home: NoEndingHome,
     pub layer: Arc<WorkspaceLayer>,
+    /// The concrete holder of participation leases started through this
+    /// service: one id per MCP server connection; CLI joins share the
+    /// resident-listener kind.
+    pub instance_id: String,
     _access: crate::workspace::home::HomeAccess,
 }
 impl Service {
     pub(crate) fn open(home: NoEndingHome) -> CliResult<Arc<Self>> {
+        Self::open_with_instance(home, "cli-resident".to_string())
+    }
+    pub(crate) fn open_with_instance(
+        home: NoEndingHome,
+        instance_id: String,
+    ) -> CliResult<Arc<Self>> {
         let access = home.acquire_access()?;
         let db = Arc::new(Db::open(&home.db_path)?);
         let layer = Arc::new(WorkspaceLayer::new(&home));
@@ -300,6 +310,7 @@ impl Service {
             db,
             home,
             layer,
+            instance_id,
             _access: access,
         }))
     }
@@ -391,6 +402,7 @@ impl Service {
                         run: run.clone(),
                         from_session,
                         holder: p_holder.clone(),
+                        holder_instance: self.instance_id.clone(),
                     },
                 )?;
                 let connection = joined["connection_id"]

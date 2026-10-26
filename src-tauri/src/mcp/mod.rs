@@ -128,7 +128,12 @@ impl ServerHandler for Server {
 
 pub(crate) fn run(home: Option<&Path>) -> i32 {
     let outcome = (|| -> CliResult<()> {
-        let service = Service::open(crate::cli::resolve_home(home)?)?;
+        let service = Service::open_with_instance(
+            crate::cli::resolve_home(home)?,
+            // One holder instance per MCP server connection: a reconnecting
+            // client claims a fresh lease instead of reusing a dead one.
+            crate::storage::new_id(),
+        )?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
