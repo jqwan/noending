@@ -805,7 +805,7 @@ export interface CollaborationMemberState {
   last_heartbeat_at: string | null;
   last_read_at: string | null;
   last_read_seq: number | null;
-  /** 最早一条未查收的他人消息时间；null 表示没有待查收。 */
+  /** 最早一条未查收的他人消息时间；null = 没有待查收。必填：缺字段等于契约没实现。 */
   awaiting_since: string | null;
   unread_count: number;
   error: string | null;

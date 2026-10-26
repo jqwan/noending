@@ -331,6 +331,22 @@ it("keeps an unconfirmed send request id when another member wake happens in bet
   expect(calls[1][3]).toBe(calls[0][3]);
 });
 
+it("shows start notices as a label instead of their raw coordinates", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
+  vi.mocked(api.collaborationRoomMessages).mockResolvedValue({
+    items: [
+      { ...message(1, ""), kind: "start", body: '{"task_id":"task-1","room_id":"room-1","run_id":"run-1"}', sender_session_id: null },
+      message(2, "开始吧"),
+    ],
+    next_cursor: null,
+    latest_seq: 2,
+  });
+  mount();
+  await screen.findByText("开始吧");
+  expect(screen.getByText("开始协作")).toBeTruthy();
+  expect(screen.queryByText(/\{"task_id"/)).toBeNull();
+});
+
 it("marks a listening member unresponsive while leaving a processing member alone", async () => {
   const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
