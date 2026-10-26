@@ -12,7 +12,7 @@
 
 ## 读取、执行与持续监听
 
-按消息 seq 顺序分页查阅当前 run 的未读内容。读取和发送均不自动确认阅读位置；只有确已读过的一段连续消息才显式 ack 到该段最后的 seq，不能越过未查阅的消息。ack 表示已经查阅，接手的工作可以仍在执行。自己的发言不代表已读完此前消息，不按未读数量、时间戳或页面条数推算位置。
+按消息 seq 顺序分页查阅当前 run 的未读内容。读取和发送均不自动确认阅读位置；只有确已读过的一段消息才显式 ack 到该段最后的 seq，不能越过未查阅的他人或用户消息。自己的发言可能不在未读批次中，不要求序号在数值上连续。ack 表示已经查阅，接手的工作可以仍在执行。自己的发言不代表已读完此前消息，不按未读数量、时间戳或页面条数推算位置。
 
 有明确工作时先推进，在影响分工的变更、阻碍、交付及其他安全检查点查看新消息；空闲或等待依赖时调用 room wait。无新消息时持续等待，不定时重复查询、不发送心跳文字。一次 wait 返回后，处理该批消息、确认阅读位置，再继续工作或等待；宿主时限造成的 timeout 不代表协作结束。
 
@@ -33,3 +33,23 @@
 若停止时仍有尚未交付的关键成果或阻碍，通过原本已获授权的定向渠道向负责人简要交接，附 task/run 及成果位置；没有其他已授权渠道时在宿主说明，不为交付自动重开协作。不要重复发送此前已交付的内容。停止协作不等于完成全部事项或归档任务；这些状态以实际验收和用户要求为准。
 
 接口返回 run 已停止、身份不符或参与关系失效时，重新查询状态，不能通过换 run、冒用成员或重复 join 绕过。超时写入先查回执，重试沿用相同 request_id 与参数；不能把无回复当作发送失败。
+
+## 操作参考
+
+`ne` 使用接入规则确认的入口，SELF 是自己的 NoEnding 会话 ID。CLI/MCP 参与和写入都显式提供自身身份，内嵌终端以实际绑定为准；外部 ID 只表示会话关联，不是凭证认证。
+
+| 目的 | CLI | MCP |
+| --- | --- | --- |
+| 按任务定位 | `ne room resolve --task TASK` | `room_resolve {task:TASK}` |
+| 核对运行和成员 | `ne room show ROOM` | `room_show {room:ROOM}` |
+| 加入本次运行 | `ne room join ROOM --run RUN --from-session SELF` | `room_join {room:ROOM,run:RUN,from_session:SELF}` |
+| 等待未读 | `ne room wait ROOM --run RUN --from-session SELF [--timeout SECONDS]` | `room_wait {room:ROOM,run:RUN,from_session:SELF,timeout_seconds?}` |
+| 查询历史或续页 | `ne room messages ROOM --run RUN [--cursor CURSOR]` | `room_messages {room:ROOM,run:RUN,cursor?}` |
+| 确认查阅位置 | `ne room ack ROOM --run RUN --from-session SELF --through-seq N` | `room_ack {room:ROOM,run:RUN,from_session:SELF,through_seq:N}` |
+| 简要发言 | `ne room send ROOM --run RUN --from-session SELF --message TEXT` | `room_send {room:ROOM,run:RUN,from_session:SELF,message:TEXT}` |
+| 退出本人参与 | `ne room leave ROOM --run RUN --from-session SELF` | `room_leave {room:ROOM,run:RUN,from_session:SELF}` |
+| 负责人停止 | `ne room stop ROOM --run RUN --from-session SELF` | `room_stop {room:ROOM,run:RUN,from_session:SELF}` |
+
+wait 没有新消息就继续等待，`status=messages` 时处理消息；`timeout` 仅表示本次等待到期，可继续等待；`stopped` 进入收尾，不再循环等待。返回下一页游标时，保持 room/run，原样回传 messages 续读，按 seq 处理后再 ack。历史首屏返回最近一页，其 next_cursor 指向更旧页；wait 的 next_cursor 指向本批后续消息，不能改变其范围或自行构造游标。
+
+需要长材料时用可访问的文件或任务事项引用；确需发正文可用 `--file UTF8_FILE` 代替 `--message`。写入可携带 `--request-id` / `request_id`，超时先核对回执，原操作重试不得更换参数或编号。CLI/MCP 不提供成员配置或任意开启协作的入口，用户先从任务页面开启本次协作。
