@@ -175,3 +175,71 @@ pub fn collaboration_room_coordinator(
     emit_changed(&app, &task_id, &room_id, &run_id, "run");
     Ok(room)
 }
+
+/// Watcher-side diff: classify external collaboration writes into one targeted
+/// event per room. Message appends outrank run changes, which outrank member
+/// (heartbeat/phase) churn; the desktop's own mutations already emit from
+/// their command handlers.
+pub(crate) fn emit_external_changes(
+    app: &AppHandle,
+    db: &crate::storage::Db,
+    cache: &mut std::collections::HashMap<String, (String, String, i64, String)>,
+) {
+    let Ok(rooms) = (|| -> std::result::Result<Vec<(String, String, String, String, i64, String)>, crate::error::AppError> {
+        let c = db.read();
+        let mut stmt = c.prepare(
+            "SELECT r.id, r.task_id, COALESCE(run.id,''), COALESCE(run.status,''),
+                    COALESCE((SELECT MAX(seq) FROM collaboration_messages m WHERE m.room_id=r.id),0),
+                    COALESCE((SELECT MAX(p.last_heartbeat_at) FROM collaboration_participations p WHERE p.room_id=r.id),'')
+             FROM collaboration_rooms r
+             LEFT JOIN collaboration_runs run ON run.room_id=r.id
+               AND run.id=(SELECT id FROM collaboration_runs cr WHERE cr.room_id=r.id ORDER BY started_at DESC, id DESC LIMIT 1)",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::error::AppError::from)?;
+        Ok(rows)
+    })() else {
+        return;
+    };
+    for (room_id, task_id, run_id, status, max_seq, heartbeat) in rooms {
+        let previous = cache.get(&room_id);
+        let changed = match previous {
+            // First sight: announce only rooms that actually have a run or mail.
+            None => !run_id.is_empty() || max_seq > 0,
+            Some((_, prev_status, prev_seq, prev_beat)) => {
+                prev_seq != &max_seq || prev_status != &status || prev_beat != &heartbeat
+            }
+        };
+        if !changed {
+            continue;
+        }
+        let category = match previous {
+            Some((_, prev_status, prev_seq, _)) if prev_seq != &max_seq => "message",
+            Some((prev_run, prev_status, _, _))
+                if prev_run != &run_id || prev_status != &status =>
+            {
+                "run"
+            }
+            _ => "member",
+        };
+        cache.insert(
+            room_id.clone(),
+            (run_id.clone(), status.clone(), max_seq, heartbeat.clone()),
+        );
+        let _ = app.emit(
+            EVENT,
+            serde_json::json!({"task_id":task_id,"room_id":room_id,"run_id":run_id,"category":category}),
+        );
+    }
+}

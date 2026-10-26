@@ -12,19 +12,6 @@ use serde_json::{json, Value};
 /// Connection freshness: a lease renewed within this window is connected.
 const CONNECTED_WINDOW_SECS: i64 = 30;
 
-fn session_brief(db: &Db, session_id: &str) -> Value {
-    match db.get_session(session_id) {
-        Ok(Some(session)) => json!({
-            "id": session.id,
-            "title": session.title,
-            "agent": session.agent.as_str(),
-        }),
-        // A purged member keeps its historical messages; the view degrades to
-        // the bare id instead of fabricating a "user" or an empty row.
-        _ => json!({"id": session_id, "title": Value::Null, "agent": Value::Null}),
-    }
-}
-
 fn parse_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -109,6 +96,7 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 "wake_status": wake_status,
                 "connection_state": connection_state(participation, now),
                 "phase": participation.and_then(|p| p.phase.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
+                "phase_since": participation.and_then(|p| p.phase_since.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
                 "last_heartbeat_at": participation.map(|p| json!(p.last_heartbeat_at)).unwrap_or(Value::Null),
                 "last_read_at": last_read_at,
                 "last_read_seq": last_read_seq,
@@ -155,10 +143,12 @@ pub(crate) fn candidates(
         .filter_map(|id| db.get_session(id).ok().flatten().map(|s| (id.clone(), s)))
         .map(|(id, session)| {
             let adapter = crate::adapters::adapter_for(session.agent);
-            let desktop = matches!(
-                adapter.desktop_resume_route(&session),
-                crate::adapters::ResumeRoute::Desktop(_)
-            );
+            let archived = session.is_archived();
+            let desktop = !archived
+                && matches!(
+                    adapter.desktop_resume_route(&session),
+                    crate::adapters::ResumeRoute::Desktop(_)
+                );
             let terminal = states.get(&id).cloned().unwrap_or(
                 crate::launcher::availability::TerminalResumeState {
                     available: false,
@@ -173,9 +163,13 @@ pub(crate) fn candidates(
                 modes.push(json!(store::WAKE_DESKTOP));
             }
             let reason = if modes.is_empty() {
-                terminal
-                    .reason
-                    .or_else(|| Some("该会话没有可用的唤醒方式".to_string()))
+                if archived {
+                    Some("已归档的会话不能继续".to_string())
+                } else {
+                    terminal
+                        .reason
+                        .or_else(|| Some("该会话没有可用的唤醒方式".to_string()))
+                }
             } else {
                 None
             };
@@ -200,41 +194,47 @@ pub(crate) struct StartParams {
     pub request_id: String,
 }
 pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
-    // Revalidate the requested wake method against real capability; the user
-    // picked from candidates, but the backend never trusts that filter.
-    let states = crate::launcher::availability::terminal_resume_states(
-        db,
-        &params
-            .members
-            .iter()
-            .map(|m| m.session_id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    for member in &params.members {
-        let session = db
-            .get_session(&member.session_id)?
-            .ok_or_else(|| CliError::new("not_found", "成员会话不存在"))?;
-        let capable = match member.wake_method.as_str() {
-            store::WAKE_TERMINAL => states.get(&member.session_id).is_some_and(|s| s.available),
-            store::WAKE_DESKTOP => {
-                matches!(
-                    crate::adapters::adapter_for(session.agent).desktop_resume_route(&session),
-                    crate::adapters::ResumeRoute::Desktop(_)
-                )
+    // A replay must be recognised BEFORE capability re-probing: the original
+    // start succeeded once, so the same request returns that result even if a
+    // member's CLI has since disappeared.
+    let replay = db.collaboration_request_exists(&params.request_id)?;
+    if !replay {
+        // Revalidate the requested wake method against real capability; the
+        // user picked from candidates, but the backend never trusts that.
+        let states = crate::launcher::availability::terminal_resume_states(
+            db,
+            &params
+                .members
+                .iter()
+                .map(|m| m.session_id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        for member in &params.members {
+            let session = db
+                .get_session(&member.session_id)?
+                .ok_or_else(|| CliError::new("not_found", "成员会话不存在"))?;
+            let capable = match member.wake_method.as_str() {
+                store::WAKE_TERMINAL => states.get(&member.session_id).is_some_and(|s| s.available),
+                store::WAKE_DESKTOP => {
+                    matches!(
+                        crate::adapters::adapter_for(session.agent).desktop_resume_route(&session),
+                        crate::adapters::ResumeRoute::Desktop(_)
+                    )
+                }
+                _ => false,
+            };
+            if !capable {
+                return Err(CliError::new(
+                    "invalid_arguments",
+                    format!(
+                        "成员 {} 不支持所选唤醒方式 {}",
+                        member.session_id, member.wake_method
+                    ),
+                ));
             }
-            _ => false,
-        };
-        if !capable {
-            return Err(CliError::new(
-                "invalid_arguments",
-                format!(
-                    "成员 {} 不支持所选唤醒方式 {}",
-                    member.session_id, member.wake_method
-                ),
-            ));
         }
     }
-    let outcome = db.collaboration_start(
+    db.collaboration_start(
         &params.task_id,
         &params.members,
         params.coordinator_session_id.as_deref(),
@@ -295,7 +295,7 @@ pub(crate) fn stop(db: &Db, params: StopParams) -> CliResult<Value> {
             ));
         }
     }
-    let (_, notice) = db.collaboration_stop(
+    db.collaboration_stop(
         &params.room_id,
         &params.run_id,
         params.initiator_session_id.as_deref(),
@@ -385,4 +385,367 @@ pub(crate) fn room_view_by_room(db: &Db, room_id: &str) -> CliResult<Value> {
         .collaboration_room_by_id(room_id)?
         .ok_or_else(|| CliError::new("not_found", format!("协作室 {room_id} 不存在")))?;
     room_view(db, &room.task_id)
+}
+
+/// Heartbeat cadence and the disconnected window (plan §4): renew about every
+/// 10s; 30s without a valid renewal means the connection is gone.
+pub(crate) const BEAT_SECS: u64 = 10;
+
+pub(crate) struct RoomJoin {
+    pub room: String,
+    pub run: String,
+    pub from_session: String,
+    pub holder: String,
+}
+pub(crate) fn join(db: &Db, home: &NoEndingHome, p: RoomJoin) -> CliResult<Value> {
+    let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
+    guard_current_run(db, &p.room, &p.run)?;
+    let cutoff =
+        (chrono::Utc::now() - chrono::Duration::seconds(CONNECTED_WINDOW_SECS)).to_rfc3339();
+    let outcome = db.collaboration_join(&p.room, &p.run, &session, &p.holder, &cutoff)?;
+    Ok(json!({
+        "connection_id": outcome.connection_id,
+        "session": session,
+        // A reusing joiner must not spawn a second resident resource.
+        "reused": outcome.reused,
+        "role": outcome.role.map(|r| json!(r)).unwrap_or(Value::Null),
+        "through_seq": outcome.through_seq,
+        "beat_seconds": BEAT_SECS,
+    }))
+}
+
+pub(crate) struct RoomAck {
+    pub room: String,
+    pub run: String,
+    pub from_session: String,
+    pub through_seq: i64,
+}
+pub(crate) fn ack(db: &Db, home: &NoEndingHome, p: RoomAck) -> CliResult<Value> {
+    let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
+    guard_current_run(db, &p.room, &p.run)?;
+    let through = db.collaboration_ack(&p.room, &p.run, &session, p.through_seq)?;
+    Ok(json!({"through_seq": through}))
+}
+
+pub(crate) struct RoomLeave {
+    pub room: String,
+    pub run: String,
+    pub from_session: String,
+}
+/// Leaving is member cleanup: allowed on a stopped run, idempotent, and it
+/// never touches another run's participation.
+pub(crate) fn leave(db: &Db, home: &NoEndingHome, p: RoomLeave) -> CliResult<Value> {
+    let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
+    db.collaboration_leave(&p.room, &p.run, &session)?;
+    Ok(json!({"left": true}))
+}
+
+pub(crate) struct RoomWait {
+    pub room: String,
+    pub run: String,
+    pub from_session: String,
+    pub timeout_seconds: Option<u64>,
+    pub limit: usize,
+}
+/// Wait for the member's unread batch in the current run. Entry marks the
+/// participation listening; handing out a batch marks it processing until the
+/// next wait. A stopped run ends the wait with status=stopped instead of an
+/// error, so every waiter learns about the stop.
+pub(crate) fn room_wait(db: &Db, home: &NoEndingHome, p: RoomWait) -> CliResult<Value> {
+    if !(1..=100).contains(&p.limit) {
+        return Err(CliError::new("invalid_arguments", "limit 需在 1～100 之间"));
+    }
+    let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
+    let current = db
+        .collaboration_current_run(&p.room)?
+        .ok_or_else(|| CliError::new("run_inactive", "协作室还没有任何运行"))?;
+    if current.id != p.run {
+        return Err(CliError::new(
+            "run_inactive",
+            "协作运行已更新，不能在旧运行上操作",
+        ));
+    }
+    let participating = db
+        .collaboration_participations_for_run(&p.run)?
+        .iter()
+        .any(|part| part.session_id == session && part.left_at.is_none() && part.room_id == p.room);
+    if !participating {
+        return Err(CliError::new("join_required", "请先加入协作再等待消息"));
+    }
+    let deadline = p.timeout_seconds.map(|s| {
+        std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(s))
+            .ok_or_else(|| CliError::new("invalid_arguments", "timeout 超出可等待范围"))
+    });
+    let deadline = deadline.transpose()?;
+    // Entry marks listening; a delivered batch marks processing.
+    db.collaboration_set_phase(&p.room, &p.run, &session, Some("listening"))?;
+    let mut fetch = || {
+        db.collaboration_wait_page(&p.room, &p.run, &session, p.limit)
+            .map_err(CliError::from)
+    };
+    room_wait_loop(
+        db,
+        &p.room,
+        &p.run,
+        &session,
+        &current.status,
+        deadline,
+        &mut fetch,
+    )
+}
+
+fn room_wait_loop(
+    db: &Db,
+    room_id: &str,
+    run_id: &str,
+    session_id: &str,
+    entry_status: &str,
+    deadline: Option<std::time::Instant>,
+    fetch: &mut dyn FnMut() -> CliResult<store::CollaborationMessagesPage>,
+) -> CliResult<Value> {
+    if entry_status == "stopped" {
+        return Ok(wait_value(
+            "stopped",
+            &store::CollaborationMessagesPage {
+                items: vec![],
+                next_cursor: None,
+                latest_seq: 0,
+            },
+        ));
+    }
+    loop {
+        crate::platform::cancellation::check().map_err(CliError::from)?;
+        // Liveness first: a deleted room, task or session must end the wait.
+        let room_alive = db.collaboration_room_by_id(room_id)?.is_some();
+        let session_alive = db.get_session(session_id)?.is_some();
+        if !room_alive || !session_alive {
+            return Err(CliError::new(
+                "not_found",
+                "协作室或成员会话已删除，等待结束",
+            ));
+        }
+        let Some(current) = db.collaboration_current_run(room_id)? else {
+            return Err(CliError::new("not_found", "协作运行不存在，等待结束"));
+        };
+        if current.id != run_id {
+            // A newer run replaced ours; the old wait has nothing to serve.
+            return Err(CliError::new(
+                "run_inactive",
+                "协作运行已更新，不能在旧运行上操作",
+            ));
+        }
+        if current.status == "stopped" {
+            db.collaboration_set_phase(room_id, run_id, session_id, None)?;
+            return Ok(wait_value(
+                "stopped",
+                &store::CollaborationMessagesPage {
+                    items: vec![],
+                    next_cursor: None,
+                    latest_seq: 0,
+                },
+            ));
+        }
+        let expired = deadline.is_some_and(|d| std::time::Instant::now() >= d);
+        let unread = db.collaboration_unread_of(room_id, run_id, session_id)?;
+        if unread.count > 0 || expired {
+            let page = fetch()?;
+            if !page.items.is_empty() {
+                db.collaboration_set_phase(room_id, run_id, session_id, Some("processing"))?;
+                return Ok(wait_value("messages", &page));
+            }
+            if expired {
+                return Ok(wait_value(
+                    "timeout",
+                    &store::CollaborationMessagesPage {
+                        items: vec![],
+                        next_cursor: None,
+                        latest_seq: page.latest_seq,
+                    },
+                ));
+            }
+            // The batch vanished between the probe and the fetch (acked or
+            // deleted elsewhere); that is not a timeout, so keep waiting.
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+fn wait_value(status: &str, page: &store::CollaborationMessagesPage) -> Value {
+    json!({
+        "status": status,
+        "items": page.items,
+        "next_cursor": page.next_cursor,
+        "latest_seq": page.latest_seq,
+    })
+}
+
+/// The MCP holder for one participation: a tokio task renewing the lease
+/// across wait requests within the connection. It exits when superseded, the
+/// run moves on or stops, the targets are deleted, or the connection ends
+/// (the cancellation registry signals it during shutdown). If no runtime is
+/// reachable the lease simply expires, which the UI reports honestly.
+pub(crate) fn spawn_mcp_heartbeat(
+    db: std::sync::Arc<Db>,
+    room_id: String,
+    run_id: String,
+    connection_id: String,
+) -> bool {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return false;
+    };
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    crate::platform::cancellation::track_flag(flag.clone());
+    runtime.spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(BEAT_SECS)).await;
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            match db.collaboration_renew(&connection_id) {
+                Ok(store::RenewOutcome::Renewed) => {}
+                _ => return,
+            }
+            match db.collaboration_current_run(&room_id) {
+                Ok(Some(current)) if current.id == run_id && current.status != "stopped" => {}
+                _ => return,
+            }
+        }
+    });
+    true
+}
+
+/// The CLI resident listener: renews one connection id every beat and exits
+/// when superseded, deleted, the run moves on or stops, or the console is
+/// cancelled. It never marks the participation left — a vanished process must
+/// look disconnected, not like an intentional leave.
+pub(crate) fn listen(db: &Db, room_id: &str, run_id: &str, connection_id: &str) -> i32 {
+    loop {
+        match db.collaboration_renew(connection_id) {
+            Ok(store::RenewOutcome::Renewed) => {}
+            Ok(store::RenewOutcome::Unowned) => return 0,
+            Ok(store::RenewOutcome::Gone) => return 0,
+            Err(_) => return 1,
+        }
+        match db.collaboration_current_run(room_id) {
+            Ok(Some(current)) if current.id == run_id && current.status != "stopped" => {}
+            // Stopped run, replaced run, or deleted room: the resident part
+            // of this participation ends.
+            _ => return 0,
+        }
+        if crate::platform::cancellation::requested() {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(BEAT_SECS));
+    }
+}
+
+#[cfg(test)]
+mod room_wait_tests {
+    use super::*;
+    use crate::storage::collaboration::{CollaborationMessage, CollaborationMessagesPage};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct TempDb(std::path::PathBuf, Db);
+    impl TempDb {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("ne-room-wait-{}", crate::storage::new_id()));
+            let db = Db::open(&root.join("noending.db")).unwrap();
+            db.write()
+                .execute_batch(
+                    "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('t','任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+                     INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+                       ('a','codex','na','jsonl','/a'),('b','codex','nb','jsonl','/b');
+                     INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','t'),('b','t');",
+                )
+                .unwrap();
+            Self(root, db)
+        }
+    }
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn page(items: Vec<CollaborationMessage>, latest_seq: i64) -> CollaborationMessagesPage {
+        CollaborationMessagesPage {
+            items,
+            next_cursor: None,
+            latest_seq,
+        }
+    }
+
+    #[test]
+    fn room_wait_keeps_waiting_when_the_batch_disappears_before_fetch() {
+        let t = TempDb::new();
+        let started =
+            t.1.collaboration_start(
+                "t",
+                &[
+                    store::SelectedMember {
+                        session_id: "a".into(),
+                        wake_method: "desktop".into(),
+                    },
+                    store::SelectedMember {
+                        session_id: "b".into(),
+                        wake_method: "desktop".into(),
+                    },
+                ],
+                None,
+                None,
+                None,
+                "r1",
+            )
+            .unwrap();
+        let mail =
+            t.1.collaboration_send(
+                &started.room.id,
+                &started.run.id,
+                Some("a"),
+                "稍纵即逝",
+                "m1",
+            )
+            .unwrap();
+        let deliver = AtomicBool::new(false);
+        let mut fetch = || {
+            if deliver.load(Ordering::SeqCst) {
+                let items = t
+                    .1
+                    .collaboration_messages_page(&started.room.id, Some(&started.run.id), None, 50)
+                    .unwrap()
+                    .items;
+                Ok(page(
+                    items.into_iter().filter(|m| m.id == mail.id).collect(),
+                    mail.seq,
+                ))
+            } else {
+                // The probe reported unread mail, but the page came back empty
+                // because it was consumed elsewhere in between.
+                Ok(page(vec![], mail.seq))
+            }
+        };
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                room_wait_loop(
+                    &t.1,
+                    &started.room.id,
+                    &started.run.id,
+                    "b",
+                    "starting",
+                    None,
+                    &mut fetch,
+                )
+            });
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            assert!(
+                !handle.is_finished(),
+                "an empty fetched batch must keep waiting instead of returning"
+            );
+            deliver.store(true, Ordering::SeqCst);
+            let value = handle.join().unwrap().unwrap();
+            assert_eq!(value["status"], "messages");
+            assert_eq!(value["items"][0]["body"], "稍纵即逝");
+        });
+    }
 }

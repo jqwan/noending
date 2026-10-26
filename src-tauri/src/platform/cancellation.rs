@@ -48,6 +48,12 @@ pub(crate) fn with_request<T>(flag: Arc<AtomicBool>, run: impl FnOnce() -> T) ->
     drop(previous);
     run()
 }
+/// Register a long-lived cooperative worker (a heartbeat task) with the
+/// connection-scoped cancellation registry without binding a thread-local.
+pub(crate) fn track_flag(flag: Arc<AtomicBool>) {
+    ACTIVE.lock().unwrap().push(Arc::downgrade(&flag));
+}
+
 /// Signal every live request worker (an MCP stdio connection has no caller
 /// left to answer it), so a bounded shutdown does not wait out its full cap.
 pub(crate) fn cancel_all_requests() {

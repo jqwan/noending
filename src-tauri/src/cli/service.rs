@@ -55,6 +55,36 @@ pub(crate) enum Command {
     },
     RoomSend(crate::collaboration::RoomSend),
     RoomStop(crate::collaboration::RoomStop),
+    RoomJoin {
+        room: String,
+        run: String,
+        from_session: String,
+        holder: String,
+    },
+    RoomWait {
+        room: String,
+        run: String,
+        from_session: String,
+        timeout_seconds: Option<u64>,
+        limit: usize,
+    },
+    RoomAck {
+        room: String,
+        run: String,
+        from_session: String,
+        through_seq: i64,
+    },
+    RoomLeave {
+        room: String,
+        run: String,
+        from_session: String,
+    },
+    /// Internal: the resident participation listener spawned by `room join`.
+    RoomListen {
+        room: String,
+        run: String,
+        connection: String,
+    },
     Status,
     SessionControl {
         command: crate::session_control::ControlCommand,
@@ -221,6 +251,9 @@ impl Command {
                 | Self::MailboxMark(_)
                 | Self::RoomSend(_)
                 | Self::RoomStop(_)
+                | Self::RoomJoin { .. }
+                | Self::RoomAck { .. }
+                | Self::RoomLeave { .. }
                 | Self::ConfigureExtraction { .. }
                 | Self::Sync { .. }
                 | Self::CreateTaskItem { .. }
@@ -343,6 +376,116 @@ impl Service {
                         request_id: crate::storage::new_id(),
                     },
                 )
+            }
+            Command::RoomJoin {
+                room,
+                run,
+                from_session,
+                holder: p_holder,
+            } => {
+                let joined = crate::collaboration::join(
+                    &self.db,
+                    &self.home,
+                    crate::collaboration::RoomJoin {
+                        room: room.clone(),
+                        run: run.clone(),
+                        from_session,
+                        holder: p_holder.clone(),
+                    },
+                )?;
+                let connection = joined["connection_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                // Only a NEW owner starts the resident resource; a reuser of a
+                // fresh lease never spawns a second one. A failed spawn rolls
+                // the participation back so no fake "connected" remains.
+                let spawned = if joined["reused"] == json!(true) {
+                    true
+                } else if p_holder == "cli" {
+                    spawn_room_listener(&self.home.root, &room, &run, &connection)
+                } else {
+                    crate::collaboration::spawn_mcp_heartbeat(
+                        self.db.clone(),
+                        room.clone(),
+                        run.clone(),
+                        connection,
+                    )
+                };
+                if !spawned {
+                    let _ = crate::collaboration::leave(
+                        &self.db,
+                        &self.home,
+                        crate::collaboration::RoomLeave {
+                            room: room.clone(),
+                            run: run.clone(),
+                            from_session: joined["session"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
+                    );
+                    return Err(CliError::new(
+                        "listener_spawn_failed",
+                        "驻留监听启动失败，请重试加入",
+                    ));
+                }
+                Ok(joined)
+            }
+            Command::RoomWait {
+                room,
+                run,
+                from_session,
+                timeout_seconds,
+                limit,
+            } => crate::collaboration::room_wait(
+                &self.db,
+                &self.home,
+                crate::collaboration::RoomWait {
+                    room,
+                    run,
+                    from_session,
+                    timeout_seconds,
+                    limit,
+                },
+            ),
+            Command::RoomAck {
+                room,
+                run,
+                from_session,
+                through_seq,
+            } => crate::collaboration::ack(
+                &self.db,
+                &self.home,
+                crate::collaboration::RoomAck {
+                    room,
+                    run,
+                    from_session,
+                    through_seq,
+                },
+            ),
+            Command::RoomLeave {
+                room,
+                run,
+                from_session,
+            } => crate::collaboration::leave(
+                &self.db,
+                &self.home,
+                crate::collaboration::RoomLeave {
+                    room,
+                    run,
+                    from_session,
+                },
+            ),
+            Command::RoomListen {
+                room,
+                run,
+                connection,
+            } => {
+                // The resident listener is internal; its exit code never
+                // reaches a caller, so keep the JSON contract trivial.
+                let code = crate::collaboration::listen(&self.db, &room, &run, &connection);
+                Ok(json!({"listening":false,"exit":code}))
             }
             Command::Status => Ok(
                 json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox"]}),
@@ -905,6 +1048,48 @@ impl Service {
         Ok(json!({"items":items,"next_cursor":if more {ids.get(limit-1)} else {None},"end":!more}))
     }
 }
+/// Spawn the detached resident listener for a fresh participation. The child
+/// re-claims its connection id at startup, so a lost race (another join won)
+/// exits on its first beat without touching the winner's lease. No shell is
+/// involved; on Windows the child hides its own console window.
+fn spawn_room_listener(home: &std::path::Path, room: &str, run: &str, connection: &str) -> bool {
+    if connection.is_empty() {
+        return false;
+    }
+    let Ok(exe) = crate::cli::executable() else {
+        return false;
+    };
+    let mut child = std::process::Command::new(exe);
+    child
+        .args([
+            "room",
+            "listen",
+            room,
+            "--run",
+            run,
+            "--connection",
+            connection,
+        ])
+        .env("NOENDING_HOME", home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    apply_detached_flags(&mut child);
+    child.spawn().is_ok()
+}
+
+fn apply_detached_flags(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: a detached listener must not own a console.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 fn parse_agent(agent: Option<String>) -> CliResult<Option<String>> {
     agent
         .map(|name| {

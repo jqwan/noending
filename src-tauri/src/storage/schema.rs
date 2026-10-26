@@ -755,6 +755,9 @@ CREATE TABLE IF NOT EXISTS collaboration_participations (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   holder TEXT NOT NULL CHECK (holder IN ('cli','mcp')),
   phase TEXT CHECK (phase IS NULL OR phase IN ('listening','processing')),
+  -- When the current phase began, so the UI can show processing duration
+  -- instead of mistaking the renewing heartbeat for a work start.
+  phase_since TEXT,
   last_heartbeat_at TEXT NOT NULL,
   left_at TEXT,
   UNIQUE(run_id, session_id)
@@ -765,9 +768,12 @@ CREATE INDEX IF NOT EXISTS idx_collaboration_participations_session ON collabora
 -- is the same operation instead of silently returning unrelated data.
 CREATE TABLE IF NOT EXISTS collaboration_requests (
   request_id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('coordinator','wake')),
+  kind TEXT NOT NULL CHECK (kind IN ('start','stop','send','coordinator','wake')),
   room_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
+  -- The immutable original operation: actor, task/room/run and every written
+  -- argument. A replay must match this exactly or be rejected, never answered
+  -- from configuration that later runs may have changed.
   fingerprint TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
