@@ -214,6 +214,29 @@ struct Messages {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct RoomTask {
+    task: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RoomId {
+    room: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RoomMessages {
+    room: String,
+    run: Option<String>,
+    cursor: Option<String>,
+    #[serde(default = "default_page_limit")]
+    #[schemars(range(min = 1, max = 100))]
+    limit: usize,
+}
+fn default_page_limit() -> usize {
+    50
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Summary {
     kind: Kind,
     id: String,
@@ -408,6 +431,11 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("mailbox_read", "Read one persistent mailbox message and its revision. Does not change read state. Sender is user when sender_session_id is null; otherwise reply to that Session only within authorized collaboration.",false,false,Command::MailboxRead),
         Spec::new("mailbox_send", "Persist a message in another Session mailbox. Requires explicit from_session with a valid sender Session ID, including embedded terminals; never user/external. Inherited terminal identity overrides the supplied sender; external callers use the supplied existing Session ID. Success means stored, not read or completed; desktop may wake/remind independently. Optional notify_immediately (default false) requests a merged unread-count reminder using the same native steering shortcut as manual reminders. Requires user-enabled automatic notifications and Idle/Completed/Unknown/Working; Waiting is excluded, Interrupted/Failed disable automatic notifications. Unknown permits best-effort notification but does not prove chat input readiness. Never changes mailbox message order or selects a particular message.",true,false,Command::MailboxSend),
         Spec::new("mailbox_mark", "Explicitly mark your own mailbox message read or unread, using the revision you actually read. Reading is not task completion. No notification controls.",true,false,Command::MailboxMark),
+        Spec::new("room_resolve", "Read one task's collaboration room view (config, current run, per-member wake/connection/read state). Read-only; room is null when the task has none. Does not create, start or wake anything.", false, false, |p: RoomTask| Command::RoomResolve { task: p.task }),
+        Spec::new("room_show", "Read one collaboration room view by room ID. Same view as room_resolve; use the ID when the task is unknown. Read-only.", false, false, |p: RoomId| Command::RoomShow { room: p.room }),
+        Spec::new("room_messages", "Page one collaboration room's shared messages, ascending by per-room seq. Omit cursor for the newest page; use next_cursor to page older (back) or newer (forward). Cursors are room-bound. Read-only.", false, false, |p: RoomMessages| Command::RoomMessages {room:p.room,run:p.run,cursor:p.cursor,limit:p.limit}),
+        Spec::new("room_send", "Send one message to a collaboration room's current run as your own member session (from_session follows the mailbox rules; terminal binding wins). Only run members may write. The run must not be stopped; retries reuse the request envelope.", true, false, Command::RoomSend),
+        Spec::new("room_stop", "Stop a collaboration run. Only the room's current coordinator session may call this; the desktop user always can. Appends a stop notice with the real initiator and ends every waiter.", true, false, Command::RoomStop),
         Spec::new("mailbox_wait", "Wait for unread mail in one mailbox instead of re-polling mailbox_list. Returns immediately when unread mail exists with the mailbox_list page contract plus status=messages; otherwise keeps waiting server-side with no periodic empty output until unread mail arrives, the request is cancelled or the connection drops, the recipient session is deleted (not_found), or the optional timeout_seconds (default none) elapses with status=timeout. Never marks anything read; continue paging with mailbox_list next_cursor and mark with mailbox_mark. Works across processes and without the desktop app. Host tool timeouts are client limits: pass a timeout_seconds that fits the host, treat status=timeout as keep-waiting, and call again.",false,false,Command::MailboxWait),
         Spec::new("session_search", "Search ingested session titles and message bodies. Returns evidence locations; use session_messages for full text and context.", false, false, |p: Search| Command::Search {query:p.query,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,cursor:p.cursor,limit:p.limit}),
         Spec::new("session_messages", "Read or search a session's stored history by ordinal and cursor. Long messages are split into ordered parts. Does not synchronize source files.", false, false, |p: Messages| Command::Messages {id:p.id,cursor:p.cursor,query:p.query,from:p.from,to:p.to,limit:p.limit}),

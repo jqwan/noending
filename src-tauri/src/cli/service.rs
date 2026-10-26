@@ -41,6 +41,20 @@ pub(crate) enum Command {
     MailboxSend(crate::mailbox::Send),
     MailboxMark(crate::mailbox::Mark),
     MailboxWait(crate::mailbox::Wait),
+    RoomResolve {
+        task: String,
+    },
+    RoomShow {
+        room: String,
+    },
+    RoomMessages {
+        room: String,
+        run: Option<String>,
+        cursor: Option<String>,
+        limit: usize,
+    },
+    RoomSend(crate::collaboration::RoomSend),
+    RoomStop(crate::collaboration::RoomStop),
     Status,
     SessionControl {
         command: crate::session_control::ControlCommand,
@@ -205,6 +219,8 @@ impl Command {
             self,
             Self::MailboxSend(_)
                 | Self::MailboxMark(_)
+                | Self::RoomSend(_)
+                | Self::RoomStop(_)
                 | Self::ConfigureExtraction { .. }
                 | Self::Sync { .. }
                 | Self::CreateTaskItem { .. }
@@ -296,6 +312,38 @@ impl Service {
             Command::MailboxSend(p) => crate::mailbox::send(&self.db, &self.home, p),
             Command::MailboxMark(p) => crate::mailbox::mark(&self.db, &self.home, p),
             Command::MailboxWait(p) => crate::mailbox::wait(&self.db, p),
+            Command::RoomResolve { task } => crate::collaboration::room_view(&self.db, &task),
+            Command::RoomShow { room } => crate::collaboration::room_view_by_room(&self.db, &room),
+            Command::RoomMessages {
+                room,
+                run,
+                cursor,
+                limit,
+            } => crate::collaboration::messages(&self.db, &room, run.as_deref(), cursor, limit),
+            Command::RoomSend(p) => crate::collaboration::send(
+                &self.db,
+                &self.home,
+                &p.room,
+                &p.run,
+                &p.message,
+                Some(&p.from_session),
+                // CLI retries with the same --request-id replay the receipt
+                // before reaching this point; the column dedupes desktop calls.
+                &crate::storage::new_id(),
+            ),
+            Command::RoomStop(p) => {
+                let initiator = crate::mailbox::actor(&self.db, &self.home, Some(&p.from_session))?;
+                crate::collaboration::stop(
+                    &self.db,
+                    crate::collaboration::StopParams {
+                        room_id: p.room,
+                        run_id: p.run,
+                        expected_revision: None,
+                        initiator_session_id: Some(initiator),
+                        request_id: crate::storage::new_id(),
+                    },
+                )
+            }
             Command::Status => Ok(
                 json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox"]}),
             ),
