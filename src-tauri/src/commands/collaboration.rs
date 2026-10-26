@@ -207,60 +207,72 @@ pub fn collaboration_room_coordinator(
 pub(crate) fn emit_external_changes(
     app: &AppHandle,
     db: &crate::storage::Db,
-    cache: &mut std::collections::HashMap<String, (String, String, i64, String)>,
+    cache: &mut std::collections::HashMap<String, String>,
 ) {
-    let Ok(rooms) = (|| -> std::result::Result<Vec<(String, String, String, String, i64, String)>, crate::error::AppError> {
-        let c = db.read();
-        let mut stmt = c.prepare(
-            "SELECT r.id, r.task_id, COALESCE(run.id,''), COALESCE(run.status,''),
-                    COALESCE((SELECT MAX(seq) FROM collaboration_messages m WHERE m.room_id=r.id),0),
-                    COALESCE((SELECT MAX(p.last_heartbeat_at) FROM collaboration_participations p WHERE p.room_id=r.id),'')
+    // One composite signature per room covering every externally-writable
+    // surface the room view projects: run identity/status, message seq,
+    // heartbeat, leave, read positions, phase and the config revision. A
+    // member that left stops heartbeating, so left_at must be watched or the
+    // UI would stay on a stale "connected".
+    let Ok(rooms) =
+        (|| -> std::result::Result<Vec<(String, String, String)>, crate::error::AppError> {
+            let c = db.read();
+            let mut stmt = c.prepare(
+            "SELECT r.id, r.task_id,
+                    COALESCE(run.id,'') || '|' || COALESCE(run.status,'') || '|' ||
+                    (SELECT MAX(seq) FROM collaboration_messages m WHERE m.room_id=r.id) || '|' ||
+                    (SELECT MAX(p.last_heartbeat_at) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
+                    (SELECT MAX(p.left_at) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
+                    (SELECT MAX(rd.read_at) FROM collaboration_reads rd WHERE rd.room_id=r.id) || '|' ||
+                    (SELECT MAX(p.phase_since) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
+                    r.revision
              FROM collaboration_rooms r
              LEFT JOIN collaboration_runs run ON run.room_id=r.id
                AND run.id=(SELECT id FROM collaboration_runs cr WHERE cr.room_id=r.id ORDER BY started_at DESC, id DESC LIMIT 1)",
         )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(crate::error::AppError::from)?;
-        Ok(rows)
-    })() else {
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(crate::error::AppError::from)?;
+            Ok(rows)
+        })()
+    else {
         return;
     };
-    for (room_id, task_id, run_id, status, max_seq, heartbeat) in rooms {
+    for (room_id, task_id, signature) in rooms {
         let previous = cache.get(&room_id);
-        let changed = match previous {
-            // First sight: announce only rooms that actually have a run or mail.
-            None => !run_id.is_empty() || max_seq > 0,
-            Some((_, prev_status, prev_seq, prev_beat)) => {
-                prev_seq != &max_seq || prev_status != &status || prev_beat != &heartbeat
-            }
-        };
-        if !changed {
+        if previous == Some(&signature) {
             continue;
         }
+        // First sight: announce only rooms that actually have a run.
+        if previous.is_none() && signature.split('|').next().unwrap_or_default().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = signature.split('|').collect();
         let category = match previous {
-            Some((_, prev_status, prev_seq, _)) if prev_seq != &max_seq => "message",
-            Some((prev_run, prev_status, _, _))
-                if prev_run != &run_id || prev_status != &status =>
-            {
-                "run"
+            None => "run",
+            Some(prev) => {
+                let prev_fields: Vec<&str> = prev.split('|').collect();
+                if prev_fields.get(2) != fields.get(2) {
+                    "message"
+                } else if prev_fields.get(0) != fields.get(0) || prev_fields.get(1) != fields.get(1)
+                {
+                    "run"
+                } else if prev_fields.get(7) != fields.get(7) {
+                    "room"
+                } else {
+                    "member"
+                }
             }
-            _ => "member",
         };
-        cache.insert(
-            room_id.clone(),
-            (run_id.clone(), status.clone(), max_seq, heartbeat.clone()),
-        );
+        let run_id = fields.first().copied().unwrap_or_default().to_string();
+        cache.insert(room_id.clone(), signature);
         let _ = app.emit(
             EVENT,
             serde_json::json!({"task_id":task_id,"room_id":room_id,"run_id":run_id,"category":category}),
@@ -320,8 +332,12 @@ fn wake_one(
     Ok(())
 }
 
-/// One member's wake with request-id idempotency: a replay returns the
-/// recorded outcome instead of launching again; a fresh request retries.
+/// One member's wake. The ledger row is claimed atomically BEFORE the side
+/// effect, so concurrent equal requests cannot both launch and a replay of a
+/// different operation is rejected by kind/fingerprint. A determinate failure
+/// settles as a completed MemberState (failed + error) and releases the
+/// claim, so an explicit retry with the same request id launches again; only
+/// a transmission interruption answers the original request.
 fn wake_with_ledger(
     app: &AppHandle,
     state: &AppState,
@@ -330,21 +346,22 @@ fn wake_with_ledger(
     run_id: &str,
     session_id: &str,
     request_id: &str,
-) -> Result<()> {
-    let (wake_method, replayed) = with_db(state, |db| {
-        let member = db
-            .collaboration_run_members(run_id)?
+) -> Result<Value> {
+    let wake_method = with_db(state, |db| {
+        db.collaboration_run_members(run_id)?
             .into_iter()
             .find(|m| m.session_id == session_id)
-            .ok_or_else(|| crate::error::other("该会话不是本次运行成员"))?;
-        let replayed = db.collaboration_request_exists(request_id)?;
-        Ok((member.wake_method, replayed))
+            .map(|m| m.wake_method)
+            .ok_or_else(|| crate::error::other("该会话不是本次运行成员"))
     })?;
-    if replayed {
-        return Ok(());
+    let claimed = with_db(state, |db| {
+        db.collaboration_claim_wake(request_id, room_id, run_id, session_id)
+    })?;
+    if !claimed {
+        // Replay (same operation) or a transmission-interrupted attempt:
+        // answer with the current recorded state, never a second launch.
+        return member_state(state, task_id, session_id);
     }
-    let fingerprint =
-        serde_json::json!({"room":room_id,"run":run_id,"session":session_id}).to_string();
     let attempt = wake_one(
         app,
         state,
@@ -354,29 +371,44 @@ fn wake_with_ledger(
         session_id,
         &wake_method,
     );
-    with_db(state, |db| {
-        match &attempt {
-            Ok(()) => {
-                db.collaboration_set_wake_status(run_id, session_id, "opened", None, request_id)?
-            }
-            Err(error) => db.collaboration_set_wake_status(
-                run_id,
-                session_id,
-                "failed",
-                Some(&error.to_string()),
-                request_id,
-            )?,
+    match &attempt {
+        Ok(()) => {
+            with_db(state, |db| {
+                db.collaboration_set_wake_status(run_id, session_id, "opened", None, request_id)
+            })?;
         }
-        if !replayed {
-            let c = db.write();
-            c.execute(
-                "INSERT OR IGNORE INTO collaboration_requests(request_id,kind,room_id,run_id,fingerprint,created_at) VALUES(?1,'wake',?2,?3,?4,?5)",
-                rusqlite::params![request_id, room_id, run_id, fingerprint, crate::storage::now()],
-            )?;
+        Err(error) => {
+            let message = error.to_string();
+            with_db(state, |db| {
+                db.collaboration_set_wake_status(
+                    run_id,
+                    session_id,
+                    "failed",
+                    Some(&message),
+                    request_id,
+                )?;
+                // Release the claim: a determinate failure must not swallow a
+                // later retry that reuses the request id.
+                db.collaboration_release_wake(request_id)
+            })?;
         }
-        Ok(())
+    }
+    member_state(state, task_id, session_id)
+}
+
+fn member_state(state: &AppState, task_id: &str, session_id: &str) -> Result<Value> {
+    let view = with_db(state, |db| {
+        map_cli(crate::collaboration::room_view(db, task_id))
     })?;
-    attempt
+    Ok(view["members"]
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|m| m["session_id"] == json!(session_id))
+        })
+        .cloned()
+        .unwrap_or(Value::Null))
 }
 
 /// Retry one member's wake (user action). Fails cleanly for old/stopped runs.
@@ -397,7 +429,7 @@ pub fn collaboration_member_wake(
             .map(|room| room.task_id)
             .ok_or_else(|| crate::error::other("协作室不存在"))
     })?;
-    wake_with_ledger(
+    let member = wake_with_ledger(
         &app,
         &state,
         &task_id,
@@ -406,18 +438,6 @@ pub fn collaboration_member_wake(
         &session_id,
         &request_id,
     )?;
-    let view = with_db(&state, |db| {
-        map_cli(crate::collaboration::room_view(db, &task_id))
-    })?;
     emit_changed(&app, &task_id, &room_id, &run_id, "member");
-    let member = view["members"]
-        .as_array()
-        .and_then(|members| {
-            members
-                .iter()
-                .find(|m| m["session_id"] == json!(session_id))
-        })
-        .cloned()
-        .unwrap_or(Value::Null);
     Ok(member)
 }

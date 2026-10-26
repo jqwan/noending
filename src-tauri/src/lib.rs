@@ -117,10 +117,7 @@ pub fn run() {
                 let state = app.state::<commands::AppState>();
                 let handle = app.handle().clone();
                 let collaboration_cache =
-                    std::sync::Mutex::new(std::collections::HashMap::<
-                        String,
-                        (String, String, i64, String),
-                    >::new());
+                    std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
                 let watcher = cli::watch_changes(state.db.clone(), move || {
                     let state = handle.state::<commands::AppState>();
                     let registry = handle.state::<terminal::TerminalRegistry>();

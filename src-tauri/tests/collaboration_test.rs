@@ -656,8 +656,16 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
         noending_lib::storage::collaboration::RenewOutcome::Renewed
     );
 
-    // Phase transitions ride on the current connection only.
-    db.collaboration_set_phase(&room_id, &run_id, "a", Some("processing"))
+    // Phase transitions ride on the entry connection only: the replaced
+    // connection's marker lands nowhere, the current one's sticks.
+    db.collaboration_set_phase(&second.connection_id, Some("processing"))
+        .unwrap();
+    let participations = db.collaboration_participations_for_run(&run_id).unwrap();
+    assert!(
+        participations[0].phase.is_none(),
+        "replaced connection cannot paint phase"
+    );
+    db.collaboration_set_phase(&takeover.connection_id, Some("processing"))
         .unwrap();
     let participations = db.collaboration_participations_for_run(&run_id).unwrap();
     assert_eq!(participations[0].phase.as_deref(), Some("processing"));

@@ -879,51 +879,39 @@ impl Db {
     /// (waiters observe it on their next poll), and stays restartable only
     /// through a fresh start on a non-archived task.
     pub fn collaboration_stop_runs_for_archived_task(&self, task_id: &str) -> Result<usize> {
+        self.tx(|tx| stop_runs_for_archived_task_conn(tx, task_id))
+    }
+
+    /// Claim the wake request before any side effect. A replay of the same
+    /// operation returns false; a reused id with different arguments is a
+    /// hard conflict; a fresh id is recorded and returns true.
+    pub fn collaboration_claim_wake(
+        &self,
+        request_id: &str,
+        room_id: &str,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<bool> {
+        let fingerprint =
+            serde_json::json!({"room":room_id,"run":run_id,"session":session_id}).to_string();
         self.tx(|tx| {
-            let Some(room) = room_by_task_conn(tx, task_id)? else {
-                return Ok(0);
-            };
-            let runs: Vec<String> = {
-                let mut st = tx.prepare(
-                    "SELECT id FROM collaboration_runs WHERE room_id=?1 AND status<>'stopped'",
-                )?;
-                let rows = st
-                    .query_map([&room.id], |r| r.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(crate::error::AppError::from)?;
-                rows
-            };
-            let mut stopped = 0;
-            for run_id in runs {
-                let request_id = format!("archive-{}", run_id);
-                let fingerprint = serde_json::json!({
-                    "room": room.id, "run": run_id, "initiator": serde_json::Value::Null,
-                })
-                .to_string();
-                if request_hit_conn(tx, &request_id, "stop", &fingerprint)?.is_some() {
-                    continue;
-                }
-                tx.execute(
-                    "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=NULL,stop_request_id=?3 WHERE id=?1 AND status<>'stopped'",
-                    params![run_id, now(), request_id],
-                )
-                .map_err(crate::error::AppError::from)?;
-                let notice_body = serde_json::json!({
-                    "room_id": room.id, "run_id": run_id, "reason": "task_archived",
-                })
-                .to_string();
-                append_message_conn(tx, &room.id, &run_id, None, "stop", &notice_body, None)?;
-                record_request_conn(
-                    tx,
-                    &request_id,
-                    "stop",
-                    &room.id,
-                    &run_id,
-                    &fingerprint,
-                )?;
-                stopped += 1;
+            if request_hit_conn(tx, request_id, "wake", &fingerprint)?.is_some() {
+                return Ok(false);
             }
-            Ok(stopped)
+            record_request_conn(tx, request_id, "wake", room_id, run_id, &fingerprint)?;
+            Ok(true)
+        })
+    }
+    /// Release a claimed wake request after a determinate failure, so an
+    /// explicit retry with the same request id launches again.
+    pub fn collaboration_release_wake(&self, request_id: &str) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "DELETE FROM collaboration_requests WHERE request_id=?1 AND kind='wake'",
+                [request_id],
+            )
+            .map_err(crate::error::AppError::from)?;
+            Ok(())
         })
     }
 
@@ -1062,6 +1050,48 @@ pub enum RenewOutcome {
 /// Resolve a request replay. A hit with the same kind and the exact original
 /// fingerprint returns the recorded run; any mismatch is a hard conflict —
 /// never an answer assembled from current, possibly-changed configuration.
+/// See `collaboration_stop_runs_for_archived_task`; runs inside the caller's
+/// transaction so the visibility flip and the run terminations commit or roll
+/// back together.
+pub(crate) fn stop_runs_for_archived_task_conn(tx: &Connection, task_id: &str) -> Result<usize> {
+    let Some(room) = room_by_task_conn(tx, task_id)? else {
+        return Ok(0);
+    };
+    let runs: Vec<String> = {
+        let mut st =
+            tx.prepare("SELECT id FROM collaboration_runs WHERE room_id=?1 AND status<>'stopped'")?;
+        let rows = st
+            .query_map([&room.id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::error::AppError::from)?;
+        rows
+    };
+    let mut stopped = 0;
+    for run_id in runs {
+        let request_id = format!("archive-{}", run_id);
+        let fingerprint = serde_json::json!({
+            "room": room.id, "run": run_id, "initiator": serde_json::Value::Null,
+        })
+        .to_string();
+        if request_hit_conn(tx, &request_id, "stop", &fingerprint)?.is_some() {
+            continue;
+        }
+        tx.execute(
+            "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=NULL,stop_request_id=?3 WHERE id=?1 AND status<>'stopped'",
+            params![run_id, now(), request_id],
+        )
+        .map_err(crate::error::AppError::from)?;
+        let notice_body = serde_json::json!({
+            "room_id": room.id, "run_id": run_id, "reason": "task_archived",
+        })
+        .to_string();
+        append_message_conn(tx, &room.id, &run_id, None, "stop", &notice_body, None)?;
+        record_request_conn(tx, &request_id, "stop", &room.id, &run_id, &fingerprint)?;
+        stopped += 1;
+    }
+    Ok(stopped)
+}
+
 fn request_hit_conn(
     tx: &Connection,
     request_id: &str,
@@ -1315,21 +1345,36 @@ impl Db {
 
     /// The wait flow's phase marker: listening on entry, processing once a
     /// batch has been handed out. Acknowledgement never changes it.
-    pub fn collaboration_set_phase(
-        &self,
-        room_id: &str,
-        run_id: &str,
-        session_id: &str,
-        phase: Option<&str>,
-    ) -> Result<()> {
+    /// Phase markers ride on one connection: a waiting request that has been
+    /// left or superseded can never repaint the new connection's phase.
+    pub fn collaboration_set_phase(&self, connection_id: &str, phase: Option<&str>) -> Result<()> {
         self.tx(|tx| {
             tx.execute(
-                "UPDATE collaboration_participations SET phase=?4,phase_since=CASE WHEN ?4 IS NULL THEN NULL ELSE ?5 END WHERE room_id=?1 AND run_id=?2 AND session_id=?3 AND left_at IS NULL",
-                params![room_id, run_id, session_id, phase, now()],
+                "UPDATE collaboration_participations SET phase=?2,phase_since=CASE WHEN ?2 IS NULL THEN NULL ELSE ?3 END WHERE id=?1 AND left_at IS NULL",
+                params![connection_id, phase, now()],
             )
             .map_err(crate::error::AppError::from)?;
             Ok(())
         })
+    }
+
+    /// The wait loop's liveness probe for its own connection: the current
+    /// participation of (run, session) must still be this connection and not
+    /// left. None means the row is gone (session deletion cascade).
+    pub fn collaboration_participation_state(
+        &self,
+        room_id: &str,
+        run_id: &str,
+        session_id: &str,
+    ) -> Result<Option<(String, bool)>> {
+        let c = self.read();
+        Ok(c.query_row(
+            "SELECT id,left_at IS NOT NULL FROM collaboration_participations WHERE room_id=?1 AND run_id=?2 AND session_id=?3",
+            params![room_id, run_id, session_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
+        )
+        .optional()
+        .map_err(crate::error::AppError::from)?)
     }
 
     /// Forward unread page for one member: messages past the acknowledged

@@ -475,21 +475,25 @@ pub(crate) fn room_wait(db: &Db, home: &NoEndingHome, p: RoomWait) -> CliResult<
             "协作运行已更新，不能在旧运行上操作",
         ));
     }
-    let participating = db
+    let entry = db
         .collaboration_participations_for_run(&p.run)?
-        .iter()
-        .any(|part| part.session_id == session && part.left_at.is_none() && part.room_id == p.room);
-    if !participating {
-        return Err(CliError::new("join_required", "请先加入协作再等待消息"));
-    }
+        .into_iter()
+        .find(|part| {
+            part.session_id == session && part.left_at.is_none() && part.room_id == p.room
+        });
+    let entry_connection = match entry {
+        Some(part) => part.id.clone(),
+        None => return Err(CliError::new("join_required", "请先加入协作再等待消息")),
+    };
     let deadline = p.timeout_seconds.map(|s| {
         std::time::Instant::now()
             .checked_add(std::time::Duration::from_secs(s))
             .ok_or_else(|| CliError::new("invalid_arguments", "timeout 超出可等待范围"))
     });
     let deadline = deadline.transpose()?;
-    // Entry marks listening; a delivered batch marks processing.
-    db.collaboration_set_phase(&p.room, &p.run, &session, Some("listening"))?;
+    // Entry marks listening; a delivered batch marks processing. Both ride on
+    // the entry connection so a superseded wait cannot repaint the new one.
+    db.collaboration_set_phase(&entry_connection, Some("listening"))?;
     let mut fetch = || {
         db.collaboration_wait_page(&p.room, &p.run, &session, p.limit)
             .map_err(CliError::from)
@@ -499,6 +503,7 @@ pub(crate) fn room_wait(db: &Db, home: &NoEndingHome, p: RoomWait) -> CliResult<
         &p.room,
         &p.run,
         &session,
+        &entry_connection,
         &current.status,
         deadline,
         &mut fetch,
@@ -510,6 +515,7 @@ fn room_wait_loop(
     room_id: &str,
     run_id: &str,
     session_id: &str,
+    entry_connection: &str,
     entry_status: &str,
     deadline: Option<std::time::Instant>,
     fetch: &mut dyn FnMut() -> CliResult<store::CollaborationMessagesPage>,
@@ -546,7 +552,7 @@ fn room_wait_loop(
             ));
         }
         if current.status == "stopped" {
-            db.collaboration_set_phase(room_id, run_id, session_id, None)?;
+            db.collaboration_set_phase(entry_connection, None)?;
             return Ok(wait_value(
                 "stopped",
                 &store::CollaborationMessagesPage {
@@ -556,12 +562,24 @@ fn room_wait_loop(
                 },
             ));
         }
+        // The waiting request owns its entry connection only: a leave, a
+        // takeover or a deleted row ends it instead of letting a stale waiter
+        // consume mail that belongs to a newer connection.
+        match db.collaboration_participation_state(room_id, run_id, session_id)? {
+            Some((id, left)) if id == entry_connection && !left => {}
+            _ => {
+                return Err(CliError::new(
+                    "join_required",
+                    "参与连接已结束，请重新加入后再等待",
+                ))
+            }
+        }
         let expired = deadline.is_some_and(|d| std::time::Instant::now() >= d);
         let unread = db.collaboration_unread_of(room_id, run_id, session_id)?;
         if unread.count > 0 || expired {
             let page = fetch()?;
             if !page.items.is_empty() {
-                db.collaboration_set_phase(room_id, run_id, session_id, Some("processing"))?;
+                db.collaboration_set_phase(entry_connection, Some("processing"))?;
                 return Ok(wait_value("messages", &page));
             }
             if expired {
@@ -717,6 +735,20 @@ mod room_wait_tests {
                 "m1",
             )
             .unwrap();
+        // The wait loop verifies its participation each iteration; it holds
+        // the connection id the join produced.
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+        let participation =
+            t.1.collaboration_join(
+                &started.room.id,
+                &started.run.id,
+                "b",
+                "cli",
+                "cli-resident",
+                &cutoff,
+            )
+            .unwrap();
+        let entry_connection = participation.connection_id;
         let deliver = AtomicBool::new(false);
         let mut fetch = || {
             if deliver.load(Ordering::SeqCst) {
@@ -742,6 +774,7 @@ mod room_wait_tests {
                     &started.room.id,
                     &started.run.id,
                     "b",
+                    &entry_connection,
                     "starting",
                     None,
                     &mut fetch,
