@@ -4,7 +4,7 @@
 use super::{with_db, AppState};
 use crate::cli::CliError;
 use crate::error::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
 const EVENT: &str = "collaboration-changed";
@@ -114,6 +114,30 @@ pub fn collaboration_room_start(
         .as_str()
         .unwrap_or_default()
         .to_string();
+    // Transaction-external wake side effects, one idempotent attempt per
+    // member: a failure is recorded on that member alone and retried via
+    // collaboration_member_wake; nobody else is re-launched for it. Replaying
+    // the start request hits the same per-member ledger keys and re-launches
+    // nothing.
+    for member in started["members"].as_array().cloned().unwrap_or_default() {
+        let session_id = member["session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if session_id.is_empty() {
+            continue;
+        }
+        let derived = format!("{request_id}:{session_id}");
+        let _ = wake_with_ledger(
+            &app,
+            &state,
+            &task_id,
+            &room_id,
+            &run_id,
+            &session_id,
+            &derived,
+        );
+    }
     emit_changed(&app, &task_id, &room_id, &run_id, "run");
     Ok(started)
 }
@@ -242,4 +266,158 @@ pub(crate) fn emit_external_changes(
             serde_json::json!({"task_id":task_id,"room_id":room_id,"run_id":run_id,"category":category}),
         );
     }
+}
+
+fn join_hint(task_id: &str, room_id: &str, run_id: &str) -> String {
+    // The wake hint stays minimal: ids plus the reading-rules entry point.
+    format!(
+        "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}\n\
+         请使用 noending 技能参与：room join → room wait → 处理后 room ack → 继续 wait。\
+         身份与读取规则见统一技能的信箱/协作参考。"
+    )
+}
+
+/// Wake one member by its recorded method. Terminal members resume in the
+/// embedded terminal with the short join hint (live terminals are reused);
+/// desktop members get their app opened and the user notifies them. Opening
+/// an app or a terminal never fakes a join.
+fn wake_one(
+    app: &AppHandle,
+    state: &AppState,
+    task_id: &str,
+    room_id: &str,
+    run_id: &str,
+    session_id: &str,
+    wake_method: &str,
+) -> Result<()> {
+    let hint = join_hint(task_id, room_id, run_id);
+    match wake_method {
+        crate::storage::collaboration::WAKE_TERMINAL => {
+            crate::commands::launch_mailbox_terminal(app, session_id, &hint)?;
+        }
+        crate::storage::collaboration::WAKE_DESKTOP => {
+            let route = with_db(state, |db| {
+                let session = db
+                    .get_session(session_id)?
+                    .ok_or_else(|| crate::error::other("成员会话不存在"))?;
+                Ok(crate::adapters::adapter_for(session.agent).desktop_resume_route(&session))
+            })?;
+            match route {
+                crate::adapters::ResumeRoute::Desktop(open) => {
+                    crate::platform::launcher::open_uri(&open.uri)?;
+                    crate::commands::ingestion::enqueue(
+                        app,
+                        crate::commands::ingestion::IngestScope::RefreshSession(
+                            session_id.to_string(),
+                        ),
+                    );
+                }
+                _ => return Err(crate::error::other("该会话没有桌面端打开方式")),
+            }
+        }
+        other => return Err(crate::error::other(format!("未知唤醒方式 {other}"))),
+    }
+    Ok(())
+}
+
+/// One member's wake with request-id idempotency: a replay returns the
+/// recorded outcome instead of launching again; a fresh request retries.
+fn wake_with_ledger(
+    app: &AppHandle,
+    state: &AppState,
+    task_id: &str,
+    room_id: &str,
+    run_id: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<()> {
+    let (wake_method, replayed) = with_db(state, |db| {
+        let member = db
+            .collaboration_run_members(run_id)?
+            .into_iter()
+            .find(|m| m.session_id == session_id)
+            .ok_or_else(|| crate::error::other("该会话不是本次运行成员"))?;
+        let replayed = db.collaboration_request_exists(request_id)?;
+        Ok((member.wake_method, replayed))
+    })?;
+    if replayed {
+        return Ok(());
+    }
+    let fingerprint =
+        serde_json::json!({"room":room_id,"run":run_id,"session":session_id}).to_string();
+    let attempt = wake_one(
+        app,
+        state,
+        task_id,
+        room_id,
+        run_id,
+        session_id,
+        &wake_method,
+    );
+    with_db(state, |db| {
+        match &attempt {
+            Ok(()) => {
+                db.collaboration_set_wake_status(run_id, session_id, "opened", None, request_id)?
+            }
+            Err(error) => db.collaboration_set_wake_status(
+                run_id,
+                session_id,
+                "failed",
+                Some(&error.to_string()),
+                request_id,
+            )?,
+        }
+        if !replayed {
+            let c = db.write();
+            c.execute(
+                "INSERT OR IGNORE INTO collaboration_requests(request_id,kind,room_id,run_id,fingerprint,created_at) VALUES(?1,'wake',?2,?3,?4,?5)",
+                rusqlite::params![request_id, room_id, run_id, fingerprint, crate::storage::now()],
+            )?;
+        }
+        Ok(())
+    })?;
+    attempt
+}
+
+/// Retry one member's wake (user action). Fails cleanly for old/stopped runs.
+#[tauri::command]
+pub fn collaboration_member_wake(
+    app: AppHandle,
+    state: State<AppState>,
+    room_id: String,
+    run_id: String,
+    session_id: String,
+    request_id: String,
+) -> Result<Value> {
+    let task_id = with_db(&state, |db| {
+        map_cli(
+            crate::collaboration::guard_current_run(db, &room_id, &run_id).map(|_| Value::Null),
+        )?;
+        db.collaboration_room_by_id(&room_id)?
+            .map(|room| room.task_id)
+            .ok_or_else(|| crate::error::other("协作室不存在"))
+    })?;
+    wake_with_ledger(
+        &app,
+        &state,
+        &task_id,
+        &room_id,
+        &run_id,
+        &session_id,
+        &request_id,
+    )?;
+    let view = with_db(&state, |db| {
+        map_cli(crate::collaboration::room_view(db, &task_id))
+    })?;
+    emit_changed(&app, &task_id, &room_id, &run_id, "member");
+    let member = view["members"]
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|m| m["session_id"] == json!(session_id))
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(member)
 }

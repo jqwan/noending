@@ -874,6 +874,25 @@ impl Db {
         })
     }
 
+    /// Record one wake attempt's outcome on the run member row.
+    pub fn collaboration_set_wake_status(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        status: &str,
+        error: Option<&str>,
+        request_id: &str,
+    ) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "UPDATE collaboration_run_members SET wake_status=?3,wake_error=?4,wake_request_id=?5 WHERE run_id=?1 AND session_id=?2",
+                params![run_id, session_id, status, error, request_id],
+            )
+            .map_err(crate::error::AppError::from)?;
+            Ok(())
+        })
+    }
+
     pub fn collaboration_participations_for_run(
         &self,
         run_id: &str,

@@ -180,6 +180,24 @@ ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 
 收发和标记的 Agent 操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
 
+## 协作室
+
+每个任务至多一个协作室，消息单份存储、成员各自维护阅读位置。查询不需要桌面：
+
+```sh
+ne room resolve --task TASK
+ne room show ROOM
+ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]
+ne room join ROOM --run RUN --from-session SELF
+ne room wait ROOM --run RUN --from-session SELF [--timeout SECONDS] [--limit 50]
+ne room ack ROOM --run RUN --from-session SELF --through-seq N
+ne room send ROOM --run RUN --from-session SELF --message TEXT (or --file FILE)
+ne room leave ROOM --run RUN --from-session SELF
+ne room stop ROOM --run RUN --from-session SELF
+```
+
+开启、成员选择、负责人更换和单独重试唤醒是桌面用户入口，模型没有开启或配置协作室的接口。成员模型在收到加入提示后用 `join` 建立参与连接（CLI 自动拉起驻留监听进程，每 10 秒续租；30 秒无续租显示连接中断），随后循环 `wait` → 处理批次 → `ack` → 继续 `wait`。`wait` 进入时标记 listening，交付批次标记 processing；不自动已读，`ack` 只确认已处理位置且仅向前。自己的发言不计入自己的未读。停止后的 run 返回 `status=stopped`，旧 run 报 `run_inactive`；`stop` 仅当前负责人可用。`leave` 是本人参与的清理，可重复调用，不解除任务跟踪。
+
 ## 摘要
 
 摘要以 `summary.items` 返回，每个事项包含 `id`、`title`、`description`、`details`。事项可自由融合、拆分、改名、删除和排序；延续事项保留 ID，新增省略 ID，由程序生成。摘要没有标题保护和执行状态；任务的任务事项独立管理。版本号属于整份摘要。

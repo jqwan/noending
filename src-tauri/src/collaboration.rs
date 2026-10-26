@@ -249,7 +249,7 @@ pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
 /// Every run-scoped operation answers only the room's CURRENT run: an old run
 /// id is stale, a stopped run is over — both are `run_inactive`, never a
 /// silent success that would leak into a newer run.
-fn guard_current_run(db: &Db, room_id: &str, run_id: &str) -> CliResult<()> {
+pub(crate) fn guard_current_run(db: &Db, room_id: &str, run_id: &str) -> CliResult<()> {
     let current = db
         .collaboration_current_run(room_id)?
         .ok_or_else(|| CliError::new("run_inactive", "协作室还没有任何运行"))?;
