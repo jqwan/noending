@@ -74,11 +74,17 @@ pub fn set_workstream_projects(db: &Db, id: &str, projects: &[String]) -> Result
 /// Absolute, not a toggle: a retry or double click must not quietly
 /// un-archive the Workstream.
 pub fn archive_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
-    let task = set_visibility(db, workstream_id, workstream_visibility::ARCHIVED)?;
-    // Archiving a task terminates its room's in-flight collaborations and
-    // wakes their waiters through the stop notice; the archived task refuses
-    // any new start.
-    db.collaboration_stop_runs_for_archived_task(workstream_id)?;
+    // The visibility flip and the collaboration terminations commit together:
+    // an archived task never leaves an in-flight run behind.
+    let task = db.tx(|tx| {
+        let mut w = crate::storage::get_workstream_conn(tx, workstream_id)?
+            .ok_or_else(|| other("任务不存在"))?;
+        w.visibility = workstream_visibility::ARCHIVED.into();
+        w.updated_at = now();
+        crate::storage::upsert_workstream_conn(tx, &w)?;
+        crate::storage::collaboration::stop_runs_for_archived_task_conn(tx, workstream_id)?;
+        Ok(w)
+    })?;
     Ok(task)
 }
 
