@@ -306,6 +306,7 @@ pub fn run() {
             commands::terminal_activity_seen,
             commands::collaboration::collaboration_candidates,
         commands::collaboration::collaboration_room_coordinator,
+        commands::collaboration::collaboration_member_wake,
         commands::collaboration::collaboration_room_get,
         commands::collaboration::collaboration_room_messages,
         commands::collaboration::collaboration_room_send,
