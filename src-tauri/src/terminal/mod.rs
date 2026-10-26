@@ -3282,6 +3282,7 @@ mod tests {
         use activity::ActivityState::*;
         for immediate in [false, true] {
             let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             let mut event = native_event("mailbox-native");
             event.activity = Some(activity::ActivitySignal {
@@ -3291,7 +3292,7 @@ mod tests {
             });
             registry.report_native_identity(&db, &id, &event);
             let first = db
-                .mailbox_send_with_notification(&session, Some(&session), "first", immediate)
+                .mailbox_send_with_notification(&session, Some(&sender.id), "first", immediate)
                 .unwrap();
             assert!(
                 registry
@@ -3328,7 +3329,7 @@ mod tests {
                 starts_turn: false,
             });
             registry.report_native_identity(&db, &id, &event);
-            db.mailbox_send_with_notification(&session, Some(&session), "second", immediate)
+            db.mailbox_send_with_notification(&session, Some(&sender.id), "second", immediate)
                 .unwrap();
             registry.check_mailboxes(&db).unwrap();
             assert_eq!(*bytes.lock().unwrap(), first_frame.as_bytes());
@@ -3454,11 +3455,12 @@ mod tests {
         use notifications::ReminderKind::{Automatic, Manual};
         for (immediate, mark_read) in [(false, false), (true, false), (true, true)] {
             let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
             let registry = std::sync::Arc::new(registry);
             let db = std::sync::Arc::new(db);
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             let mail = db
-                .mailbox_send_with_notification(&session, Some(&session), "one", immediate)
+                .mailbox_send_with_notification(&session, Some(&sender.id), "one", immediate)
                 .unwrap();
             registry
                 .set_auto_notifications(&db, &id, identity, true)
@@ -3500,6 +3502,7 @@ mod tests {
     fn immediate_requests_merge_with_ordinary_mail_in_working_and_keep_mailbox_arrival_order() {
         use activity::ActivityState::*;
         let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -3513,10 +3516,10 @@ mod tests {
         registry.report_native_identity(&db, &id, &e);
         let ordinary = db.mailbox_send(&session, None, "first ordinary").unwrap();
         let requested = db
-            .mailbox_send_with_notification(&session, Some(&session), "second immediate", true)
+            .mailbox_send_with_notification(&session, Some(&sender.id), "second immediate", true)
             .unwrap();
         let requested_two = db
-            .mailbox_send_with_notification(&session, Some(&session), "third immediate", true)
+            .mailbox_send_with_notification(&session, Some(&sender.id), "third immediate", true)
             .unwrap();
         registry.check_mailboxes(&db).unwrap();
         assert!(bytes.lock().unwrap().is_empty());
@@ -3555,8 +3558,9 @@ mod tests {
         use activity::ActivityState::*;
         for state in [Idle, Completed, Working, Unknown] {
             let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
-            db.mailbox_send_with_notification(&session, Some(&session), "request", true)
+            db.mailbox_send_with_notification(&session, Some(&sender.id), "request", true)
                 .unwrap();
             registry.initialize_mailboxes(&db).unwrap();
             let mut e = native_event("mailbox-native");
@@ -3590,6 +3594,7 @@ mod tests {
     fn read_or_deleted_immediate_requests_do_not_release_other_unread_mail_while_working() {
         use activity::ActivityState::*;
         let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -3603,10 +3608,10 @@ mod tests {
         registry.report_native_identity(&db, &id, &e);
         db.mailbox_send(&session, None, "ordinary").unwrap();
         let read = db
-            .mailbox_send_with_notification(&session, Some(&session), "read", true)
+            .mailbox_send_with_notification(&session, Some(&sender.id), "read", true)
             .unwrap();
         let deleted = db
-            .mailbox_send_with_notification(&session, Some(&session), "deleted", true)
+            .mailbox_send_with_notification(&session, Some(&sender.id), "deleted", true)
             .unwrap();
         registry.check_mailboxes(&db).unwrap();
         db.mailbox_mark(&session, &read.id, read.revision, true)
@@ -3632,6 +3637,7 @@ mod tests {
         use activity::ActivityState::*;
         for state in [Interrupted, Failed] {
             let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             registry
                 .set_auto_notifications(&db, &id, identity, true)
@@ -3643,7 +3649,7 @@ mod tests {
                 starts_turn: false,
             });
             registry.report_native_identity(&db, &id, &e);
-            db.mailbox_send_with_notification(&session, Some(&session), "request", true)
+            db.mailbox_send_with_notification(&session, Some(&sender.id), "request", true)
                 .unwrap();
             registry.check_mailboxes(&db).unwrap();
             e.activity.as_mut().unwrap().state = state;

@@ -70,6 +70,30 @@ fn editing_preserves_sender_time_and_unread_but_stale_read_cannot_consume_new_co
     assert!(db.mailbox_read("b", &m.id).is_err());
 }
 #[test]
+fn self_mail_is_rejected_without_persisting_but_user_and_other_session_mail_survive_reopen() {
+    let f = Fixture::new();
+    {
+        let db = f.db();
+        for notify in [false, true] {
+            let error = db
+                .mailbox_send_with_notification("a", Some("a"), "self mail", notify)
+                .unwrap_err();
+            assert!(error.to_string().contains("不能给自己发送信箱消息"));
+        }
+        let user = db.mailbox_send("a", None, "user mail").unwrap();
+        assert!(user.sender_session_id.is_none());
+        db.mailbox_send("a", Some("b"), "other session mail")
+            .unwrap();
+    }
+    let db = f.db();
+    let page = db.mailbox_list("a", "all", None, 50).unwrap();
+    assert_eq!((page.total, page.unread), (2, 2));
+    assert_eq!(page.items[0].body, "user mail");
+    assert_eq!(page.items[1].body, "other session mail");
+    assert_eq!(page.items[1].sender_session_id.as_deref(), Some("b"));
+}
+
+#[test]
 fn recipient_deletion_removes_mail_while_sender_deletion_preserves_other_inboxes() {
     let f = Fixture::new();
     let db = f.db();

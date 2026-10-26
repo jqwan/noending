@@ -33,7 +33,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | --- | --- |
 | 状态与定位 | `status`、`freshness`、`agent_list`、`project_resolve`、`session_resolve` |
 | 对象查询 | `object_list`、`object_get` |
-| 信箱 | `mailbox_list`、`mailbox_read`、`mailbox_send`、`mailbox_mark` |
+| 信箱 | `mailbox_list`、`mailbox_read`、`mailbox_send`、`mailbox_mark`、`mailbox_wait` |
 | 会话控制（需桌面运行） | `session_terminals`、`session_start` |
 | 历史与证据 | `session_search`、`session_messages` |
 | 事项摘要 | `summary_search`、`summary_get`、`summary_update`、`summary_context`、`summary_input`、`summary_submit` |
@@ -112,10 +112,11 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | `mailbox_read` | `{session,message_id}`，返回正文、发件会话、服务端时间、read_at、revision 和 notify_immediately |
 | `mailbox_send` | `{session,message,from_session,notify_immediately?:boolean}`，必须显式提供有效发件会话 ID，内嵌终端也不例外；成功表示持久化 |
 | `mailbox_mark` | `{session,message_id,revision,state:"read"|"unread",from_session?}`，只能标记自己的信箱 |
+| `mailbox_wait` | `{session,timeout_seconds?,limit?}`，无未读时服务端持续等待，不返回周期空结果；有未读立即返回 `status=messages`（与 mailbox_list 未读分页同构），可选时限到期返回 `status=timeout`，取消、断连或会话删除及时结束。不改动已读，跨进程可用且无需桌面；宿主工具超时是客户端限制，用 `timeout_seconds` 对齐并按需再次调用 |
 
 `sender_session_id=null` 表示用户，否则是来源会话 ID。CLI/MCP 不得以 user、external 或匿名身份发送；内嵌终端发信时使用实际绑定的身份覆盖传入来源；外部调用用 session_resolve 解析自己的原生身份后提供 from_session，后端检查其存在性。标记消息时，显式来源仍须与终端绑定一致。消息不增加正文来源前缀。
 
-读取不自动已读，标记使用实际读取到的版本，冲突后重读。发送者可用 mailbox_read 查询自己已发出消息的当前状态，不能代收件会话标记。发送成功、已读与任务完成彼此独立。写请求复用 request_id；发送／标记回执不保存另一份正文。
+读取不自动已读，标记使用实际读取到的版本，冲突后重读。会话不能给自己发信，按后端实际采用的发件身份判断；用户界面发信不受此限制。发送者可用 mailbox_read 查询自己已发出消息的当前状态，不能代收件会话标记。发送成功、已读与任务完成彼此独立。写请求复用 request_id；发送／标记回执不保存另一份正文。
 
 桌面只在新消息到达时唤醒没有运行终端且支持 TUI 的收件会话。运行期自动通知由用户控制，模型无设置接口。普通自动通知在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的未读数量提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动通知，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动通知。多条请求合并，不指定单条消息或改变信箱顺序；开启自动通知时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查收提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及统一技能中的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。
 

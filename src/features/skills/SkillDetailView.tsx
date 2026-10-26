@@ -55,7 +55,6 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
   const [previewing, setPreviewing] = useState(false);
   const [configuring, setConfiguring] = useState(false);
   const [registering, setRegistering] = useState(false);
-  const [contentModalOpen, setContentModalOpen] = useState(false);
   const previewRequest = useRef(0);
   const request = useRef(0);
   const alive = useRef(true);
@@ -142,6 +141,10 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
     if (!row?.path) return;
     void api.openPath(row.path).catch(e => setError(String(e)));
   };
+  const copyContent = async () => {
+    if (!detail?.content) return;
+    showToast((await copyToClipboard(detail.content)) ? "已复制" : "复制失败");
+  };
   const userEntries = row ? row.entry_paths.map((entry, i) => ({ entry, link: row.entry_links[i] === true, location: locations.find(l => l.id === row.locations[i]) })).filter(entry => entry.location?.scope === "user") : [];
   const userScopeEntries: SkillScopeEntry[] = userEntries.map(entry => ({
     path: entry.entry,
@@ -162,20 +165,18 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
       <div className="detail-main">
         <section className="card detail-section" aria-label="技能详情">
           <div className="row between" style={{ alignItems: "center" }}>
-            <h2><Icon name="file" />描述</h2>
-            <button
-              type="button"
-              className="btn small ghost"
-              onClick={() => setContentModalOpen(true)}
-            >
-              查看全文
-            </button>
+            <h2><Icon name="file" />正文</h2>
+            {!!detail?.content.trim() && (
+              <button
+                type="button"
+                className="btn small ghost"
+                onClick={() => void copyContent()}
+              >
+                复制全文
+              </button>
+            )}
           </div>
-          {row.description ? (
-            <p className="skill-description">{row.description}</p>
-          ) : (
-            <p className="small muted">暂无技能描述。</p>
-          )}
+          <SkillContent content={detail?.content ?? ""} />
           {row.error && <div className="skill-error">{row.error}</div>}
         </section>
       </div>
@@ -275,13 +276,6 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
           if (result.resource_id === resourceId) void refresh(true).catch(() => {});
           else navigate({ view: "skill", resourceId: result.resource_id, initialTitle: result.name });
         }} />}
-    {contentModalOpen && row && detail && (
-      <SkillContentModal
-        name={row.name}
-        content={detail.content}
-        onClose={() => setContentModalOpen(false)}
-      />
-    )}
   </div>;
 }
 
@@ -316,17 +310,8 @@ export function parseFrontmatter(raw: string): { key: string; value: string }[] 
   return pairs;
 }
 
-function SkillContentModal({ name, content, onClose }: {
-  name: string;
-  content: string;
-  onClose: () => void;
-}) {
-  const [preview, setPreview] = useState(true);
-
-  const copyAll = async () => {
-    const ok = await copyToClipboard(content);
-    showToast(ok ? "已复制" : "复制失败");
-  };
+function SkillContent({ content }: { content: string }) {
+  if (!content.trim()) return <p className="small muted">暂无技能内容。</p>;
 
   const frontmatterMatch = content.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   const frontmatterRaw = frontmatterMatch ? frontmatterMatch[1] : null;
@@ -334,61 +319,29 @@ function SkillContentModal({ name, content, onClose }: {
   const cleanContent = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
 
   return (
-    <Modal title={`${name} · SKILL.md`} wide onClose={onClose}>
-      <div className="settings-seg" role="group" aria-label="显示方式" style={{ marginBottom: 12 }}>
-        <button
-          type="button"
-          className={preview ? "" : "on"}
-          aria-pressed={!preview}
-          onClick={() => setPreview(false)}
-        >
-          原文
-        </button>
-        <button
-          type="button"
-          className={preview ? "on" : ""}
-          aria-pressed={preview}
-          onClick={() => setPreview(true)}
-        >
-          预览
-        </button>
-      </div>
-      {preview ? (
-        <div className="skill-markdown skill-modal-content">
-          {frontmatterPairs.length > 0 ? (
-            <div className="skill-frontmatter-box">
-              <dl className="skill-properties">
-                {frontmatterPairs.map(({ key, value }) => (
-                  <div key={key} style={{ display: "contents" }}>
-                    <dt className="mono" style={{ fontWeight: 600 }}>{key}</dt>
-                    <dd style={{ whiteSpace: "pre-wrap" }}>{value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ) : frontmatterRaw ? (
-            <pre className="skill-source" style={{ margin: "0 0 16px" }}>{frontmatterRaw}</pre>
-          ) : null}
-          {cleanContent.trim() ? (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}
-            >
-              {cleanContent}
-            </ReactMarkdown>
-          ) : frontmatterPairs.length === 0 && !frontmatterRaw ? (
-            <p className="small muted">暂无内容。</p>
-          ) : null}
+    <div className="skill-markdown">
+      {frontmatterPairs.length > 0 ? (
+        <div className="skill-frontmatter-box">
+          <dl className="skill-properties">
+            {frontmatterPairs.map(({ key, value }) => (
+              <div key={key} style={{ display: "contents" }}>
+                <dt className="mono" style={{ fontWeight: 600 }}>{key}</dt>
+                <dd style={{ whiteSpace: "pre-wrap" }}>{value}</dd>
+              </div>
+            ))}
+          </dl>
         </div>
-      ) : (
-        <pre className="skill-source skill-modal-content" style={{ margin: 0 }}>
-          {content}
-        </pre>
+      ) : frontmatterRaw ? (
+        <pre className="skill-source" style={{ margin: "0 0 16px" }}>{frontmatterRaw}</pre>
+      ) : null}
+      {cleanContent.trim() && (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{ a: ({ children }) => <span>{children}</span>, img: () => null }}
+        >
+          {cleanContent}
+        </ReactMarkdown>
       )}
-      <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-        <button type="button" className="btn" onClick={copyAll}>复制全文</button>
-        <button type="button" className="btn" onClick={onClose}>关闭</button>
-      </div>
-    </Modal>
+    </div>
   );
 }

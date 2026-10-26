@@ -103,3 +103,51 @@ it("shows the entire inbox count across pages while keeping every message access
   fireEvent.click(last);
   expect(within(screen.getByRole("dialog", { name: "信箱消息" })).getByText("最后一条完整消息")).toBeTruthy();
 });
+
+it("sends user mail from session details without a running terminal and refreshes the history", async () => {
+  const body = "完整正文\n" + "长消息".repeat(1000);
+  const sent = { ...message, id: "user-mail", sender_session_id: null, body };
+  let finish!: (value: MailboxMessage) => void;
+  vi.mocked(api.mailboxSend).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  render(<MailboxHistory sessionId="self" />);
+  fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+  const dialog = screen.getByRole("dialog", { name: "发送信箱消息" });
+  const submit = within(dialog).getByRole("button", { name: "发送到信箱" });
+  expect(submit).toHaveProperty("disabled", true);
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "消息内容" }), { target: { value: body } });
+  fireEvent.click(submit); fireEvent.click(submit);
+  expect(api.mailboxSend).toHaveBeenCalledTimes(1);
+  expect(api.mailboxSend).toHaveBeenCalledWith("self", body);
+  expect(within(dialog).getByRole("button", { name: "发送中…" })).toHaveProperty("disabled", true);
+  vi.mocked(api.mailboxList).mockResolvedValue({ items: [message, sent], total: 2, unread: 2, next_cursor: null });
+  await act(async () => { finish(sent); });
+  await screen.findByRole("heading", { name: "信箱（2）" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText("用户")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /^查看消息：完整正文/ }));
+  expect(within(screen.getByRole("dialog", { name: "信箱消息" })).getByText(/完整正文/).textContent).toBe(body);
+  expect(api.mailboxRemind).not.toHaveBeenCalled();
+  expect(api.mailboxEdit).not.toHaveBeenCalled();
+});
+
+it("keeps a failed draft available for retry and clears it when switching recipient sessions", async () => {
+  vi.mocked(api.mailboxSend).mockRejectedValueOnce("保存失败").mockResolvedValueOnce({ ...message, sender_session_id: null, body: "重试正文" });
+  const view = render(<MailboxHistory sessionId="self" />);
+  fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "消息内容" }), { target: { value: "重试正文" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送到信箱" }));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "保存失败");
+  expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveProperty("value", "重试正文");
+  fireEvent.click(screen.getByRole("button", { name: "发送到信箱" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.mailboxSend).toHaveBeenLastCalledWith("self", "重试正文");
+  fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "消息内容" }), { target: { value: "只给原会话的草稿" } });
+  view.rerender(<MailboxHistory sessionId="other" />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+  expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveProperty("value", "");
+  fireEvent.change(screen.getByRole("textbox", { name: "消息内容" }), { target: { value: "新会话消息" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送到信箱" }));
+  await waitFor(() => expect(api.mailboxSend).toHaveBeenLastCalledWith("other", "新会话消息"));
+});

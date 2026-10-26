@@ -405,7 +405,8 @@ describe("NewSessionView task and project selection", () => {
     expect((screen.getByLabelText("项目目录") as HTMLSelectElement).value).toBe("/tmp/workspace");
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME));
     expect(api.addProjectPath).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "所属项目：我的聊天空间" }));
+    // 项目是默认工作目录推出来的，标签要认这层「默认」——直接写项目名会像是自己挑的。
+    fireEvent.click(screen.getByRole("button", { name: "所属项目：默认 · 我的聊天空间" }));
     expect(screen.queryByRole("button", { name: "无项目" })).toBeNull();
   });
 
@@ -589,6 +590,37 @@ it("offers only tasks associated with the selected project", async () => {
 
 });
 
+/** 项目没有工作路径不是死路：后端 `resolve_new_cwd` 会回落到 NoEnding 默认工作目录，
+ *  前端不该拿一个灰按钮把它否定掉。只是必须把「落在哪」说出来。 */
+it("starts a project without paths by falling back to the default workspace, and says so", async () => {
+  const navigate = vi.fn();
+  const pathless: ProjectCardData = {
+    ...chatProject, id: "pathless", name: "空目录项目", representative_paths: [], search_paths: [],
+  };
+  vi.mocked(api.listProjectCards).mockResolvedValue([pathless]);
+  vi.mocked(api.prepareNewSession).mockResolvedValue({
+    ...preparedFixture,
+    cwd: "/tmp/workspace",
+    cwd_resolution: { source: "default_workspace", cwd: "/tmp/workspace", fallback: false, note: null },
+  });
+  vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
+    launched_via: "内嵌终端", command_line: "codex", note: "已启动", terminal_id: "t-default",
+  });
+  render(<NewSessionView navigate={navigate} projectId="pathless" />);
+
+  expect(await screen.findByText("你想在 空目录项目 中构建什么？")).toBeTruthy();
+  await waitFor(() => expect(screen.getByRole("status").textContent)
+    .toBe("未选择项目目录，将从默认工作目录启动：/tmp/workspace"));
+
+  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "先跑起来" } });
+  const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+  await waitFor(() => expect(send.disabled).toBe(false));
+  fireEvent.click(send);
+
+  await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], undefined, "先跑起来", NATIVE_RUNTIME));
+  expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-default" });
+});
+
 it("shows the resolved fallback directory and uses the same default-path intent when sending", async () => {
   vi.mocked(api.prepareNewSession).mockResolvedValue({
     ...preparedFixture,
@@ -751,10 +783,28 @@ describe("NewSessionView runtime selection", () => {
     cleanup();
     vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }])));
     render(<NewSessionView navigate={vi.fn()} />);
-    await screen.findByText("没有可用的新建会话 Agent，请确保本地已安装支持的 Agent CLI。");
+    await screen.findByText("本地还没有检测到受支持的 Agent TUI。安装后即可在这里新建会话。");
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
     expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
     expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
+  });
+
+  /** 提示长在输入区里，并且被输入框的 aria-describedby 引用——否则读屏用户只遇到一个
+   *  永不启用的发送按钮。 */
+  it("explains an unusable agent inside the composer and points at the agent page", async () => {
+    const navigate = vi.fn();
+    vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(
+      Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }]),
+    ));
+    render(<NewSessionView navigate={navigate} />);
+
+    const notice = await screen.findByText("本地还没有检测到受支持的 Agent TUI。安装后即可在这里新建会话。");
+    expect(notice.closest(".new-session-composer")).toBeTruthy();
+    expect(screen.getByLabelText("首条消息").getAttribute("aria-describedby"))
+      .toBe("new-session-agent-notice new-session-message-hint");
+
+    fireEvent.click(screen.getByRole("button", { name: "前往 Agent 设置" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "agents" });
   });
 });
 

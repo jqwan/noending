@@ -68,9 +68,46 @@ export function MailboxMessagePreview({ message }: { message: MailboxMessage }) 
 }
 
 export function MailboxHistory({ sessionId }: { sessionId: string }) {
-  const { page, error, more } = useMailboxMessages(sessionId, "all");
+  return <MailboxHistoryContent key={sessionId} sessionId={sessionId} />;
+}
+
+function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; onClose: () => void; onSent: () => void }) {
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const sending = useRef(false);
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const send = async () => {
+    if (sending.current || !body.trim()) return;
+    sending.current = true; setBusy(true); setError("");
+    try {
+      await api.mailboxSend(sessionId, body);
+      if (active.current) onSent();
+    } catch (e) {
+      if (active.current) setError(String(e));
+    } finally {
+      sending.current = false;
+      if (active.current) setBusy(false);
+    }
+  };
+  return <Modal title="发送信箱消息" onClose={() => { if (!sending.current) onClose(); }}>
+    <form className="mailbox-compose mailbox-history-compose" onSubmit={e => { e.preventDefault(); void send(); }}>
+      <textarea aria-label="消息内容" placeholder="向此会话发送消息" value={body} disabled={busy} onChange={e => setBody(e.target.value)} />
+      {error && <div role="alert" className="badge warn">{error}</div>}
+      <div className="mailbox-compose-actions"><button type="submit" className="btn primary" disabled={busy || !body.trim()}>{busy ? "发送中…" : "发送到信箱"}</button></div>
+    </form>
+  </Modal>;
+}
+
+function MailboxHistoryContent({ sessionId }: { sessionId: string }) {
+  const { page, error, more, refresh } = useMailboxMessages(sessionId, "all");
+  const [composing, setComposing] = useState(false);
   return <section aria-label="会话信箱" className="card detail-section mailbox-history">
-    <h2 className="detail-section-title"><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></h2>
+    <div className="mailbox-history-head">
+      <h2 className="detail-section-title"><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></h2>
+      <button type="button" className="btn small ghost" onClick={() => setComposing(true)}><Icon name="chatPlus" />发送消息</button>
+    </div>
     {error && <div role="alert" className="badge warn mailbox-history-error">{error}</div>}
     {!page && !error && <div className="skeleton mailbox-history-loading" />}
     <div className="mailbox-history-list" role="region" aria-label="信箱消息列表" tabIndex={0}>
@@ -80,5 +117,6 @@ export function MailboxHistory({ sessionId }: { sessionId: string }) {
       {page?.items.length === 0 && <div className="l1-none">暂无信箱消息</div>}
       {page?.next_cursor != null && <div className="mailbox-history-footer"><button className="btn small ghost" onClick={() => void more()}>加载更多</button></div>}
     </div>
+    {composing && <MailboxComposer sessionId={sessionId} onClose={() => setComposing(false)} onSent={() => { setComposing(false); void refresh(); }} />}
   </section>;
 }

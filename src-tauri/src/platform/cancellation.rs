@@ -6,13 +6,14 @@ use std::{
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex, Weak,
     },
 };
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static REQUEST: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
+static ACTIVE: Mutex<Vec<Weak<AtomicBool>>> = Mutex::new(Vec::new());
 pub fn requested() -> bool {
     CANCELLED.load(Ordering::Relaxed)
         || REQUEST.with(|slot| {
@@ -24,16 +25,40 @@ pub fn requested() -> bool {
 /// Bind cancellation to a blocking request worker, without cancelling other
 /// MCP requests or the next operation on the same pooled thread.
 pub(crate) fn with_request<T>(flag: Arc<AtomicBool>, run: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Arc<AtomicBool>>);
+    struct Restore(Weak<AtomicBool>);
     impl Drop for Restore {
         fn drop(&mut self) {
             REQUEST.with(|slot| {
-                slot.replace(self.0.take());
+                slot.take();
             });
+            ACTIVE
+                .lock()
+                .unwrap()
+                .retain(|weak| weak.strong_count() > 0 && !weak.ptr_eq(&self.0));
         }
     }
-    let _restore = Restore(REQUEST.with(|slot| slot.replace(Some(flag))));
+    {
+        let mut active = ACTIVE.lock().unwrap();
+        active.retain(|weak| weak.strong_count() > 0);
+        active.push(Arc::downgrade(&flag));
+    }
+    let _restore = Restore(Arc::downgrade(&flag));
+    let previous = REQUEST.with(|slot| slot.replace(Some(flag)));
+    debug_assert!(previous.is_none(), "request workers must not nest");
+    drop(previous);
     run()
+}
+/// Signal every live request worker (an MCP stdio connection has no caller
+/// left to answer it), so a bounded shutdown does not wait out its full cap.
+pub(crate) fn cancel_all_requests() {
+    let mut active = ACTIVE.lock().unwrap();
+    active.retain(|weak| match weak.upgrade() {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    });
 }
 pub fn check() -> io::Result<()> {
     if requested() {

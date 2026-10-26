@@ -156,6 +156,12 @@ pub(crate) fn run(home: Option<&Path>) -> i32 {
             stopped.map_err(|error| CliError::new("mcp_connection_error", error))?;
             Ok(())
         });
+        // rmcp drains in-flight handlers for up to 5s on stdin EOF (2s after
+        // a console cancellation) before this point; nobody cancels a waiting
+        // handler there, so signal every blocking worker now — the bounded
+        // shutdown below then only waits for the drain, not for a poller that
+        // would otherwise run forever.
+        crate::platform::cancellation::cancel_all_requests();
         // Allow cancelled extraction children and receipt writes to finish.
         // Tokio's stdin reader may remain blocked after a console signal.
         runtime.shutdown_timeout(Duration::from_secs(5));

@@ -74,6 +74,9 @@ impl Db {
         body: &str,
         notify_immediately: bool,
     ) -> Result<MailboxMessage> {
+        if sender == Some(session) {
+            return Err(other("不能给自己发送信箱消息"));
+        }
         if notify_immediately && sender.is_none() {
             return Err(other("立即通知请求必须来自会话"));
         }
@@ -136,6 +139,16 @@ impl Db {
     }
     pub fn mailbox_unread(&self, session: &str) -> Result<i64> {
         Ok(self.read().query_row("SELECT count(*) FROM mailbox_messages WHERE recipient_session_id=?1 AND read_at IS NULL",[session],|r|r.get(0))?)
+    }
+    /// One cheap poll for waiters: unread count plus recipient-session liveness.
+    /// A deleted session cascades its mailbox away, so liveness is what keeps a
+    /// waiter from spinning forever on an inbox that can never fill again.
+    pub fn mailbox_wait_probe(&self, session: &str) -> Result<(bool, i64)> {
+        Ok(self.read().query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1),(SELECT count(*) FROM mailbox_messages WHERE recipient_session_id=?1 AND read_at IS NULL)",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
     pub fn mailbox_immediate_unread(&self, session: &str) -> Result<Vec<String>> {
         let c = self.read();

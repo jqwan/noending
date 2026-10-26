@@ -55,20 +55,10 @@ it("reads Skill content and enablement without exposing a Skill editor", async (
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(inventory.resources[0], "# Review workflow\n\nRead source changes."));
   render(<SkillTestApp />);
   fireEvent.click(await screen.findByRole("button", { name: /review/ }));
-  expect(await screen.findByRole("heading", { name: "描述" })).toBeTruthy();
-  expect(screen.getByText("Project documentation")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Review workflow" })).toBeNull();
-
-  fireEvent.click(screen.getByRole("button", { name: "查看全文" }));
-  const dialog = await screen.findByRole("dialog", { name: "review · SKILL.md" });
-  expect(await within(dialog).findByRole("heading", { name: "Review workflow" })).toBeTruthy();
-
-  fireEvent.click(within(dialog).getByRole("button", { name: "原文" }));
-  expect(within(dialog).getByText(/# Review workflow/)).toBeTruthy();
-  fireEvent.click(within(dialog).getByRole("button", { name: "预览" }));
-  expect(within(dialog).getByRole("heading", { name: "Review workflow" })).toBeTruthy();
-
-  fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+  expect(await screen.findByRole("heading", { name: "正文" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Review workflow" })).toBeTruthy();
+  expect(screen.getByText("Read source changes.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "查看全文" })).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: sourcePath }));
@@ -76,25 +66,20 @@ it("reads Skill content and enablement without exposing a Skill editor", async (
   expect(navigation).toHaveBeenCalledWith(expect.objectContaining({ view: "skill", resourceId: "review", initialTitle: "review" }));
 });
 
-it("previews YAML frontmatter metadata and markdown content in full-text modal", async () => {
+it("shows the complete SKILL.md inline with frontmatter metadata", async () => {
   const rawContent = `---\nname: wechat-decrypt\ndescription: Read WeChat history on macOS.\n---\n# Instructions\n\nRun the decrypt tool.`;
   const skill = resource({ id: "wechat", name: "wechat-decrypt", description: "Read WeChat history on macOS." });
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, rawContent));
   render(<SkillDetailView resourceId="wechat" initialTitle="wechat-decrypt" navigate={navigation} />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "查看全文" }));
-  const dialog = await screen.findByRole("dialog", { name: "wechat-decrypt · SKILL.md" });
-
-  // In preview mode: frontmatter metadata is rendered
-  expect(within(dialog).getByText("name")).toBeTruthy();
-  expect(within(dialog).getByText("wechat-decrypt")).toBeTruthy();
-  expect(within(dialog).getByText("description")).toBeTruthy();
-  expect(within(dialog).getByText("Read WeChat history on macOS.")).toBeTruthy();
-  expect(within(dialog).getByRole("heading", { name: "Instructions" })).toBeTruthy();
-
-  // In source mode: full raw content including delimiters is visible
-  fireEvent.click(within(dialog).getByRole("button", { name: "原文" }));
-  expect(within(dialog).getByText((_, el) => el?.tagName === "PRE" && el.textContent === rawContent)).toBeTruthy();
+  const section = await screen.findByLabelText("技能详情");
+  expect(within(section).getByText("name")).toBeTruthy();
+  expect(within(section).getByText("wechat-decrypt")).toBeTruthy();
+  expect(within(section).getByText("description")).toBeTruthy();
+  expect(within(section).getByText("Read WeChat history on macOS.")).toBeTruthy();
+  expect(within(section).getByRole("heading", { name: "Instructions" })).toBeTruthy();
+  expect(within(section).getByText("Run the decrypt tool.")).toBeTruthy();
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 it("displays Windows Skill paths without the verbatim prefix while opening the original path", async () => {

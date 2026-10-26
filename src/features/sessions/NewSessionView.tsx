@@ -62,6 +62,9 @@ export default function NewSessionView({
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
   );
+  /** 这个项目是从默认工作目录推出来的，不是用户挑的。标签要认这层"默认"，
+   *  否则用户会以为自己选过它。 */
+  const [projectDefaulted, setProjectDefaulted] = useState(false);
   const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
     if (initialAgent && allowedAgents.includes(initialAgent)) {
@@ -166,6 +169,8 @@ export default function NewSessionView({
             defaultDir = result.path.canonical_path;
             cards = (await api.listProjectCards()).filter(p => p.visibility !== "archived");
           }
+          // 走到这里说明既没入口预置、也没记住上次选择：项目是默认工作目录推出来的。
+          if (projectId) setProjectDefaulted(true);
         }
         if (cancelled) return;
         setProjects(cards);
@@ -239,6 +244,9 @@ export default function NewSessionView({
     : allowedAgents;
 
   const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.detected && agentStatus[selectedAgent]?.launch_enabled));
+  // 「一个都没探到」和「这个被关了」是两种处境，下一步也不同：前者要去装，后者要去开。
+  const anyAgentDetected = Boolean(agentStatus
+    && allowedAgents.some(a => agentStatus[a]?.terminal_cli && agentStatus[a]?.detected));
   useEffect(() => {
     if (!agentStatus || !cliAgents.length || (agentChanged.current && agentAvailable)) return;
     const preferred = [initialAgent, savedPreferences.agent, defaultAgent, cliAgents[0]]
@@ -337,12 +345,14 @@ export default function NewSessionView({
 
   const availableTasks = workstreams.filter(w => w.visibility === "normal" && w.projects.some(p => p.id === selectedProjectId));
   const eligibleTask = trackedWorkstreamIds.every(id => availableTasks.some(w => w.id === id));
-  const hasDirectory = Boolean(launchCwd);
 
+  // 没有目录不是错误：后端 `resolve_new_cwd` 会回落到 NoEnding 默认工作目录
+  // （`CwdSource::DefaultWorkspace`，不存在时还有 `Unresolved`），并且这个决定本来就
+  // 要向用户说明。前端再拦一道就等于否定了标签里那句「默认工作目录」——所以这里不拦。
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
-    if (!selectedAgent || !agentAvailable || !eligibleTask || !hasDirectory) return null;
+    if (!selectedAgent || !agentAvailable || !eligibleTask) return null;
     return api.prepareNewSession(selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride);
-  }, [selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride, agentAvailable, eligibleTask, hasDirectory]);
+  }, [selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride, agentAvailable, eligibleTask]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
@@ -361,6 +371,8 @@ export default function NewSessionView({
     setTaskMenuOpen(false);
     releasePrepared();
     setSelectedProjectId(next);
+    // 用户亲手挑过之后，项目就不再是"默认"的了。
+    setProjectDefaulted(false);
     const preferences = readNewSessionPreferences();
     setSelectedDirPath(preferences.directories[next] ?? "");
     setMessage(preferences.drafts[next] ?? "");
@@ -428,7 +440,22 @@ export default function NewSessionView({
   const hasMessage = Boolean(message.trim());
   const messageUsesFile = message.length > INLINE_MESSAGE_LIMIT;
   const launchLabel = hasMessage ? "发送" : "打开终端";
-  const canSend = Boolean(selectedAgent && agentAvailable && prepared && eligibleTask && hasDirectory && !preparing && !busy);
+  const canSend = Boolean(selectedAgent && agentAvailable && prepared && eligibleTask && !preparing && !busy);
+
+  /** 这一发落在哪个目录，必须说出来。后端 `CwdResolution` 分四档并备好 note，
+   *  但对 New 流程而言 `default_workspace` 那档 `fallback` 是 false、`note` 是空——
+   *  用户没挑目录时，前端得替它把那句话补上，否则会话开在哪儿无人知晓。 */
+  const cwdNote = (() => {
+    const resolution = prepared?.cwd_resolution;
+    if (!resolution) return "";
+    // 后端约定：只要发生了 fallback 就必须可见，不接受沉默降级。
+    if (resolution.fallback) return resolution.note ?? "未从默认工作目录启动";
+    if (launchCwd) return resolution.source === "explicit" ? resolution.note ?? "" : "";
+    if (resolution.note) return resolution.note;
+    return resolution.source === "default_workspace" && resolution.cwd
+      ? `未选择项目目录，将从默认工作目录启动：${resolution.cwd}`
+      : "";
+  })();
 
   const start = async () => {
     if (!canSend || launching.current) return;
@@ -463,7 +490,11 @@ export default function NewSessionView({
   };
 
 
-  const projectLabel = selectedProject?.name ?? "选择项目";
+  // 没选项目时后端用默认工作目录推出一个，标签必须认这层"默认"：写「选择项目」会
+  // 让人以为还得自己定，直接写项目名又像是自己挑的。名字取自项目卡片，不写死。
+  const projectLabel = !selectedProject ? "选择项目"
+    : projectDefaulted ? `默认 · ${selectedProject.name}`
+    : selectedProject.name;
 
   const currentDir = launchCwd || "";
   const dirLabel = useMemo(() => {
@@ -488,7 +519,11 @@ export default function NewSessionView({
       <div className="new-session-content">
         <div className="new-session-heading">
           <BrandLockup cap={13} />
-          <h1 id="new-session-title">你想在 {selectedProject?.name ?? "这里"} 中构建什么？</h1>
+          {/* 没选项目是合法起点（会话会落在默认工作目录），所以不能再拿「这里」填空——
+              那读起来像指代不明。无项目时就直接问要做什么。 */}
+          <h1 id="new-session-title">
+            {selectedProject ? `你想在 ${selectedProject.name} 中构建什么？` : "你想构建什么？"}
+          </h1>
         </div>
 
         <form className="new-session-form" onSubmit={(e) => { e.preventDefault(); void start(); }}>
@@ -752,13 +787,32 @@ export default function NewSessionView({
             </section>
           </div>
 
-          {!agentAvailable && <p role="alert">没有可用的新建会话 Agent，请确保本地已安装支持的 Agent CLI。</p>}
           <div className="new-session-composer" aria-busy={busy}>
+            {/* 提示放进输入区内部而不是浮在上方：它解释的是「这条输入为什么发不出去」，
+                离开输入框就成了另一条无关的横幅。 */}
+            {!agentAvailable && (
+              <p className="new-session-composer-notice">
+                <span id="new-session-agent-notice">
+                  {anyAgentDetected
+                    ? "当前 Agent 不能用于新建会话，换一个或前往 Agent 设置启用。"
+                    : "本地还没有检测到受支持的 Agent TUI。安装后即可在这里新建会话。"}
+                </span>
+                <button
+                  type="button"
+                  className="new-session-notice-action"
+                  onClick={() => navigate({ view: "agents" })}
+                >
+                  前往 Agent 设置
+                </button>
+              </p>
+            )}
             <textarea
               autoFocus
               aria-label="首条消息"
               placeholder="描述你想完成的任务，或直接打开终端…"
-              aria-describedby="new-session-message-hint"
+              aria-describedby={agentAvailable
+                ? "new-session-message-hint"
+                : "new-session-agent-notice new-session-message-hint"}
               value={message}
               onChange={(e) => handleMessageChange(e.target.value)}
               onKeyDown={(e) => {
@@ -890,10 +944,8 @@ export default function NewSessionView({
                 : "请先选择该任务关联的项目。"}
             </p>
           )}
-          {prepared?.cwd_resolution?.fallback && (
-            <p className="new-session-note" role="status">
-              {prepared.cwd_resolution.note || "未从默认工作目录启动"}
-            </p>
+          {cwdNote && (
+            <p className="new-session-note" role="status">{cwdNote}</p>
           )}
           {(projectError || error) && (
             <div className="new-session-error" role="alert">

@@ -1339,6 +1339,27 @@ fn mailbox_cli_persists_without_desktop_requires_session_sender_and_uses_current
     let db = f.db.as_ref().unwrap();
     db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    for notify in ["false", "true"] {
+        let (ok, rejected) = f.run(
+            exe,
+            &[
+                "mailbox",
+                "send",
+                "--session",
+                "sender",
+                "--from-session",
+                "sender",
+                "--message",
+                "self mail",
+                "--notify-immediately",
+                notify,
+            ],
+        );
+        assert!(!ok, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "operation_rejected");
+        assert_eq!(rejected["error"]["message"], "不能给自己发送信箱消息");
+    }
+    assert_eq!(db.mailbox_list("sender", "all", None, 50).unwrap().total, 0);
     let (ok, err) = f.run(
         exe,
         &[
@@ -1472,6 +1493,238 @@ fn mailbox_cli_persists_without_desktop_requires_session_sender_and_uses_current
             .len(),
         2
     );
+}
+
+fn mailbox_wait_fixture() -> (Fixture, PathBuf) {
+    let f = Fixture::new();
+    f.db
+        .as_ref()
+        .unwrap()
+        .write()
+        .execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')")
+        .unwrap();
+    (f, PathBuf::from(env!("CARGO_BIN_EXE_ne")))
+}
+
+fn spawn_mailbox_wait(exe: &Path, f: &Fixture, timeout: Option<&str>) -> std::process::Child {
+    let mut args = vec!["mailbox", "wait", "--session", "target"];
+    args.extend(timeout.iter().flat_map(|t| ["--timeout", t]));
+    Command::new(exe)
+        .args(&args)
+        .env("NOENDING_HOME", &f.home.root)
+        .env_remove("NOENDING_TERMINAL_ID")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn wait_for_exit(
+    child: &mut std::process::Child,
+    bound: std::time::Duration,
+) -> std::process::ExitStatus {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            start.elapsed() < bound,
+            "mailbox wait did not finish within {bound:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn child_stdout(child: &mut std::process::Child) -> String {
+    use std::io::Read;
+    let mut text = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    text
+}
+
+#[test]
+fn mailbox_wait_returns_existing_unread_immediately_and_leaves_them_unread() {
+    let (f, exe) = mailbox_wait_fixture();
+    let db = f.db.as_ref().unwrap();
+    db.mailbox_send("target", Some("sender"), "第一封").unwrap();
+    db.mailbox_send("target", Some("sender"), "second").unwrap();
+    let started = std::time::Instant::now();
+    let (ok, waited) = f.run(
+        &exe,
+        &["mailbox", "wait", "--session", "target", "--timeout", "30"],
+    );
+    assert!(ok, "{waited}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "existing unread must return without waiting for the bound"
+    );
+    assert_eq!(waited["data"]["status"], "messages");
+    let items = waited["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["body"], "第一封");
+    assert!(items[0]["read_at"].is_null());
+    assert!(items[0]["revision"].is_i64());
+    assert_eq!(
+        db.mailbox_list("target", "unread", None, 50)
+            .unwrap()
+            .unread,
+        2
+    );
+}
+
+#[test]
+fn mailbox_wait_sleeps_until_another_process_delivers_and_prints_only_the_final_batch() {
+    let (f, exe) = mailbox_wait_fixture();
+    let mut child = spawn_mailbox_wait(&exe, &f, None);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "an empty mailbox must keep waiting instead of returning an empty result"
+    );
+    let sent_at = std::time::Instant::now();
+    let (ok, sent) = f.run(
+        &exe,
+        &[
+            "mailbox",
+            "send",
+            "--session",
+            "target",
+            "--from-session",
+            "sender",
+            "--message",
+            "跨进程投递",
+        ],
+    );
+    assert!(ok, "{sent}");
+    let status = wait_for_exit(&mut child, std::time::Duration::from_secs(10));
+    assert!(status.success());
+    assert!(
+        sent_at.elapsed() < std::time::Duration::from_secs(5),
+        "delivery must wake the waiter promptly, not on a long period"
+    );
+    let stdout = child_stdout(&mut child);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "waiting must not print periodic output: {stdout}"
+    );
+    let value: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(value["data"]["status"], "messages");
+    assert_eq!(value["data"]["items"][0]["body"], "跨进程投递");
+    assert_eq!(value["data"]["unread"], 1);
+}
+
+#[test]
+fn mailbox_wait_validates_limit_and_timeout_at_entry_instead_of_waiting() {
+    let (f, exe) = mailbox_wait_fixture();
+    for limit in ["0", "101"] {
+        let (ok, rejected) = f.run(
+            &exe,
+            &[
+                "mailbox",
+                "wait",
+                "--session",
+                "target",
+                "--timeout",
+                "1",
+                "--limit",
+                limit,
+            ],
+        );
+        assert!(!ok, "limit {limit}: {rejected}");
+        assert_eq!(rejected["error"]["code"], "invalid_arguments");
+    }
+    let (ok, rejected) = f.run(
+        &exe,
+        &[
+            "mailbox",
+            "wait",
+            "--session",
+            "target",
+            "--timeout",
+            "18446744073709551615",
+        ],
+    );
+    assert!(!ok, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "invalid_arguments");
+}
+
+#[test]
+fn mailbox_wait_reports_timeout_after_the_server_bound_without_empty_progress() {
+    let (f, exe) = mailbox_wait_fixture();
+    let started = std::time::Instant::now();
+    let (ok, waited) = f.run(
+        &exe,
+        &["mailbox", "wait", "--session", "target", "--timeout", "1"],
+    );
+    assert!(ok, "{waited}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "the server-side bound must actually wait"
+    );
+    assert_eq!(waited["data"]["status"], "timeout");
+    assert_eq!(waited["data"]["items"].as_array().unwrap().len(), 0);
+    assert_eq!(waited["data"]["unread"], 0);
+}
+
+#[test]
+#[cfg(unix)]
+fn mailbox_wait_ends_as_cancelled_on_interrupt_and_keeps_unread_for_later_requests() {
+    let (f, exe) = mailbox_wait_fixture();
+    let db = f.db.as_ref().unwrap();
+    let mut child = spawn_mailbox_wait(&exe, &f, Some("60"));
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the waiter must still be waiting when interrupted"
+    );
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    assert_eq!(unsafe { kill(child.id() as i32, 2) }, 0, "SIGINT delivery");
+    let status = wait_for_exit(&mut child, std::time::Duration::from_secs(5));
+    assert!(!status.success());
+    let value: Value = serde_json::from_str(&child_stdout(&mut child)).unwrap();
+    assert_eq!(value["error"]["code"], "cancelled");
+    db.mailbox_send("target", Some("sender"), "取消后投递不丢失")
+        .unwrap();
+    assert_eq!(
+        db.mailbox_list("target", "unread", None, 50)
+            .unwrap()
+            .unread,
+        1
+    );
+    let (ok, waited) = f.run(
+        &exe,
+        &["mailbox", "wait", "--session", "target", "--timeout", "30"],
+    );
+    assert!(ok, "{waited}");
+    assert_eq!(waited["data"]["status"], "messages");
+    assert_eq!(waited["data"]["items"][0]["body"], "取消后投递不丢失");
+}
+
+#[test]
+fn mailbox_wait_fails_clearly_when_the_recipient_session_is_deleted_mid_wait() {
+    let (f, exe) = mailbox_wait_fixture();
+    let db = f.db.as_ref().unwrap();
+    let mut child = spawn_mailbox_wait(&exe, &f, Some("60"));
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    db.write()
+        .execute("DELETE FROM sessions WHERE id='target'", [])
+        .unwrap();
+    let status = wait_for_exit(&mut child, std::time::Duration::from_secs(5));
+    assert!(!status.success());
+    let value: Value = serde_json::from_str(&child_stdout(&mut child)).unwrap();
+    assert_eq!(value["error"]["code"], "not_found");
+    let (ok, listed) = f.run(&exe, &["mailbox", "list", "--session", "sender"]);
+    assert!(ok, "{listed}");
 }
 
 #[test]

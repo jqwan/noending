@@ -1220,7 +1220,11 @@ button.btn.ghost.terminal-exited,
 .mailbox-compose { display:flex; flex-direction:column; gap:8px; }
 .terminal-mailbox textarea { width:100%; box-sizing:border-box; min-height:90px; }
 .mailbox-history { display: flex; flex-direction: column; max-height: min(400px, 60vh); }
-.mailbox-history > .detail-section-title { flex-shrink: 0; }
+.mailbox-history-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; }
+.mailbox-history-head > .detail-section-title { margin: 0; }
+.mailbox-history-head > button { flex-shrink: 0; }
+.mailbox-history-compose textarea { width: 100%; box-sizing: border-box; min-height: 160px; resize: vertical; }
+.mailbox-compose-actions { display: flex; justify-content: flex-end; }
 .mailbox-history-list, .mailbox-unread-list { min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .mailbox-history-list { display: flex; flex-direction: column; }
 .mailbox-unread-list { max-height: min(300px, 40vh); }

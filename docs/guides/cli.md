@@ -163,17 +163,20 @@ ne mailbox send --session RECIPIENT --from-session SELF --message "请查收新�
 ne mailbox list --session SELF --state unread --limit 50
 ne mailbox read --session SELF --message-id MESSAGE_ID
 ne mailbox mark --session SELF --message-id MESSAGE_ID --revision N --state read --from-session SELF
+ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 ```
 
 `list` 可用 `unread|read|all`，返回 `items`、`total`、`unread` 和 `next_cursor`；total 和 unread 分别统计整个信箱的全部及未读消息，不受筛选和分页影响。后续页保持筛选并传 `--cursor`。读取不会自动已读，标记必须提供真正读到的 revision，冲突时重读。改回未读使用 `--state unread`。已读只代表查阅，不代表完成任务。
 
+`wait` 在没有未读时由服务端持续等待，不返回周期性空结果：调用时已有未读立即返回 `status=messages`，否则等到新消息、取消、会话删除（`not_found`）或可选 `--timeout` 到期（`status=timeout`）。返回体与 `list` 的未读分页同构；等待、返回和取消都不改动已读状态，继续分页用 `list --cursor`，随后显式标记。等待跨进程可用、无需桌面运行，也不阻塞其他进程写信。宿主工具超时属于客户端限制：需要与宿主时限对齐时传入 `--timeout`，收到 `timeout` 视为继续等待，可再次调用；只有用户明确要求持续监听时才循环等待，普通查信不自动进入永久监听。
+
 发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 发信必须显式提供有效来源会话，内嵌终端也不能省略 `--from-session` / `from_session`，不能使用 user、external 或匿名来源。内嵌终端先用 `session identity` 查询自身会话，外部 Agent 用宿主原生 ID 解析；内嵌终端发信时，后端以实际绑定覆盖传入的来源，外部调用则使用并校验传入 ID。标记消息时，内嵌终端仍可省略来源，由绑定确定，显式来源与绑定冲突则拒绝；共享 MCP 调用显式提供已确认的来源。不按目录猜测身份，会话 ID 用于本地关联，不是认证凭证。
 
-发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
+会话不能给自己发信，按后端实际采用的发件身份判断；用户界面发信不受此限制。发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
 
 桌面运行期间，新消息可唤醒可恢复的 TUI 会话，首条输入仅为“noending信箱中有 N 条未读信息，请查收”；应用启动不为历史未读补唤醒。运行中的终端由用户控制自动通知，开关不持久化，不能由模型设置。普通自动通知在 Idle／Completed／Unknown 时使用原生排队快捷键。发件会话可用 `--notify-immediately true` 请求立即通知：仍须用户开启自动通知，在 Idle／Completed／Unknown／Working 可发送，Waiting 时不发送；提醒使用与手动通知相同的原生插队快捷键，内容仍为统一的未读数量，多条请求与普通查收提醒合并，不指定单条消息，不改变消息顺序。开启自动通知时会检查已有未读消息及立即通知请求，写入前复查未读状态；已读或删除的请求不再允许 Working 例外。手动查收提醒同样只发未读数量，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动提醒。Unknown 允许开启并尝试自动通知，状态保持未知，不代表输入框已就绪；Failed／Interrupted 会关闭自动通知。用户须保持聊天输入框干净可用。提醒不等待送达确认，也不自动重启终端重发。
 
-右侧栏只显示未读，模型标记已读后自动移除；会话详情只读展示全部消息。自动通知关闭时用户可以编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
+右侧栏只显示未读，模型标记已读后自动移除；会话详情展示全部消息，可点击查看完整正文，或通过标题栏的“发送消息”向该会话发信。自动通知关闭时用户可以在右侧栏编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
 
 收发和标记的 Agent 操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
 

@@ -43,10 +43,6 @@
 .skill-detail-page .detail-layout { margin-top: 18px; }
 .skill-detail-page .detail-section > p { margin: 0; line-height: 1.7; }
 
-.skill-modal-content {
-  max-height: 65vh;
-  overflow: auto;
-}
 .skill-frontmatter-box {
   background: var(--bg-panel);
   border: 1px solid var(--border-subtle);

@@ -193,6 +193,7 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             "mailbox_read",
             "session_start",
             "mailbox_send",
+            "mailbox_wait",
             "task_items",
             "task_item_create",
             "task_item_update",
@@ -781,6 +782,19 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
         "invalid_arguments"
     );
     let sent = client.ok("mailbox_send", json!({"session":"target","from_session":"not-an-ingested-session","message":"use actual terminal binding"}));
+    let rejected = client.call(
+        "mailbox_send",
+        json!({"session":"sender","from_session":"target","message":"self after binding"}),
+    );
+    assert_eq!(rejected["error"]["code"], "operation_rejected");
+    assert_eq!(rejected["error"]["message"], "不能给自己发送信箱消息");
+    assert_eq!(db.mailbox_list("sender", "all", None, 50).unwrap().total, 0);
+    let delivered = client.ok("mailbox_send", json!({"session":"target","from_session":"target","message":"actual binding differs from recipient"}));
+    let delivered = client.ok(
+        "mailbox_read",
+        json!({"session":"target","message_id":delivered["message_id"]}),
+    );
+    assert_eq!(delivered["sender_session_id"], "sender");
     let mail = client.ok(
         "mailbox_read",
         json!({"session":"target","message_id":sent["message_id"]}),
@@ -834,6 +848,10 @@ fn mailbox_tools_persist_and_mark_without_a_desktop_and_reject_anonymous_or_wron
     let db = Db::open(&f.home.db_path).unwrap();
     db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
     let mut c = f.start();
+    let rejected = c.call("mailbox_send", json!({"session":"sender","from_session":"sender","message":"self mail","notify_immediately":true}));
+    assert_eq!(rejected["error"]["code"], "operation_rejected");
+    assert_eq!(rejected["error"]["message"], "不能给自己发送信箱消息");
+    assert_eq!(db.mailbox_list("sender", "all", None, 50).unwrap().total, 0);
     for arguments in [
         json!({"session":"target","message":"anonymous"}),
         json!({"session":"target","from_session":null,"message":"null sender"}),
@@ -883,6 +901,98 @@ fn mailbox_tools_persist_and_mark_without_a_desktop_and_reject_anonymous_or_wron
         c.ok("mailbox_read", json!({"session":"target","message_id":mid}))["read_at"].is_string()
     );
     c.finish();
+}
+
+#[test]
+fn mailbox_wait_returns_unread_immediately_and_reports_server_timeout_without_marking_read() {
+    let f = Fixture::new();
+    f.home.ensure_dirs().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
+    let mut c = f.start();
+    let waited = c.ok(
+        "mailbox_wait",
+        json!({"session":"target","timeout_seconds":1}),
+    );
+    assert_eq!(waited["status"], "timeout");
+    assert_eq!(waited["items"].as_array().unwrap().len(), 0);
+    let sent = c.ok(
+        "mailbox_send",
+        json!({"session":"target","from_session":"sender","message":"等待后返回"}),
+    );
+    let waited = c.ok(
+        "mailbox_wait",
+        json!({"session":"target","timeout_seconds":30}),
+    );
+    assert_eq!(waited["status"], "messages");
+    assert_eq!(waited["items"][0]["id"], sent["message_id"]);
+    assert_eq!(waited["items"][0]["body"], "等待后返回");
+    assert!(waited["items"][0]["read_at"].is_null());
+    assert_eq!(
+        db.mailbox_list("target", "unread", None, 50)
+            .unwrap()
+            .unread,
+        1
+    );
+    c.finish();
+}
+
+#[test]
+fn mailbox_wait_cancels_one_request_and_ends_promptly_on_disconnect() {
+    let f = Fixture::new();
+    f.home.ensure_dirs().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender','jsonl','/sender'),('target','codex','target','jsonl','/target')").unwrap();
+    let mut c = f.start();
+    let id = c.begin(
+        "tools/call",
+        json!({"name":"mailbox_wait","arguments":{"session":"target"}}),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    c.send(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":id}}));
+    // rmcp suppresses the response of a cancelled request; the cancelled wait
+    // must not wedge the connection and later requests must keep working.
+    std::thread::sleep(Duration::from_millis(500));
+    let sent = c.ok(
+        "mailbox_send",
+        json!({"session":"target","from_session":"sender","message":"取消后照常"}),
+    );
+    let waited = c.ok(
+        "mailbox_wait",
+        json!({"session":"target","timeout_seconds":30}),
+    );
+    assert_eq!(waited["status"], "messages");
+    assert_eq!(waited["items"][0]["id"], sent["message_id"]);
+    c.ok(
+        "mailbox_mark",
+        json!({"session":"target","message_id":waited["items"][0]["id"],"revision":waited["items"][0]["revision"],"state":"read","from_session":"target"}),
+    );
+    let _id = c.begin(
+        "tools/call",
+        json!({"name":"mailbox_wait","arguments":{"session":"target"}}),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        c.child.try_wait().unwrap().is_none(),
+        "the second wait must be in flight before the disconnect"
+    );
+    // Closing the transport must end the in-flight wait. rmcp drains handlers
+    // for up to 5s on stdin EOF before our shutdown cancellation runs, so the
+    // close-out is bounded by that drain plus the fast flag-based shutdown —
+    // the wait must not hang the server process indefinitely.
+    drop(c.input.take());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = c.child.try_wait().unwrap() {
+            assert!(status.success(), "MCP exited with {status}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "MCP kept running after the client disconnected"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

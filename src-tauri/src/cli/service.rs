@@ -40,6 +40,7 @@ pub(crate) enum Command {
     MailboxRead(crate::mailbox::Read),
     MailboxSend(crate::mailbox::Send),
     MailboxMark(crate::mailbox::Mark),
+    MailboxWait(crate::mailbox::Wait),
     Status,
     SessionControl {
         command: crate::session_control::ControlCommand,
@@ -294,6 +295,7 @@ impl Service {
             )?),
             Command::MailboxSend(p) => crate::mailbox::send(&self.db, &self.home, p),
             Command::MailboxMark(p) => crate::mailbox::mark(&self.db, &self.home, p),
+            Command::MailboxWait(p) => crate::mailbox::wait(&self.db, p),
             Command::Status => Ok(
                 json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox"]}),
             ),
