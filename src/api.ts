@@ -280,6 +280,38 @@ export const api = {
   mailboxEdit: (terminalId: string, identityRevision: number, messageId: string, revision: number, body: string | null) => invoke<import("./types").MailboxMessage | null>("mailbox_edit", { terminalId, identityRevision, messageId, revision, body }),
   mailboxRemind: (terminalId: string) => invoke<void>("mailbox_remind", { terminalId }),
   mailboxNotificationHint: (skip?: boolean) => invoke<boolean>("mailbox_notification_hint", { skip }),
+  // 协作室：读取不隐式创建房间；首次开启前 room=null。
+  collaborationRoomGet: (taskId: string) =>
+    invoke<import("./types").CollaborationRoomView>("collaboration_room_get", { taskId }),
+  collaborationCandidates: (taskId: string, cursor: string | null = null, limit = 20) =>
+    invoke<import("./types").CollaborationCandidatePage>("collaboration_candidates", { taskId, cursor, limit }),
+  collaborationRoomStart: (
+    taskId: string,
+    members: import("./types").CollaborationStartedMember[],
+    expectedRevision: number,
+    requestId: string,
+    coordinatorSessionId: string | null = null,
+    initialMessage: string | null = null,
+  ) => invoke<import("./types").CollaborationRoomView>("collaboration_room_start", {
+    taskId, members, coordinatorSessionId, expectedRevision, initialMessage, requestId,
+  }),
+  collaborationRoomStop: (roomId: string, runId: string, expectedRevision: number, requestId: string) =>
+    invoke<import("./types").CollaborationRoomView>("collaboration_room_stop", { roomId, runId, expectedRevision, requestId }),
+  collaborationRoomCoordinator: (
+    roomId: string,
+    runId: string,
+    sessionId: string | null,
+    expectedRevision: number,
+    requestId: string,
+  ) => invoke<import("./types").CollaborationRoomView>("collaboration_room_coordinator", {
+    roomId, runId, sessionId, expectedRevision, requestId,
+  }),
+  collaborationRoomSend: (roomId: string, runId: string, body: string, requestId: string) =>
+    invoke<import("./types").CollaborationMessage>("collaboration_room_send", { roomId, runId, body, requestId }),
+  collaborationMemberWake: (roomId: string, runId: string, sessionId: string, requestId: string) =>
+    invoke<import("./types").CollaborationMemberState>("collaboration_member_wake", { roomId, runId, sessionId, requestId }),
+  collaborationRoomMessages: (roomId: string, runId: string | null = null, cursor: string | null = null, limit = 30) =>
+    invoke<import("./types").CollaborationMessagePage>("collaboration_room_messages", { roomId, runId, cursor, limit }),
   terminalCacheImage: (terminalId: string, image: { mime: string; data_base64: string }) =>
     invoke<string>("terminal_cache_image", { terminalId, image }),
   terminalAcknowledgeOutput: (terminalId: string, offset: number, consumerId: string) =>
