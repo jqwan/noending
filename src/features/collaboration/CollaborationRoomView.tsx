@@ -69,17 +69,13 @@ export default function CollaborationRoomView({
   const title = room?.title || taskTitle;
   const enoughMembers = selection.selected.length >= 2;
 
-  // 上次运行已停止时，沿用原配置重新开启，用户不必再勾一次。
+  // 上次运行已停止时，沿用原配置（含唤醒方式）重新开启，用户不必再勾一次。
   const restore = useMemo(() => {
     if (running || !config) return null;
-    const selected = config.selected_members
-      .map(session_id => {
-        const previous = room?.members.find(m => m.session_id === session_id);
-        return previous ? { session_id, wake_method: previous.wake_method } : null;
-      })
-      .filter((v): v is CollaborationStartedMember => v !== null);
-    return selected.length ? { selected, coordinator: config.coordinator_session_id } : null;
-  }, [running, config, room?.members]);
+    return config.selected_members.length
+      ? { selected: config.selected_members, coordinator: config.coordinator_session_id }
+      : null;
+  }, [running, config]);
 
   useEffect(() => {
     if (restore && selection.selected.length === 0) setSelection(restore);

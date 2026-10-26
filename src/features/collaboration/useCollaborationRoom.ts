@@ -24,9 +24,15 @@ interface ChangedEvent {
   task_id?: string;
   room_id?: string;
   run_id?: string;
-  /** 心跳只发 member，避免成员续租触发整页重载。 */
-  category?: "room" | "run" | "member" | "message";
+  /** member｜heartbeat｜ack｜wake｜room｜message｜run；两版契约命名并存，都按语义归类。 */
+  category?: string;
 }
+
+/**
+ * 只改成员状态的变更：心跳续租、阅读位置、唤醒结果、配置变更。
+ * 这些不产生消息，重载历史既贵又会让「心跳不刷全部消息」的约束失效。
+ */
+const MEMBER_ONLY = new Set(["member", "heartbeat", "ack", "wake", "room"]);
 
 /**
  * 协作室读取：房间状态与消息分开刷新。
@@ -119,7 +125,7 @@ export function useCollaborationRoom(taskId: string) {
       if (!active) return;
       const payload = event.payload ?? {};
       if (payload.task_id && payload.task_id !== taskId) return;
-      if (payload.category === "member") {
+      if (payload.category && MEMBER_ONLY.has(payload.category)) {
         void refreshRoom();
         return;
       }

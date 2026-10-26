@@ -50,7 +50,15 @@ const noRoom: RoomView = { task_id: "task-1", title: "跨会话聊天室开发",
 const activeRun: RoomView = {
   task_id: "task-1",
   title: "跨会话聊天室开发",
-  room: { id: "room-1", revision: 3, selected_members: ["s1", "s2"], coordinator_session_id: "s1" },
+  room: {
+    id: "room-1",
+    revision: 3,
+    selected_members: [
+      { session_id: "s1", wake_method: "terminal" },
+      { session_id: "s2", wake_method: "desktop" },
+    ],
+    coordinator_session_id: "s1",
+  },
   run: { id: "run-1", status: "active", started_at: "2026-10-27T03:50:00Z", stopped_at: null },
   members: [member({ session_id: "s1" }), member({ session_id: "s2", phase: "processing" })],
 };
@@ -149,6 +157,25 @@ it("says the run has stopped instead of reporting a generic failure when the old
   expect((screen.getByRole("textbox", { name: "在协作室说一句" }) as HTMLTextAreaElement).value).toBe("还在吗");
 });
 
+it("reuses the saved wake method when a stopped room is started again", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(stoppedRun);
+  vi.mocked(api.collaborationRoomStart).mockResolvedValue(activeRun);
+  mount();
+  const start = await screen.findByRole("button", { name: "开启协作" }) as HTMLButtonElement;
+  await waitFor(() => expect(start.disabled).toBe(false));
+  fireEvent.click(start);
+
+  await waitFor(() => expect(api.collaborationRoomStart).toHaveBeenCalledWith(
+    "task-1",
+    // 配置里保存的唤醒方式（s2 是桌面）被沿用，不在重开时重新推断。
+    [{ session_id: "s1", wake_method: "terminal" }, { session_id: "s2", wake_method: "desktop" }],
+    3,
+    expect.any(String),
+    "s1",
+    null,
+  ));
+});
+
 it("marks a listening member unresponsive while leaving a processing member alone", async () => {
   const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
@@ -190,7 +217,7 @@ it("retries opening one failed member without restarting the run for everyone", 
   expect(api.collaborationMemberWake).toHaveBeenCalledWith("room-1", "run-1", "s2", expect.any(String));
 });
 
-it("refreshes only member state on a heartbeat change and keeps the message list single", async () => {
+it("refreshes only member state on heartbeat-class changes and keeps the message list single", async () => {
   vi.mocked(api.collaborationRoomGet)
     .mockResolvedValueOnce({ ...activeRun, members: [member({ session_id: "s1", connection_state: "pending", phase: null }), member({ session_id: "s2" })] })
     .mockResolvedValue(activeRun);
@@ -198,9 +225,14 @@ it("refreshes only member state on a heartbeat change and keeps the message list
   await screen.findByText("等待加入");
   const before = screen.getAllByRole("listitem").length;
 
+  // 两版契约的心跳类命名都只刷成员状态：不重载消息历史，也不制造重复条目。
   const set = handlers.get("collaboration-changed");
   expect(set?.size).toBeGreaterThan(0);
-  for (const handler of set ?? []) handler({ payload: { task_id: "task-1", room_id: "room-1", run_id: "run-1", category: "member" } });
+  for (const category of ["member", "heartbeat", "ack", "wake"]) {
+    for (const handler of set ?? []) {
+      handler({ payload: { task_id: "task-1", room_id: "room-1", run_id: "run-1", category } });
+    }
+  }
 
   await waitFor(() => expect(
     within(screen.getByRole("listitem", { name: "后端会话" })).getByText("正在监听"),

@@ -822,7 +822,8 @@ export interface CollaborationRunView {
 export interface CollaborationRoomConfig {
   id: string;
   revision: number;
-  selected_members: string[];
+  /** 保存唤醒方式：停止后再次开启沿用原选择，不用重新推断能力。 */
+  selected_members: CollaborationStartedMember[];
   coordinator_session_id: string | null;
 }
 
