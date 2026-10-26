@@ -51,7 +51,14 @@ fn start_validates_membership_and_persists_notice_and_first_message_atomically()
     let db = f.db();
     // Fewer than two members.
     assert!(db
-        .collaboration_start("t", &Fixture::members("a", "a"), None, None, None, "r1")
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b")[..1],
+            None,
+            None,
+            None,
+            "r1"
+        )
         .is_err());
     // Duplicate member sessions.
     let duplicate = vec![
@@ -424,4 +431,121 @@ fn candidate_sessions_are_task_scoped_unarchived_and_stably_paged() {
         .collaboration_candidate_sessions("missing", None, 10)
         .unwrap();
     assert!(unrelated.items.is_empty());
+}
+
+#[test]
+fn review_same_message_request_cannot_change_body_or_sender() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-start",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    let saved = db
+        .collaboration_send(room, run, Some("a"), "原始正文", "review-message")
+        .unwrap();
+    assert_eq!(saved.body, "原始正文");
+    assert!(db
+        .collaboration_send(room, run, Some("a"), "修改正文", "review-message")
+        .is_err());
+    assert!(db
+        .collaboration_send(room, run, Some("b"), "原始正文", "review-message")
+        .is_err());
+    let replay = db
+        .collaboration_send(room, run, Some("a"), "原始正文", "review-message")
+        .unwrap();
+    assert_eq!(replay.id, saved.id);
+}
+
+#[test]
+fn review_history_cursor_cannot_change_its_run_scope() {
+    let f = Fixture::new();
+    let db = f.db();
+    let first = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            Some("本轮首信"),
+            "review-first",
+        )
+        .unwrap();
+    let page = db
+        .collaboration_messages_page(&first.room.id, Some(&first.run.id), None, 1)
+        .unwrap();
+    assert_eq!(page.items[0].body, "本轮首信");
+    let cursor = page.next_cursor.as_deref().unwrap();
+    let older = db
+        .collaboration_messages_page(&first.room.id, Some(&first.run.id), Some(cursor), 1)
+        .unwrap();
+    assert_eq!(older.items[0].kind, "start");
+    assert!(db
+        .collaboration_messages_page(&first.room.id, None, Some(cursor), 1)
+        .is_err());
+    db.collaboration_stop(&first.room.id, &first.run.id, None, "review-stop")
+        .unwrap();
+    let second = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-second",
+        )
+        .unwrap();
+    assert!(db
+        .collaboration_messages_page(&first.room.id, Some(&second.run.id), Some(cursor), 1)
+        .is_err());
+}
+
+#[test]
+fn review_own_messages_do_not_wake_sender_or_skip_other_messages() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-reads",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    db.collaboration_ack(room, run, "a", 1).unwrap();
+    db.collaboration_ack(room, run, "b", 1).unwrap();
+    db.collaboration_send(room, run, Some("a"), "自己的发言", "review-own")
+        .unwrap();
+    assert_eq!(db.collaboration_unread_of(room, run, "a").unwrap().count, 0);
+    assert_eq!(db.collaboration_unread_of(room, run, "b").unwrap().count, 1);
+    db.collaboration_send(room, run, Some("b"), "对方待查阅的发言", "review-other")
+        .unwrap();
+    db.collaboration_send(
+        room,
+        run,
+        Some("a"),
+        "尚未查阅就再次发言",
+        "review-own-again",
+    )
+    .unwrap();
+    assert_eq!(db.collaboration_unread_of(room, run, "a").unwrap().count, 1);
+    assert_eq!(
+        db.collaboration_read_of(room, "a", run)
+            .unwrap()
+            .unwrap()
+            .through_seq,
+        1
+    );
 }
