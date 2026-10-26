@@ -1,0 +1,137 @@
+/* 协作室：任务详情的一个子页。复用 detail-section / badge / btn，不新增一套组件体系。 */
+
+.collab-candidates,
+.collab-room,
+.collab-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.collab-candidate-list,
+.collab-member-list,
+.collab-message-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.collab-candidate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.collab-candidate:last-child { border-bottom: 0; }
+.collab-candidate.blocked { opacity: 0.66; }
+.collab-candidate-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 220px;
+  min-width: 0;
+  cursor: pointer;
+}
+.collab-candidate.blocked .collab-candidate-main { cursor: default; }
+.collab-candidate-name { min-width: 0; }
+.collab-candidate-wake {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.collab-coordinator {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.collab-coordinator legend { padding: 0 4px; color: var(--text-secondary); }
+.collab-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collab-member {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.collab-member:last-child { border-bottom: 0; }
+.collab-member-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.collab-member-name { min-width: 0; font-weight: 500; }
+.collab-member-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.collab-member-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.collab-member-actions:empty { display: none; }
+
+/* 连接与处理阶段分开着色：心跳活着 ≠ 模型能响应。 */
+.collab-tone-waiting { background: var(--bg-hover); color: var(--text-secondary); }
+.collab-tone-listening { background: var(--bg-hover); color: var(--success); }
+.collab-tone-processing { background: var(--accent-wash); color: var(--accent); }
+.collab-tone-stalled { background: var(--warning-wash); color: var(--warning); }
+.collab-tone-idle { background: var(--bg-hover); color: var(--text-secondary); }
+.collab-tone-disconnected { background: var(--warning-wash); color: var(--warning); }
+.collab-tone-left { background: var(--bg-hover); color: var(--text-muted); }
+.collab-tone-failed { background: var(--warning-wash); color: var(--danger); }
+
+.collab-run-starting { background: var(--bg-hover); color: var(--text-secondary); }
+.collab-run-active { background: var(--accent-wash); color: var(--accent); }
+.collab-run-stopped { background: var(--bg-hover); color: var(--text-muted); }
+
+.collab-message {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+}
+.collab-message.mine { background: var(--accent-wash); }
+.collab-message-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.collab-message-sender { color: var(--text-secondary); font-weight: 500; }
+.collab-message-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.collab-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.collab-compose textarea {
+  width: 100%;
+  resize: vertical;
+}

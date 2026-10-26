@@ -16,10 +16,12 @@ import {
   type WorkstreamContext as WorkstreamContextData,
   type WorkstreamContextView,
 } from "../../types";
-import type { Route } from "../../app/routes";
+import type { Route, WorkstreamEntry } from "../../app/routes";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "../sessions/SummaryContent";
 import WorkstreamSessions from "./WorkstreamSessions";
 import TaskItems from "./TaskItems";
+import TaskSubpageTabs from "./TaskSubpageTabs";
+import CollaborationRoomView from "../collaboration/CollaborationRoomView";
 
 /** Task organization and the current Markdown summary. All reads are pure. */
 import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
@@ -30,11 +32,13 @@ export { workstreamDetailCache, clearWorkstreamDetailCache };
 export default function WorkstreamDetailView({
   workstreamId,
   initialTitle,
+  entry,
   navigate,
   goBack,
 }: {
   workstreamId: string;
   initialTitle?: string;
+  entry?: WorkstreamEntry;
   navigate: (r: Route) => void;
   goBack: (fallback?: Route) => void;
 }) {
@@ -171,7 +175,10 @@ export default function WorkstreamDetailView({
     if (loadError === "") {
       return (
         <div className="main task-detail" role="status">
-          <PageHeader title={initialTitle ?? ""} />
+          <PageHeader
+            title={initialTitle ?? ""}
+            actions={<TaskSubpageTabs workstreamId={workstreamId} entry={entry} initialTitle={initialTitle} navigate={navigate} />}
+          />
           {showSkeleton && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
               <div className="skeleton" style={{ height: 120, borderRadius: "var(--radius-lg)" }} />
@@ -287,6 +294,13 @@ export default function WorkstreamDetailView({
         }
         actions={
           <>
+            <TaskSubpageTabs
+              workstreamId={workstream.id}
+              entry={entry}
+              initialTitle={workstream.title}
+              navigate={navigate}
+            />
+            <span className="session-action-divider" aria-hidden="true" />
             <button className="btn ghost icon-button" title="编辑任务" aria-label="编辑任务"
               onClick={openEditor}>
               <Icon name="edit" />
@@ -329,9 +343,18 @@ export default function WorkstreamDetailView({
         )}
       </PageHeader>
 
+      {/* 协作室与详情共用标题栏：协作室自己读取房间状态，不占用详情的数据。 */}
+      {entry === "collaboration" ? (
+        <CollaborationRoomView
+          taskId={workstream.id}
+          taskTitle={workstream.title}
+          sessions={sessions}
+          archived={archived}
+        />
+      ) : (
+      <div className="detail-layout task-detail-layout">
       {/* Workstream 自身（Base Experience）：与另外两个详情页同形——主栏是内容本身
           （概览、会话、Context），右栏是只读事实（状态、路径、项目）。 */}
-      <div className="detail-layout task-detail-layout">
         <div className="detail-main task-detail-main">
           <section className="card detail-section">
             <div className="row between" style={{ alignItems: "center" }}>
@@ -464,6 +487,7 @@ export default function WorkstreamDetailView({
           </section>
         </aside>
       </div>
+      )}
 
       {projectPickerOpen && (
         <WorkstreamProjectPickerModal
