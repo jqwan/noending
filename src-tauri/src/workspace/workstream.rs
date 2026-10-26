@@ -74,7 +74,12 @@ pub fn set_workstream_projects(db: &Db, id: &str, projects: &[String]) -> Result
 /// Absolute, not a toggle: a retry or double click must not quietly
 /// un-archive the Workstream.
 pub fn archive_workstream(db: &Db, workstream_id: &str) -> Result<Workstream> {
-    set_visibility(db, workstream_id, workstream_visibility::ARCHIVED)
+    let task = set_visibility(db, workstream_id, workstream_visibility::ARCHIVED)?;
+    // Archiving a task terminates its room's in-flight collaborations and
+    // wakes their waiters through the stop notice; the archived task refuses
+    // any new start.
+    db.collaboration_stop_runs_for_archived_task(workstream_id)?;
+    Ok(task)
 }
 
 /// Unarchive without changing task data or associations.

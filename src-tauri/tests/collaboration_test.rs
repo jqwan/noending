@@ -921,6 +921,89 @@ fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
 }
 
 #[test]
+fn joining_activates_the_run_and_archiving_the_task_stops_it() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            Some("a"),
+            None,
+            None,
+            "r1",
+        )
+        .unwrap();
+    let room_id = started.room.id.clone();
+    let run_id = started.run.id.clone();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+
+    // One member joined, but the designated coordinator is not among the
+    // live participations: the run stays starting.
+    db.collaboration_join(&room_id, &run_id, "b", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    assert_eq!(
+        db.collaboration_current_run(&room_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "starting"
+    );
+
+    // The coordinator joins: two live members including the coordinator.
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    assert_eq!(
+        db.collaboration_current_run(&room_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "active"
+    );
+
+    // A stop on an active run still works; restart and archive flow next.
+    db.collaboration_stop(&room_id, &run_id, None, "s1")
+        .unwrap();
+    let restarted = db
+        .collaboration_start("t", &Fixture::members("a", "b"), None, None, None, "r2")
+        .unwrap();
+    let run2 = restarted.run.id.clone();
+    let room2 = restarted.room.id.clone();
+    db.collaboration_join(&room2, &run2, "a", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    db.collaboration_join(&room2, &run2, "b", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    assert_eq!(
+        db.collaboration_current_run(&room2)
+            .unwrap()
+            .unwrap()
+            .status,
+        "active"
+    );
+
+    // Archiving the task terminates the in-flight run with a user stop
+    // notice; waiters observe stopped on their next poll.
+    db.write()
+        .execute(
+            "UPDATE workstreams SET visibility='archived' WHERE id='t'",
+            [],
+        )
+        .unwrap();
+    // The archive entry point (not bare visibility SQL) performs the stop.
+    noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
+    let run = db.collaboration_current_run(&room2).unwrap().unwrap();
+    assert_eq!(run.status, "stopped");
+    assert!(run.stop_initiator_session_id.is_none());
+    let page = db
+        .collaboration_messages_page(&room2, Some(&run2), None, 50)
+        .unwrap();
+    let last = page.items.last().unwrap();
+    assert_eq!(last.kind, "stop");
+    assert!(last.sender_session_id.is_none());
+    assert!(last.body.contains("task_archived"));
+}
+
+#[test]
 fn run_activates_after_two_members_and_the_selected_coordinator_join() {
     for coordinator in [None, Some("c")] {
         let f = Fixture::new();
