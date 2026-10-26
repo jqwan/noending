@@ -35,25 +35,25 @@ fn connection_state(
 /// The full room view for one task: configuration, current run and one member
 /// entry per selected session, composed from four storage projections.
 pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
+    let title = db
+        .get_workstream(task_id)?
+        .ok_or_else(|| CliError::new("not_found", "任务不存在"))?
+        .title;
     let Some((room, run)) = db.collaboration_room_by_task(task_id)? else {
-        let title = db
-            .get_workstream(task_id)?
-            .map(|t| json!(t.title))
-            .unwrap_or(Value::Null);
         return Ok(
             json!({"task_id":task_id,"title":title,"room":Value::Null,"run":Value::Null,"members":[]}),
         );
     };
-    let title = db
-        .get_workstream(task_id)?
-        .map(|t| json!(t.title))
-        .unwrap_or(Value::Null);
     let now = chrono::Utc::now();
     let participations: Vec<store::CollaborationParticipation> = match &run {
         Some(run) => db.collaboration_participations_for_run(&run.id)?,
         None => vec![],
     };
     let run_id = run.as_ref().map(|r| r.id.clone());
+    let run_members = match &run_id {
+        Some(id) => db.collaboration_run_members(id)?,
+        None => vec![],
+    };
     let members = room
         .selected_members
         .iter()
@@ -62,13 +62,12 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 .iter()
                 .find(|p| p.session_id == selected.session_id);
             let (wake_status, wake_error) = match (&run, &run_id) {
-                (Some(_), Some(run_id)) => {
-                    let member = db
-                        .collaboration_run_members(run_id)?
-                        .into_iter()
+                (Some(_), Some(_)) => {
+                    let member = run_members
+                        .iter()
                         .find(|m| m.session_id == selected.session_id);
                     match member {
-                        Some(m) => (json!(m.wake_status), m.wake_error.map(|e| json!(e))),
+                        Some(m) => (json!(m.wake_status), m.wake_error.as_ref().map(|e| json!(e))),
                         None => (Value::Null, None),
                     }
                 }
@@ -193,7 +192,7 @@ pub(crate) struct StartParams {
     pub initial_message: Option<String>,
     pub request_id: String,
 }
-pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
+pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<store::CollaborationStartOutcome> {
     // A replay must be recognised BEFORE capability re-probing: the original
     // start succeeded once, so the same request returns that result even if a
     // member's CLI has since disappeared.
@@ -234,16 +233,14 @@ pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
             }
         }
     }
-    db.collaboration_start(
+    Ok(db.collaboration_start(
         &params.task_id,
         &params.members,
         params.coordinator_session_id.as_deref(),
         params.expected_revision,
         params.initial_message.as_deref(),
         &params.request_id,
-    )?;
-    // The desktop always receives the same full RoomView shape as room_get.
-    room_view(db, &params.task_id)
+    )?)
 }
 
 /// Every run-scoped operation answers only the room's CURRENT run: an old run

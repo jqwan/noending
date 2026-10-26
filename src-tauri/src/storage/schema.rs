@@ -705,10 +705,7 @@ CREATE TABLE IF NOT EXISTS collaboration_runs (
   stopped_at TEXT,
   -- NULL = the desktop user; a session id keeps the coordinator's identity,
   -- mirroring the mailbox sender semantics.
-  stop_initiator_session_id TEXT,
-  -- Idempotency: repeating a start/stop request with the same id is a no-op.
-  start_request_id TEXT UNIQUE,
-  stop_request_id TEXT UNIQUE
+  stop_initiator_session_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_collaboration_runs_room ON collaboration_runs(room_id, started_at);
 CREATE TABLE IF NOT EXISTS collaboration_run_members (
@@ -735,7 +732,6 @@ CREATE TABLE IF NOT EXISTS collaboration_messages (
   request_id TEXT UNIQUE,
   UNIQUE(room_id, seq)
 );
-CREATE INDEX IF NOT EXISTS idx_collaboration_messages_room ON collaboration_messages(room_id, seq);
 -- Per-member processing cursor, one row per run: a new run starts before its
 -- own start notice, so old-run messages stay reviewable without re-execution.
 CREATE TABLE IF NOT EXISTS collaboration_reads (

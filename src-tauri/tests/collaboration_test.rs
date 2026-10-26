@@ -177,6 +177,38 @@ fn repeated_start_request_returns_the_existing_run_without_appending() {
     assert_eq!(first.run.id, second.run.id);
     assert!(second.appended.is_empty());
     assert_eq!(first.appended.len(), 2);
+
+    db.collaboration_stop(&first.room.id, &first.run.id, None, "stop-first")
+        .unwrap();
+    let newer = db
+        .collaboration_start("t", &Fixture::members("a", "c"), None, None, None, "newer")
+        .unwrap();
+    let old_request = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            Some("msg"),
+            "same",
+        )
+        .unwrap();
+    assert_eq!(old_request.run.id, first.run.id);
+    assert_eq!(
+        old_request
+            .members
+            .iter()
+            .map(|m| m.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        db.collaboration_current_run(&first.room.id)
+            .unwrap()
+            .unwrap()
+            .id,
+        newer.run.id
+    );
 }
 
 #[test]
@@ -516,10 +548,7 @@ fn coordinator_swap_guards_revision_is_idempotent_and_rejects_reused_ids() {
     let conflict = db
         .collaboration_set_coordinator(&room_id, &run_id, Some("a"), 2, "swap-1")
         .unwrap_err();
-    assert!(
-        conflict.to_string().contains("已被用于不同的负责人操作"),
-        "{conflict}"
-    );
+    assert!(conflict.to_string().contains("已被用于"), "{conflict}");
 
     // A coordinator outside the members is rejected.
     let outsider = db
@@ -1107,4 +1136,123 @@ fn archiving_a_task_stops_its_collaboration_and_does_not_duplicate_stop_notice()
         )
         .unwrap();
     assert_ne!(next.run.id, started.run.id);
+}
+
+#[test]
+fn wake_replay_keeps_failed_outcome_and_late_results_cannot_overwrite_a_new_attempt() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "wake-start",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    assert!(db
+        .collaboration_claim_wake("wake-one", room, run, "a")
+        .unwrap());
+    assert!(!db
+        .collaboration_claim_wake("wake-one", room, run, "a")
+        .unwrap());
+    assert!(db
+        .collaboration_claim_wake("wake-one", room, run, "b")
+        .is_err());
+    db.collaboration_set_wake_status(run, "a", "failed", Some("打开失败"), "wake-one")
+        .unwrap();
+    assert!(!db
+        .collaboration_claim_wake("wake-one", room, run, "a")
+        .unwrap());
+    let failed = db.collaboration_run_members(run).unwrap();
+    assert_eq!(
+        failed
+            .iter()
+            .find(|m| m.session_id == "a")
+            .unwrap()
+            .wake_error
+            .as_deref(),
+        Some("打开失败")
+    );
+
+    assert!(db
+        .collaboration_claim_wake("wake-two", room, run, "a")
+        .unwrap());
+    db.collaboration_set_wake_status(run, "a", "opened", None, "wake-one")
+        .unwrap();
+    let pending = db.collaboration_run_members(run).unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .find(|m| m.session_id == "a")
+            .unwrap()
+            .wake_status,
+        "pending"
+    );
+    db.collaboration_set_wake_status(run, "a", "opened", None, "wake-two")
+        .unwrap();
+    assert_eq!(
+        db.collaboration_run_members(run)
+            .unwrap()
+            .iter()
+            .find(|m| m.session_id == "a")
+            .unwrap()
+            .wake_status,
+        "opened"
+    );
+    db.collaboration_stop(room, run, None, "wake-stop").unwrap();
+    assert!(db
+        .collaboration_claim_wake("wake-after-stop", room, run, "a")
+        .is_err());
+}
+
+#[test]
+fn clearing_a_pending_coordinator_activates_ready_members_and_rejects_stale_run_changes() {
+    let f = Fixture::new();
+    let db = f.db();
+    let mut members = Fixture::members("a", "b");
+    members.push(SelectedMember {
+        session_id: "c".into(),
+        wake_method: "desktop".into(),
+    });
+    let started = db
+        .collaboration_start("t", &members, Some("c"), None, None, "coordinator-start")
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    for session in ["a", "b"] {
+        db.collaboration_join(room, run, session, "cli", "cli-resident", &cutoff)
+            .unwrap();
+    }
+    assert_eq!(
+        db.collaboration_current_run(room).unwrap().unwrap().status,
+        "starting"
+    );
+    let edited = db
+        .collaboration_set_coordinator(room, run, None, 1, "clear-coordinator")
+        .unwrap();
+    assert_eq!(
+        db.collaboration_current_run(room).unwrap().unwrap().status,
+        "active"
+    );
+    assert!(edited.coordinator_session_id.is_none());
+    assert!(db
+        .collaboration_set_coordinator(
+            room,
+            "foreign-run",
+            None,
+            edited.revision,
+            "clear-coordinator"
+        )
+        .is_err());
+    db.collaboration_stop(room, run, None, "coordinator-stop")
+        .unwrap();
+    assert!(db
+        .collaboration_set_coordinator(room, run, Some("a"), edited.revision, "change-after-stop")
+        .is_err());
 }

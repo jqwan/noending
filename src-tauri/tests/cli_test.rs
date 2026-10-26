@@ -71,6 +71,11 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
         let (success, status) = f.run(Path::new(exe), &["status"]);
         assert!(success);
         assert_eq!(status["data"]["connected"], true);
+        assert!(status["data"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "room"));
         let (success, freshness) = f.run(Path::new(exe), &["freshness"]);
         assert!(success);
         assert_eq!(freshness["data"]["sessions"]["total"], 0);
@@ -1840,6 +1845,10 @@ fn progress_note_cli_appends_literal_text_and_replays_without_overwriting_existi
 #[test]
 fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let (ok, missing) = f.run(exe, &["room", "resolve", "--task", "missing"]);
+    assert!(!ok);
+    assert_eq!(missing["error"]["code"], "not_found");
     let db = f.db.as_ref().unwrap();
     db.write()
         .execute_batch(
@@ -1849,7 +1858,6 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
              INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
         )
         .unwrap();
-    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
     use noending_lib::storage::collaboration::SelectedMember;
     let started = db
         .collaboration_start(

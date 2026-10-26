@@ -508,8 +508,8 @@ impl Db {
             let run_id = new_id();
             let started_at = now();
             tx.execute(
-                "INSERT INTO collaboration_runs(id,room_id,status,started_at,start_request_id) VALUES(?1,?2,'starting',?3,?4)",
-                params![run_id, room_id, started_at, request_id],
+                "INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES(?1,?2,'starting',?3)",
+                params![run_id, room_id, started_at],
             )
             .map_err(crate::error::AppError::from)?;
             record_request_conn(tx, request_id, "start", &room_id, &run_id, &fingerprint)?;
@@ -622,8 +622,8 @@ impl Db {
                 }
             }
             tx.execute(
-                "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=?3,stop_request_id=?4 WHERE id=?1",
-                params![run_id, now(), initiator, request_id],
+                "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=?3 WHERE id=?1",
+                params![run_id, now(), initiator],
             )
             .map_err(crate::error::AppError::from)?;
             record_request_conn(tx, request_id, "stop", room_id, run_id, &fingerprint)?;
@@ -657,28 +657,23 @@ impl Db {
         expected_revision: i64,
         request_id: &str,
     ) -> Result<CollaborationRoom> {
-        let fingerprint = serde_json::json!({"coordinator":coordinator}).to_string();
+        let fingerprint = serde_json::json!({
+            "room": room_id, "run": run_id, "coordinator": coordinator,
+            "revision": expected_revision,
+        })
+        .to_string();
         self.tx(|tx| {
             let row = tx
                 .query_row(&format!("{ROOM_SELECT} WHERE id=?1"), [room_id], row_room)
                 .optional()?
                 .ok_or_else(|| other("协作室不存在"))?;
             let room = parse_room(row)?;
-            let replay: Option<String> = tx
-                .query_row(
-                    "SELECT fingerprint FROM collaboration_requests WHERE request_id=?1",
-                    [request_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(crate::error::AppError::from)?;
-            if let Some(stored) = replay {
-                if stored == fingerprint {
-                    // The original swap already happened; answer with the
-                    // current room without re-checking the stale revision.
-                    return Ok(room);
-                }
-                return Err(other("请求编号已被用于不同的负责人操作"));
+            if request_hit_conn(tx, request_id, "coordinator", &fingerprint)?.is_some() {
+                return Ok(room);
+            }
+            let current = current_run_conn(tx, room_id)?.ok_or_else(|| other("协作运行不存在"))?;
+            if current.id != run_id || current.status == "stopped" {
+                return Err(other("协作运行已停止或更新，不能修改负责人"));
             }
             if room.revision != expected_revision {
                 return Err(other("协作室配置已被其他人修改，请刷新后重试"));
@@ -702,6 +697,7 @@ impl Db {
                 params![room_id, coordinator, now()],
             )
             .map_err(crate::error::AppError::from)?;
+            maybe_activate_run_conn(tx, room_id, run_id)?;
             let updated = tx
                 .query_row(&format!("{ROOM_SELECT} WHERE id=?1"), [room_id], row_room)
                 .optional()?
@@ -898,20 +894,18 @@ impl Db {
             if request_hit_conn(tx, request_id, "wake", &fingerprint)?.is_some() {
                 return Ok(false);
             }
+            let current = current_run_conn(tx, room_id)?
+                .ok_or_else(|| other("协作运行不存在"))?;
+            if current.id != run_id || current.status == "stopped" {
+                return Err(other("协作运行已停止或更新，不能打开成员会话"));
+            }
+            require_run_member_conn(tx, run_id, session_id)?;
             record_request_conn(tx, request_id, "wake", room_id, run_id, &fingerprint)?;
-            Ok(true)
-        })
-    }
-    /// Release a claimed wake request after a determinate failure, so an
-    /// explicit retry with the same request id launches again.
-    pub fn collaboration_release_wake(&self, request_id: &str) -> Result<()> {
-        self.tx(|tx| {
             tx.execute(
-                "DELETE FROM collaboration_requests WHERE request_id=?1 AND kind='wake'",
-                [request_id],
-            )
-            .map_err(crate::error::AppError::from)?;
-            Ok(())
+                "UPDATE collaboration_run_members SET wake_status='pending',wake_error=NULL,wake_request_id=?3 WHERE run_id=?1 AND session_id=?2",
+                params![run_id, session_id, request_id],
+            )?;
+            Ok(true)
         })
     }
 
@@ -926,7 +920,7 @@ impl Db {
     ) -> Result<()> {
         self.tx(|tx| {
             tx.execute(
-                "UPDATE collaboration_run_members SET wake_status=?3,wake_error=?4,wake_request_id=?5 WHERE run_id=?1 AND session_id=?2",
+                "UPDATE collaboration_run_members SET wake_status=?3,wake_error=?4 WHERE run_id=?1 AND session_id=?2 AND wake_request_id=?5",
                 params![run_id, session_id, status, error, request_id],
             )
             .map_err(crate::error::AppError::from)?;
@@ -1077,8 +1071,8 @@ pub(crate) fn stop_runs_for_archived_task_conn(tx: &Connection, task_id: &str) -
             continue;
         }
         tx.execute(
-            "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=NULL,stop_request_id=?3 WHERE id=?1 AND status<>'stopped'",
-            params![run_id, now(), request_id],
+            "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=NULL WHERE id=?1 AND status<>'stopped'",
+            params![run_id, now()],
         )
         .map_err(crate::error::AppError::from)?;
         let notice_body = serde_json::json!({
@@ -1153,10 +1147,11 @@ fn maybe_activate_run_conn(tx: &Connection, room_id: &str, run_id: &str) -> Resu
             |r| r.get::<_, Option<String>>(0),
         )
         .map_err(crate::error::AppError::from)?;
+    let fresh_cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     let joined: i64 = tx
         .query_row(
             "SELECT COUNT(DISTINCT p.session_id) FROM collaboration_participations p WHERE p.run_id=?1 AND p.left_at IS NULL AND p.last_heartbeat_at>=?2",
-            params![run_id, (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339()],
+            params![run_id, fresh_cutoff],
             |r| r.get(0),
         )
         .map_err(crate::error::AppError::from)?;
@@ -1167,8 +1162,8 @@ fn maybe_activate_run_conn(tx: &Connection, room_id: &str, run_id: &str) -> Resu
         None => true,
         Some(id) => tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL)",
-                params![run_id, id],
+                "SELECT EXISTS(SELECT 1 FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL AND last_heartbeat_at>=?3)",
+                params![run_id, id, fresh_cutoff],
                 |r| r.get::<_, bool>(0),
             )
             .map_err(crate::error::AppError::from)?,

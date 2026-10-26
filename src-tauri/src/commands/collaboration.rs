@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 
 const EVENT: &str = "collaboration-changed";
 
-fn map_cli(result: crate::cli::CliResult<Value>) -> Result<Value> {
+fn map_cli<T>(result: crate::cli::CliResult<T>) -> Result<T> {
     result.map_err(|CliError { code, message, .. }| {
         crate::error::other(format!("[{code}] {message}"))
     })
@@ -106,27 +106,15 @@ pub fn collaboration_room_start(
             },
         ))
     })?;
-    let room_id = started["room"]["id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    let run_id = started["run"]["id"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let room_id = started.room.id;
+    let run_id = started.run.id;
     // Transaction-external wake side effects, one idempotent attempt per
     // member: a failure is recorded on that member alone and retried via
     // collaboration_member_wake; nobody else is re-launched for it. Replaying
     // the start request hits the same per-member ledger keys and re-launches
     // nothing.
-    for member in started["members"].as_array().cloned().unwrap_or_default() {
-        let session_id = member["session_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if session_id.is_empty() {
-            continue;
-        }
+    for member in started.members {
+        let session_id = member.session_id;
         let derived = format!("{request_id}:{session_id}");
         let _ = wake_with_ledger(
             &app,
@@ -139,7 +127,9 @@ pub fn collaboration_room_start(
         );
     }
     emit_changed(&app, &task_id, &room_id, &run_id, "run");
-    Ok(started)
+    with_db(&state, |db| {
+        map_cli(crate::collaboration::room_view(db, &task_id))
+    })
 }
 
 #[tauri::command]
@@ -335,9 +325,8 @@ fn wake_one(
 /// One member's wake. The ledger row is claimed atomically BEFORE the side
 /// effect, so concurrent equal requests cannot both launch and a replay of a
 /// different operation is rejected by kind/fingerprint. A determinate failure
-/// settles as a completed MemberState (failed + error) and releases the
-/// claim, so an explicit retry with the same request id launches again; only
-/// a transmission interruption answers the original request.
+/// settles as a completed MemberState (failed + error). Its request stays
+/// recorded: replay only confirms that attempt; an explicit retry uses a new id.
 fn wake_with_ledger(
     app: &AppHandle,
     state: &AppState,
@@ -386,10 +375,7 @@ fn wake_with_ledger(
                     "failed",
                     Some(&message),
                     request_id,
-                )?;
-                // Release the claim: a determinate failure must not swallow a
-                // later retry that reuses the request id.
-                db.collaboration_release_wake(request_id)
+                )
             })?;
         }
     }
