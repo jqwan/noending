@@ -330,6 +330,38 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     from_session: options.required("from-session")?,
                 })
             }
+            "room" if action == "join" && words.len() == 3 => Command::RoomJoin {
+                room: id(&words)?,
+                run: options.required("run")?,
+                from_session: options.required("from-session")?,
+                holder: "cli".to_string(),
+            },
+            "room" if action == "wait" && words.len() == 3 => Command::RoomWait {
+                room: id(&words)?,
+                run: options.required("run")?,
+                from_session: options.required("from-session")?,
+                timeout_seconds: options
+                    .take("timeout")
+                    .map(|s| s.parse().map_err(|_| invalid("--timeout 无效")))
+                    .transpose()?,
+                limit: options.number("limit", 50)?,
+            },
+            "room" if action == "ack" && words.len() == 3 => Command::RoomAck {
+                room: id(&words)?,
+                run: options.required("run")?,
+                from_session: options.required("from-session")?,
+                through_seq: options.number("through-seq", -1)?,
+            },
+            "room" if action == "leave" && words.len() == 3 => Command::RoomLeave {
+                room: id(&words)?,
+                run: options.required("run")?,
+                from_session: options.required("from-session")?,
+            },
+            "room" if action == "listen" && words.len() == 3 => Command::RoomListen {
+                room: id(&words)?,
+                run: options.required("run")?,
+                connection: options.required("connection")?,
+            },
             "mailbox" if action == "wait" && words.len() == 2 => {
                 Command::MailboxWait(crate::mailbox::Wait {
                     session: options.required("session")?,
@@ -616,7 +648,7 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
         None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
-        Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room stop ROOM --run RUN --from-session ID"],
+        Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
         Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
         Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item complete ID --item-id ID --revision N", "ne task item reopen ID --item-id ID --revision N", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],

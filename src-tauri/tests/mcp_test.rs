@@ -199,6 +199,10 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             "room_messages",
             "room_send",
             "room_stop",
+            "room_join",
+            "room_wait",
+            "room_ack",
+            "room_leave",
             "task_items",
             "task_item_create",
             "task_item_update",
@@ -1111,5 +1115,117 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     assert_eq!(closed["error"]["code"], "run_inactive");
     let view = c.ok("room_resolve", json!({"task":"task1"}));
     assert_eq!(view["run"]["status"], "stopped");
+    c.finish();
+}
+
+#[test]
+fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
+    let f = Fixture::new();
+    f.home.ensure_dirs().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    db.write()
+        .execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+               ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+        )
+        .unwrap();
+    use noending_lib::storage::collaboration::SelectedMember;
+    let started = db
+        .collaboration_start(
+            "task1",
+            &[
+                SelectedMember {
+                    session_id: "coord".into(),
+                    wake_method: "desktop".into(),
+                },
+                SelectedMember {
+                    session_id: "peer".into(),
+                    wake_method: "desktop".into(),
+                },
+            ],
+            None,
+            None,
+            None,
+            "start-1",
+        )
+        .unwrap();
+    let room = started.room.id.clone();
+    let run = started.run.id.clone();
+    let mut c = f.start();
+
+    // Waiting before joining is rejected instead of silently leaking a lease.
+    let premature = c.call(
+        "room_wait",
+        json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":1}),
+    );
+    assert_eq!(premature["error"]["code"], "join_required");
+
+    let joined = c.ok(
+        "room_join",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert!(joined["connection_id"].as_str().is_some());
+
+    // The start notice is the first batch; the wait returns immediately.
+    let waited = c.ok(
+        "room_wait",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert_eq!(waited["status"], "messages");
+    assert_eq!(waited["items"].as_array().unwrap().len(), 1);
+    assert_eq!(waited["items"][0]["kind"], "start");
+
+    // Acknowledge, then an empty mailbox honours the server bound.
+    c.ok(
+        "room_ack",
+        json!({"room":room,"run":run,"from_session":"peer","through_seq":waited["items"][0]["seq"]}),
+    );
+    let waited = c.ok(
+        "room_wait",
+        json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":1}),
+    );
+    assert_eq!(waited["status"], "timeout");
+
+    // A message written by the coordinator arrives in the next wait.
+    db.collaboration_send(&room, &run, Some("coord"), "来自负责人", "m1")
+        .unwrap();
+    let waited = c.ok(
+        "room_wait",
+        json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":10}),
+    );
+    assert_eq!(waited["status"], "messages");
+    assert_eq!(waited["items"][0]["body"], "来自负责人");
+
+    // The view shows the processing phase after a delivered batch.
+    let view = c.ok("room_resolve", json!({"task":"task1"}));
+    let member = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["session_id"] == "peer")
+        .unwrap();
+    assert_eq!(member["phase"], "processing");
+    assert_eq!(member["connection_state"], "connected");
+
+    // Leaving ends the lease; a later wait needs a fresh join.
+    c.ok(
+        "room_leave",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    let view = c.ok("room_resolve", json!({"task":"task1"}));
+    let member = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["session_id"] == "peer")
+        .unwrap();
+    assert_eq!(member["connection_state"], "left");
+    let premature = c.call(
+        "room_wait",
+        json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":1}),
+    );
+    assert_eq!(premature["error"]["code"], "join_required");
     c.finish();
 }

@@ -1970,3 +1970,225 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     assert!(!ok, "{closed}");
     assert_eq!(closed["error"]["code"], "run_inactive");
 }
+
+#[test]
+fn collaboration_participation_survives_across_real_cli_processes() {
+    let f = Fixture::new();
+    let db = f.db.as_ref().unwrap();
+    db.write()
+        .execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+               ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+        )
+        .unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    use noending_lib::storage::collaboration::SelectedMember;
+    let started = db
+        .collaboration_start(
+            "task1",
+            &[
+                SelectedMember {
+                    session_id: "coord".into(),
+                    wake_method: "desktop".into(),
+                },
+                SelectedMember {
+                    session_id: "peer".into(),
+                    wake_method: "desktop".into(),
+                },
+            ],
+            None,
+            None,
+            None,
+            "start-1",
+        )
+        .unwrap();
+    let room = started.room.id.clone();
+    let run = started.run.id.clone();
+
+    // Join in one process: the claim persists and the resident listener starts.
+    let (ok, joined) = f.run(
+        exe,
+        &[
+            "room",
+            "join",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+        ],
+    );
+    assert!(ok, "{joined}");
+    assert!(joined["data"]["connection_id"].as_str().is_some());
+
+    // A second join replaces the lease; both processes see the same truth.
+    let (ok, rejoined) = f.run(
+        exe,
+        &[
+            "room",
+            "join",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+        ],
+    );
+    assert!(ok, "{rejoined}");
+    assert_ne!(
+        joined["data"]["connection_id"], rejoined["data"]["connection_id"],
+        "re-joining claims a fresh connection id"
+    );
+
+    // The lease is live right after joining (heartbeat written at claim).
+    let (ok, view) = f.run(exe, &["room", "show", &room]);
+    assert!(ok, "{view}");
+    let member = view["data"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["session_id"] == "peer")
+        .unwrap();
+    assert_eq!(member["connection_state"], "connected");
+    assert_eq!(member["phase"], Value::Null);
+
+    // Controlled clock: a heartbeat older than the 30s window is disconnected.
+    db.write()
+        .execute(
+            "UPDATE collaboration_participations SET last_heartbeat_at=?1",
+            [chrono_now_minus(31)],
+        )
+        .unwrap();
+    let (ok, view) = f.run(exe, &["room", "show", &room]);
+    assert!(ok, "{view}");
+    let member = view["data"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["session_id"] == "peer")
+        .unwrap();
+    assert_eq!(member["connection_state"], "disconnected");
+
+    // Ack the start notice so nothing is pending, then wait with nothing
+    // pending honours the server bound distinguishably.
+    let (ok, acked) = f.run(
+        exe,
+        &[
+            "room",
+            "ack",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--through-seq",
+            "1",
+        ],
+    );
+    assert!(ok, "{acked}");
+    let (ok, waited) = f.run(
+        exe,
+        &[
+            "room",
+            "wait",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--timeout",
+            "1",
+        ],
+    );
+    assert!(ok, "{waited}");
+    assert_eq!(waited["data"]["status"], "timeout");
+
+    // A delivery from another process wakes the waiter with the batch.
+    let sent = db
+        .collaboration_send(&room, &run, Some("coord"), "来自负责人", "m1")
+        .unwrap();
+    let (ok, waited) = f.run(
+        exe,
+        &[
+            "room",
+            "wait",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--timeout",
+            "10",
+        ],
+    );
+    assert!(ok, "{waited}");
+    assert_eq!(waited["data"]["status"], "messages");
+    assert_eq!(waited["data"]["items"][0]["id"], sent.id);
+
+    // Ack the handled position, then leave; the lease reports left.
+    let (ok, acked) = f.run(
+        exe,
+        &[
+            "room",
+            "ack",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--through-seq",
+            &sent.seq.to_string(),
+        ],
+    );
+    assert!(ok, "{acked}");
+    let (ok, left) = f.run(
+        exe,
+        &[
+            "room",
+            "leave",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+        ],
+    );
+    assert!(ok, "{left}");
+    let (ok, view) = f.run(exe, &["room", "show", &room]);
+    assert!(ok, "{view}");
+    let member = view["data"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["session_id"] == "peer")
+        .unwrap();
+    assert_eq!(member["connection_state"], "left");
+
+    // A stopped run ends waits gracefully instead of erroring. The
+    // coordinator joins first so its participation exists.
+    db.collaboration_join(&room, &run, "coord", "cli").unwrap();
+    db.collaboration_stop(&room, &run, None, "stop-1").unwrap();
+    let (ok, waited) = f.run(
+        exe,
+        &[
+            "room",
+            "wait",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "coord",
+            "--timeout",
+            "5",
+        ],
+    );
+    assert!(ok, "{waited}");
+    assert_eq!(waited["data"]["status"], "stopped");
+    //coord never joined; participation missing → join_required comes first
+}
+
+fn chrono_now_minus(seconds: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339()
+}

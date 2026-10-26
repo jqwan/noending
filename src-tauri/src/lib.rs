@@ -116,11 +116,23 @@ pub fn run() {
             {
                 let state = app.state::<commands::AppState>();
                 let handle = app.handle().clone();
+                let collaboration_cache =
+                    std::sync::Mutex::new(std::collections::HashMap::<
+                        String,
+                        (String, String, i64, String),
+                    >::new());
                 let watcher = cli::watch_changes(state.db.clone(), move || {
                     let state = handle.state::<commands::AppState>();
                     let registry = handle.state::<terminal::TerminalRegistry>();
                     registry.bind_discovered(&state.db);
                     registry.kick_notifications("");
+                    if let Ok(mut cache) = collaboration_cache.lock() {
+                        commands::collaboration::emit_external_changes(
+                            &handle,
+                            &state.db,
+                            &mut cache,
+                        );
+                    }
                     let _ = handle.emit("cli-data-changed", ());
                 });
                 app.manage(watcher);

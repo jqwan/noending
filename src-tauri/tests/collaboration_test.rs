@@ -557,3 +557,122 @@ fn start_rejects_a_request_id_reused_for_a_different_configuration() {
         "conflicting replays never append"
     );
 }
+
+#[test]
+fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            Some("a"),
+            None,
+            None,
+            "r1",
+        )
+        .unwrap();
+    let room_id = started.room.id.clone();
+    let run_id = started.run.id.clone();
+
+    let first = db
+        .collaboration_join(&room_id, &run_id, "a", "cli")
+        .unwrap();
+    assert_eq!(first.role.as_deref(), Some("a"));
+    assert_eq!(
+        first.through_seq, 0,
+        "start notice begins the processing range"
+    );
+
+    // A second join replaces the connection id in one atomic step.
+    let second = db
+        .collaboration_join(&room_id, &run_id, "a", "mcp")
+        .unwrap();
+    assert_ne!(first.connection_id, second.connection_id);
+
+    // The replaced connection's row is gone; the current one can renew.
+    assert_eq!(
+        db.collaboration_renew(&first.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Gone
+    );
+    assert_eq!(
+        db.collaboration_renew(&second.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Renewed
+    );
+
+    // Phase transitions ride on the current connection only.
+    db.collaboration_set_phase(&room_id, &run_id, "a", Some("processing"))
+        .unwrap();
+    let participations = db.collaboration_participations_for_run(&run_id).unwrap();
+    assert_eq!(participations[0].phase.as_deref(), Some("processing"));
+
+    // Leave is idempotent and ends renewal for the leaver only.
+    db.collaboration_leave(&room_id, &run_id, "a").unwrap();
+    db.collaboration_leave(&room_id, &run_id, "a").unwrap();
+    let participations = db.collaboration_participations_for_run(&run_id).unwrap();
+    assert!(participations[0].left_at.is_some());
+    assert!(participations[0].phase.is_none());
+    assert_eq!(
+        db.collaboration_renew(&second.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Unowned
+    );
+
+    // A non-member can never join.
+    assert!(db
+        .collaboration_join(&room_id, &run_id, "x", "cli")
+        .is_err());
+
+    // A deleted participation (cascade) reports Gone instead of renewing.
+    db.collaboration_join(&room_id, &run_id, "a", "cli")
+        .unwrap();
+    db.write()
+        .execute("DELETE FROM collaboration_participations", [])
+        .unwrap();
+    let third = db
+        .collaboration_join(&room_id, &run_id, "a", "cli")
+        .unwrap();
+    db.write()
+        .execute("DELETE FROM sessions WHERE id='a'", [])
+        .unwrap();
+    assert_eq!(
+        db.collaboration_renew(&third.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Gone
+    );
+}
+
+#[test]
+fn wait_page_reads_forward_from_the_acknowledged_position() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start("t", &Fixture::members("a", "b"), None, None, None, "r1")
+        .unwrap();
+    let room_id = started.room.id.clone();
+    let run_id = started.run.id.clone();
+    for i in 0..3 {
+        db.collaboration_send(
+            &room_id,
+            &run_id,
+            Some("a"),
+            &format!("m{i}"),
+            &format!("m{i}"),
+        )
+        .unwrap();
+    }
+
+    // No ack yet: the batch starts at the run's start notice.
+    let page = db
+        .collaboration_wait_page(&room_id, &run_id, "b", 2)
+        .unwrap();
+    let seqs: Vec<i64> = page.items.iter().map(|m| m.seq).collect();
+    assert_eq!(seqs, vec![1, 2]);
+    assert!(page.next_cursor.is_some());
+
+    db.collaboration_ack(&room_id, &run_id, "b", 2).unwrap();
+    let page = db
+        .collaboration_wait_page(&room_id, &run_id, "b", 2)
+        .unwrap();
+    let seqs: Vec<i64> = page.items.iter().map(|m| m.seq).collect();
+    assert_eq!(seqs, vec![3, 4]);
+    assert!(page.next_cursor.is_none(), "everything delivered");
+}

@@ -309,6 +309,7 @@ fn run_scope(run_id: Option<&str>) -> &str {
 enum PageDirection {
     Newest,
     Back,
+    Forward,
 }
 fn decode_cursor(
     room_id: &str,
@@ -324,16 +325,20 @@ fn decode_cursor(
     if value["room"].as_str() != Some(room_id) || value["run"].as_str() != Some(expected_scope) {
         return Err(other("协作室游标不属于该房间或运行范围"));
     }
-    if value["dir"].as_str() != Some("back") {
-        return Err(other("协作室游标无效"));
-    }
+    let direction = match value["dir"].as_str() {
+        Some("back") => PageDirection::Back,
+        // Forward cursors are minted only by the wait flow for batch
+        // continuation; history pagination itself never produces them.
+        Some("forward") => PageDirection::Forward,
+        _ => return Err(other("协作室游标无效")),
+    };
     let seq = value["seq"]
         .as_i64()
         .ok_or_else(|| other("协作室游标无效"))?;
     if seq < 0 {
         return Err(other("协作室游标无效"));
     }
-    Ok((PageDirection::Back, seq))
+    Ok((direction, seq))
 }
 
 impl Db {
@@ -767,6 +772,7 @@ impl Db {
         };
         let (comparison, order) = match direction {
             PageDirection::Back => ("<", "DESC"),
+            PageDirection::Forward => (">", "ASC"),
             PageDirection::Newest => (">", "DESC"),
         };
         let run_clause = if run_id.is_some() {
@@ -777,7 +783,7 @@ impl Db {
         let mut stmt = c.prepare(&format!(
             "{MESSAGE_SELECT} WHERE room_id=?1 AND seq {comparison} ?2 {run_clause} ORDER BY seq {order} LIMIT ?4"
         ))?;
-        let mut rows = stmt
+        let rows = stmt
             .query_map(
                 params![room_id, boundary, run_id, limit as i64 + 1],
                 row_message,
@@ -786,9 +792,14 @@ impl Db {
             .map_err(crate::error::AppError::from)?;
         let has_more = rows.len() > limit;
         let mut items: Vec<CollaborationMessage> = rows.into_iter().take(limit).collect();
-        items.reverse();
+        if direction != PageDirection::Forward {
+            items.reverse();
+        }
         let next_cursor = has_more.then(|| {
-            let edge = items.first().map(|m| m.seq).unwrap_or_default();
+            let edge = match direction {
+                PageDirection::Forward => items.last().map(|m| m.seq).unwrap_or_default(),
+                _ => items.first().map(|m| m.seq).unwrap_or_default(),
+            };
             encode_cursor(room_id, scope, edge)
         });
         Ok(CollaborationMessagesPage {
@@ -927,4 +938,216 @@ impl Db {
             awaiting_since: row.1,
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CollaborationJoinOutcome {
+    pub connection_id: String,
+    pub role: Option<String>,
+    /// The member's processing start inside this run: the acknowledged
+    /// position, or before the run's start notice when none exists.
+    pub through_seq: i64,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RenewOutcome {
+    Renewed,
+    /// The row exists but this connection may not renew it (the member left).
+    Unowned,
+    /// The row is gone (room/run/session deletion cascaded it away).
+    Gone,
+}
+
+fn require_run_member_conn(c: &Connection, run_id: &str, session_id: &str) -> Result<()> {
+    let member = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_run_members WHERE run_id=?1 AND session_id=?2)",
+            params![run_id, session_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(crate::error::AppError::from)?;
+    if !member {
+        return Err(other("只有本次运行的成员才能参与协作"));
+    }
+    Ok(())
+}
+
+impl Db {
+    /// Atomic ownership handshake: one statement claims or replaces the
+    /// (run, session) participation, so concurrent joins serialize at SQLite
+    /// and exactly one connection id is current afterwards. Losers detect
+    /// supersession at their next renewal and exit without touching the row.
+    pub fn collaboration_join(
+        &self,
+        room_id: &str,
+        run_id: &str,
+        session_id: &str,
+        holder: &str,
+    ) -> Result<CollaborationJoinOutcome> {
+        let connection_id = new_id();
+        self.tx(|tx| {
+            let run = run_conn(tx, run_id)?.ok_or_else(|| other("协作运行不存在"))?;
+            if run.room_id != room_id {
+                return Err(other("协作运行不属于该房间"));
+            }
+            require_run_member_conn(tx, run_id, session_id)?;
+            let role: Option<String> = tx
+                .query_row(
+                    "SELECT coordinator_session_id FROM collaboration_rooms WHERE id=?1",
+                    [room_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .map_err(crate::error::AppError::from)?
+                .filter(|coordinator| coordinator == session_id);
+            tx.execute(
+                "INSERT INTO collaboration_participations(id,room_id,run_id,session_id,holder,last_heartbeat_at) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(run_id,session_id) DO UPDATE SET id=excluded.id,holder=excluded.holder,phase=NULL,last_heartbeat_at=excluded.last_heartbeat_at,left_at=NULL",
+                params![connection_id, room_id, run_id, session_id, holder, now()],
+            )
+            .map_err(crate::error::AppError::from)?;
+            let through_seq: i64 = tx
+                .query_row(
+                    "SELECT through_seq FROM collaboration_reads WHERE room_id=?1 AND session_id=?2 AND run_id=?3",
+                    params![room_id, session_id, run_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(crate::error::AppError::from)?
+                .unwrap_or_else(|| {
+                    tx.query_row(
+                        "SELECT COALESCE(MIN(seq),0) FROM collaboration_messages WHERE room_id=?1 AND run_id=?2",
+                        params![room_id, run_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map(|min| (min - 1).max(0))
+                    .unwrap_or(0)
+                });
+            Ok(CollaborationJoinOutcome {
+                connection_id,
+                role,
+                through_seq,
+            })
+        })
+    }
+
+    /// One lease renewal. Only the current connection id may renew; anything
+    /// else reports supersession or deletion instead of overwriting.
+    pub fn collaboration_renew(&self, connection_id: &str) -> Result<RenewOutcome> {
+        let mut writer = self.write();
+        let tx = writer.transaction()?;
+        let renewed = tx
+            .execute(
+                "UPDATE collaboration_participations SET last_heartbeat_at=?2 WHERE id=?1 AND left_at IS NULL",
+                params![connection_id, now()],
+            )
+            .map_err(crate::error::AppError::from)?;
+        tx.commit()?;
+        if renewed > 0 {
+            return Ok(RenewOutcome::Renewed);
+        }
+        let c = self.read();
+        let exists = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM collaboration_participations WHERE id=?1)",
+                [connection_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(crate::error::AppError::from)?;
+        if exists {
+            Ok(RenewOutcome::Unowned)
+        } else {
+            Ok(RenewOutcome::Gone)
+        }
+    }
+
+    /// Explicit leave: idempotent, only clears this member's participation in
+    /// this run and never touches a newer connection of another run.
+    pub fn collaboration_leave(&self, room_id: &str, run_id: &str, session_id: &str) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "UPDATE collaboration_participations SET left_at=?4,phase=NULL WHERE room_id=?1 AND run_id=?2 AND session_id=?3 AND left_at IS NULL",
+                params![room_id, run_id, session_id, now()],
+            )
+            .map_err(crate::error::AppError::from)?;
+            Ok(())
+        })
+    }
+
+    /// The wait flow's phase marker: listening on entry, processing once a
+    /// batch has been handed out. Acknowledgement never changes it.
+    pub fn collaboration_set_phase(
+        &self,
+        room_id: &str,
+        run_id: &str,
+        session_id: &str,
+        phase: Option<&str>,
+    ) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "UPDATE collaboration_participations SET phase=?4 WHERE room_id=?1 AND run_id=?2 AND session_id=?3 AND left_at IS NULL",
+                params![room_id, run_id, session_id, phase],
+            )
+            .map_err(crate::error::AppError::from)?;
+            Ok(())
+        })
+    }
+
+    /// Forward unread page for one member: messages past the acknowledged
+    /// position, ascending, with a forward cursor for the next slice.
+    pub fn collaboration_wait_page(
+        &self,
+        room_id: &str,
+        run_id: &str,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<CollaborationMessagesPage> {
+        if !(1..=100).contains(&limit) {
+            return Err(other("协作室分页大小无效（1～100）"));
+        }
+        let c = self.read();
+        let through: i64 = c
+            .query_row(
+                "SELECT through_seq FROM collaboration_reads WHERE room_id=?1 AND session_id=?2 AND run_id=?3",
+                params![room_id, session_id, run_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(crate::error::AppError::from)?
+            .unwrap_or_else(|| {
+                c.query_row(
+                    "SELECT COALESCE(MIN(seq),0) FROM collaboration_messages WHERE room_id=?1 AND run_id=?2",
+                    params![room_id, run_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|min| (min - 1).max(0))
+                .unwrap_or(0)
+            });
+        let latest_seq = latest_seq_conn(&c, room_id)?;
+        let mut stmt = c.prepare(&format!(
+            "{MESSAGE_SELECT} WHERE room_id=?1 AND run_id=?2 AND seq>?3 ORDER BY seq ASC LIMIT ?4"
+        ))?;
+        let rows = stmt
+            .query_map(
+                params![room_id, run_id, through, limit as i64 + 1],
+                row_message,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(crate::error::AppError::from)?;
+        let has_more = rows.len() > limit;
+        let items: Vec<CollaborationMessage> = rows.into_iter().take(limit).collect();
+        let next_cursor = has_more.then(|| {
+            let edge = items.last().map(|m| m.seq).unwrap_or_default();
+            encode_wait_cursor(room_id, run_id, edge)
+        });
+        Ok(CollaborationMessagesPage {
+            items,
+            next_cursor,
+            latest_seq,
+        })
+    }
+}
+fn encode_wait_cursor(room_id: &str, run_id: &str, seq: i64) -> String {
+    use base64::Engine;
+    let payload =
+        serde_json::json!({"room":room_id,"run":run_id,"dir":"forward","seq":seq}).to_string();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes())
 }
