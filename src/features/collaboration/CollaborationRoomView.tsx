@@ -90,7 +90,7 @@ export default function CollaborationRoomView({
   const pending = useRef(new Map<string, string>());
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    const timer = setInterval(() => setNow(Date.now()), 10_000);
     return () => clearInterval(timer);
   }, []);
 
@@ -297,6 +297,7 @@ export default function CollaborationRoomView({
                 sessions={sessions}
                 now={now}
                 busySessionId={waking}
+                disabled={busy}
                 onWake={sessionId => void wake(sessionId)}
                 onCopyPrompt={sessionId => void copyPrompt(sessionId)}
               />

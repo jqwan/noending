@@ -8,6 +8,16 @@ function memberName(sessionId: string, sessions: SessionListItem[]): string {
   return local?.title || sessionId.slice(0, 8);
 }
 
+function elapsed(since: string | null, now: number): string | null {
+  const start = since ? Date.parse(since) : Number.NaN;
+  if (!Number.isFinite(start) || start > now) return null;
+  const seconds = Math.floor((now - start) / 1000);
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟`;
+  return `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`;
+}
+
 /**
  * 本次运行的成员状态。
  *
@@ -21,6 +31,7 @@ export default function CollaborationMembers({
   busySessionId,
   onWake,
   onCopyPrompt,
+  disabled = false,
 }: {
   room: CollaborationRoomView;
   sessions: SessionListItem[];
@@ -28,6 +39,7 @@ export default function CollaborationMembers({
   busySessionId: string | null;
   onWake: (sessionId: string) => void;
   onCopyPrompt: (sessionId: string) => void;
+  disabled?: boolean;
 }) {
   const coordinator = room.room?.coordinator_session_id ?? null;
   if (!room.members.length) {
@@ -39,6 +51,7 @@ export default function CollaborationMembers({
         const status = memberStatus(member, now);
         const name = memberName(member.session_id, sessions);
         const busy = busySessionId === member.session_id;
+        const processingTime = status.tone === "processing" ? elapsed(member.phase_since, now) : null;
         return (
           <li key={member.session_id} className="collab-member" aria-label={name}>
             <div className="collab-member-head">
@@ -50,30 +63,32 @@ export default function CollaborationMembers({
             </div>
             <div className="collab-member-meta small muted">
               <span>{WAKE_LABEL[member.wake_method]}</span>
+              {processingTime && <span aria-label="处理时长">已处理 {processingTime}</span>}
               <span aria-label="最近查收">
                 {member.last_read_at ? `最近查收 ${timeAgo(member.last_read_at)}` : "尚未查收"}
                 {member.last_read_seq != null ? ` · 到 #${member.last_read_seq}` : ""}
               </span>
               {member.last_heartbeat_at && <span>心跳 {timeAgo(member.last_heartbeat_at)}</span>}
             </div>
-            {member.error && <p className="small warning" role="alert">{member.error}</p>}
+            {member.error && status.tone === "failed" && <p className="small warning" role="alert">{member.error}</p>}
             <div className="collab-member-actions">
-              {member.wake_status === "failed" && (
-                <button type="button" className="btn small" disabled={busy} onClick={() => onWake(member.session_id)}>
+              {status.tone === "failed" && (
+                <button type="button" className="btn small" disabled={disabled || busySessionId !== null} onClick={() => onWake(member.session_id)}>
                   {busy ? "打开中…" : "重试打开"}
                 </button>
               )}
-              {member.wake_status === "pending" && member.wake_method === "desktop" && (
-                <button type="button" className="btn small" disabled={busy} onClick={() => onWake(member.session_id)}>
-                  {busy ? "打开中…" : "打开应用"}
+              {(status.tone === "disconnected" || status.tone === "left" || (member.wake_status === "pending" && member.wake_method === "desktop")) && (
+                <button type="button" className="btn small" disabled={disabled || busySessionId !== null} onClick={() => onWake(member.session_id)}>
+                  {busy ? "打开中…" : "打开会话"}
                 </button>
               )}
-              {member.wake_method === "desktop" && (
-                <button type="button" className="btn small ghost" onClick={() => onCopyPrompt(member.session_id)}>
-                  <Icon name="copy" /> 复制加入提示
-                </button>
-              )}
+              <button type="button" className="btn small ghost" onClick={() => onCopyPrompt(member.session_id)}>
+                <Icon name="copy" /> 复制加入提示
+              </button>
             </div>
+            {member.connection_state === "pending" && member.wake_method === "terminal" && member.wake_status === "opened" && (
+              <p className="small muted">复用现有终端时，请复制加入提示发送给会话。</p>
+            )}
           </li>
         );
       })}

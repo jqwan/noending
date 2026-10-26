@@ -27,15 +27,24 @@ export type RunTone = "starting" | "active" | "stopped";
 
 /** 待消息阶段超过这个时长仍未查收，才显示「暂未响应」。 */
 export const STALL_MS = 2 * 60 * 1000;
+export const LEASE_MS = 30 * 1000;
 
 export function memberStatus(
   member: CollaborationMemberState,
   now: number,
 ): { tone: MemberTone; label: string } {
-  if (member.wake_status === "failed") return { tone: "failed", label: "唤醒失败" };
   if (member.connection_state === "left") return { tone: "left", label: "已退出" };
   if (member.connection_state === "disconnected") return { tone: "disconnected", label: "连接中断" };
-  if (member.connection_state === "pending") return { tone: "waiting", label: "等待加入" };
+  if (member.connection_state === "pending") {
+    return member.wake_status === "failed"
+      ? { tone: "failed", label: "唤醒失败" }
+      : { tone: "waiting", label: "等待加入" };
+  }
+  // A stopped heartbeat produces no further database writes or events.
+  const heartbeat = member.last_heartbeat_at ? Date.parse(member.last_heartbeat_at) : Number.NaN;
+  if (!Number.isFinite(heartbeat) || now - heartbeat > LEASE_MS) {
+    return { tone: "disconnected", label: "连接中断" };
+  }
   if (member.phase === "processing") return { tone: "processing", label: "处理中" };
   if (member.phase === "listening") {
     const since = member.awaiting_since ? Date.parse(member.awaiting_since) : Number.NaN;

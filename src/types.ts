@@ -802,6 +802,7 @@ export interface CollaborationMemberState {
   wake_status: CollaborationWakeStatus;
   connection_state: CollaborationConnectionState;
   phase: CollaborationPhase | null;
+  phase_since: string | null;
   last_heartbeat_at: string | null;
   last_read_at: string | null;
   last_read_seq: number | null;

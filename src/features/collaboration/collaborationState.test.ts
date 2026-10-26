@@ -9,6 +9,7 @@ const member = (patch: Partial<CollaborationMemberState> = {}): CollaborationMem
   wake_status: "opened",
   connection_state: "connected",
   phase: "listening",
+  phase_since: null,
   last_heartbeat_at: "2026-10-27T03:59:50Z",
   last_read_at: null,
   last_read_seq: 4,
@@ -34,7 +35,16 @@ it("does not read a live heartbeat as the model being ready to answer", () => {
   expect(memberStatus(member({ phase: null }), NOW).label).toBe("已连接");
   expect(memberStatus(member({ connection_state: "disconnected" }), NOW).label).toBe("连接中断");
   expect(memberStatus(member({ connection_state: "pending", wake_status: "pending" }), NOW).label).toBe("等待加入");
-  expect(memberStatus(member({ wake_status: "failed" }), NOW).label).toBe("唤醒失败");
+  expect(memberStatus(member({ connection_state: "pending", wake_status: "failed" }), NOW).label).toBe("唤醒失败");
+});
+
+it("expires the observed connection when no further heartbeat event arrives", () => {
+  expect(memberStatus(member({ last_heartbeat_at: new Date(NOW - 30_000).toISOString() }), NOW).label).toBe("暂未响应");
+  expect(memberStatus(member({ last_heartbeat_at: new Date(NOW - 31_000).toISOString() }), NOW).label).toBe("连接中断");
+});
+
+it("shows an established connection after a manual join even when the earlier wake failed", () => {
+  expect(memberStatus(member({ wake_status: "failed", awaiting_since: null }), NOW).label).toBe("正在监听");
 });
 
 it("writes a join prompt with the run coordinates and no message body", () => {

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
@@ -43,6 +43,7 @@ const message = (seq: number, body: string, sender: string | null = "s1"): Colla
 
 const member = (patch: Partial<CollaborationMemberState> & { session_id: string }): CollaborationMemberState => ({
   wake_method: "terminal", wake_status: "opened", connection_state: "connected", phase: "listening",
+  phase_since: null,
   last_heartbeat_at: "2026-10-27T03:59:00Z", last_read_at: "2026-10-27T03:58:00Z", last_read_seq: 1,
   awaiting_since: null, unread_count: 0, error: null, ...patch,
 });
@@ -92,7 +93,7 @@ beforeEach(() => {
   vi.mocked(api.collaborationRoomMessages).mockResolvedValue({ items: [message(1, "先对齐契约")], next_cursor: null, latest_seq: 1 });
   vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: candidates, next_cursor: null });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 it("keeps 开启协作 disabled until two session members are chosen and shows why a session cannot join", async () => {
   mount();
@@ -407,4 +408,31 @@ it("refreshes only member state on heartbeat-class changes and keeps the message
   expect(screen.queryByText("等待加入")).toBeNull();
   expect(screen.getAllByRole("listitem").length).toBe(before);
   expect(screen.getByText("先对齐契约")).toBeTruthy();
+});
+
+it("shows processing time after joining and expires the connection without another backend event", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+  const now = new Date("2026-10-27T04:00:00Z");
+  vi.setSystemTime(now);
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({
+    ...activeRun,
+    members: [
+      member({
+        session_id: "s1", phase: "processing", phase_since: "2026-10-27T03:59:00Z",
+        last_heartbeat_at: now.toISOString(), wake_status: "failed", error: "上次打开失败",
+      }),
+      member({ session_id: "s2", wake_method: "desktop", connection_state: "left" }),
+    ],
+  });
+  mount();
+  const terminal = within(await screen.findByRole("listitem", { name: "后端会话" }));
+  expect(terminal.getByText("处理中")).toBeTruthy();
+  expect(terminal.getByText("已处理 1分钟")).toBeTruthy();
+  expect(screen.queryByText("上次打开失败")).toBeNull();
+  expect(terminal.getByRole("button", { name: "复制加入提示" })).toBeTruthy();
+  expect(within(screen.getByRole("listitem", { name: "前端会话" })).getByRole("button", { name: "复制加入提示" })).toBeTruthy();
+
+  await act(async () => { vi.advanceTimersByTime(40_000); });
+  expect(terminal.getByText("连接中断")).toBeTruthy();
+  expect(terminal.queryByText(/已处理/)).toBeNull();
 });
