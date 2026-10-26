@@ -1209,6 +1209,25 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
     assert_eq!(member["phase"], "processing");
     assert_eq!(member["connection_state"], "connected");
 
+    // Repeating join on this connection reuses its resource. After this MCP
+    // process closes, a replacement connection must establish its own lease
+    // even though the previous heartbeat is still fresh.
+    let repeated = c.ok(
+        "room_join",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert_eq!(repeated["connection_id"], joined["connection_id"]);
+    c.finish();
+    let mut c = f.start();
+    let reconnected = c.ok(
+        "room_join",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert_ne!(
+        reconnected["connection_id"], joined["connection_id"],
+        "a new MCP connection cannot reuse a resource owned by the closed connection"
+    );
+
     // Leaving ends the lease; a later wait needs a fresh join.
     c.ok(
         "room_leave",
