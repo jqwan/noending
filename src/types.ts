@@ -771,3 +771,93 @@ export interface OperationStatus {
   targets: { kind: string; id: string }[];
   agent: Agent | null;
 }
+
+// 协作室：一个任务最多一个协作室，一次开启一个 run。
+// 字段名与后端一致（snake_case）；首次开启时房间尚不存在，room=null。
+
+export type CollaborationRunStatus = "starting" | "active" | "stopped";
+export type CollaborationConnectionState = "pending" | "connected" | "disconnected" | "left";
+/** 处理阶段与连接状态独立：有心跳只说明参与通道活着。 */
+export type CollaborationPhase = "listening" | "processing";
+export type CollaborationWakeStatus = "pending" | "opened" | "failed";
+export type CollaborationWakeMethod = "terminal" | "desktop";
+export type CollaborationMessageKind = "text" | "start" | "stop";
+
+export interface CollaborationMessage {
+  id: string;
+  room_id: string;
+  run_id: string;
+  /** 房间内单份消息序列，升序即时间序。 */
+  seq: number;
+  /** null = 用户本人；通知消息保存真实发起者。 */
+  sender_session_id: string | null;
+  body: string;
+  kind: CollaborationMessageKind;
+  created_at: string;
+}
+
+export interface CollaborationMemberState {
+  session_id: string;
+  wake_method: CollaborationWakeMethod;
+  wake_status: CollaborationWakeStatus;
+  connection_state: CollaborationConnectionState;
+  phase: CollaborationPhase | null;
+  last_heartbeat_at: string | null;
+  last_read_at: string | null;
+  last_read_seq: number | null;
+  /** 最早一条未查收的他人消息时间；null 表示没有待查收。 */
+  awaiting_since: string | null;
+  unread_count: number;
+  error: string | null;
+}
+
+export interface CollaborationRunView {
+  id: string;
+  status: CollaborationRunStatus;
+  started_at: string;
+  stopped_at: string | null;
+}
+
+/** 房间配置：成员选择与负责人属于配置，与某次运行的参与状态分开。 */
+export interface CollaborationRoomConfig {
+  id: string;
+  revision: number;
+  /** 保存唤醒方式：停止后再次开启沿用原选择，不用重新推断能力。 */
+  selected_members: CollaborationStartedMember[];
+  coordinator_session_id: string | null;
+}
+
+export interface CollaborationRoomView {
+  task_id: string;
+  title: string;
+  room: CollaborationRoomConfig | null;
+  run: CollaborationRunView | null;
+  members: CollaborationMemberState[];
+}
+
+export interface CollaborationCandidate {
+  session_id: string;
+  title: string | null;
+  agent: Agent | null;
+  /** 该会话实际支持的唤醒方式，不由前端假定都有 CLI。 */
+  wake_modes: CollaborationWakeMethod[];
+  /** 非空表示不可加入：仅展示原因，不能勾选。 */
+  unavailable_reason: string | null;
+}
+
+export interface CollaborationCandidatePage {
+  items: CollaborationCandidate[];
+  next_cursor: string | null;
+}
+
+export interface CollaborationMessagePage {
+  items: CollaborationMessage[];
+  /** 方向由后端 opaque cursor 表达；前端只回传，不自行推算。 */
+  next_cursor: string | null;
+  latest_seq: number;
+}
+
+export interface CollaborationStartedMember {
+  session_id: string;
+  wake_method: CollaborationWakeMethod;
+}

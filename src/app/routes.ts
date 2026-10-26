@@ -22,10 +22,13 @@ export type WorkstreamScope = "unarchived" | "archived";
 /** 会话页的历史消息入口。终端实例由 terminal_id 路由标识，与详情、历史消息共用顶部导航。 */
 export type SessionEntry = "conversation";
 
+/** 任务详情的子页：详情与协作室共用标题栏，省略即详情。 */
+export type WorkstreamEntry = "detail" | "collaboration";
+
 export type Route =
   | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
-  | { view: "workstream"; workstreamId: string; initialTitle?: string }
+  | { view: "workstream"; workstreamId: string; initialTitle?: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
   | {
       view: "session";
