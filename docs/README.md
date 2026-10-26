@@ -10,6 +10,7 @@
 
 - [CLI 使用说明](guides/cli.md)：独立命令的安装、查询、编辑、同步及提取。
 - [MCP 使用说明](guides/mcp.md)：stdio 服务接入、工具与请求语义。
+- [任务协作室](guides/collaboration.md)：成员加入、共享消息、持续监听、在线状态及协作收尾。
 - [NoEnding 统一技能](../src-tauri/skills/noending/SKILL.md)：按需读取[记忆检索](../src-tauri/skills/noending/references/memory.md)、[任务管理](../src-tauri/skills/noending/references/task.md)、[会话信箱](../src-tauri/skills/noending/references/mailbox.md)与[摘要提取](../src-tauri/skills/noending/references/extraction.md)，共用接入和身份说明。
 
 ## 开发约定

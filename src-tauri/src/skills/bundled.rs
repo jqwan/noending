@@ -41,6 +41,10 @@ pub(crate) const FILES: &[(&str, &str)] = &[
         include_str!("../../skills/noending/references/mailbox.md"),
     ),
     (
+        "references/collaboration.md",
+        include_str!("../../skills/noending/references/collaboration.md"),
+    ),
+    (
         "references/extraction.md",
         include_str!("../../skills/noending/references/extraction.md"),
     ),

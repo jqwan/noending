@@ -1777,6 +1777,7 @@ fn bundled_skill_keeps_project_enablement_and_support_files_across_refresh_and_s
         "references/memory.md",
         "references/task.md",
         "references/mailbox.md",
+        "references/collaboration.md",
         "references/extraction.md",
         "references/extraction-protocol.md",
     ] {
