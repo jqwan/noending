@@ -265,6 +265,44 @@ fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files()
 }
 
 #[test]
+#[cfg(debug_assertions)]
+fn development_desktop_launchers_ignore_a_stale_sibling_console() {
+    let f = Fixture::new();
+    let app_directory = f.root.join("development app with spaces");
+    std::fs::create_dir_all(&app_directory).unwrap();
+    let desktop = app_directory.join(if cfg!(windows) {
+        "noending.exe"
+    } else {
+        "noending"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_noending"), &desktop).unwrap();
+    let stale_console = app_directory.join(if cfg!(windows) { "ne.exe" } else { "ne" });
+    std::fs::write(&stale_console, "unusable CLI left by another build").unwrap();
+
+    let directory = f.root.join("private CLI entry");
+    let (success, result) = f.run(
+        &desktop,
+        &["cli", "update", "--dir", directory.to_str().unwrap()],
+    );
+    assert!(success, "{result}");
+    for name in ["ne", "noending"] {
+        let output = installed_command(&directory, name)
+            .args(["--home", f.home.root.to_str().unwrap(), "status"])
+            .env("NOENDING_HOME", f.root.join("wrong-home"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["data"]["home"], f.home.root.to_str().unwrap());
+    }
+}
+
+#[test]
 fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments() {
     let mut f = Fixture::new();
     let directory = f.root.join("assistant's tools with spaces");

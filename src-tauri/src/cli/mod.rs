@@ -207,6 +207,12 @@ fn attach_parent_console() {
 }
 pub(crate) fn executable() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
+    // `tauri dev` rebuilds the desktop binary, not a sibling `ne` left by
+    // an earlier build. Debug desktop entries support redirected CLI output
+    // on both platforms, so keep private launchers on the running build.
+    if cfg!(debug_assertions) {
+        return Ok(exe);
+    }
     let console = exe.with_file_name(if cfg!(windows) { "ne.exe" } else { "ne" });
     Ok(if console.is_file() { console } else { exe })
 }

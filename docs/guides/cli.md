@@ -6,7 +6,9 @@ Agent 也可以使用 `ne mcp serve [--home PATH]` 启动 stdio MCP 服务，直
 
 ## 安装
 
-源码运行时先在 `src-tauri` 执行 `cargo build --bins`，得到桌面程序 `target/debug/noending` 和控制台程序 `target/debug/ne`（Windows 加 `.exe`）。桌面应用照常使用 `pnpm tauri dev` 启动。
+桌面开发直接使用 `pnpm tauri dev`。调试构建的内置技能入口和后台提取入口使用当前运行的程序执行 CLI，不依赖同目录中可能残留的旧 `ne` / `ne.exe`。
+
+需要独立控制台程序或配置 MCP 时，在 `src-tauri` 执行 `cargo build --bins`，得到桌面程序 `target/debug/noending` 和控制台程序 `target/debug/ne`（Windows 加 `.exe`）。
 
 可以直接运行控制台程序，也可以安装两个命令到已有的 PATH 目录：
 
