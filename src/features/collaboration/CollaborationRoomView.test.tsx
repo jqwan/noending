@@ -271,6 +271,66 @@ it("drops the stale earlier cursor when a newer page leaves a hole, then fills t
   expect(within(list).getAllByText("#69")).toHaveLength(1);
 });
 
+it("replays an unconfirmed start instead of sending the first message a second time", async () => {
+  vi.mocked(api.collaborationRoomStart)
+    .mockRejectedValueOnce(new Error("timeout"))
+    .mockResolvedValueOnce(activeRun);
+  // 后端其实已经落库：刷新后房间是运行中，只是首次响应丢了。
+  vi.mocked(api.collaborationRoomGet)
+    .mockResolvedValueOnce(noRoom)
+    .mockResolvedValue(activeRun);
+  mount();
+  await screen.findByRole("checkbox", { name: "后端会话" });
+  fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
+  fireEvent.click(screen.getByRole("radio", { name: "后端会话" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" }), { target: { value: "先各自核对契约" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送并开启" }));
+
+  await screen.findByText(/开启未确认/);
+  await screen.findByRole("button", { name: "停止协作" });
+  // 草稿还在：用户看不出这是一条已经写进房间的消息。
+  expect((screen.getByRole("textbox", { name: "在协作室说一句" }) as HTMLTextAreaElement).value).toBe("先各自核对契约");
+
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(api.collaborationRoomStart).toHaveBeenCalledTimes(2));
+  const calls = vi.mocked(api.collaborationRoomStart).mock.calls;
+  // 原参数、原 request_id 重放，而不是按刷新后的配置另起一次开启。
+  expect(calls[1][3]).toBe(calls[0][3]);
+  expect(calls[1][1]).toEqual(calls[0][1]);
+  // 关键：没有再发一条正文，房间里只有一份首条消息。
+  expect(api.collaborationRoomSend).not.toHaveBeenCalled();
+});
+
+it("keeps an unconfirmed send request id when another member wake happens in between", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({
+    ...activeRun,
+    members: [
+      member({ session_id: "s1" }),
+      member({ session_id: "s2", wake_status: "failed", connection_state: "pending", phase: null }),
+    ],
+  });
+  vi.mocked(api.collaborationRoomSend)
+    .mockRejectedValueOnce(new Error("timeout"))
+    .mockResolvedValue(message(3, "在吗"));
+  vi.mocked(api.collaborationMemberWake).mockResolvedValue(member({ session_id: "s2" }));
+  mount();
+  await screen.findByText("唤醒失败");
+
+  fireEvent.change(screen.getByRole("textbox", { name: "在协作室说一句" }), { target: { value: "在吗" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByText(/发送失败/);
+
+  // 期间发生另一次写操作（唤醒），不能顶掉这次未确认发信的 request_id。
+  fireEvent.click(screen.getByRole("button", { name: "重试打开" }));
+  await waitFor(() => expect(api.collaborationMemberWake).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(api.collaborationRoomSend).toHaveBeenCalledTimes(2));
+  const calls = vi.mocked(api.collaborationRoomSend).mock.calls;
+  expect(calls[1][3]).toBe(calls[0][3]);
+});
+
 it("marks a listening member unresponsive while leaving a processing member alone", async () => {
   const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
