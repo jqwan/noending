@@ -376,7 +376,7 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     // Without a live participation the ack is rejected.
     assert!(db.collaboration_ack(&room_id, &run_id, "b", 1).is_err());
-    db.collaboration_join(&room_id, &run_id, "b", "cli", &cutoff)
+    db.collaboration_join(&room_id, &run_id, "b", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "b", 1).unwrap();
     let unread = db.collaboration_unread_of(&room_id, &run_id, "b").unwrap();
@@ -416,7 +416,8 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
         unread.awaiting_since.is_some(),
         "a peer message sets the timer"
     );
-    db.collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
+    let mcp_instance = noending_lib::storage::new_id();
+    db.collaboration_join(&room_id, &run_id, "a", "mcp", &mcp_instance, &cutoff)
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "a", 3).unwrap();
     let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
@@ -435,7 +436,7 @@ fn session_purge_keeps_real_senders_but_drops_participation_state() {
     db.collaboration_send(&room_id, &run_id, Some("a"), "来自将删除的会话", "m1")
         .unwrap();
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "a", 2).unwrap();
 
@@ -598,7 +599,7 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
 
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     let first = db
-        .collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+        .collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
     assert_eq!(first.role.as_deref(), Some("a"));
     assert_eq!(
@@ -608,14 +609,29 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
 
     // A fresh lease is reused across a mode switch: same connection id, no
     // second owner.
+    // A fresh lease is reused across a mode switch: same connection id, no
+    // second owner. (Same holder instance only.)
+    let mcp_instance = noending_lib::storage::new_id();
     let second = db
-        .collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
+        .collaboration_join(&room_id, &run_id, "a", "mcp", &mcp_instance, &cutoff)
         .unwrap();
-    assert!(second.reused);
-    assert_eq!(second.connection_id, first.connection_id);
+    assert!(!second.reused, "a different MCP instance takes over");
+    assert_ne!(second.connection_id, first.connection_id);
+    assert_eq!(
+        db.collaboration_renew(&second.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Renewed
+    );
+
+    // The same instance rejoining reuses its own fresh lease.
+    let rejoined = db
+        .collaboration_join(&room_id, &run_id, "a", "mcp", &mcp_instance, &cutoff)
+        .unwrap();
+    assert!(rejoined.reused);
+    assert_eq!(rejoined.connection_id, second.connection_id);
     assert_eq!(
         db.collaboration_renew(&first.connection_id).unwrap(),
-        noending_lib::storage::collaboration::RenewOutcome::Renewed
+        noending_lib::storage::collaboration::RenewOutcome::Gone,
+        "the takeover replaced the whole row, so the CLI id is gone"
     );
 
     // A stale lease (heartbeat outside the window) is replaced atomically and
@@ -627,7 +643,7 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
         )
         .unwrap();
     let takeover = db
-        .collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
+        .collaboration_join(&room_id, &run_id, "a", "mcp", &mcp_instance, &cutoff)
         .unwrap();
     assert!(!takeover.reused);
     assert_ne!(takeover.connection_id, first.connection_id);
@@ -659,17 +675,17 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
 
     // A non-member can never join.
     assert!(db
-        .collaboration_join(&room_id, &run_id, "x", "cli", &cutoff)
+        .collaboration_join(&room_id, &run_id, "x", "cli", "cli-resident", &cutoff)
         .is_err());
 
     // A deleted participation (cascade) reports Gone instead of renewing.
-    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.write()
         .execute("DELETE FROM collaboration_participations", [])
         .unwrap();
     let third = db
-        .collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+        .collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.write()
         .execute("DELETE FROM sessions WHERE id='a'", [])
@@ -709,7 +725,7 @@ fn wait_page_reads_forward_from_the_acknowledged_position() {
     assert!(page.next_cursor.is_some());
 
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    db.collaboration_join(&room_id, &run_id, "b", "cli", &cutoff)
+    db.collaboration_join(&room_id, &run_id, "b", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "b", 2).unwrap();
     let page = db
@@ -812,9 +828,9 @@ fn review_own_messages_do_not_wake_sender_or_skip_other_messages() {
     let room = &started.room.id;
     let run = &started.run.id;
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    db.collaboration_join(room, run, "a", "cli", &cutoff)
+    db.collaboration_join(room, run, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
-    db.collaboration_join(room, run, "b", "cli", &cutoff)
+    db.collaboration_join(room, run, "b", "cli", "cli-resident", &cutoff)
         .unwrap();
     db.collaboration_ack(room, run, "a", 1).unwrap();
     db.collaboration_ack(room, run, "b", 1).unwrap();
@@ -861,7 +877,7 @@ fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
     db.collaboration_send(&room_id, &run_id, Some("a"), "历史发件人", "m1")
         .unwrap();
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
         .unwrap();
 
     // The real purge entry: archive, then permanently delete through the

@@ -1075,6 +1075,7 @@ impl Db {
         run_id: &str,
         session_id: &str,
         holder: &str,
+        holder_instance: &str,
         fresh_cutoff: &str,
     ) -> Result<CollaborationJoinOutcome> {
         let connection_id = new_id();
@@ -1092,10 +1093,13 @@ impl Db {
                 )
                 .map_err(crate::error::AppError::from)?
                 .filter(|coordinator| coordinator == session_id);
+            // Only the lease's OWN instance may reuse it: a new MCP
+            // connection (or a CLI/MCP takeover) cannot renew someone else's
+            // connection id, so it always claims a fresh one.
             let reusable: Option<String> = tx
                 .query_row(
-                    "SELECT id FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL AND last_heartbeat_at>=?3",
-                    params![run_id, session_id, fresh_cutoff],
+                    "SELECT id FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL AND last_heartbeat_at>=?3 AND holder_instance=?4",
+                    params![run_id, session_id, fresh_cutoff, holder_instance],
                     |r| r.get(0),
                 )
                 .optional()
@@ -1126,9 +1130,9 @@ impl Db {
                 });
             }
             tx.execute(
-                "INSERT INTO collaboration_participations(id,room_id,run_id,session_id,holder,last_heartbeat_at) VALUES(?1,?2,?3,?4,?5,?6)
-                 ON CONFLICT(run_id,session_id) DO UPDATE SET id=excluded.id,holder=excluded.holder,phase=NULL,phase_since=NULL,last_heartbeat_at=excluded.last_heartbeat_at,left_at=NULL",
-                params![connection_id, room_id, run_id, session_id, holder, now()],
+                "INSERT INTO collaboration_participations(id,room_id,run_id,session_id,holder,holder_instance,last_heartbeat_at) VALUES(?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(run_id,session_id) DO UPDATE SET id=excluded.id,holder=excluded.holder,holder_instance=excluded.holder_instance,phase=NULL,phase_since=NULL,last_heartbeat_at=excluded.last_heartbeat_at,left_at=NULL",
+                params![connection_id, room_id, run_id, session_id, holder, holder_instance, now()],
             )
             .map_err(crate::error::AppError::from)?;
             let through_seq: i64 = tx

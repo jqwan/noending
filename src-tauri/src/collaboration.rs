@@ -396,13 +396,23 @@ pub(crate) struct RoomJoin {
     pub run: String,
     pub from_session: String,
     pub holder: String,
+    /// The concrete holder instance: an MCP server connection id, or the CLI
+    /// resident kind. Reuse is bound to it, not just to the holder kind.
+    pub holder_instance: String,
 }
 pub(crate) fn join(db: &Db, home: &NoEndingHome, p: RoomJoin) -> CliResult<Value> {
     let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
     guard_current_run(db, &p.room, &p.run)?;
     let cutoff =
         (chrono::Utc::now() - chrono::Duration::seconds(CONNECTED_WINDOW_SECS)).to_rfc3339();
-    let outcome = db.collaboration_join(&p.room, &p.run, &session, &p.holder, &cutoff)?;
+    let outcome = db.collaboration_join(
+        &p.room,
+        &p.run,
+        &session,
+        &p.holder,
+        &p.holder_instance,
+        &cutoff,
+    )?;
     Ok(json!({
         "connection_id": outcome.connection_id,
         "session": session,

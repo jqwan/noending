@@ -2176,6 +2176,7 @@ fn collaboration_participation_survives_across_real_cli_processes() {
         &run,
         "coord",
         "cli",
+        "cli-resident",
         &(chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
     )
     .unwrap();
