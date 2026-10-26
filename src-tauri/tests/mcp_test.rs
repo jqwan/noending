@@ -1228,10 +1228,45 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         "a new MCP connection cannot reuse a resource owned by the closed connection"
     );
 
-    // Leaving ends the lease; a later wait needs a fresh join.
+    // Leaving also ends an already-pending wait, rather than letting the old
+    // participant keep receiving messages until its optional timeout.
+    c.ok(
+        "room_ack",
+        json!({"room":room,"run":run,"from_session":"peer","through_seq":waited["items"][0]["seq"]}),
+    );
+    let pending_wait = c.begin(
+        "tools/call",
+        json!({"name":"room_wait","arguments":
+        {"room":room,"run":run,"from_session":"peer","timeout_seconds":2}}),
+    );
+    let listening_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let view = c.ok("room_resolve", json!({"task":"task1"}));
+        let peer = view["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["session_id"] == "peer")
+            .unwrap();
+        if peer["phase"] == "listening" {
+            break;
+        }
+        assert!(
+            Instant::now() < listening_deadline,
+            "wait did not enter listening"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // A later wait needs a fresh join as well.
     c.ok(
         "room_leave",
         json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    let ended = c.response(pending_wait);
+    assert_eq!(
+        ended["result"]["structuredContent"]["error"]["code"], "join_required",
+        "{ended}"
     );
     let view = c.ok("room_resolve", json!({"task":"task1"}));
     let member = view["members"]

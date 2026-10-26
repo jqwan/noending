@@ -919,3 +919,101 @@ fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
     let mail = page.items.iter().find(|m| m.body == "历史发件人").unwrap();
     assert_eq!(mail.sender_session_id.as_deref(), Some("a"));
 }
+
+#[test]
+fn run_activates_after_two_members_and_the_selected_coordinator_join() {
+    for coordinator in [None, Some("c")] {
+        let f = Fixture::new();
+        let db = f.db();
+        let mut members = Fixture::members("a", "b");
+        if coordinator.is_some() {
+            members.push(SelectedMember {
+                session_id: "c".into(),
+                wake_method: "desktop".into(),
+            });
+        }
+        let started = db
+            .collaboration_start("t", &members, coordinator, None, None, "activation")
+            .unwrap();
+        let room = &started.room.id;
+        let run = &started.run.id;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+        db.collaboration_join(room, run, "a", "cli", "cli-resident", &cutoff)
+            .unwrap();
+        assert_eq!(
+            db.collaboration_current_run(room).unwrap().unwrap().status,
+            "starting"
+        );
+        db.collaboration_join(room, run, "b", "cli", "cli-resident", &cutoff)
+            .unwrap();
+        if coordinator.is_some() {
+            assert_eq!(
+                db.collaboration_current_run(room).unwrap().unwrap().status,
+                "starting"
+            );
+            db.collaboration_join(room, run, "c", "cli", "cli-resident", &cutoff)
+                .unwrap();
+        }
+        let active = db.collaboration_current_run(room).unwrap().unwrap();
+        assert_eq!(active.status, "active");
+        assert!(active.activated_at.is_some());
+        db.collaboration_leave(room, run, "a").unwrap();
+        assert_eq!(
+            db.collaboration_current_run(room).unwrap().unwrap().status,
+            "active"
+        );
+    }
+}
+
+#[test]
+fn archiving_a_task_stops_its_collaboration_and_does_not_duplicate_stop_notice() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "archive-start",
+        )
+        .unwrap();
+    let archived = noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
+    assert_eq!(archived.visibility, "archived");
+    assert_eq!(
+        db.collaboration_current_run(&started.room.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "stopped"
+    );
+    noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
+    let history = db
+        .collaboration_messages_page(&started.room.id, None, None, 100)
+        .unwrap();
+    let stops: Vec<_> = history.items.iter().filter(|m| m.kind == "stop").collect();
+    assert_eq!(stops.len(), 1);
+    assert!(!stops[0].body.is_empty());
+    assert!(db
+        .collaboration_send(
+            &started.room.id,
+            &started.run.id,
+            Some("a"),
+            "归档后发言",
+            "archive-send"
+        )
+        .is_err());
+    noending_lib::workspace::workstream::restore_workstream(&db, "t").unwrap();
+    let next = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "after-archive",
+        )
+        .unwrap();
+    assert_ne!(next.run.id, started.run.id);
+}
