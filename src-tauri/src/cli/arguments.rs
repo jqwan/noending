@@ -360,7 +360,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             "room" if action == "listen" && words.len() == 3 => Command::RoomListen {
                 room: id(&words)?,
                 run: options.required("run")?,
-                connection: options.required("connection")?,
+                connection: options.required("lease-id")?,
             },
             "mailbox" if action == "wait" && words.len() == 2 => {
                 Command::MailboxWait(crate::mailbox::Wait {

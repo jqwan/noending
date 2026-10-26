@@ -1338,6 +1338,17 @@ impl Db {
         })
     }
 
+    /// A failed resident startup only releases the generation it created.
+    pub(crate) fn collaboration_abandon_connection(&self, connection_id: &str) -> Result<()> {
+        self.tx(|tx| {
+            tx.execute(
+                "UPDATE collaboration_participations SET left_at=?2,phase=NULL,phase_since=NULL WHERE id=?1 AND left_at IS NULL",
+                params![connection_id, now()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// The wait flow's phase marker: listening on entry, processing once a
     /// batch has been handed out. Acknowledgement never changes it.
     /// Phase markers ride on one connection: a waiting request that has been

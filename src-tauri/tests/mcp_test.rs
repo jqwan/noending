@@ -1209,6 +1209,30 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
     assert_eq!(member["phase"], "processing");
     assert_eq!(member["connection_state"], "connected");
 
+    // No wait request is active: the MCP participation still renews during
+    // model work, and the heartbeat must leave its processing phase intact.
+    let first_heartbeat = member["last_heartbeat_at"].clone();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let current = c.ok("room_resolve", json!({"task":"task1"}));
+        let peer = current["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["session_id"] == "peer")
+            .unwrap();
+        if peer["last_heartbeat_at"] != first_heartbeat {
+            assert_eq!(peer["phase"], "processing");
+            assert_eq!(peer["connection_state"], "connected");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "MCP participation never renewed after join: {current}"
+        );
+    }
+
     // Repeating join on this connection reuses its resource. After this MCP
     // process closes, a replacement connection must establish its own lease
     // even though the previous heartbeat is still fresh.

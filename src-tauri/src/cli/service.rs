@@ -415,28 +415,17 @@ impl Service {
                 let spawned = if joined["reused"] == json!(true) {
                     true
                 } else if p_holder == "cli" {
-                    spawn_room_listener(&self.home.root, &room, &run, &connection)
+                    spawn_room_listener(&self.db, &self.home.root, &room, &run, &connection)
                 } else {
                     crate::collaboration::spawn_mcp_heartbeat(
                         self.db.clone(),
                         room.clone(),
                         run.clone(),
-                        connection,
+                        connection.clone(),
                     )
                 };
                 if !spawned {
-                    let _ = crate::collaboration::leave(
-                        &self.db,
-                        &self.home,
-                        crate::collaboration::RoomLeave {
-                            room: room.clone(),
-                            run: run.clone(),
-                            from_session: joined["session"]
-                                .as_str()
-                                .unwrap_or_default()
-                                .to_string(),
-                        },
-                    );
+                    let _ = self.db.collaboration_abandon_connection(&connection);
                     return Err(CliError::new(
                         "listener_spawn_failed",
                         "驻留监听启动失败，请重试加入",
@@ -1064,30 +1053,76 @@ impl Service {
 /// re-claims its connection id at startup, so a lost race (another join won)
 /// exits on its first beat without touching the winner's lease. No shell is
 /// involved; on Windows the child hides its own console window.
-fn spawn_room_listener(home: &std::path::Path, room: &str, run: &str, connection: &str) -> bool {
+fn spawn_room_listener(
+    db: &Db,
+    home: &std::path::Path,
+    room: &str,
+    run: &str,
+    connection: &str,
+) -> bool {
     if connection.is_empty() {
         return false;
     }
     let Ok(exe) = crate::cli::executable() else {
         return false;
     };
-    let mut child = std::process::Command::new(exe);
-    child
+    let initial = match db.collaboration_participations_for_run(run) {
+        Ok(parts) => match parts
+            .into_iter()
+            .find(|p| p.id == connection && p.left_at.is_none())
+        {
+            Some(part) => part.last_heartbeat_at,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    let mut command = std::process::Command::new(exe);
+    command
         .args([
             "room",
             "listen",
             room,
             "--run",
             run,
-            "--connection",
+            "--lease-id",
             connection,
         ])
         .env("NOENDING_HOME", home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    apply_detached_flags(&mut child);
-    child.spawn().is_ok()
+    apply_detached_flags(&mut command);
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let ready = loop {
+        if !matches!(child.try_wait(), Ok(None)) || crate::platform::cancellation::requested() {
+            break false;
+        }
+        let part = db
+            .collaboration_participations_for_run(run)
+            .ok()
+            .and_then(|parts| {
+                parts
+                    .into_iter()
+                    .find(|p| p.id == connection && p.left_at.is_none())
+            });
+        match part {
+            Some(part) if part.last_heartbeat_at != initial => break true,
+            None => break false,
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    ready
 }
 
 fn apply_detached_flags(command: &mut std::process::Command) {
@@ -1098,7 +1133,12 @@ fn apply_detached_flags(command: &mut std::process::Command) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(any(windows, unix)))]
     let _ = command;
 }
 

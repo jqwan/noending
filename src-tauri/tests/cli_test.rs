@@ -2031,7 +2031,7 @@ fn collaboration_participation_survives_across_real_cli_processes() {
     assert!(ok, "{joined}");
     assert!(joined["data"]["connection_id"].as_str().is_some());
 
-    // A second join replaces the lease; both processes see the same truth.
+    // A second join reuses the resident lease across processes.
     let (ok, rejoined) = f.run(
         exe,
         &[
@@ -2064,6 +2064,30 @@ fn collaboration_participation_survives_across_real_cli_processes() {
         .unwrap();
     assert_eq!(member["connection_state"], "connected");
     assert_eq!(member["phase"], Value::Null);
+
+    // Cross a real heartbeat period. A timestamp written only by join is
+    // insufficient proof that the spawned listener survived its parent.
+    let first_heartbeat = member["last_heartbeat_at"].clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (ok, current) = f.run(exe, &["room", "show", &room]);
+        assert!(ok, "{current}");
+        let peer = current["data"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["session_id"] == "peer")
+            .unwrap();
+        if peer["last_heartbeat_at"] != first_heartbeat {
+            assert_eq!(peer["connection_state"], "connected");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resident listener never renewed after join: {current}"
+        );
+    }
 
     // Controlled clock: a heartbeat older than the 30s window is disconnected.
     db.write()
