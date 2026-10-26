@@ -20,6 +20,15 @@ interface Selection {
   coordinator: string | null;
 }
 
+/** 未确认的开启：请求可能已落库只是响应超时，重放时必须原参数、原 request_id。 */
+interface UnconfirmedStart {
+  requestId: string;
+  revision: number;
+  members: CollaborationStartedMember[];
+  coordinator: string | null;
+  initialMessage: string | null;
+}
+
 const EMPTY: Selection = { selected: [], coordinator: null };
 
 function newRequestId(): string {
@@ -53,7 +62,8 @@ function revisionErrorCopy(action: string, error: unknown): string {
  * 后端事务；运行中掉线不自动结束任务、不替换负责人、不重启成员。
  *
  * 写操作按「操作 + 参数」复用 request_id：同一请求传输失败后重试不会在后端
- * 留下第二份记录；参数变化才算新操作。
+ * 留下第二份记录；参数变化才算新操作。未确认的开启单独保存原参数，
+ * 即使 room 已刷新成运行中，重试也只重放那一次开启，不会把首条消息改成第二条。
  */
 export default function CollaborationRoomView({
   taskId,
@@ -74,7 +84,10 @@ export default function CollaborationRoomView({
   const [waking, setWaking] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const pending = useRef<{ key: string; id: string } | null>(null);
+  /** 未确认的开启：与别的写操作分开保存，不会被一次唤醒或停止覆盖。 */
+  const [unconfirmed, setUnconfirmed] = useState<UnconfirmedStart | null>(null);
+  /** 多槽：每个「操作 + 参数」各持一个 request_id，互不覆盖。 */
+  const pending = useRef(new Map<string, string>());
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
@@ -98,35 +111,48 @@ export default function CollaborationRoomView({
   const enoughMembers = selection.selected.length >= 2;
 
   const requestId = (key: string) => {
-    if (pending.current?.key === key) return pending.current.id;
+    const existing = pending.current.get(key);
+    if (existing) return existing;
     const id = newRequestId();
-    pending.current = { key, id };
+    pending.current.set(key, id);
     return id;
   };
-  const settled = (key: string) => { if (pending.current?.key === key) pending.current = null; };
+  const settled = (key: string) => { pending.current.delete(key); };
 
-  const start = async (initialMessage: string | null) => {
-    if (busy || archived) return;
-    const { selected, coordinator } = selection;
-    if (selected.length < 2) { setActionError("至少需要 2 个会话成员。"); return; }
-    const key = `start:${taskId}:${revision}:${JSON.stringify(selected)}:${coordinator ?? ""}:${initialMessage ?? ""}`;
+  /** 提交/重放一次开启。重放时参数原样取自未确认记录，不受刷新后的配置影响。 */
+  const submitStart = async (plan: UnconfirmedStart) => {
     setBusy(true);
     setActionError("");
     try {
       const next = await api.collaborationRoomStart(
-        taskId, selected, revision, requestId(key), coordinator, initialMessage,
+        taskId, plan.members, plan.revision, plan.requestId, plan.coordinator, plan.initialMessage,
       );
-      settled(key);
+      setUnconfirmed(null);
       setRoom(next);
       setEdited(null);
-      setDraft("");
+      // 只有还停在首条消息时才清空；这期间用户新写的内容要留着。
+      setDraft(current => (current === (plan.initialMessage ?? "") ? "" : current));
       if (next.room?.id) await loadLatest(next.room.id, true);
     } catch (e) {
-      setActionError(`开启失败：${String(e)}`);
+      setUnconfirmed(plan);
+      setActionError(`开启未确认：${String(e)}。重试会沿用同一次请求，不会重复写入首条消息。`);
       void refreshRoom();
     } finally {
       setBusy(false);
     }
+  };
+
+  const start = async (initialMessage: string | null) => {
+    if (busy || archived) return;
+    const members = selection.selected;
+    const coordinator = selection.coordinator;
+    if (members.length < 2) { setActionError("至少需要 2 个会话成员。"); return; }
+    // 参数与未确认那一次完全一致才算重放；后端按 request_id 返回同一结果。
+    const same = unconfirmed
+      && unconfirmed.initialMessage === initialMessage
+      && unconfirmed.coordinator === coordinator
+      && JSON.stringify(unconfirmed.members) === JSON.stringify(members);
+    await submitStart(same ? unconfirmed! : { requestId: newRequestId(), revision, members, coordinator, initialMessage });
   };
 
   const stop = async () => {
@@ -164,6 +190,9 @@ export default function CollaborationRoomView({
   const send = async () => {
     const body = draft.trim();
     if (!body || busy) return;
+    // 上次开启没拿到确认、房间却已刷新成运行中：先重放那一次开启。
+    // 直接发 send 会把同一条首条消息变成第二条正文。
+    if (unconfirmed) { await submitStart(unconfirmed); return; }
     if (!running || !config || !run) { await start(body); return; }
     const key = `send:${config.id}:${run.id}:${body}`;
     setBusy(true);
@@ -251,6 +280,14 @@ export default function CollaborationRoomView({
             </p>
           )}
           {actionError && <p role="alert" className="small warning">{actionError}</p>}
+          {unconfirmed && (
+            <p className="small warning" role="status">
+              上次开启未得到确认（后端可能已生效）。
+              <button type="button" className="btn small" disabled={busy}
+                onClick={() => void submitStart(unconfirmed)}>重试确认</button>
+              会沿用同一次请求，不会重复写入首条消息。
+            </p>
+          )}
           {error && <p role="alert" className="small warning">{error}</p>}
 
           {running ? (
@@ -323,10 +360,7 @@ export default function CollaborationRoomView({
             消息只在本房间保存一份。成员各自维护阅读位置；任务进展由负责人统一维护，成员在这里简要汇报。
           </p>
           {config && (
-            <>
-              <div className="small"><span className="muted">房间</span> <span className="mono">{config.id.slice(0, 8)}</span></div>
-              <div className="small"><span className="muted">配置版本</span> {config.revision}</div>
-            </>
+            <div className="small"><span className="muted">房间</span> <span className="mono">{config.id.slice(0, 8)}</span></div>
           )}
           {run && (
             <div className="small">
