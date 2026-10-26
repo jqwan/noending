@@ -87,7 +87,7 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 }
                 _ => (Value::Null, None),
             };
-            let (last_read_at, last_read_seq, unread_count) = match &run_id {
+            let (last_read_at, last_read_seq, unread_count, awaiting_since) = match &run_id {
                 Some(run_id) => {
                     let read = db.collaboration_read_of(&room.id, &selected.session_id, run_id)?;
                     let unread = db.collaboration_unread_of(&room.id, run_id, &selected.session_id)?;
@@ -95,9 +95,13 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                         read.as_ref().map(|r| json!(r.read_at)).unwrap_or(Value::Null),
                         read.as_ref().map(|r| json!(r.through_seq)).unwrap_or(Value::Null),
                         json!(unread.count),
+                        unread
+                            .awaiting_since
+                            .map(|at| json!(at))
+                            .unwrap_or(Value::Null),
                     )
                 }
-                _ => (Value::Null, Value::Null, json!(0)),
+                _ => (Value::Null, Value::Null, json!(0), Value::Null),
             };
             Ok(json!({
                 "session_id": selected.session_id,
@@ -109,6 +113,7 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 "last_read_at": last_read_at,
                 "last_read_seq": last_read_seq,
                 "unread_count": unread_count,
+                "awaiting_since": awaiting_since,
                 "error": wake_error,
             }))
         })
@@ -237,12 +242,27 @@ pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
         params.initial_message.as_deref(),
         &params.request_id,
     )?;
-    Ok(json!({
-        "room": outcome.room,
-        "run": outcome.run,
-        "members": outcome.members,
-        "appended": outcome.appended,
-    }))
+    // The desktop always receives the same full RoomView shape as room_get.
+    room_view(db, &params.task_id)
+}
+
+/// Every run-scoped operation answers only the room's CURRENT run: an old run
+/// id is stale, a stopped run is over — both are `run_inactive`, never a
+/// silent success that would leak into a newer run.
+fn guard_current_run(db: &Db, room_id: &str, run_id: &str) -> CliResult<()> {
+    let current = db
+        .collaboration_current_run(room_id)?
+        .ok_or_else(|| CliError::new("run_inactive", "协作室还没有任何运行"))?;
+    if current.id != run_id {
+        return Err(CliError::new(
+            "run_inactive",
+            "协作运行已更新，不能在旧运行上操作",
+        ));
+    }
+    if current.status == "stopped" {
+        return Err(CliError::new("run_inactive", "协作已停止"));
+    }
+    Ok(())
 }
 
 pub(crate) struct StopParams {
@@ -254,6 +274,7 @@ pub(crate) struct StopParams {
     pub request_id: String,
 }
 pub(crate) fn stop(db: &Db, params: StopParams) -> CliResult<Value> {
+    guard_current_run(db, &params.room_id, &params.run_id)?;
     if let Some(initiator) = &params.initiator_session_id {
         let room = db
             .collaboration_room_by_id(&params.room_id)?
@@ -274,24 +295,40 @@ pub(crate) fn stop(db: &Db, params: StopParams) -> CliResult<Value> {
             ));
         }
     }
-    let (run, notice) = db.collaboration_stop(
+    let (_, notice) = db.collaboration_stop(
         &params.room_id,
         &params.run_id,
         params.initiator_session_id.as_deref(),
         &params.request_id,
     )?;
-    Ok(json!({"run":run,"notice":notice}))
+    let task_id = db
+        .collaboration_room_by_id(&params.room_id)?
+        .map(|room| room.task_id)
+        .unwrap_or_default();
+    room_view(db, &task_id)
 }
 
 pub(crate) fn set_coordinator(
     db: &Db,
     room_id: &str,
+    run_id: &str,
     session_id: Option<String>,
     expected_revision: i64,
+    request_id: &str,
 ) -> CliResult<Value> {
-    let room =
-        db.collaboration_set_coordinator(room_id, session_id.as_deref(), expected_revision)?;
-    Ok(json!({"room":room}))
+    guard_current_run(db, room_id, run_id)?;
+    db.collaboration_set_coordinator(
+        room_id,
+        run_id,
+        session_id.as_deref(),
+        expected_revision,
+        request_id,
+    )?;
+    let task_id = db
+        .collaboration_room_by_id(room_id)?
+        .map(|room| room.task_id)
+        .unwrap_or_default();
+    room_view(db, &task_id)
 }
 
 pub(crate) fn send(
@@ -303,6 +340,7 @@ pub(crate) fn send(
     claimed_sender: Option<&str>,
     request_id: &str,
 ) -> CliResult<Value> {
+    guard_current_run(db, room_id, run_id)?;
     // CLI/MCP callers resolve through the mailbox actor rules (terminal
     // binding wins over an explicit claim); the desktop sends as the user.
     let sender = match claimed_sender {

@@ -1094,18 +1094,21 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     );
     assert_eq!(denied["error"]["code"], "operation_rejected");
 
-    let stopped = c.ok(
+    let view = c.ok(
         "room_stop",
         json!({"room":room,"run":run,"from_session":"coord"}),
     );
-    assert_eq!(stopped["run"]["status"], "stopped");
-    assert_eq!(stopped["notice"]["sender_session_id"], "coord");
+    assert_eq!(view["run"]["status"], "stopped");
+    let page = c.ok("room_messages", json!({"room":room}));
+    let last = page["items"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["kind"], "stop");
+    assert_eq!(last["sender_session_id"], "coord");
 
     let closed = c.call(
         "room_send",
         json!({"room":room,"run":run,"from_session":"peer","message":"停后发言"}),
     );
-    assert_eq!(closed["error"]["code"], "operation_rejected");
+    assert_eq!(closed["error"]["code"], "run_inactive");
     let view = c.ok("room_resolve", json!({"task":"task1"}));
     assert_eq!(view["run"]["status"], "stopped");
     c.finish();

@@ -164,8 +164,10 @@ pub fn collaboration_room_coordinator(
         let room = map_cli(crate::collaboration::set_coordinator(
             db,
             &room_id,
+            &run_id,
             session_id,
             expected_revision,
+            &request_id,
         ))?;
         let task_id = room["task_id"].as_str().unwrap_or_default().to_string();
         Ok::<_, crate::error::AppError>((task_id, room))
