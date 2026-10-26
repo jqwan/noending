@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
 import { copyToClipboard, timeAgo } from "../../components/common";
@@ -15,10 +15,21 @@ import { RUN_LABEL, joinPrompt } from "./collaborationState";
 import { useCollaborationRoom } from "./useCollaborationRoom";
 import "./collaboration.css";
 
+interface Selection {
+  selected: CollaborationStartedMember[];
+  coordinator: string | null;
+}
+
+const EMPTY: Selection = { selected: [], coordinator: null };
+
 function newRequestId(): string {
   const web = globalThis.crypto;
   if (web && typeof web.randomUUID === "function") return web.randomUUID();
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sessionLabel(sessionId: string, sessions: SessionListItem[]): string {
+  return sessions.find(s => s.id === sessionId)?.title || sessionId.slice(0, 8);
 }
 
 /** 旧或已停止的 run 统一报 run_inactive；要明说「已停止」，不能当成普通失败静默重试。 */
@@ -29,11 +40,20 @@ function sendErrorMessage(error: unknown): string {
   return `发送失败：${text}`;
 }
 
+function revisionErrorCopy(action: string, error: unknown): string {
+  const text = String(error);
+  if (/revision|conflict|冲突|已变化/i.test(text)) return `${action}失败：配置已变化，已重新读取，请再试一次。`;
+  return `${action}失败：${text}`;
+}
+
 /**
  * 任务详情／协作室。
  *
  * 一个任务最多一个协作室，一次开启一个 run。未开启时发送消息与开启是同一个
  * 后端事务；运行中掉线不自动结束任务、不替换负责人、不重启成员。
+ *
+ * 写操作按「操作 + 参数」复用 request_id：同一请求传输失败后重试不会在后端
+ * 留下第二份记录；参数变化才算新操作。
  */
 export default function CollaborationRoomView({
   taskId,
@@ -48,15 +68,13 @@ export default function CollaborationRoomView({
 }) {
   const { room, messages, earlierCursor, loading, error, refreshRoom, loadLatest, loadEarlier, setRoom } =
     useCollaborationRoom(taskId);
-  const [selection, setSelection] = useState<{ selected: CollaborationStartedMember[]; coordinator: string | null }>({
-    selected: [],
-    coordinator: null,
-  });
+  const [edited, setEdited] = useState<{ revision: number; value: Selection } | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [waking, setWaking] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const pending = useRef<{ key: string; id: string } | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30_000);
@@ -66,33 +84,41 @@ export default function CollaborationRoomView({
   const config = room?.room ?? null;
   const run = room?.run ?? null;
   const running = run?.status === "starting" || run?.status === "active";
+  const revision = config?.revision ?? 0;
   const title = room?.title || taskTitle;
+
+  // 配置里保存的成员和唤醒方式：停止后再次开启沿用，用户也能在此基础上改。
+  const saved = useMemo<Selection>(
+    () => (config ? { selected: config.selected_members, coordinator: config.coordinator_session_id } : EMPTY),
+    [config],
+  );
+  // 用户本次改动优先。空成员数组与 null 负责人都是有效选择，不能被配置回填覆盖。
+  const selection = edited && edited.revision === revision ? edited.value : saved;
+  const setSelection = (value: Selection) => setEdited({ revision, value });
   const enoughMembers = selection.selected.length >= 2;
 
-  // 上次运行已停止时，沿用原配置（含唤醒方式）重新开启，用户不必再勾一次。
-  const restore = useMemo(() => {
-    if (running || !config) return null;
-    return config.selected_members.length
-      ? { selected: config.selected_members, coordinator: config.coordinator_session_id }
-      : null;
-  }, [running, config]);
-
-  useEffect(() => {
-    if (restore && selection.selected.length === 0) setSelection(restore);
-  }, [restore, selection.selected.length]);
+  const requestId = (key: string) => {
+    if (pending.current?.key === key) return pending.current.id;
+    const id = newRequestId();
+    pending.current = { key, id };
+    return id;
+  };
+  const settled = (key: string) => { if (pending.current?.key === key) pending.current = null; };
 
   const start = async (initialMessage: string | null) => {
     if (busy || archived) return;
-    const members = selection.selected.length ? selection.selected : restore?.selected ?? [];
-    const coordinator = selection.coordinator ?? restore?.coordinator ?? null;
-    if (members.length < 2) { setActionError("至少需要 2 个会话成员。"); return; }
+    const { selected, coordinator } = selection;
+    if (selected.length < 2) { setActionError("至少需要 2 个会话成员。"); return; }
+    const key = `start:${taskId}:${revision}:${JSON.stringify(selected)}:${coordinator ?? ""}:${initialMessage ?? ""}`;
     setBusy(true);
     setActionError("");
     try {
       const next = await api.collaborationRoomStart(
-        taskId, members, config?.revision ?? 0, newRequestId(), coordinator, initialMessage,
+        taskId, selected, revision, requestId(key), coordinator, initialMessage,
       );
+      settled(key);
       setRoom(next);
+      setEdited(null);
       setDraft("");
       if (next.room?.id) await loadLatest(next.room.id, true);
     } catch (e) {
@@ -105,12 +131,30 @@ export default function CollaborationRoomView({
 
   const stop = async () => {
     if (busy || !config || !run) return;
+    const key = `stop:${config.id}:${run.id}:${revision}`;
     setBusy(true);
     setActionError("");
     try {
-      setRoom(await api.collaborationRoomStop(config.id, run.id, config.revision, newRequestId()));
+      setRoom(await api.collaborationRoomStop(config.id, run.id, revision, requestId(key)));
+      settled(key);
     } catch (e) {
-      setActionError(`停止失败：${String(e)}`);
+      setActionError(revisionErrorCopy("停止", e));
+      void refreshRoom();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changeCoordinator = async (sessionId: string | null) => {
+    if (busy || !config || !run) return;
+    const key = `coordinator:${config.id}:${run.id}:${revision}:${sessionId ?? ""}`;
+    setBusy(true);
+    setActionError("");
+    try {
+      setRoom(await api.collaborationRoomCoordinator(config.id, run.id, sessionId, revision, requestId(key)));
+      settled(key);
+    } catch (e) {
+      setActionError(revisionErrorCopy("更换负责人", e));
       void refreshRoom();
     } finally {
       setBusy(false);
@@ -121,11 +165,13 @@ export default function CollaborationRoomView({
     const body = draft.trim();
     if (!body || busy) return;
     if (!running || !config || !run) { await start(body); return; }
+    const key = `send:${config.id}:${run.id}:${body}`;
     setBusy(true);
     setActionError("");
     const submitted = draft;
     try {
-      await api.collaborationRoomSend(config.id, run.id, body, newRequestId());
+      await api.collaborationRoomSend(config.id, run.id, body, requestId(key));
+      settled(key);
       setDraft(current => (current === submitted ? "" : current));
       await loadLatest(config.id);
     } catch (e) {
@@ -137,12 +183,14 @@ export default function CollaborationRoomView({
 
   const wake = async (sessionId: string) => {
     if (!config || !run || waking) return;
+    const key = `wake:${config.id}:${run.id}:${sessionId}`;
     setWaking(sessionId);
     setActionError("");
     try {
       const member: CollaborationMemberState = await api.collaborationMemberWake(
-        config.id, run.id, sessionId, newRequestId(),
+        config.id, run.id, sessionId, requestId(key),
       );
+      settled(key);
       setRoom(old => (old
         ? { ...old, members: old.members.map(m => (m.session_id === member.session_id ? member : m)) }
         : old));
@@ -183,7 +231,7 @@ export default function CollaborationRoomView({
             <button
               type="button"
               className={`btn small ${running ? "danger" : "primary"}`}
-              disabled={busy || archived || (!running && !enoughMembers && !restore)}
+              disabled={busy || archived || (!running && !enoughMembers)}
               title={archived ? "已归档任务不能开启协作" : running ? "停止本次协作" : "开启协作"}
               onClick={() => void (running ? stop() : start(draft.trim() || null))}
             >
@@ -206,14 +254,32 @@ export default function CollaborationRoomView({
           {error && <p role="alert" className="small warning">{error}</p>}
 
           {running ? (
-            <CollaborationMembers
-              room={{ ...room!, title }}
-              sessions={sessions}
-              now={now}
-              busySessionId={waking}
-              onWake={sessionId => void wake(sessionId)}
-              onCopyPrompt={sessionId => void copyPrompt(sessionId)}
-            />
+            <>
+              <CollaborationMembers
+                room={{ ...room!, title }}
+                sessions={sessions}
+                now={now}
+                busySessionId={waking}
+                onWake={sessionId => void wake(sessionId)}
+                onCopyPrompt={sessionId => void copyPrompt(sessionId)}
+              />
+              <fieldset className="collab-coordinator" disabled={busy}>
+                <legend className="small">负责人（仅本次成员，可更换或清除）</legend>
+                <label className="collab-radio">
+                  <input type="radio" name="collab-run-coordinator" checked={!config?.coordinator_session_id}
+                    onChange={() => void changeCoordinator(null)} />
+                  <span>不由成员负责，由我协调</span>
+                </label>
+                {room!.members.map(member => (
+                  <label key={member.session_id} className="collab-radio">
+                    <input type="radio" name="collab-run-coordinator"
+                      checked={config?.coordinator_session_id === member.session_id}
+                      onChange={() => void changeCoordinator(member.session_id)} />
+                    <span className="truncate">{sessionLabel(member.session_id, sessions)}</span>
+                  </label>
+                ))}
+              </fieldset>
+            </>
           ) : (
             <CollaborationCandidates
               taskId={taskId}
