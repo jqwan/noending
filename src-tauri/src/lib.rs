@@ -5,6 +5,7 @@ pub mod adapters;
 pub mod agent_runtime;
 pub mod assistant;
 pub mod cli;
+pub mod collaboration;
 pub mod commands;
 pub mod context;
 pub mod domain;
@@ -291,7 +292,14 @@ pub fn run() {
             commands::terminal_for_session,
             commands::terminal_attach,
             commands::terminal_activity_seen,
-            commands::mailbox_list,
+            commands::collaboration::collaboration_candidates,
+        commands::collaboration::collaboration_room_coordinator,
+        commands::collaboration::collaboration_room_get,
+        commands::collaboration::collaboration_room_messages,
+        commands::collaboration::collaboration_room_send,
+        commands::collaboration::collaboration_room_start,
+        commands::collaboration::collaboration_room_stop,
+        commands::mailbox_list,
             commands::mailbox_notification_hint,
             commands::mailbox_send,
             commands::mailbox_edit,

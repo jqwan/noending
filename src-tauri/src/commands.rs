@@ -13,6 +13,7 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
+pub mod collaboration;
 pub mod ingestion;
 pub mod packages;
 pub mod project;

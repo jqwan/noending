@@ -1836,3 +1836,133 @@ fn progress_note_cli_appends_literal_text_and_replays_without_overwriting_existi
         serde_json::json!(["先前已核实的成果", text])
     );
 }
+
+#[test]
+fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
+    let f = Fixture::new();
+    let db = f.db.as_ref().unwrap();
+    db.write()
+        .execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+               ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np'),('outsider','codex','no','jsonl','/no');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+        )
+        .unwrap();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    use noending_lib::storage::collaboration::SelectedMember;
+    let started = db
+        .collaboration_start(
+            "task1",
+            &[
+                SelectedMember {
+                    session_id: "coord".into(),
+                    wake_method: "desktop".into(),
+                },
+                SelectedMember {
+                    session_id: "peer".into(),
+                    wake_method: "desktop".into(),
+                },
+            ],
+            Some("coord"),
+            None,
+            Some("开始吧"),
+            "start-1",
+        )
+        .unwrap();
+    let room = started.room.id.clone();
+    let run = started.run.id.clone();
+
+    let (ok, view) = f.run(exe, &["room", "show", &room]);
+    assert!(ok, "{view}");
+    assert_eq!(view["data"]["run"]["status"], "starting");
+    assert_eq!(view["data"]["members"].as_array().unwrap().len(), 2);
+    assert_eq!(view["data"]["members"][0]["session_id"], "coord");
+    assert_eq!(view["data"]["members"][0]["wake_method"], "desktop");
+
+    let (ok, page) = f.run(exe, &["room", "messages", &room, "--run", &run]);
+    assert!(ok, "{page}");
+    let items = page["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "start notice + first user message");
+    assert_eq!(items[0]["kind"], "start");
+
+    let (ok, sent) = f.run(
+        exe,
+        &[
+            "room",
+            "send",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--message",
+            "成员汇报",
+        ],
+    );
+    assert!(ok, "{sent}");
+
+    let (ok, rejected) = f.run(
+        exe,
+        &[
+            "room",
+            "send",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "outsider",
+            "--message",
+            "外人发言",
+        ],
+    );
+    assert!(!ok, "{rejected}");
+
+    let (ok, denied) = f.run(
+        exe,
+        &[
+            "room",
+            "stop",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+        ],
+    );
+    assert!(!ok, "{denied}");
+    assert_eq!(denied["error"]["code"], "operation_rejected");
+
+    let (ok, stopped) = f.run(
+        exe,
+        &[
+            "room",
+            "stop",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "coord",
+        ],
+    );
+    assert!(ok, "{stopped}");
+    assert_eq!(stopped["data"]["run"]["status"], "stopped");
+    assert_eq!(stopped["data"]["notice"]["kind"], "stop");
+    assert_eq!(stopped["data"]["notice"]["sender_session_id"], "coord");
+
+    let (ok, closed) = f.run(
+        exe,
+        &[
+            "room",
+            "send",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+            "--message",
+            "停后发言",
+        ],
+    );
+    assert!(!ok, "{closed}");
+}

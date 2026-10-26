@@ -682,6 +682,85 @@ CREATE TABLE IF NOT EXISTS mailbox_messages (
 CREATE INDEX IF NOT EXISTS mailbox_recipient ON mailbox_messages(recipient_session_id,seq);
 CREATE INDEX IF NOT EXISTS mailbox_unread ON mailbox_messages(recipient_session_id,seq) WHERE read_at IS NULL;
 
+-- Collaboration rooms: one per task. The persisted configuration (membership,
+-- coordinator) lives here; per-run wake state, messages, read positions and
+-- participation leases live in the sibling tables below.
+CREATE TABLE IF NOT EXISTS collaboration_rooms (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE REFERENCES workstreams(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  -- Persisted member selection: [{session_id, wake_method}]. Membership is
+  -- revalidated against the task on every start, never trusted from the UI.
+  selected_members TEXT NOT NULL CHECK(json_valid(selected_members) AND json_type(selected_members)='array'),
+  coordinator_session_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collaboration_runs (
+  id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL REFERENCES collaboration_rooms(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'starting' CHECK (status IN ('starting','active','stopped')),
+  started_at TEXT NOT NULL,
+  activated_at TEXT,
+  stopped_at TEXT,
+  -- NULL = the desktop user; a session id keeps the coordinator's identity,
+  -- mirroring the mailbox sender semantics.
+  stop_initiator_session_id TEXT,
+  -- Idempotency: repeating a start/stop request with the same id is a no-op.
+  start_request_id TEXT UNIQUE,
+  stop_request_id TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_collaboration_runs_room ON collaboration_runs(room_id, started_at);
+CREATE TABLE IF NOT EXISTS collaboration_run_members (
+  run_id TEXT NOT NULL REFERENCES collaboration_runs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  wake_method TEXT NOT NULL CHECK (wake_method IN ('terminal','desktop')),
+  wake_status TEXT NOT NULL DEFAULT 'pending' CHECK (wake_status IN ('pending','opened','failed')),
+  wake_request_id TEXT UNIQUE,
+  wake_error TEXT,
+  PRIMARY KEY (run_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_collaboration_run_members_session ON collaboration_run_members(session_id);
+-- The single shared message store. Rows survive member session deletion with
+-- the real sender preserved: no foreign key to sessions here.
+CREATE TABLE IF NOT EXISTS collaboration_messages (
+  id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL REFERENCES collaboration_rooms(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES collaboration_runs(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  sender_session_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('text','start','stop')),
+  body TEXT NOT NULL CHECK(length(trim(body)) > 0),
+  created_at TEXT NOT NULL,
+  request_id TEXT UNIQUE,
+  UNIQUE(room_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_collaboration_messages_room ON collaboration_messages(room_id, seq);
+-- Per-member processing cursor, one row per run: a new run starts before its
+-- own start notice, so old-run messages stay reviewable without re-execution.
+CREATE TABLE IF NOT EXISTS collaboration_reads (
+  room_id TEXT NOT NULL REFERENCES collaboration_rooms(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES collaboration_runs(id) ON DELETE CASCADE,
+  through_seq INTEGER NOT NULL CHECK(through_seq >= 0),
+  read_at TEXT NOT NULL,
+  PRIMARY KEY (room_id, session_id, run_id)
+);
+-- Run-scoped participation lease: the connection identity is the row id, so a
+-- superseded connection's heartbeat or exit cannot touch its replacement.
+CREATE TABLE IF NOT EXISTS collaboration_participations (
+  id TEXT PRIMARY KEY,
+  room_id TEXT NOT NULL REFERENCES collaboration_rooms(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES collaboration_runs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  holder TEXT NOT NULL CHECK (holder IN ('cli','mcp')),
+  phase TEXT CHECK (phase IS NULL OR phase IN ('listening','processing')),
+  last_heartbeat_at TEXT NOT NULL,
+  left_at TEXT,
+  UNIQUE(run_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_collaboration_participations_session ON collaboration_participations(session_id);
+
 "#;
 
 /// Create the current format. Only ever called for a completely empty file, so

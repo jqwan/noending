@@ -194,6 +194,11 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             "session_start",
             "mailbox_send",
             "mailbox_wait",
+            "room_resolve",
+            "room_show",
+            "room_messages",
+            "room_send",
+            "room_stop",
             "task_items",
             "task_item_create",
             "task_item_update",
@@ -1022,4 +1027,86 @@ fn current_session_extraction_uses_scoped_mcp_pages_and_commits_without_an_agent
     assert_eq!(out["ok"], true, "{out}");
     let summary = client.call("summary_get", json!({"kind":"task","id":id}));
     assert_eq!(summary["data"]["summary"]["items"][0]["title"], "MCP goal");
+}
+
+#[test]
+fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
+    let f = Fixture::new();
+    f.home.ensure_dirs().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    db.write()
+        .execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+               ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np'),('outsider','codex','no','jsonl','/no');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+        )
+        .unwrap();
+    let mut c = f.start();
+    let empty = c.ok("room_resolve", json!({"task":"task1"}));
+    assert!(empty["room"].is_null());
+
+    use noending_lib::storage::collaboration::SelectedMember;
+    let started = db
+        .collaboration_start(
+            "task1",
+            &[
+                SelectedMember {
+                    session_id: "coord".into(),
+                    wake_method: "desktop".into(),
+                },
+                SelectedMember {
+                    session_id: "peer".into(),
+                    wake_method: "desktop".into(),
+                },
+            ],
+            Some("coord"),
+            None,
+            None,
+            "start-1",
+        )
+        .unwrap();
+    let room = started.room.id.clone();
+    let run = started.run.id.clone();
+
+    let view = c.ok("room_show", json!({"room":room}));
+    assert_eq!(view["run"]["status"], "starting");
+    assert_eq!(view["members"].as_array().unwrap().len(), 2);
+
+    let page = c.ok("room_messages", json!({"room":room,"run":run}));
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+
+    let sent = c.ok(
+        "room_send",
+        json!({"room":room,"run":run,"from_session":"peer","message":"成员汇报"}),
+    );
+    assert!(sent["seq"].is_i64());
+
+    let rejected = c.call(
+        "room_send",
+        json!({"room":room,"run":run,"from_session":"outsider","message":"外人发言"}),
+    );
+    assert_eq!(rejected["error"]["code"], "operation_rejected");
+
+    let denied = c.call(
+        "room_stop",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert_eq!(denied["error"]["code"], "operation_rejected");
+
+    let stopped = c.ok(
+        "room_stop",
+        json!({"room":room,"run":run,"from_session":"coord"}),
+    );
+    assert_eq!(stopped["run"]["status"], "stopped");
+    assert_eq!(stopped["notice"]["sender_session_id"], "coord");
+
+    let closed = c.call(
+        "room_send",
+        json!({"room":room,"run":run,"from_session":"peer","message":"停后发言"}),
+    );
+    assert_eq!(closed["error"]["code"], "operation_rejected");
+    let view = c.ok("room_resolve", json!({"task":"task1"}));
+    assert_eq!(view["run"]["status"], "stopped");
+    c.finish();
 }
