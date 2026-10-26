@@ -55,14 +55,16 @@ export default function RoomMessages({
           {messages.map(message => {
             const kind = KIND_LABEL[message.kind];
             return (
-              <li key={message.id} className={`collab-message${message.sender_session_id ? "" : " mine"}`}>
+              <li key={message.id} className={`collab-message${message.sender_session_id ? "" : " mine"}`}
+                title={message.kind === "text" ? undefined : message.body}>
                 <div className="collab-message-head small muted">
                   <span className="collab-message-sender">{senderName(message.sender_session_id, sessions)}</span>
                   {kind && <span className="badge muted small">{kind}</span>}
                   <span title={message.created_at}>{formatDateTime(message.created_at)}</span>
                   <span className="mono">#{message.seq}</span>
                 </div>
-                <div className="collab-message-body">{message.body}</div>
+                {/* 开始/停止通知的正文是定位信息（JSON），不是给人读的话；只留徽章，原文进 title。 */}
+                {message.kind === "text" && <div className="collab-message-body">{message.body}</div>}
               </li>
             );
           })}

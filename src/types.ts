@@ -799,14 +799,15 @@ export interface CollaborationMessage {
 export interface CollaborationMemberState {
   session_id: string;
   wake_method: CollaborationWakeMethod;
-  wake_status: CollaborationWakeStatus;
+  /** 尚无本次运行的成员行时为 null（例如运行刚刚创建）。 */
+  wake_status: CollaborationWakeStatus | null;
   connection_state: CollaborationConnectionState;
   phase: CollaborationPhase | null;
   last_heartbeat_at: string | null;
   last_read_at: string | null;
   last_read_seq: number | null;
-  /** 最早一条未查收的他人消息时间；null 表示没有待查收。 */
-  awaiting_since: string | null;
+  /** 最早一条未查收的他人消息时间；null = 没有待查收。 */
+  awaiting_since?: string | null;
   unread_count: number;
   error: string | null;
 }
