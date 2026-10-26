@@ -760,6 +760,17 @@ CREATE TABLE IF NOT EXISTS collaboration_participations (
   UNIQUE(run_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_collaboration_participations_session ON collaboration_participations(session_id);
+-- Request ledger for user actions that carry no natural artifact row
+-- (coordinator swaps, member wake retries): the fingerprint proves a replay
+-- is the same operation instead of silently returning unrelated data.
+CREATE TABLE IF NOT EXISTS collaboration_requests (
+  request_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('coordinator','wake')),
+  room_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 
 "#;
 

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const WAKE_TERMINAL: &str = "terminal";
 pub const WAKE_DESKTOP: &str = "desktop";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelectedMember {
     pub session_id: String,
     pub wake_method: String,
@@ -91,7 +91,9 @@ pub struct CollaborationRead {
 #[derive(Debug, Clone, Serialize)]
 pub struct CollaborationUnread {
     pub count: i64,
-    pub oldest_at: Option<String>,
+    /// Oldest not-yet-acknowledged message from someone else; own messages
+    /// never make a member look unresponsive.
+    pub awaiting_since: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CollaborationCandidatePage {
@@ -290,44 +292,55 @@ fn append_message_conn(
     Ok(c.query_row(&format!("{MESSAGE_SELECT} WHERE id=?1"), [&id], row_message)?)
 }
 
-/// The cursor encodes direction, boundary and its room, so a cursor from
-/// another room or an unknown shape is rejected instead of misread.
-fn encode_cursor(room_id: &str, direction: &str, seq: i64) -> String {
+/// The history cursor encodes its room, run scope and direction, so a cursor
+/// from another room, another run scope or an unknown shape is rejected
+/// instead of misread. History only pages older messages; the wait flow reads
+/// forward from a member's own acknowledged position.
+fn encode_cursor(room_id: &str, run_scope: &str, seq: i64) -> String {
     use base64::Engine;
-    let payload = serde_json::json!({"room":room_id,"dir":direction,"seq":seq}).to_string();
+    let payload =
+        serde_json::json!({"room":room_id,"run":run_scope,"dir":"back","seq":seq}).to_string();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes())
+}
+fn run_scope(run_id: Option<&str>) -> &str {
+    run_id.unwrap_or("all")
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PageDirection {
     Newest,
     Back,
-    Forward,
 }
-fn decode_cursor(room_id: &str, cursor: &str) -> Result<(PageDirection, i64)> {
+fn decode_cursor(
+    room_id: &str,
+    expected_scope: &str,
+    cursor: &str,
+) -> Result<(PageDirection, i64)> {
     use base64::Engine;
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor.trim().as_bytes())
         .map_err(|_| other("协作室游标无效"))?;
     let value: serde_json::Value =
         serde_json::from_slice(&raw).map_err(|_| other("协作室游标无效"))?;
-    if value["room"].as_str() != Some(room_id) {
-        return Err(other("协作室游标不属于该房间"));
+    if value["room"].as_str() != Some(room_id) || value["run"].as_str() != Some(expected_scope) {
+        return Err(other("协作室游标不属于该房间或运行范围"));
     }
-    let direction = match value["dir"].as_str() {
-        Some("back") => PageDirection::Back,
-        Some("forward") => PageDirection::Forward,
-        _ => return Err(other("协作室游标无效")),
-    };
+    if value["dir"].as_str() != Some("back") {
+        return Err(other("协作室游标无效"));
+    }
     let seq = value["seq"]
         .as_i64()
         .ok_or_else(|| other("协作室游标无效"))?;
     if seq < 0 {
         return Err(other("协作室游标无效"));
     }
-    Ok((direction, seq))
+    Ok((PageDirection::Back, seq))
 }
 
 impl Db {
+    pub fn collaboration_current_run(&self, room_id: &str) -> Result<Option<CollaborationRun>> {
+        let c = self.read();
+        current_run_conn(&c, room_id)
+    }
     pub fn collaboration_room_by_id(&self, room_id: &str) -> Result<Option<CollaborationRoom>> {
         let c = self.read();
         c.query_row(&format!("{ROOM_SELECT} WHERE id=?1"), [room_id], row_room)
@@ -424,9 +437,22 @@ impl Db {
                 .optional()
                 .map_err(crate::error::AppError::from)?
             {
+                // A request id replay must be the same operation: same task,
+                // same members, same coordinator. Anything else is a caller
+                // reusing an id for different work.
                 let run = run_conn(tx, &existing)?.ok_or_else(|| other("协作运行不存在"))?;
-                let room =
-                    room_by_task_conn(tx, task_id)?.ok_or_else(|| other("协作室不存在"))?;
+                let room = tx
+                    .query_row(&format!("{ROOM_SELECT} WHERE id=?1"), [&run.room_id], row_room)
+                    .optional()?
+                    .ok_or_else(|| other("协作室不存在"))?;
+                let room = parse_room(room)?;
+                if room.task_id != task_id {
+                    return Err(other("请求编号已被用于其他任务的开启"));
+                }
+                let stored: Vec<SelectedMember> = room.selected_members.clone();
+                if stored != members || room.coordinator_session_id.as_deref() != coordinator {
+                    return Err(other("请求编号已被用于不同的成员或负责人配置"));
+                }
                 return Ok(CollaborationStartOutcome {
                     members: run_members_conn(tx, &existing)?,
                     appended: vec![],
@@ -560,6 +586,9 @@ impl Db {
                 .map_err(crate::error::AppError::from)?
             {
                 let run = run_conn(tx, &existing)?.ok_or_else(|| other("协作运行不存在"))?;
+                if run.room_id != room_id {
+                    return Err(other("请求编号已被用于其他协作室的停止"));
+                }
                 let notice = tx
                     .query_row(
                         &format!("{MESSAGE_SELECT} WHERE run_id=?1 AND kind='stop' ORDER BY seq DESC LIMIT 1"),
@@ -600,21 +629,41 @@ impl Db {
         })
     }
 
-    /// Swap or clear the coordinator. The revision guard keeps concurrent user
-    /// edits honest; repeating a successful swap is harmless, so no request
-    /// ledger is needed here.
+    /// Swap or clear the coordinator. The run fence is enforced by the caller;
+    /// here the revision guard keeps concurrent user edits honest and the
+    /// request ledger makes a replay idempotent while rejecting a reused id
+    /// with different arguments.
     pub fn collaboration_set_coordinator(
         &self,
         room_id: &str,
+        run_id: &str,
         coordinator: Option<&str>,
         expected_revision: i64,
+        request_id: &str,
     ) -> Result<CollaborationRoom> {
+        let fingerprint = serde_json::json!({"coordinator":coordinator}).to_string();
         self.tx(|tx| {
             let row = tx
                 .query_row(&format!("{ROOM_SELECT} WHERE id=?1"), [room_id], row_room)
                 .optional()?
                 .ok_or_else(|| other("协作室不存在"))?;
             let room = parse_room(row)?;
+            let replay: Option<String> = tx
+                .query_row(
+                    "SELECT fingerprint FROM collaboration_requests WHERE request_id=?1",
+                    [request_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(crate::error::AppError::from)?;
+            if let Some(stored) = replay {
+                if stored == fingerprint {
+                    // The original swap already happened; answer with the
+                    // current room without re-checking the stale revision.
+                    return Ok(room);
+                }
+                return Err(other("请求编号已被用于不同的负责人操作"));
+            }
             if room.revision != expected_revision {
                 return Err(other("协作室配置已被其他人修改，请刷新后重试"));
             }
@@ -627,6 +676,11 @@ impl Db {
                     return Err(other("负责人必须来自所选成员"));
                 }
             }
+            tx.execute(
+                "INSERT INTO collaboration_requests(request_id,kind,room_id,run_id,fingerprint,created_at) VALUES(?1,'coordinator',?2,?3,?4,?5)",
+                params![request_id, room_id, run_id, fingerprint, now()],
+            )
+            .map_err(crate::error::AppError::from)?;
             tx.execute(
                 "UPDATE collaboration_rooms SET coordinator_session_id=?2,revision=revision+1,updated_at=?3 WHERE id=?1",
                 params![room_id, coordinator, now()],
@@ -706,13 +760,13 @@ impl Db {
             return Err(other("协作室不存在"));
         }
         let latest_seq = latest_seq_conn(&c, room_id)?;
+        let scope = run_scope(run_id);
         let (direction, boundary) = match cursor {
             None => (PageDirection::Newest, i64::MIN),
-            Some(cursor) => decode_cursor(room_id, cursor)?,
+            Some(cursor) => decode_cursor(room_id, scope, cursor)?,
         };
         let (comparison, order) = match direction {
             PageDirection::Back => ("<", "DESC"),
-            PageDirection::Forward => (">", "ASC"),
             PageDirection::Newest => (">", "DESC"),
         };
         let run_clause = if run_id.is_some() {
@@ -732,22 +786,10 @@ impl Db {
             .map_err(crate::error::AppError::from)?;
         let has_more = rows.len() > limit;
         let mut items: Vec<CollaborationMessage> = rows.into_iter().take(limit).collect();
-        if direction != PageDirection::Forward {
-            items.reverse();
-        }
+        items.reverse();
         let next_cursor = has_more.then(|| {
-            let edge = if direction == PageDirection::Forward {
-                items.last()
-            } else {
-                items.first()
-            }
-            .map(|m| m.seq)
-            .unwrap_or_default();
-            let name = match direction {
-                PageDirection::Forward => "forward",
-                _ => "back",
-            };
-            encode_cursor(room_id, name, edge)
+            let edge = items.first().map(|m| m.seq).unwrap_or_default();
+            encode_cursor(room_id, scope, edge)
         });
         Ok(CollaborationMessagesPage {
             items,
@@ -875,14 +917,14 @@ impl Db {
             .max(0);
         let row = c
             .query_row(
-                "SELECT COUNT(*),MIN(created_at) FROM collaboration_messages WHERE room_id=?1 AND run_id=?2 AND seq>?3",
-                params![room_id, run_id, through],
+                "SELECT COUNT(*),(SELECT MIN(created_at) FROM collaboration_messages WHERE room_id=?1 AND run_id=?2 AND seq>?3 AND (sender_session_id IS NULL OR sender_session_id<>?4)) FROM collaboration_messages WHERE room_id=?1 AND run_id=?2 AND seq>?3",
+                params![room_id, run_id, through, session_id],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
             )
             .map_err(crate::error::AppError::from)?;
         Ok(CollaborationUnread {
             count: row.0,
-            oldest_at: row.1,
+            awaiting_since: row.1,
         })
     }
 }

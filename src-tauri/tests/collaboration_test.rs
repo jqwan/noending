@@ -325,6 +325,23 @@ fn messages_page_walks_back_and_forward_without_overlap_or_cross_room() {
     assert_eq!(back_seqs, vec![1, 2, 3]);
     assert!(back.next_cursor.is_none(), "reached the beginning");
 
+    // A run-scoped cursor must not be spent on the all-history scope.
+    let scoped = db
+        .collaboration_messages_page(&room_id, Some(&run_id), None, 2)
+        .unwrap();
+    assert_eq!(scoped.items.len(), 2);
+    let wrong_scope = db
+        .collaboration_messages_page(&room_id, None, scoped.next_cursor.as_deref(), 2)
+        .unwrap_err();
+    assert!(
+        wrong_scope.to_string().contains("运行范围"),
+        "{wrong_scope}"
+    );
+    let same_scope = db
+        .collaboration_messages_page(&room_id, Some(&run_id), scoped.next_cursor.as_deref(), 2)
+        .unwrap();
+    assert_eq!(same_scope.items.len(), 2);
+
     let forward = db.collaboration_messages_page(&room_id, None, Some("__bad__"), 3);
     assert!(forward.is_err(), "an unknown cursor shape is rejected");
 
@@ -375,9 +392,25 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
         1
     );
     assert!(db.collaboration_ack(&room_id, &run_id, "b", 99).is_err());
-    // A member without reads still starts at the run boundary.
+    // A member without reads still starts at the run boundary. Own messages
+    // count as unread but never make the member look unresponsive; the user's
+    // start notice does.
     let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
     assert_eq!(unread.count, 2, "own messages do not advance the position");
+    assert!(
+        unread.awaiting_since.is_some(),
+        "the user's start notice is a pending foreign message"
+    );
+    db.collaboration_send(&room_id, &run_id, Some("b"), "来自同伴", "m2")
+        .unwrap();
+    let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
+    assert!(
+        unread.awaiting_since.is_some(),
+        "a peer message sets the timer"
+    );
+    db.collaboration_ack(&room_id, &run_id, "a", 3).unwrap();
+    let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
+    assert!(unread.awaiting_since.is_none(), "everything acknowledged");
 }
 
 #[test]
@@ -431,6 +464,105 @@ fn candidate_sessions_are_task_scoped_unarchived_and_stably_paged() {
         .collaboration_candidate_sessions("missing", None, 10)
         .unwrap();
     assert!(unrelated.items.is_empty());
+}
+
+#[test]
+fn coordinator_swap_guards_revision_is_idempotent_and_rejects_reused_ids() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            Some("a"),
+            None,
+            None,
+            "r1",
+        )
+        .unwrap();
+    let room_id = started.room.id.clone();
+    let run_id = started.run.id.clone();
+
+    // The run fence is the caller's job (business layer); the ledger proves
+    // replay identity here.
+    let swapped = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("b"), 1, "swap-1")
+        .unwrap();
+    assert_eq!(swapped.coordinator_session_id.as_deref(), Some("b"));
+    assert_eq!(swapped.revision, 2);
+
+    // Same request id, same arguments: idempotent even with a stale revision.
+    let replay = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("b"), 1, "swap-1")
+        .unwrap();
+    assert_eq!(replay.revision, 2);
+
+    // Same request id, different target: rejected instead of silently reused.
+    let conflict = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("a"), 2, "swap-1")
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("已被用于不同的负责人操作"),
+        "{conflict}"
+    );
+
+    // A coordinator outside the members is rejected.
+    let outsider = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("x"), 2, "swap-2")
+        .unwrap_err();
+    assert!(
+        outsider.to_string().contains("负责人必须来自所选成员"),
+        "{outsider}"
+    );
+
+    // A stale revision is rejected; the request id stays unused for retries.
+    let stale = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("a"), 1, "swap-3")
+        .unwrap_err();
+    assert!(stale.to_string().contains("已被其他人修改"), "{stale}");
+    let retried = db
+        .collaboration_set_coordinator(&room_id, &run_id, Some("a"), 2, "swap-3")
+        .unwrap();
+    assert_eq!(retried.coordinator_session_id.as_deref(), Some("a"));
+}
+
+#[test]
+fn start_rejects_a_request_id_reused_for_a_different_configuration() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start("t", &Fixture::members("a", "b"), None, None, None, "r1")
+        .unwrap();
+    // Same id, different task: mismatch instead of a foreign room answer.
+    db.write()
+        .execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('t2','第二任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','t2'),('b','t2');",
+        )
+        .unwrap();
+    let conflict = db
+        .collaboration_start("t2", &Fixture::members("a", "b"), None, None, None, "r1")
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("已被用于其他任务"),
+        "{conflict}"
+    );
+    // Same id, different members: mismatch as well.
+    let conflict = db
+        .collaboration_start("t", &Fixture::members("a", "c"), None, None, None, "r1")
+        .unwrap_err();
+    assert!(
+        conflict.to_string().contains("不同的成员或负责人"),
+        "{conflict}"
+    );
+    assert_eq!(
+        db.collaboration_messages_page(&started.room.id, None, None, 50)
+            .unwrap()
+            .items
+            .len(),
+        1,
+        "conflicting replays never append"
+    );
 }
 
 #[test]

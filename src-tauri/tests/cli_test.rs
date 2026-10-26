@@ -1947,8 +1947,11 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     );
     assert!(ok, "{stopped}");
     assert_eq!(stopped["data"]["run"]["status"], "stopped");
-    assert_eq!(stopped["data"]["notice"]["kind"], "stop");
-    assert_eq!(stopped["data"]["notice"]["sender_session_id"], "coord");
+    let (ok, page) = f.run(exe, &["room", "messages", &room]);
+    assert!(ok, "{page}");
+    let last = page["data"]["items"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["kind"], "stop");
+    assert_eq!(last["sender_session_id"], "coord");
 
     let (ok, closed) = f.run(
         exe,
@@ -1965,4 +1968,5 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
         ],
     );
     assert!(!ok, "{closed}");
+    assert_eq!(closed["error"]["code"], "run_inactive");
 }
