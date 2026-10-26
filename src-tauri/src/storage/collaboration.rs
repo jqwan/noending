@@ -874,6 +874,59 @@ impl Db {
         })
     }
 
+    /// Task archiving terminates the task room's in-flight runs: every
+    /// non-stopped run flips to stopped with a user-initiated stop notice
+    /// (waiters observe it on their next poll), and stays restartable only
+    /// through a fresh start on a non-archived task.
+    pub fn collaboration_stop_runs_for_archived_task(&self, task_id: &str) -> Result<usize> {
+        self.tx(|tx| {
+            let Some(room) = room_by_task_conn(tx, task_id)? else {
+                return Ok(0);
+            };
+            let runs: Vec<String> = {
+                let mut st = tx.prepare(
+                    "SELECT id FROM collaboration_runs WHERE room_id=?1 AND status<>'stopped'",
+                )?;
+                let rows = st
+                    .query_map([&room.id], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(crate::error::AppError::from)?;
+                rows
+            };
+            let mut stopped = 0;
+            for run_id in runs {
+                let request_id = format!("archive-{}", run_id);
+                let fingerprint = serde_json::json!({
+                    "room": room.id, "run": run_id, "initiator": serde_json::Value::Null,
+                })
+                .to_string();
+                if request_hit_conn(tx, &request_id, "stop", &fingerprint)?.is_some() {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE collaboration_runs SET status='stopped',stopped_at=?2,stop_initiator_session_id=NULL,stop_request_id=?3 WHERE id=?1 AND status<>'stopped'",
+                    params![run_id, now(), request_id],
+                )
+                .map_err(crate::error::AppError::from)?;
+                let notice_body = serde_json::json!({
+                    "room_id": room.id, "run_id": run_id, "reason": "task_archived",
+                })
+                .to_string();
+                append_message_conn(tx, &room.id, &run_id, None, "stop", &notice_body, None)?;
+                record_request_conn(
+                    tx,
+                    &request_id,
+                    "stop",
+                    &room.id,
+                    &run_id,
+                    &fingerprint,
+                )?;
+                stopped += 1;
+            }
+            Ok(stopped)
+        })
+    }
+
     /// Record one wake attempt's outcome on the run member row.
     pub fn collaboration_set_wake_status(
         &self,
@@ -1049,6 +1102,57 @@ fn record_request_conn(
     Ok(())
 }
 
+/// Run activation: starting → active once at least two members have live
+/// participations AND the designated coordinator (when one exists) is among
+/// them. Runs without a coordinator rely on the two-member rule alone.
+fn maybe_activate_run_conn(tx: &Connection, room_id: &str, run_id: &str) -> Result<()> {
+    let starting = tx
+        .query_row(
+            "SELECT status='starting' FROM collaboration_runs WHERE id=?1",
+            [run_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(crate::error::AppError::from)?;
+    if !starting {
+        return Ok(());
+    }
+    let coordinator: Option<String> = tx
+        .query_row(
+            "SELECT coordinator_session_id FROM collaboration_rooms WHERE id=?1",
+            [room_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(crate::error::AppError::from)?;
+    let joined: i64 = tx
+        .query_row(
+            "SELECT COUNT(DISTINCT p.session_id) FROM collaboration_participations p WHERE p.run_id=?1 AND p.left_at IS NULL AND p.last_heartbeat_at>=?2",
+            params![run_id, (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339()],
+            |r| r.get(0),
+        )
+        .map_err(crate::error::AppError::from)?;
+    if joined < 2 {
+        return Ok(());
+    }
+    let coordinator_joined = match &coordinator {
+        None => true,
+        Some(id) => tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL)",
+                params![run_id, id],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(crate::error::AppError::from)?,
+    };
+    if coordinator_joined {
+        tx.execute(
+            "UPDATE collaboration_runs SET status='active',activated_at=?2 WHERE id=?1 AND status='starting'",
+            params![run_id, now()],
+        )
+        .map_err(crate::error::AppError::from)?;
+    }
+    Ok(())
+}
+
 fn require_run_member_conn(c: &Connection, run_id: &str, session_id: &str) -> Result<()> {
     let member = c
         .query_row(
@@ -1135,6 +1239,11 @@ impl Db {
                 params![connection_id, room_id, run_id, session_id, holder, holder_instance, now()],
             )
             .map_err(crate::error::AppError::from)?;
+            maybe_activate_run_conn(
+                tx,
+                room_id,
+                run_id,
+            )?;
             let through_seq: i64 = tx
                 .query_row(
                     "SELECT through_seq FROM collaboration_reads WHERE room_id=?1 AND session_id=?2 AND run_id=?3",
