@@ -366,6 +366,11 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
     let unread = db.collaboration_unread_of(&room_id, &run_id, "b").unwrap();
     assert_eq!(unread.count, 2, "start notice + member message");
 
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    // Without a live participation the ack is rejected.
+    assert!(db.collaboration_ack(&room_id, &run_id, "b", 1).is_err());
+    db.collaboration_join(&room_id, &run_id, "b", "cli", &cutoff)
+        .unwrap();
     db.collaboration_ack(&room_id, &run_id, "b", 1).unwrap();
     let unread = db.collaboration_unread_of(&room_id, &run_id, "b").unwrap();
     assert_eq!(unread.count, 1);
@@ -389,7 +394,10 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
     // count as unread but never make the member look unresponsive; the user's
     // start notice does.
     let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
-    assert_eq!(unread.count, 2, "own messages do not advance the position");
+    assert_eq!(
+        unread.count, 1,
+        "own messages are not unread; the user's notice is"
+    );
     assert!(
         unread.awaiting_since.is_some(),
         "the user's start notice is a pending foreign message"
@@ -401,6 +409,8 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
         unread.awaiting_since.is_some(),
         "a peer message sets the timer"
     );
+    db.collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
+        .unwrap();
     db.collaboration_ack(&room_id, &run_id, "a", 3).unwrap();
     let unread = db.collaboration_unread_of(&room_id, &run_id, "a").unwrap();
     assert!(unread.awaiting_since.is_none(), "everything acknowledged");
@@ -416,6 +426,9 @@ fn session_purge_keeps_real_senders_but_drops_participation_state() {
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
     db.collaboration_send(&room_id, &run_id, Some("a"), "来自将删除的会话", "m1")
+        .unwrap();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "a", 2).unwrap();
 
@@ -442,16 +455,17 @@ fn session_purge_keeps_real_senders_but_drops_participation_state() {
 }
 
 #[test]
-fn candidate_sessions_are_task_scoped_unarchived_and_stably_paged() {
+fn candidate_sessions_are_task_scoped_stably_paged_and_include_archived() {
     let f = Fixture::new();
     let db = f.db();
     let first = db.collaboration_candidate_sessions("t", None, 2).unwrap();
-    assert_eq!(first.items, vec!["a", "b"]);
-    assert_eq!(first.next_cursor.as_deref(), Some("b"));
+    assert_eq!(first.items, vec!["a", "archived"]);
+    assert_eq!(first.next_cursor.as_deref(), Some("archived"));
     let second = db
         .collaboration_candidate_sessions("t", first.next_cursor.as_deref(), 2)
         .unwrap();
-    assert_eq!(second.items, vec!["c"], "archived sessions never appear");
+    // Archived sessions stay listed so the UI can grey them out with a reason.
+    assert_eq!(second.items, vec!["b", "c"]);
     assert!(second.next_cursor.is_none());
     let unrelated = db
         .collaboration_candidate_sessions("missing", None, 10)
@@ -537,7 +551,7 @@ fn start_rejects_a_request_id_reused_for_a_different_configuration() {
         .collaboration_start("t2", &Fixture::members("a", "b"), None, None, None, "r1")
         .unwrap_err();
     assert!(
-        conflict.to_string().contains("已被用于其他任务"),
+        conflict.to_string().contains("已被用于不同的操作参数"),
         "{conflict}"
     );
     // Same id, different members: mismatch as well.
@@ -545,7 +559,7 @@ fn start_rejects_a_request_id_reused_for_a_different_configuration() {
         .collaboration_start("t", &Fixture::members("a", "c"), None, None, None, "r1")
         .unwrap_err();
     assert!(
-        conflict.to_string().contains("不同的成员或负责人"),
+        conflict.to_string().contains("已被用于不同的操作参数"),
         "{conflict}"
     );
     assert_eq!(
@@ -575,8 +589,9 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
 
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     let first = db
-        .collaboration_join(&room_id, &run_id, "a", "cli")
+        .collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
         .unwrap();
     assert_eq!(first.role.as_deref(), Some("a"));
     assert_eq!(
@@ -584,19 +599,37 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
         "start notice begins the processing range"
     );
 
-    // A second join replaces the connection id in one atomic step.
+    // A fresh lease is reused across a mode switch: same connection id, no
+    // second owner.
     let second = db
-        .collaboration_join(&room_id, &run_id, "a", "mcp")
+        .collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
         .unwrap();
-    assert_ne!(first.connection_id, second.connection_id);
+    assert!(second.reused);
+    assert_eq!(second.connection_id, first.connection_id);
+    assert_eq!(
+        db.collaboration_renew(&first.connection_id).unwrap(),
+        noending_lib::storage::collaboration::RenewOutcome::Renewed
+    );
 
-    // The replaced connection's row is gone; the current one can renew.
+    // A stale lease (heartbeat outside the window) is replaced atomically and
+    // the replaced connection's row is gone.
+    db.write()
+        .execute(
+            "UPDATE collaboration_participations SET last_heartbeat_at=?1",
+            [(chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()],
+        )
+        .unwrap();
+    let takeover = db
+        .collaboration_join(&room_id, &run_id, "a", "mcp", &cutoff)
+        .unwrap();
+    assert!(!takeover.reused);
+    assert_ne!(takeover.connection_id, first.connection_id);
     assert_eq!(
         db.collaboration_renew(&first.connection_id).unwrap(),
         noending_lib::storage::collaboration::RenewOutcome::Gone
     );
     assert_eq!(
-        db.collaboration_renew(&second.connection_id).unwrap(),
+        db.collaboration_renew(&takeover.connection_id).unwrap(),
         noending_lib::storage::collaboration::RenewOutcome::Renewed
     );
 
@@ -613,23 +646,23 @@ fn join_claims_atomically_supersedes_old_connections_and_leaves_idempotently() {
     assert!(participations[0].left_at.is_some());
     assert!(participations[0].phase.is_none());
     assert_eq!(
-        db.collaboration_renew(&second.connection_id).unwrap(),
+        db.collaboration_renew(&takeover.connection_id).unwrap(),
         noending_lib::storage::collaboration::RenewOutcome::Unowned
     );
 
     // A non-member can never join.
     assert!(db
-        .collaboration_join(&room_id, &run_id, "x", "cli")
+        .collaboration_join(&room_id, &run_id, "x", "cli", &cutoff)
         .is_err());
 
     // A deleted participation (cascade) reports Gone instead of renewing.
-    db.collaboration_join(&room_id, &run_id, "a", "cli")
+    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
         .unwrap();
     db.write()
         .execute("DELETE FROM collaboration_participations", [])
         .unwrap();
     let third = db
-        .collaboration_join(&room_id, &run_id, "a", "cli")
+        .collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
         .unwrap();
     db.write()
         .execute("DELETE FROM sessions WHERE id='a'", [])
@@ -668,6 +701,9 @@ fn wait_page_reads_forward_from_the_acknowledged_position() {
     assert_eq!(seqs, vec![1, 2]);
     assert!(page.next_cursor.is_some());
 
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "b", "cli", &cutoff)
+        .unwrap();
     db.collaboration_ack(&room_id, &run_id, "b", 2).unwrap();
     let page = db
         .collaboration_wait_page(&room_id, &run_id, "b", 2)
@@ -675,4 +711,188 @@ fn wait_page_reads_forward_from_the_acknowledged_position() {
     let seqs: Vec<i64> = page.items.iter().map(|m| m.seq).collect();
     assert_eq!(seqs, vec![3, 4]);
     assert!(page.next_cursor.is_none(), "everything delivered");
+}
+
+#[test]
+fn review_same_message_request_cannot_change_body_or_sender() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-start",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    let saved = db
+        .collaboration_send(room, run, Some("a"), "原始正文", "review-message")
+        .unwrap();
+    assert_eq!(saved.body, "原始正文");
+    assert!(db
+        .collaboration_send(room, run, Some("a"), "修改正文", "review-message")
+        .is_err());
+    assert!(db
+        .collaboration_send(room, run, Some("b"), "原始正文", "review-message")
+        .is_err());
+    let replay = db
+        .collaboration_send(room, run, Some("a"), "原始正文", "review-message")
+        .unwrap();
+    assert_eq!(replay.id, saved.id);
+}
+
+#[test]
+fn review_history_cursor_cannot_change_its_run_scope() {
+    let f = Fixture::new();
+    let db = f.db();
+    let first = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            Some("本轮首信"),
+            "review-first",
+        )
+        .unwrap();
+    let page = db
+        .collaboration_messages_page(&first.room.id, Some(&first.run.id), None, 1)
+        .unwrap();
+    assert_eq!(page.items[0].body, "本轮首信");
+    let cursor = page.next_cursor.as_deref().unwrap();
+    let older = db
+        .collaboration_messages_page(&first.room.id, Some(&first.run.id), Some(cursor), 1)
+        .unwrap();
+    assert_eq!(older.items[0].kind, "start");
+    assert!(db
+        .collaboration_messages_page(&first.room.id, None, Some(cursor), 1)
+        .is_err());
+    db.collaboration_stop(&first.room.id, &first.run.id, None, "review-stop")
+        .unwrap();
+    let second = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-second",
+        )
+        .unwrap();
+    assert!(db
+        .collaboration_messages_page(&first.room.id, Some(&second.run.id), Some(cursor), 1)
+        .is_err());
+}
+
+#[test]
+fn review_own_messages_do_not_wake_sender_or_skip_other_messages() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "review-reads",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(room, run, "a", "cli", &cutoff)
+        .unwrap();
+    db.collaboration_join(room, run, "b", "cli", &cutoff)
+        .unwrap();
+    db.collaboration_ack(room, run, "a", 1).unwrap();
+    db.collaboration_ack(room, run, "b", 1).unwrap();
+    db.collaboration_send(room, run, Some("a"), "自己的发言", "review-own")
+        .unwrap();
+    assert_eq!(db.collaboration_unread_of(room, run, "a").unwrap().count, 0);
+    assert_eq!(db.collaboration_unread_of(room, run, "b").unwrap().count, 1);
+    db.collaboration_send(room, run, Some("b"), "对方待查阅的发言", "review-other")
+        .unwrap();
+    db.collaboration_send(
+        room,
+        run,
+        Some("a"),
+        "尚未查阅就再次发言",
+        "review-own-again",
+    )
+    .unwrap();
+    assert_eq!(db.collaboration_unread_of(room, run, "a").unwrap().count, 1);
+    assert_eq!(
+        db.collaboration_read_of(room, "a", run)
+            .unwrap()
+            .unwrap()
+            .through_seq,
+        1
+    );
+}
+
+#[test]
+fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            Some("a"),
+            None,
+            None,
+            "r1",
+        )
+        .unwrap();
+    let room_id = started.room.id.clone();
+    let run_id = started.run.id.clone();
+    db.collaboration_send(&room_id, &run_id, Some("a"), "历史发件人", "m1")
+        .unwrap();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "a", "cli", &cutoff)
+        .unwrap();
+
+    // The real purge entry: archive, then permanently delete through the
+    // lifecycle API (never bare SQL against sessions).
+    db.write()
+        .execute(
+            "UPDATE sessions SET archived_at='2026-01-02T00:00:00Z' WHERE id='a'",
+            [],
+        )
+        .unwrap();
+    noending_lib::lifecycle::permanently_delete_session(&db, "a").unwrap();
+
+    // Config loses the member and the coordinator reference, with a revision
+    // bump; no automatic replacement and no run status change.
+    let room = db.collaboration_room_by_id(&room_id).unwrap().unwrap();
+    let kept: Vec<&str> = room
+        .selected_members
+        .iter()
+        .map(|m| m.session_id.as_str())
+        .collect();
+    assert_eq!(kept, vec!["b"]);
+    assert!(room.coordinator_session_id.is_none());
+    assert_eq!(room.revision, started.room.revision + 1);
+    let run = db.collaboration_current_run(&room_id).unwrap().unwrap();
+    assert_eq!(run.status, "starting", "no automatic stop or restart");
+
+    // Participation/reads/wake rows cascaded; shared history keeps the sender.
+    assert!(db
+        .collaboration_participations_for_run(&run_id)
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .collaboration_read_of(&room_id, "a", &run_id)
+        .unwrap()
+        .is_none());
+    let page = db
+        .collaboration_messages_page(&room_id, None, None, 50)
+        .unwrap();
+    let mail = page.items.iter().find(|m| m.body == "历史发件人").unwrap();
+    assert_eq!(mail.sender_session_id.as_deref(), Some("a"));
 }

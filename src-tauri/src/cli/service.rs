@@ -397,15 +397,38 @@ impl Service {
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
-                if p_holder == "cli" {
-                    spawn_room_listener(&self.home.root, &room, &run, &connection);
+                // Only a NEW owner starts the resident resource; a reuser of a
+                // fresh lease never spawns a second one. A failed spawn rolls
+                // the participation back so no fake "connected" remains.
+                let spawned = if joined["reused"] == json!(true) {
+                    true
+                } else if p_holder == "cli" {
+                    spawn_room_listener(&self.home.root, &room, &run, &connection)
                 } else {
                     crate::collaboration::spawn_mcp_heartbeat(
                         self.db.clone(),
                         room.clone(),
                         run.clone(),
                         connection,
+                    )
+                };
+                if !spawned {
+                    let _ = crate::collaboration::leave(
+                        &self.db,
+                        &self.home,
+                        crate::collaboration::RoomLeave {
+                            room: room.clone(),
+                            run: run.clone(),
+                            from_session: joined["session"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        },
                     );
+                    return Err(CliError::new(
+                        "listener_spawn_failed",
+                        "驻留监听启动失败，请重试加入",
+                    ));
                 }
                 Ok(joined)
             }
@@ -1029,12 +1052,12 @@ impl Service {
 /// re-claims its connection id at startup, so a lost race (another join won)
 /// exits on its first beat without touching the winner's lease. No shell is
 /// involved; on Windows the child hides its own console window.
-fn spawn_room_listener(home: &std::path::Path, room: &str, run: &str, connection: &str) {
+fn spawn_room_listener(home: &std::path::Path, room: &str, run: &str, connection: &str) -> bool {
     if connection.is_empty() {
-        return;
+        return false;
     }
     let Ok(exe) = crate::cli::executable() else {
-        return;
+        return false;
     };
     let mut child = std::process::Command::new(exe);
     child
@@ -1052,7 +1075,7 @@ fn spawn_room_listener(home: &std::path::Path, room: &str, run: &str, connection
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     apply_detached_flags(&mut child);
-    let _ = child.spawn();
+    child.spawn().is_ok()
 }
 
 fn apply_detached_flags(command: &mut std::process::Command) {

@@ -128,7 +128,50 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         "DELETE FROM session_messages WHERE session_id = ?1",
         params![session_id],
     )?;
+    // Collaboration config must not keep a ghost selection: drop the purged
+    // session from every member list, clear a coordinator reference without
+    // choosing a replacement, and bump the revision. Participation, read and
+    // wake rows cascade with the session; shared messages keep the real
+    // sender id, and runs keep their status (no automatic stop or restart).
+    let rooms: Vec<String> = {
+        let mut st = tx.prepare("SELECT id FROM collaboration_rooms WHERE instr(selected_members,?1)>0 OR coordinator_session_id=?1")?;
+        let rows = st
+            .query_map(params![session_id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    for room_id in rooms {
+        rewrite_room_without_member(tx, &room_id, session_id)?;
+    }
     // The session row itself, last, once nothing references it.
     tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+    Ok(())
+}
+
+/// Rewrite one room's selection JSON without the purged member. Implemented
+/// in Rust (not SQL JSON surgery) so the shape stays exact.
+fn rewrite_room_without_member(tx: &Transaction, room_id: &str, session_id: &str) -> Result<()> {
+    let row = tx
+        .query_row(
+            "SELECT selected_members,coordinator_session_id FROM collaboration_rooms WHERE id=?1",
+            [room_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    let Some((selected, coordinator)) = row else {
+        return Ok(());
+    };
+    let members: Vec<crate::storage::collaboration::SelectedMember> =
+        serde_json::from_str(&selected).unwrap_or_default();
+    let kept: Vec<crate::storage::collaboration::SelectedMember> = members
+        .into_iter()
+        .filter(|m| m.session_id != session_id)
+        .collect();
+    let selected = serde_json::to_string(&kept).unwrap_or_else(|_| "[]".into());
+    let coordinator = coordinator.filter(|id| id != session_id);
+    tx.execute(
+        "UPDATE collaboration_rooms SET selected_members=?2,coordinator_session_id=?3,revision=revision+1,updated_at=?4 WHERE id=?1",
+        params![room_id, selected, coordinator, crate::storage::now()],
+    )?;
     Ok(())
 }

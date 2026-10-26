@@ -96,6 +96,7 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 "wake_status": wake_status,
                 "connection_state": connection_state(participation, now),
                 "phase": participation.and_then(|p| p.phase.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
+                "phase_since": participation.and_then(|p| p.phase_since.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
                 "last_heartbeat_at": participation.map(|p| json!(p.last_heartbeat_at)).unwrap_or(Value::Null),
                 "last_read_at": last_read_at,
                 "last_read_seq": last_read_seq,
@@ -142,10 +143,12 @@ pub(crate) fn candidates(
         .filter_map(|id| db.get_session(id).ok().flatten().map(|s| (id.clone(), s)))
         .map(|(id, session)| {
             let adapter = crate::adapters::adapter_for(session.agent);
-            let desktop = matches!(
-                adapter.desktop_resume_route(&session),
-                crate::adapters::ResumeRoute::Desktop(_)
-            );
+            let archived = session.is_archived();
+            let desktop = !archived
+                && matches!(
+                    adapter.desktop_resume_route(&session),
+                    crate::adapters::ResumeRoute::Desktop(_)
+                );
             let terminal = states.get(&id).cloned().unwrap_or(
                 crate::launcher::availability::TerminalResumeState {
                     available: false,
@@ -160,9 +163,13 @@ pub(crate) fn candidates(
                 modes.push(json!(store::WAKE_DESKTOP));
             }
             let reason = if modes.is_empty() {
-                terminal
-                    .reason
-                    .or_else(|| Some("该会话没有可用的唤醒方式".to_string()))
+                if archived {
+                    Some("已归档的会话不能继续".to_string())
+                } else {
+                    terminal
+                        .reason
+                        .or_else(|| Some("该会话没有可用的唤醒方式".to_string()))
+                }
             } else {
                 None
             };
@@ -187,38 +194,44 @@ pub(crate) struct StartParams {
     pub request_id: String,
 }
 pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<Value> {
-    // Revalidate the requested wake method against real capability; the user
-    // picked from candidates, but the backend never trusts that filter.
-    let states = crate::launcher::availability::terminal_resume_states(
-        db,
-        &params
-            .members
-            .iter()
-            .map(|m| m.session_id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    for member in &params.members {
-        let session = db
-            .get_session(&member.session_id)?
-            .ok_or_else(|| CliError::new("not_found", "成员会话不存在"))?;
-        let capable = match member.wake_method.as_str() {
-            store::WAKE_TERMINAL => states.get(&member.session_id).is_some_and(|s| s.available),
-            store::WAKE_DESKTOP => {
-                matches!(
-                    crate::adapters::adapter_for(session.agent).desktop_resume_route(&session),
-                    crate::adapters::ResumeRoute::Desktop(_)
-                )
+    // A replay must be recognised BEFORE capability re-probing: the original
+    // start succeeded once, so the same request returns that result even if a
+    // member's CLI has since disappeared.
+    let replay = db.collaboration_request_exists(&params.request_id)?;
+    if !replay {
+        // Revalidate the requested wake method against real capability; the
+        // user picked from candidates, but the backend never trusts that.
+        let states = crate::launcher::availability::terminal_resume_states(
+            db,
+            &params
+                .members
+                .iter()
+                .map(|m| m.session_id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        for member in &params.members {
+            let session = db
+                .get_session(&member.session_id)?
+                .ok_or_else(|| CliError::new("not_found", "成员会话不存在"))?;
+            let capable = match member.wake_method.as_str() {
+                store::WAKE_TERMINAL => states.get(&member.session_id).is_some_and(|s| s.available),
+                store::WAKE_DESKTOP => {
+                    matches!(
+                        crate::adapters::adapter_for(session.agent).desktop_resume_route(&session),
+                        crate::adapters::ResumeRoute::Desktop(_)
+                    )
+                }
+                _ => false,
+            };
+            if !capable {
+                return Err(CliError::new(
+                    "invalid_arguments",
+                    format!(
+                        "成员 {} 不支持所选唤醒方式 {}",
+                        member.session_id, member.wake_method
+                    ),
+                ));
             }
-            _ => false,
-        };
-        if !capable {
-            return Err(CliError::new(
-                "invalid_arguments",
-                format!(
-                    "成员 {} 不支持所选唤醒方式 {}",
-                    member.session_id, member.wake_method
-                ),
-            ));
         }
     }
     db.collaboration_start(
@@ -387,9 +400,14 @@ pub(crate) struct RoomJoin {
 pub(crate) fn join(db: &Db, home: &NoEndingHome, p: RoomJoin) -> CliResult<Value> {
     let session = crate::mailbox::actor(db, home, Some(&p.from_session))?;
     guard_current_run(db, &p.room, &p.run)?;
-    let outcome = db.collaboration_join(&p.room, &p.run, &session, &p.holder)?;
+    let cutoff =
+        (chrono::Utc::now() - chrono::Duration::seconds(CONNECTED_WINDOW_SECS)).to_rfc3339();
+    let outcome = db.collaboration_join(&p.room, &p.run, &session, &p.holder, &cutoff)?;
     Ok(json!({
         "connection_id": outcome.connection_id,
+        "session": session,
+        // A reusing joiner must not spawn a second resident resource.
+        "reused": outcome.reused,
         "role": outcome.role.map(|r| json!(r)).unwrap_or(Value::Null),
         "through_seq": outcome.through_seq,
         "beat_seconds": BEAT_SECS,
@@ -572,9 +590,9 @@ pub(crate) fn spawn_mcp_heartbeat(
     room_id: String,
     run_id: String,
     connection_id: String,
-) {
+) -> bool {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        return;
+        return false;
     };
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     crate::platform::cancellation::track_flag(flag.clone());
@@ -594,6 +612,7 @@ pub(crate) fn spawn_mcp_heartbeat(
             }
         }
     });
+    true
 }
 
 /// The CLI resident listener: renews one connection id every beat and exits

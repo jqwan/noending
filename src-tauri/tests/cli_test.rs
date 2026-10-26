@@ -2037,9 +2037,12 @@ fn collaboration_participation_survives_across_real_cli_processes() {
         ],
     );
     assert!(ok, "{rejoined}");
-    assert_ne!(
+    // A fresh lease is reused across processes: same connection id, and the
+    // reusing joiner reports it so no second resident listener spawns.
+    assert_eq!(rejoined["data"]["reused"], true);
+    assert_eq!(
         joined["data"]["connection_id"], rejoined["data"]["connection_id"],
-        "re-joining claims a fresh connection id"
+        "re-joining reuses the live lease"
     );
 
     // The lease is live right after joining (heartbeat written at claim).
@@ -2168,7 +2171,14 @@ fn collaboration_participation_survives_across_real_cli_processes() {
 
     // A stopped run ends waits gracefully instead of erroring. The
     // coordinator joins first so its participation exists.
-    db.collaboration_join(&room, &run, "coord", "cli").unwrap();
+    db.collaboration_join(
+        &room,
+        &run,
+        "coord",
+        "cli",
+        &(chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+    )
+    .unwrap();
     db.collaboration_stop(&room, &run, None, "stop-1").unwrap();
     let (ok, waited) = f.run(
         exe,
