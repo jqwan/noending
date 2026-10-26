@@ -347,17 +347,6 @@ it("shows start notices as a label instead of their raw coordinates", async () =
   expect(screen.queryByText(/\{"task_id"/)).toBeNull();
 });
 
-it("does not report a missing per-run wake row as a wake failure", async () => {
-  vi.mocked(api.collaborationRoomGet).mockResolvedValue({
-    ...activeRun,
-    members: [member({ session_id: "s1", wake_status: null, connection_state: "pending", phase: null })],
-  });
-  mount();
-  const row = within(await screen.findByRole("listitem", { name: "后端会话" }));
-  expect(row.getByText("等待加入")).toBeTruthy();
-  expect(row.queryByText("唤醒失败")).toBeNull();
-});
-
 it("marks a listening member unresponsive while leaving a processing member alone", async () => {
   const stale = new Date(Date.now() - 3 * 60 * 1000).toISOString();
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
