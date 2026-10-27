@@ -41,10 +41,13 @@ const message = (seq: number, body: string, sender: string | null = "s1"): Colla
   body, kind: "text", created_at: `2026-10-27T03:${String(seq).padStart(2, "0")}:00Z`,
 });
 
+/** 心跳窗口只有 30 秒，测试数据必须相对当前时间，写死的时间戳会随日期腐坏。 */
+const ago = (seconds: number) => new Date(Date.now() - seconds * 1000).toISOString();
+
 const member = (patch: Partial<CollaborationMemberState> & { session_id: string }): CollaborationMemberState => ({
   wake_method: "terminal", wake_status: "opened", connection_state: "connected", phase: "listening",
   phase_since: null,
-  last_heartbeat_at: "2026-10-27T03:59:00Z", last_read_at: "2026-10-27T03:58:00Z", last_read_seq: 1,
+  last_heartbeat_at: ago(5), last_read_at: ago(60), last_read_seq: 1,
   awaiting_since: null, unread_count: 0, error: null, ...patch,
 });
 
