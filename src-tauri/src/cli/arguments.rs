@@ -97,7 +97,9 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                 .get(i + 1)
                 .filter(|s| matches!(key, "message" | "text") || !s.starts_with("--"))
                 .ok_or_else(|| invalid(format!("--{key} 缺少值")))?;
-            if options.0.contains_key(key) && !matches!(key, "path" | "path-id" | "task") {
+            if options.0.contains_key(key)
+                && !matches!(key, "path" | "path-id" | "task" | "project")
+            {
                 return Err(invalid(format!("重复 --{key}")));
             }
             options.0.entry(key.into()).or_default().push(value.clone());
@@ -135,6 +137,13 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         && !(resource == "session" && action == "new")
     {
         return Err(invalid("此命令只接受一个 --task"));
+    }
+    if options.0.get("project").is_some_and(|v| v.len() > 1)
+        && !(resource == "task"
+            && (action == "create"
+                || (action == "project" && words.get(2).is_some_and(|s| s == "set"))))
+    {
+        return Err(invalid("此命令只接受一个 --project"));
     }
     if options.0.get("path-id").is_some_and(|p| p.len() > 1)
         && !(resource == "task" && action == "path" && words.get(2).is_some_and(|s| s == "reorder"))

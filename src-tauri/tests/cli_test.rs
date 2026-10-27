@@ -157,6 +157,89 @@ fn console_and_desktop_entries_share_json_contract_without_starting_another_app(
     assert_eq!(persisted.description, "");
 }
 #[test]
+fn task_project_options_preserve_multiple_projects_and_reject_ambiguous_filters() {
+    let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let mut projects = Vec::new();
+    for name in ["first", "second"] {
+        let path = f.root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let (ok, registered) = f.run(exe, &["path", "register", "--path", path.to_str().unwrap()]);
+        assert!(ok, "{registered}");
+        projects.push(
+            registered["data"]["project"]["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let (ok, created) = f.run(
+        exe,
+        &[
+            "task",
+            "create",
+            "--title",
+            "Cross-project collaboration",
+            "--project",
+            &projects[0],
+            "--project",
+            &projects[1],
+        ],
+    );
+    assert!(ok, "{created}");
+    let task = created["data"]["task"]["id"].as_str().unwrap();
+    let assert_projects = |expected: &[String]| {
+        let (ok, view) = f.run(exe, &["task", "project", "list", task]);
+        assert!(ok, "{view}");
+        let mut actual: Vec<_> = view["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect();
+        actual.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(actual, expected);
+    };
+    assert_projects(&projects);
+    let (ok, removed) = f.run(
+        exe,
+        &["task", "project", "set", task, "--project", &projects[0]],
+    );
+    assert!(ok, "{removed}");
+    assert_projects(&projects[..1]);
+    let (ok, restored) = f.run(
+        exe,
+        &[
+            "task",
+            "project",
+            "set",
+            task,
+            "--project",
+            &projects[0],
+            "--project",
+            &projects[1],
+        ],
+    );
+    assert!(ok, "{restored}");
+    assert_projects(&projects);
+    let (ok, ambiguous) = f.run(
+        exe,
+        &[
+            "task",
+            "list",
+            "--project",
+            &projects[0],
+            "--project",
+            &projects[1],
+        ],
+    );
+    assert!(!ok, "{ambiguous}");
+    assert_eq!(ambiguous["error"]["code"], "invalid_arguments");
+}
+
+#[test]
 fn installed_ne_and_noending_commands_work_and_do_not_overwrite_existing_files() {
     let f = Fixture::new();
     let app_directory = f.root.join("app with spaces");
