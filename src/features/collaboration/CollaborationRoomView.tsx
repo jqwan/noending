@@ -250,6 +250,29 @@ export default function CollaborationRoomView({
   return (
     <div className="detail-layout task-detail-layout">
       <div className="detail-main task-detail-main">
+
+        <section className="card detail-section">
+          <h2 className="detail-section-title">
+            <Icon name="chat" />
+            <span>协作消息{messages.length ? `（${messages.length}）` : ""}</span>
+          </h2>
+          <RoomMessages
+            messages={messages}
+            earlierCursor={earlierCursor}
+            sessions={sessions}
+            sending={busy}
+            draft={draft}
+            onDraftChange={setDraft}
+            onSend={() => void send()}
+            onLoadEarlier={() => void loadEarlier()}
+            sendLabel={running ? "发送" : "发送并开启"}
+            placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
+            disabled={archived}
+          />
+        </section>
+      </div>
+
+      <aside className="detail-aside">
         <section className="card detail-section collab-room">
           <div className="row between" style={{ alignItems: "center" }}>
             <h2 className="detail-section-title">
@@ -330,28 +353,6 @@ export default function CollaborationRoomView({
           )}
         </section>
 
-        <section className="card detail-section">
-          <h2 className="detail-section-title">
-            <Icon name="chat" />
-            <span>协作消息{messages.length ? `（${messages.length}）` : ""}</span>
-          </h2>
-          <RoomMessages
-            messages={messages}
-            earlierCursor={earlierCursor}
-            sessions={sessions}
-            sending={busy}
-            draft={draft}
-            onDraftChange={setDraft}
-            onSend={() => void send()}
-            onLoadEarlier={() => void loadEarlier()}
-            sendLabel={running ? "发送" : "发送并开启"}
-            placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
-            disabled={archived}
-          />
-        </section>
-      </div>
-
-      <aside className="detail-aside">
         <section className="card detail-section">
           <h2 className="detail-section-title">
             <Icon name="info" />
