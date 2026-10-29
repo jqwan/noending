@@ -76,7 +76,7 @@ export default function CollaborationRoomView({
   sessions: SessionListItem[];
   archived?: boolean;
 }) {
-  const { room, messages, earlierCursor, loading, error, refreshRoom, loadLatest, loadEarlier, setRoom } =
+  const { room, messages, loading, error, refreshRoom, loadAll, loadLatest, setRoom } =
     useCollaborationRoom(taskId);
   const [edited, setEdited] = useState<{ revision: number; value: Selection } | null>(null);
   const [draft, setDraft] = useState("");
@@ -132,7 +132,7 @@ export default function CollaborationRoomView({
       setEdited(null);
       // 只有还停在首条消息时才清空；这期间用户新写的内容要留着。
       setDraft(current => (current === (plan.initialMessage ?? "") ? "" : current));
-      if (next.room?.id) await loadLatest(next.room.id, true);
+      if (next.room?.id) await loadAll(next.room.id);
     } catch (e) {
       setUnconfirmed(plan);
       setActionError(`开启未确认：${String(e)}。重试会沿用同一次请求，不会重复写入首条消息。`);
@@ -258,13 +258,11 @@ export default function CollaborationRoomView({
           </h2>
           <RoomMessages
             messages={messages}
-            earlierCursor={earlierCursor}
             sessions={sessions}
             sending={busy}
             draft={draft}
             onDraftChange={setDraft}
             onSend={() => void send()}
-            onLoadEarlier={() => void loadEarlier()}
             sendLabel={running ? "发送" : "发送并开启"}
             placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
             disabled={archived}

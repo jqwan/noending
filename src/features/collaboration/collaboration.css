@@ -106,26 +106,10 @@
 .collab-run-active { background: var(--accent-wash); color: var(--accent); }
 .collab-run-stopped { background: var(--bg-hover); color: var(--text-muted); }
 
-.collab-message {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px;
-  border-radius: var(--radius-md);
-}
-.collab-message.mine { background: var(--accent-wash); }
-.collab-message-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.collab-message-sender { color: var(--text-secondary); font-weight: 500; }
-.collab-message-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text-primary);
-}
+/* 消息列表与会话详情页「最近消息」一致：气泡之间 12px，条目本身不加内边距与底色。 */
+.collab-message-list { gap: 12px; }
+.collab-message { list-style: none; }
+.collab-notice { margin: 0; text-align: center; }
 
 .collab-compose {
   display: flex;

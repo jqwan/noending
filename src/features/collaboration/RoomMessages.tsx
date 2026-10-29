@@ -1,5 +1,7 @@
 import type { CollaborationMessage, SessionListItem } from "../../types";
+import SessionMessage from "../sessions/SessionMessage";
 import { formatDateTime } from "../sessions/SessionTable";
+import "../sessions/sessions.css";
 
 const KIND_LABEL: Record<CollaborationMessage["kind"], string | null> = {
   text: null,
@@ -15,59 +17,60 @@ function senderName(sender: string | null, sessions: SessionListItem[]): string 
 }
 
 /**
- * 协作消息。房间内单份正文，按 seq 升序；只有追加，更正用新消息。
- * 输入框在未开启时承载首条消息——开启与写消息由后端在同一事务里完成。
+ * 协作消息：与会话详情页的「最近消息」同形——自己靠右、成员靠左，
+ * Markdown 走预览、长文点开弹窗。整段历史一次展示，不另设分页入口。
+ *
+ * 开始／停止通知的正文是坐标 JSON，不渲染成气泡，只留一行居中提示。
  */
 export default function RoomMessages({
   messages,
-  earlierCursor,
   sessions,
   sending,
   draft,
   onDraftChange,
   onSend,
-  onLoadEarlier,
   sendLabel,
   placeholder,
   disabled = false,
 }: {
   messages: CollaborationMessage[];
-  earlierCursor: string | null;
   sessions: SessionListItem[];
   sending: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
   onSend: () => void;
-  onLoadEarlier: () => void;
   sendLabel: string;
   placeholder: string;
   disabled?: boolean;
 }) {
   return (
     <div className="collab-messages">
-      {earlierCursor && (
-        <button type="button" className="btn small ghost" onClick={onLoadEarlier}>加载更早的消息</button>
-      )}
       {messages.length === 0 ? (
         <p className="small muted" style={{ margin: 0 }}>还没有消息。</p>
       ) : (
         <ol className="collab-message-list" aria-label="协作消息">
-          {messages.map(message => {
-            const kind = KIND_LABEL[message.kind];
-            return (
-              <li key={message.id} className={`collab-message${message.sender_session_id ? "" : " mine"}`}
-                title={message.kind === "text" ? undefined : message.body}>
-                <div className="collab-message-head small muted">
-                  <span className="collab-message-sender">{senderName(message.sender_session_id, sessions)}</span>
-                  {kind && <span className="badge muted small">{kind}</span>}
-                  <span title={message.created_at}>{formatDateTime(message.created_at)}</span>
-                  <span className="mono">#{message.seq}</span>
-                </div>
-                {/* 开始/停止通知的正文是定位信息（JSON），不是给人读的话；只留徽章，原文进 title。 */}
-                {message.kind === "text" && <div className="collab-message-body">{message.body}</div>}
-              </li>
-            );
-          })}
+          {messages.map(message => (
+            <li key={message.id} className="collab-message">
+              {message.kind === "text" ? (
+                <SessionMessage
+                  ordinal={message.seq}
+                  msg={{
+                    sequence: message.seq,
+                    role: message.sender_session_id ? "assistant" : "user",
+                    content: message.body,
+                    ts: message.created_at,
+                    who: senderName(message.sender_session_id, sessions),
+                    turnFinal: true,
+                  }}
+                />
+              ) : (
+                <p className="small muted collab-notice" title={message.body}>
+                  {KIND_LABEL[message.kind]} · {senderName(message.sender_session_id, sessions)}
+                  {" · "}{formatDateTime(message.created_at)}
+                </p>
+              )}
+            </li>
+          ))}
         </ol>
       )}
       <form className="collab-compose" onSubmit={e => { e.preventDefault(); onSend(); }}>

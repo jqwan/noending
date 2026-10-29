@@ -247,32 +247,27 @@ it("reuses the same request id when a failed send is retried unchanged and start
   expect(vi.mocked(api.collaborationRoomSend).mock.calls[2][3]).not.toBe(calls[0][3]);
 });
 
-it("drops the stale earlier cursor when a newer page leaves a hole, then fills the gap without loss or duplication", async () => {
-  const first = [message(1, "一"), message(2, "二")];
-  const later = Array.from({ length: 30 }, (_, i) => message(40 + i, `m${40 + i}`));
-  const gap = Array.from({ length: 37 }, (_, i) => message(3 + i, `m${3 + i}`));
+it("loads the whole room history into the card and offers no paging entry", async () => {
+  const newest = Array.from({ length: 40 }, (_, i) => message(70 + i, `m${70 + i}`));
+  const older = Array.from({ length: 40 }, (_, i) => message(30 + i, `m${30 + i}`));
+  const oldest = Array.from({ length: 29 }, (_, i) => message(1 + i, `m${1 + i}`));
   vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
   vi.mocked(api.collaborationRoomMessages)
-    .mockResolvedValueOnce({ items: first, next_cursor: "cursor-before-1", latest_seq: 2 })
-    .mockResolvedValueOnce({ items: later, next_cursor: "cursor-39", latest_seq: 69 })
-    .mockResolvedValueOnce({ items: gap, next_cursor: null, latest_seq: 69 });
+    .mockResolvedValueOnce({ items: newest, next_cursor: "cursor-69", latest_seq: 109 })
+    .mockResolvedValueOnce({ items: older, next_cursor: "cursor-29", latest_seq: 109 })
+    .mockResolvedValueOnce({ items: oldest, next_cursor: null, latest_seq: 109 });
   mount();
-  await screen.findByText("一");
 
-  emit({ task_id: "task-1", room_id: "room-1", run_id: "run-1", category: "message" });
-  await screen.findByText("m40");
-  // 中间空档：旧页被丢弃，旧的向前游标也必须一起作废。
-  expect(screen.queryByText("一")).toBeNull();
-
-  fireEvent.click(screen.getByRole("button", { name: "加载更早的消息" }));
-  await screen.findByText("m3");
-  // 请求用的是新页给的游标，否则 3..39 会被永久跳过。
-  expect(vi.mocked(api.collaborationRoomMessages).mock.calls[2][2]).toBe("cursor-39");
+  await screen.findByText("m109");
+  // 最早一条也在同一个卡里：按游标一路翻到底，不需要用户点。
+  expect(await screen.findByText("m1")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "加载更早的消息" })).toBeNull();
 
   const list = screen.getByRole("list", { name: "协作消息" });
-  expect(within(list).getAllByRole("listitem")).toHaveLength(67);
-  expect(within(list).getAllByText("#3")).toHaveLength(1);
-  expect(within(list).getAllByText("#69")).toHaveLength(1);
+  expect(within(list).getAllByRole("listitem")).toHaveLength(109);
+  // 无重叠：跨页出现过的消息只渲染一次。
+  expect(within(list).getAllByText("m70")).toHaveLength(1);
+  expect(vi.mocked(api.collaborationRoomMessages).mock.calls[1][2]).toBe("cursor-69");
 });
 
 it("replays an unconfirmed start instead of sending the first message a second time", async () => {
@@ -347,7 +342,7 @@ it("shows start notices as a label instead of their raw coordinates", async () =
   });
   mount();
   await screen.findByText("开始吧");
-  expect(screen.getByText("开始协作")).toBeTruthy();
+  expect(screen.getByText(/开始协作/)).toBeTruthy();
   expect(screen.queryByText(/\{"task_id"/)).toBeNull();
 });
 
