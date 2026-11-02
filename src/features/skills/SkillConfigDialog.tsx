@@ -1,3 +1,5 @@
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
@@ -119,10 +121,10 @@ export default function SkillConfigDialog({ resource, locations, onClose, onDone
         </div>
         {!projects.length && <p className="small muted">还没有项目；仍可选择全选以启用用户级。</p>}
       </>}
-    {error && <div role="alert" className="skill-error">{error}</div>}
-    <div className="row skill-dialog-actions">
+    {error && <Notice role="alert" >{error}</Notice>}
+    <DialogActions>
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
       <button className="btn primary" disabled={busy || !changed} onClick={() => void submit()}>{busy ? "保存中…" : "保存"}</button>
-    </div>
+    </DialogActions>
   </Modal>;
 }

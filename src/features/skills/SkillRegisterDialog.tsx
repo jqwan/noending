@@ -1,3 +1,5 @@
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { displayPath } from "../../pathDisplay";
@@ -59,10 +61,10 @@ export default function SkillRegisterDialog({ id, name, onClose, onDone }: {
       </p>
       {!migrateSource && physical && <p className="small skill-safe-note">源目录位于 Agent 生效路径，对应作用域会保持启用，不能直接停用该物理入口。</p>}
     </div>
-    {error && <div role="alert" className="skill-error">{error}</div>}
-    <div className="row skill-dialog-actions">
+    {error && <Notice role="alert" >{error}</Notice>}
+    <DialogActions>
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
       <button className="btn primary" disabled={busy || loading || !preview} onClick={() => void submit()}>{busy ? "托管中…" : "托管"}</button>
-    </div>
+    </DialogActions>
   </Modal>;
 }

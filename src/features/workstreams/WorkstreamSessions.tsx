@@ -1,3 +1,4 @@
+import { DetailSection } from "../../components/DetailSection";
 import Icon from "../../components/Icon";
 import SessionMiniList from "../sessions/SessionMiniList";
 import type { SessionListItem } from "../../types";
@@ -10,28 +11,20 @@ export default function WorkstreamSessions({ sessions, navigate, onNewSession, a
   onNewSession?: () => void;
   allowActions?: boolean;
 }) {
-  const sorted = [...sessions].sort((a, b) =>
-    (b.last_activity_at ?? b.started_at ?? "").localeCompare(
-      a.last_activity_at ?? a.started_at ?? "",
-    ),
-  );
 
   return (
-    <section className="card detail-section">
-      <div className="row between" style={{ alignItems: "center" }}>
-        <h2 className="detail-section-title">
+    <DetailSection sectionId="sessions" label="关联会话" title={<>
           <Icon name="chat" />
           <span>关联会话（{sessions.length}）</span>
-        </h2>
-        {allowActions && onNewSession && (
+        </>} actions={<>{allowActions && onNewSession && (
           <button className="btn ghost icon-button small" title="新建会话" aria-label="新建会话"
             onClick={onNewSession}>
             <Icon name="plus" />
           </button>
-        )}
-      </div>
+        )}</>}>
 
-      <SessionMiniList sessions={sorted} emptyText="还没有会话跟踪这项任务。" navigate={navigate} />
-    </section>
+
+      <SessionMiniList sessions={sessions} emptyText="还没有会话跟踪这项任务。" navigate={navigate} />
+    </DetailSection>
   );
 }

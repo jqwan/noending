@@ -1,3 +1,5 @@
+import EmptyState from "../../components/EmptyState";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
@@ -133,10 +135,10 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
         </div>
       </div>
     </div>
-    {error && <div role="alert" className="skill-error">{error}</div>}
+    {error && <Notice role="alert" >{error}</Notice>}
     {inventory.warnings.length > 0 && <details className="skill-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{displayScanWarning(warning)}</p>)}</details>}
     <section className={viewMode === "cards" ? "ws-grid board-grid skill-cards" : "skill-list"} aria-label="技能">
-      {!loading && !visibleRows.length && <div className="empty">没有匹配的技能。</div>}
+      {!loading && !visibleRows.length && <EmptyState title="没有匹配的技能。" />}
       {visibleRows.map(row => {
         const locations = resourceLocations(inventory, row);
         const userEntries = locations.filter(l => l.scope === "user");

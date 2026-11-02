@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { Modal, submitsOnEnter } from "./common";
+import CustomSelect from "./CustomSelect";
 afterEach(cleanup);
 
 it("takes Enter as submit only when no IME is mid-composition", () => {
@@ -39,4 +40,21 @@ it("closes from the shared header button", () => {
   render(<Modal title="编辑" onClose={close}>内容</Modal>);
   fireEvent.click(screen.getByRole("button", { name: "关闭弹窗" }));
   expect(close).toHaveBeenCalledOnce();
+});
+
+it("keeps a selector popup inside the dialog keyboard flow without closing its parent", () => {
+  const close = vi.fn();
+  render(<Modal title="配置" onClose={close}>
+    <CustomSelect ariaLabel="选择" value="one" onChange={() => {}} options={[{ value: "one", label: "一" }, { value: "two", label: "二" }]} />
+  </Modal>);
+  const selector = screen.getByRole("button", { name: "选择：一" });
+  fireEvent.click(selector);
+  fireEvent.keyDown(screen.getByRole("option", { name: "一" }), { key: "Escape" });
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByRole("dialog", { name: "配置" })).toBeTruthy();
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(selector);
+  fireEvent.keyDown(screen.getByRole("option", { name: "一" }), { key: "Tab" });
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "关闭弹窗" }));
 });

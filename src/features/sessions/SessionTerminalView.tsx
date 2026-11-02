@@ -1,3 +1,4 @@
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
 import { invalidateTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
@@ -10,7 +11,6 @@ import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionTaskTracking from "./SessionTaskTracking";
 import TerminalMailbox from "./TerminalMailbox";
 import { useMailbox, isTerminalReply } from "./useMailbox";
-import { useViewState } from "../../hooks/useViewState";
 import { DesktopContinueButton } from "./SessionHeaderActions";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { copyToClipboard } from "../../components/common";
@@ -95,7 +95,6 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [closing, setClosing] = useState(false);
-  const [statusOpen, setStatusOpen] = useViewState(`terminal.${terminalId}.status.open`, true);
   const { notification, error: mailboxError, apply: applyNotification, refresh: refreshMailbox } = useMailbox(terminalId);
   const closingRef = useRef(false);
   const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(null);
@@ -360,7 +359,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const meta = sessionMeta?.id === boundSessionId ? sessionMeta : null;
 
   return (
-    <div className="main fill">
+    <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动通知开启，终端只读" : undefined}><div className="main fill detail-page">
       <PageHeader
         title={
           headerAgent ? (
@@ -379,9 +378,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
               terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
-            <button className={`btn ghost icon-button${statusOpen ? " on" : ""}`} aria-label={statusOpen ? "收起状态栏" : "展开状态栏"}
-              title={`${statusOpen ? "收起状态栏" : "展开状态栏"}${notification?.enabled ? " · 自动通知开启，终端只读" : ""}`} aria-expanded={statusOpen} aria-controls={`terminal-status-${terminalId}`}
-              onClick={() => setStatusOpen(value => !value)}><Icon name="panelRight" /></button>
+
             <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
               title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || terminalBusy || state.kind === "loading"}
               onClick={() => void closeTerminal()}><Icon name="close" /></button>
@@ -412,17 +409,14 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
               {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}。
             </div>
           )}
-          <div className="terminal-body">
-            <div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} />
-            <aside className="terminal-status-panel" id={`terminal-status-${terminalId}`} aria-label="终端状态栏" hidden={!statusOpen}>
+          <DetailLayout mainClassName="detail-main-terminal" label="终端详情栏" panel={<>
               <SessionTaskTracking key={boundSessionId} sessionId={boundSessionId} navigate={navigate} />
               <TerminalMailbox key={notification?.session_id ?? terminalId} terminalId={terminalId} notification={notification} error={mailboxError}
                 apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} />
-            </aside>
-          </div>
+            </>}><div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} /></DetailLayout>
         </>
       )}
 
-    </div>
+    </div></DetailPanelProvider>
   );
 }

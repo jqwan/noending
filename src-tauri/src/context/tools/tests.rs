@@ -250,7 +250,7 @@ fn batch_partial_only_accepts_failed_ids_within_pending_scope() {
     let a = f.add_session(1, 10);
     let b = f.add_session(1, 10);
     let root = std::env::temp_dir().join(format!("noending-tools-{}", crate::storage::new_id()));
-    let files = ExtractionFiles::create(&root, "task-t", &[a.clone(), b.clone()]).unwrap();
+    let files = ExtractionFiles::create(&root, "project-t", &[a.clone(), b.clone()]).unwrap();
     let sessions: Vec<_> = [&a, &b]
         .into_iter()
         .map(|id| {
@@ -260,9 +260,9 @@ fn batch_partial_only_accepts_failed_ids_within_pending_scope() {
     for s in &sessions {
         files.add_session(s, true, false);
     }
-    files.add_batch("task", "t", json!({"type":"task"}), 0, false, sessions);
+    files.add_batch("project", "t", json!({"type":"task"}), 0, false, sessions);
     std::fs::write(
-        files.batch_result("task", "t"),
+        files.batch_result("project", "t"),
         r#"{"summary":{"items":[{"title":"任务结果","description":"","details":[]}]}}"#,
     )
     .unwrap();

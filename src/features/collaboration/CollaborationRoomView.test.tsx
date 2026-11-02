@@ -1,8 +1,12 @@
+import { DetailPanelProvider } from "../../components/DetailLayout";
+import PageHeader from "../../layout/PageHeader";
+import { viewState } from "../../hooks/useViewState";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import CollaborationRoomView from "./CollaborationRoomView";
+import RoomMessages from "./RoomMessages";
 import type {
   CollaborationCandidate,
   CollaborationMemberState,
@@ -14,6 +18,7 @@ import type {
 const { handlers } = vi.hoisted(() => ({ handlers: new Map<string, Set<(event: { payload: unknown }) => void>>() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("../../api", () => ({ api: {
+  getOperationStatus: vi.fn(), getWorkstreamContextState: vi.fn(), updateWorkstreamContext: vi.fn(), regenerateWorkstreamContext: vi.fn(),
   collaborationRoomGet: vi.fn(),
   collaborationRoomMessages: vi.fn(),
   collaborationCandidates: vi.fn(),
@@ -48,7 +53,7 @@ const member = (patch: Partial<CollaborationMemberState> & { session_id: string 
   wake_method: "terminal", wake_status: "opened", connection_state: "connected", phase: "listening",
   phase_since: null,
   last_heartbeat_at: ago(5), last_read_at: ago(60), last_read_seq: 1,
-  awaiting_since: null, unread_count: 0, error: null, ...patch,
+  awaiting_since: null, join_prompt: null, unread_count: 0, error: null, ...patch,
 });
 
 const roomConfig = {
@@ -75,7 +80,12 @@ const stoppedRun: RoomView = {
 };
 
 function mount() {
-  return render(<CollaborationRoomView taskId="task-1" taskTitle="跨会话聊天室开发" sessions={sessions} />);
+  return render(<DetailPanelProvider kind="collaboration"><PageHeader title="协作室" /><CollaborationRoomView taskId="task-1" taskTitle="跨会话聊天室开发" sessions={sessions} /></DetailPanelProvider>);
+}
+
+function chooseCoordinator(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: /^负责人：/ }));
+  fireEvent.click(within(screen.getByRole("listbox", { name: "负责人" })).getByRole("option", { name }));
 }
 
 function emit(payload: Record<string, unknown>) {
@@ -83,8 +93,11 @@ function emit(payload: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  localStorage.clear(); viewState.clear();
   vi.resetAllMocks();
   handlers.clear();
+  vi.mocked(api.getOperationStatus).mockResolvedValue([]);
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue({workstream_id:"task-1",summary:null,context_revision:0,updated_at:null,pending:false,pending_messages:0,processed_through_seq:0,freshness:{refreshed_at:null,pending_messages:0,history_rewritten_sessions:0,unknown_coverage_sessions:0,summary_changed_sessions:0,scope_changed:false,pending:false}});
   vi.mocked(listen).mockImplementation(async (name, callback) => {
     const fn = callback as unknown as (event: { payload: unknown }) => void;
     const set = handlers.get(name) ?? new Set();
@@ -97,6 +110,52 @@ beforeEach(() => {
   vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: candidates, next_cursor: null });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+it("sends with Enter but lets composition and Shift+Enter stay in the composer", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
+  vi.mocked(api.collaborationRoomSend).mockResolvedValue(message(2, "准备开始", null));
+  mount();
+  const box = await screen.findByRole("textbox", { name: "在协作室说一句" });
+  fireEvent.change(box, { target: { value: "准备开始" } });
+  fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+  fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
+  fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+  expect(api.collaborationRoomSend).not.toHaveBeenCalled();
+  expect((box as HTMLTextAreaElement).value).toBe("准备开始");
+  fireEvent.keyDown(box, { key: "Enter" });
+  await waitFor(() => expect(api.collaborationRoomSend).toHaveBeenCalledWith(
+    "room-1", "run-1", "准备开始", expect.any(String),
+  ));
+  await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(""));
+});
+
+it("keeps chosen members when their settings are hidden and restored", async () => {
+  mount();
+  fireEvent.click(await screen.findByRole("checkbox", { name: "后端会话" }));
+  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
+  expect(screen.queryByRole("checkbox", { name: "后端会话" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
+  expect((screen.getByRole("checkbox", { name: "后端会话" }) as HTMLInputElement).checked).toBe(true);
+});
+
+it("leaves the reader on older messages until they choose to follow new ones", () => {
+  const props = { sessions, sending: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), sendLabel: "发送", placeholder: "消息" };
+  const view = render(<RoomMessages {...props} messages={[message(1, "旧消息")]} />);
+  const history = screen.getByRole("region", { name: "协作消息记录" });
+  Object.defineProperties(history, { scrollHeight: { configurable: true, value: 900 }, clientHeight: { configurable: true, value: 300 } });
+  history.scrollTop = 0;
+  fireEvent.scroll(history);
+  view.rerender(<RoomMessages {...props} messages={[message(1, "旧消息"), message(2, "新消息")]} />);
+  expect(screen.getByText("新消息")).toBeTruthy();
+  expect(history.scrollTop).toBe(0);
+  fireEvent.click(screen.getByRole("button", { name: "有新消息 · 回到最新消息" }));
+  expect(history.scrollTop).toBe(900);
+  expect(screen.queryByRole("button", { name: "有新消息 · 回到最新消息" })).toBeNull();
+  Object.defineProperty(history, "scrollHeight", { value: 1100 });
+  view.rerender(<RoomMessages {...props} messages={[message(1, "旧消息"), message(2, "新消息"), message(3, "后续消息")]} />);
+  expect(history.scrollTop).toBe(1100);
+});
 
 it("keeps 开启协作 disabled until two session members are chosen and shows why a session cannot join", async () => {
   mount();
@@ -123,14 +182,18 @@ it("writes the first message together with starting, and shows the run and membe
   await screen.findByRole("checkbox", { name: "后端会话" });
   fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
-  fireEvent.click(screen.getByRole("radio", { name: "后端会话" }));
+  const wakeModes = within(screen.getByRole("group", { name: "前端会话 的唤醒方式" }));
+  fireEvent.click(wakeModes.getByRole("button", { name: "桌面应用" }));
+  expect(wakeModes.getByRole("button", { name: "桌面应用" }).getAttribute("aria-pressed")).toBe("true");
+  expect(wakeModes.getByRole("button", { name: "内嵌终端" }).getAttribute("aria-pressed")).toBe("false");
+  chooseCoordinator("后端会话");
   fireEvent.change(screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" }), { target: { value: "先各自核对契约" } });
   fireEvent.click(screen.getByRole("button", { name: "发送并开启" }));
 
   await screen.findByText("协作中");
   expect(api.collaborationRoomStart).toHaveBeenCalledWith(
     "task-1",
-    [{ session_id: "s1", wake_method: "terminal" }, { session_id: "s2", wake_method: "terminal" }],
+    [{ session_id: "s1", wake_method: "terminal" }, { session_id: "s2", wake_method: "desktop" }],
     0,
     expect.any(String),
     "s1",
@@ -148,16 +211,16 @@ it("changes and clears the coordinator while the run is active", async () => {
     .mockResolvedValueOnce({ ...activeRun, room: { ...roomConfig, revision: 5, coordinator_session_id: null } });
   mount();
 
-  const backend = await screen.findByRole("radio", { name: "后端会话" }) as HTMLInputElement;
-  expect(backend.checked).toBe(true);
+  await screen.findByRole("button", { name: "负责人：后端会话" });
 
-  fireEvent.click(screen.getByRole("radio", { name: "前端会话" }));
-  await waitFor(() => expect((screen.getByRole("radio", { name: "前端会话" }) as HTMLInputElement).checked).toBe(true));
+  chooseCoordinator("前端会话");
+  await screen.findByRole("button", { name: "负责人：前端会话" });
+  expect(within(screen.getByRole("listitem", { name: "前端会话" })).getByRole("img", { name: "负责人" })).toBeTruthy();
   // 更换负责人带当前配置版本，冲突时由后端拒绝。
   expect(api.collaborationRoomCoordinator).toHaveBeenLastCalledWith("room-1", "run-1", "s2", 3, expect.any(String));
 
-  fireEvent.click(screen.getByRole("radio", { name: "不由成员负责，由我协调" }));
-  await waitFor(() => expect((screen.getByRole("radio", { name: "不由成员负责，由我协调" }) as HTMLInputElement).checked).toBe(true));
+  chooseCoordinator("由我协调");
+  await screen.findByRole("button", { name: "负责人：由我协调" });
   expect(api.collaborationRoomCoordinator).toHaveBeenLastCalledWith("room-1", "run-1", null, 4, expect.any(String));
 });
 
@@ -169,7 +232,7 @@ it("lets the user drop every member and clear the saved coordinator after a stop
   // 停止后沿用保存的配置：两人都选中，负责人仍是 s1。
   expect((await screen.findByRole("checkbox", { name: "后端会话" }) as HTMLInputElement).checked).toBe(true);
   expect((screen.getByRole("checkbox", { name: "前端会话" }) as HTMLInputElement).checked).toBe(true);
-  expect((screen.getByRole("radio", { name: "后端会话" }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.getByRole("button", { name: "负责人：后端会话" })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
@@ -181,8 +244,8 @@ it("lets the user drop every member and clear the saved coordinator after a stop
   // 重新选人并清除原负责人，再开启时负责人是 null 而不是被回填成 s1。
   fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
-  fireEvent.click(screen.getByRole("radio", { name: "不由成员负责，由我协调" }));
-  await waitFor(() => expect((screen.getByRole("radio", { name: "不由成员负责，由我协调" }) as HTMLInputElement).checked).toBe(true));
+  chooseCoordinator("由我协调");
+  await screen.findByRole("button", { name: "负责人：由我协调" });
   fireEvent.click(screen.getByRole("button", { name: "开启协作" }));
 
   await waitFor(() => expect(api.collaborationRoomStart).toHaveBeenCalledWith(
@@ -282,7 +345,7 @@ it("replays an unconfirmed start instead of sending the first message a second t
   await screen.findByRole("checkbox", { name: "后端会话" });
   fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
-  fireEvent.click(screen.getByRole("radio", { name: "后端会话" }));
+  chooseCoordinator("后端会话");
   fireEvent.change(screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" }), { target: { value: "先各自核对契约" } });
   fireEvent.click(screen.getByRole("button", { name: "发送并开启" }));
 
@@ -380,7 +443,7 @@ it("retries opening one failed member without restarting the run for everyone", 
 
   await waitFor(() => expect(screen.queryByText("唤醒失败")).toBeNull());
   const retried = within(screen.getByRole("listitem", { name: "前端会话" }));
-  expect(retried.getByText("正在监听")).toBeTruthy();
+  expect(retried.getByText("等待消息")).toBeTruthy();
   expect(screen.queryByText("应用未响应")).toBeNull();
   // 只重试这一个成员，不重新开启整次协作。
   expect(api.collaborationRoomStart).not.toHaveBeenCalled();
@@ -401,7 +464,7 @@ it("refreshes only member state on heartbeat-class changes and keeps the message
   emit({ task_id: "task-1", room_id: "room-1", run_id: "run-1", category: "room" });
 
   await waitFor(() => expect(
-    within(screen.getByRole("listitem", { name: "后端会话" })).getByText("正在监听"),
+    within(screen.getByRole("listitem", { name: "后端会话" })).getByText("等待消息"),
   ).toBeTruthy());
   expect(screen.queryByText("等待加入")).toBeNull();
   expect(screen.getAllByRole("listitem").length).toBe(before);
@@ -425,12 +488,63 @@ it("shows processing time after joining and expires the connection without anoth
   mount();
   const terminal = within(await screen.findByRole("listitem", { name: "后端会话" }));
   expect(terminal.getByText("处理中")).toBeTruthy();
-  expect(terminal.getByText("已处理 1分钟")).toBeTruthy();
+  expect(terminal.getByLabelText("已处理 1分钟")).toBeTruthy();
   expect(screen.queryByText("上次打开失败")).toBeNull();
   expect(terminal.getByRole("button", { name: "复制加入提示" })).toBeTruthy();
   expect(within(screen.getByRole("listitem", { name: "前端会话" })).getByRole("button", { name: "复制加入提示" })).toBeTruthy();
 
   await act(async () => { vi.advanceTimersByTime(40_000); });
   expect(terminal.getByText("连接中断")).toBeTruthy();
-  expect(terminal.queryByText(/已处理/)).toBeNull();
+  expect(terminal.queryByLabelText(/已处理/)).toBeNull();
+});
+
+it("keeps shared summary collapsed in the room and refreshes it without changing chat messages", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
+  const initial = {
+    workstream_id: "task-1", summary: { items: [{ id: "decision", title: "已确认分工", description: "后端负责消息协议", details: [] }] },
+    context_revision: 1, updated_at: null, pending: true, pending_messages: 2, processed_through_seq: 1,
+    freshness: { refreshed_at: null, pending_messages: 2, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: true },
+  };
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(initial);
+  let complete!: () => void;
+  vi.mocked(api.updateWorkstreamContext).mockImplementation(() => new Promise(resolve => { complete = () => resolve({workstream_id:"task-1",status:"updated",context_revision:2,processed_through_seq:3,remaining_pending:0}); }));
+  mount();
+  await screen.findByText("有 2 条协作消息待整理");
+  expect(screen.queryByRole("heading", { name: "已确认分工" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "协作摘要（1）" }));
+  expect(screen.getByRole("heading", { name: "已确认分工" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
+  await waitFor(() => expect((screen.getByRole("button", {name:"更新摘要"}) as HTMLButtonElement).disabled).toBe(true));
+  expect((screen.getByRole("button", {name:"重新生成"}) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("textbox", { name:"在协作室说一句" })).toBeTruthy();
+  vi.mocked(api.getWorkstreamContextState).mockResolvedValue({...initial,pending:false,pending_messages:0,processed_through_seq:3});
+  await act(async () => complete());
+  await waitFor(() => expect(screen.queryByRole("button", {name:"更新摘要"})).toBeNull());
+  expect(screen.getByText("先对齐契约")).toBeTruthy();
+  expect(api.collaborationRoomSend).not.toHaveBeenCalled();
+});
+
+it("copies the join prompt the backend supplied instead of building one", async () => {
+  const backendPrompt = "后端模板：房间 room-1 运行 run-1，用技能 join 后 wait，再 ack。";
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({
+    ...activeRun,
+    members: [
+      member({ session_id: "s1", join_prompt: backendPrompt }),
+      member({ session_id: "s2", join_prompt: null }),
+    ],
+  });
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  mount();
+
+  const withPrompt = within(await screen.findByRole("listitem", { name: "后端会话" }));
+  fireEvent.click(withPrompt.getByRole("button", { name: "复制加入提示" }));
+  // 复制到的必须是后端那段，不是前端按 task/room/run 拼出来的自比内容。
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(backendPrompt));
+
+  // 没有提示的成员不复制伪内容。
+  const withoutPrompt = within(screen.getByRole("listitem", { name: "前端会话" }));
+  fireEvent.click(withoutPrompt.getByRole("button", { name: "复制加入提示" }));
+  await Promise.resolve();
+  expect(writeText).toHaveBeenCalledTimes(1);
 });

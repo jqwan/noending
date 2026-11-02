@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import Icon, { type IconName } from "./Icon";
+import PopupMenu, { PopupMenuItem } from "./PopupMenu";
 
 export interface CustomSelectOption {
   value: string;
@@ -21,148 +22,49 @@ export interface CustomSelectProps {
   placement?: "auto" | "top" | "bottom";
 }
 
-export default function CustomSelect({
-  value,
-  onChange,
-  options,
-  ariaLabel,
-  title,
-  disabled = false,
-  className = "",
-  placeholder,
-  prefix,
-  placement = "auto",
-}: CustomSelectProps) {
+export default function CustomSelect({ value, onChange, options, ariaLabel, title, disabled = false, className = "", placeholder, prefix, placement = "auto" }: CustomSelectProps) {
   const [open, setOpen] = useState(false);
-  const [dropup, setDropup] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const selectedOption = options.find((o) => o.value === value);
-  const displayLabel = selectedOption?.label ?? placeholder ?? (options[0]?.label ?? "");
-
-  const toggleOpen = () => {
-    if (disabled) return;
-    setOpen((prev) => {
-      const next = !prev;
-      if (next && containerRef.current) {
-        if (placement === "top") {
-          setDropup(true);
-        } else if (placement === "bottom") {
-          setDropup(false);
-        } else {
-          const rect = containerRef.current.getBoundingClientRect();
-          const spaceBelow = window.innerHeight - rect.bottom;
-          const spaceAbove = rect.top;
-          setDropup(spaceBelow < 220 && spaceAbove > spaceBelow);
-        }
-      }
-      return next;
-    });
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  const displayLabel = options.find(option => option.value === value)?.label ?? placeholder ?? options[0]?.label ?? "";
+  const close = () => setOpen(false);
+  const select = (next: string) => { onChange(next); close(); trigger.current?.focus(); };
 
   return (
-    <div
-      ref={containerRef}
-      className={`custom-select-control ${open ? "open" : ""} ${dropup ? "dropup" : ""} ${disabled ? "disabled" : ""} ${className}`}
-      onClick={(e) => {
-        if (disabled) return;
-        if ((e.target as HTMLElement).closest(".custom-select-menu")) return;
-        toggleOpen();
-      }}
-      role="button"
-      tabIndex={disabled ? -1 : 0}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      aria-label={ariaLabel ? `${ariaLabel}：${displayLabel}` : title ? `${title}：${displayLabel}` : undefined}
-      title={title || displayLabel}
-      onKeyDown={(e) => {
-        if (disabled) return;
-        if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
-          e.preventDefault();
-          toggleOpen();
-        }
-      }}
-    >
-      {prefix}
-      <span className="custom-select-label truncate" data-label={displayLabel} />
-      <Icon name="chevronDown" className="custom-select-chevron" />
-
-      {/* Hidden underlying native select for full accessibility and testing compatibility */}
-      <select
-        aria-label={ariaLabel}
-        title={title}
-        value={value}
-        onChange={(e) => {
-          onChange(e.target.value);
-        }}
-        disabled={disabled}
-        tabIndex={-1}
-        className="custom-select-native"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value} disabled={opt.disabled}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-
-      {open && (
-        <div className="custom-select-menu" role="listbox" aria-label={ariaLabel || title}>
-          <div className="custom-select-list">
-            {options.map((opt) => {
-              const isSelected = opt.value === value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  className={`custom-select-item ${isSelected ? "selected" : ""}`}
-                  disabled={opt.disabled}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (opt.disabled) return;
-                    onChange(opt.value);
-                    setOpen(false);
-                  }}
-                  role="option"
-                  aria-selected={isSelected}
-                >
-                  {opt.icon && (
-                    <span className="custom-select-item-icon">
-                      {typeof opt.icon === "string" ? <Icon name={opt.icon as IconName} /> : opt.icon}
-                    </span>
-                  )}
-                  <span className="custom-select-item-label truncate">{opt.label}</span>
-                  {isSelected && (
-                    <span className="custom-select-item-check">
-                      <Icon name="check" />
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+    <>
+      <button type="button" ref={trigger} className={`custom-select-control ${open ? "open" : ""} ${className}`}
+        disabled={disabled} aria-haspopup="listbox" aria-expanded={open && !disabled}
+        aria-label={ariaLabel ? `${ariaLabel}：${displayLabel}` : title ? `${title}：${displayLabel}` : displayLabel}
+        title={title || displayLabel} onClick={() => setOpen(value => !value)}
+        onKeyDown={event => {
+          if (event.key === "Escape") close();
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}>
+        {prefix}
+        <span className="custom-select-label truncate">{displayLabel}</span>
+        <Icon name="chevronDown" className="custom-select-chevron" />
+      </button>
+      {open && !disabled && (
+        <PopupMenu anchorRef={trigger} placement={placement} onDismiss={close} focusOnOpen role="listbox" aria-label={ariaLabel || title}
+          onKeyDown={event => {
+            if (event.key.length !== 1 || event.ctrlKey || event.metaKey || event.altKey) return;
+            const option = options.find(option => !option.disabled && option.label.toLocaleLowerCase().startsWith(event.key.toLocaleLowerCase()));
+            if (!option) return;
+            const item = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(item => item.dataset.value === option.value);
+            item?.focus();
+          }}>
+          {options.map(option => (
+            <PopupMenuItem key={option.value} data-value={option.value} role="option" selected={option.value === value} disabled={option.disabled}
+              title={option.label} onClick={() => select(option.value)}>
+              {option.icon && <span className="custom-select-item-icon">{typeof option.icon === "string" ? <Icon name={option.icon as IconName} /> : option.icon}</span>}
+              <span className="popup-menu-label">{option.label}</span>
+            </PopupMenuItem>
+          ))}
+        </PopupMenu>
       )}
-    </div>
+    </>
   );
 }

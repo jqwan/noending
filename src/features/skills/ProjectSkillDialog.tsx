@@ -1,3 +1,5 @@
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -61,10 +63,10 @@ export default function ProjectSkillDialog({ projectId, resources, enabledIds, u
           </label>;
         })}
       </div>}
-    {error && <div role="alert" className="skill-error">{error}</div>}
-    <div className="row skill-dialog-actions">
+    {error && <Notice role="alert" >{error}</Notice>}
+    <DialogActions>
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
       <button className="btn primary" disabled={busy || !changed} onClick={() => void submit()}>{busy ? "保存中…" : "保存"}</button>
-    </div>
+    </DialogActions>
   </Modal>;
 }

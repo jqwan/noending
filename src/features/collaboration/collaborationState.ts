@@ -51,9 +51,10 @@ export function memberStatus(
     if (Number.isFinite(since) && now - since > STALL_MS) {
       return { tone: "stalled", label: "暂未响应" };
     }
-    return { tone: "listening", label: "正在监听" };
+    return { tone: "listening", label: "等待消息" };
   }
-  return { tone: "idle", label: "已连接" };
+  // 参与通道在，但没有进入等待：只说连接事实，不写成「在听」。
+  return { tone: "idle", label: "仅连接" };
 }
 
 export const RUN_LABEL: Record<CollaborationRunStatus, string> = {
@@ -72,28 +73,6 @@ export function defaultWakeMethod(modes: CollaborationWakeMethod[]): Collaborati
   if (modes.includes("terminal")) return "terminal";
   if (modes.includes("desktop")) return "desktop";
   return null;
-}
-
-/**
- * 桌面成员无法由 NoEnding 替用户通知，只能给出可复制的加入提示。
- * 提示只含定位信息与职责，不复制协作消息正文——正文只有一份。
- */
-export function joinPrompt(args: {
-  taskId: string;
-  taskTitle: string;
-  roomId: string;
-  runId: string;
-  selfSessionId: string;
-  coordinator: boolean;
-}): string {
-  return [
-    `加入协作室：${args.taskTitle}`,
-    `任务 ${args.taskId}`,
-    `房间 ${args.roomId} · 运行 ${args.runId}`,
-    `你的会话 ${args.selfSessionId}${args.coordinator ? "（本次负责人）" : ""}`,
-    "用 noending 技能 join 该房间与运行，然后 wait 取未读、ack 推进阅读位置。",
-    "协作消息只在本房间读取，正文不复制到信箱；任务进展由负责人维护。",
-  ].join("\n");
 }
 
 export function connectionLabel(state: CollaborationConnectionState): string {

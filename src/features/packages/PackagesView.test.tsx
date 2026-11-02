@@ -129,7 +129,8 @@ it("filters by agent and query on the board", async () => {
   expect(await screen.findByText("review")).toBeTruthy();
   expect(screen.getByText("team-tools")).toBeTruthy();
 
-  fireEvent.change(screen.getByRole("combobox", { name: "筛选 Agent" }), { target: { value: "pi" } });
+  fireEvent.click(screen.getByRole("button", { name: /^筛选 Agent：/ }));
+  fireEvent.click(screen.getByRole("option", { name: "Pi" }));
   expect(await screen.findByText("team-tools")).toBeTruthy();
   expect(screen.queryByText("review")).toBeNull();
 });

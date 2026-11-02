@@ -6,8 +6,8 @@ export default function EmptyState({ title, hint, actions }: {
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="empty" style={{ padding: "40px 8px" }}>
-      <div style={{ fontWeight: 550, color: "var(--text-secondary)", marginBottom: 4 }}>{title}</div>
+    <div className="empty">
+      <div className="empty-title">{title}</div>
       {hint && <div className="small">{hint}</div>}
       {actions && <div className="invite">{actions}</div>}
     </div>

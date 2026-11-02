@@ -429,21 +429,32 @@ export interface SessionContextView {
   pending: boolean;
 }
 
-export interface ProjectContextView extends Omit<WorkstreamContextView, "workstream_id"> {
+export interface ProjectContextView {
   project_id: string;
+  summary: SummaryDocument | null;
+  context_revision: number;
+  updated_at: string | null;
+  pending: boolean;
+  pending_sessions: number;
+  freshness: SummaryFreshness;
 }
-
-export interface ProjectUpdateOutcome extends Omit<WorkstreamUpdateOutcome, "workstream_id"> {
+export interface ProjectUpdateOutcome {
   project_id: string;
+  status: ContextUpdateStatus;
+  context_revision: number;
+  updated_sessions: string[];
+  skipped_session_ids: string[];
+  failed_sessions: { session_id: string; error: string }[];
+  remaining_pending: number;
 }
-
 export interface WorkstreamContextView {
   workstream_id: string;
   summary: SummaryDocument | null;
   context_revision: number;
   updated_at: string | null;
   pending: boolean;
-  pending_sessions: number;
+  pending_messages: number;
+  processed_through_seq: number;
   freshness: SummaryFreshness;
 }
 
@@ -460,10 +471,8 @@ export interface WorkstreamUpdateOutcome {
   workstream_id: string;
   status: ContextUpdateStatus;
   context_revision: number;
-  updated_sessions: string[];
-  skipped_session_ids: string[];
-  failed_sessions: { session_id: string; error: string }[];
-  /** 本次调用后仍待更新的 Session 数。 */
+  processed_through_seq: number;
+  /** 尚未纳入协作摘要的消息数。 */
   remaining_pending: number;
 }
 
@@ -808,6 +817,8 @@ export interface CollaborationMemberState {
   last_read_seq: number | null;
   /** 最早一条未查收的他人消息时间；null = 没有待查收。必填：缺字段等于契约没实现。 */
   awaiting_since: string | null;
+  /** 后端生成的加入提示，活动运行才有；前端只复制这段，不自己拼。 */
+  join_prompt: string | null;
   unread_count: number;
   error: string | null;
 }

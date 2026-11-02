@@ -128,9 +128,9 @@ export function Modal({ title, onClose, children, wide, actions }: { title: stri
       <div className={`modal${wide ? " wide" : ""}`} tabIndex={-1} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-header">
           <h2>{title}</h2>
-          <div className="modal-header-actions" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div className="modal-header-actions">
             {actions}
-            <button type="button" className="btn ghost icon-only" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
+            <button type="button" className="btn ghost icon-button" aria-label="关闭弹窗" title="关闭" onClick={onClose}><Icon name="close" /></button>
           </div>
         </div>
         {children}
@@ -196,8 +196,7 @@ export async function openRemoteUrl(url: string): Promise<boolean> {
   }
 }
 
-/** Label-above-value fact row with an optional copy button — the shared
- *  detail-aside pattern (session info, plugin package properties). */
+/** 只读属性字段，在 DetailFields 中使用。 */
 export function Field({
   label,
   copyValue,
@@ -225,14 +224,14 @@ export function Field({
   };
 
   return (
-    <>
-      <div className="session-field-label-row">
-        <span className="muted small" style={{ whiteSpace: "nowrap" }}>{label}</span>
-        {action && <span className="session-field-action" style={{ marginLeft: "auto" }}>{action}</span>}
+    <div className="detail-field">
+      <dt className="detail-field-label">
+        <span>{label}</span>
+        {action && <span className="detail-field-action">{action}</span>}
         {copyValue && (
           <button
             type="button"
-            className={`btn ghost icon-button small session-field-copy-btn${copied ? " copied" : ""}`}
+            className={`btn ghost icon-button small detail-field-copy${copied ? " copied" : ""}`}
             title={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
             aria-label={copied ? "已复制" : (copyTitle ?? `复制${label}`)}
             onClick={onCopy}
@@ -240,8 +239,8 @@ export function Field({
             <Icon name={copied ? "check" : "copy"} />
           </button>
         )}
-      </div>
-      <div style={{ minWidth: 0 }}>{children}</div>
-    </>
+      </dt>
+      <dd className="detail-field-value">{children}</dd>
+    </div>
   );
 }

@@ -105,14 +105,9 @@ pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()>
         crate::storage::bump_input_revision_conn(tx, &tid)?;
     }
 
-    // The Session's current summary and its place in every Workstream's
-    // consumption frontier.
+    // The Session's current summary.
     tx.execute(
         "DELETE FROM session_contexts WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    tx.execute(
-        "DELETE FROM workstream_session_frontiers WHERE session_id = ?1",
         params![session_id],
     )?;
     // The current-message projection goes with the conversation.

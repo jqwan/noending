@@ -30,7 +30,7 @@ export default function PageHeader({ back, onBack, title, sub, actions, children
         >
           {title}
         </h1>
-        {actions && <div className="actions">{actions}</div>}
+        <div className="actions">{actions}<DetailPanelToggle /></div>
       </div>
       {back && onBack && (
         <button className="back-link" onClick={onBack}>← {back}</button>
@@ -40,3 +40,4 @@ export default function PageHeader({ back, onBack, title, sub, actions, children
     </>
   );
 }
+import { DetailPanelToggle } from "../components/DetailLayout";

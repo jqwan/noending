@@ -1,3 +1,5 @@
+import "./sessions.css";
+import DialogActions from "../../components/DialogActions";
 import { useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -139,10 +141,10 @@ function MessageModal({ who, stamp, text, previewable, onClose }: {
       ) : (
         <div className="msg-full">{text}</div>
       )}
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 14 }}>
+      <DialogActions>
         <button className="btn" onClick={copyAll}>复制全文</button>
         <button className="btn" onClick={onClose}>关闭</button>
-      </div>
+      </DialogActions>
     </Modal>
   );
 }

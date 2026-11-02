@@ -1,4 +1,6 @@
-import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailContent, DetailFields, DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import DialogActions from "../../components/DialogActions";
 import { removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./workstreams.css";
@@ -6,24 +8,22 @@ import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
 import Icon from "../../components/Icon";
-import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo } from "../../components/common";
+import { timeAgo } from "../../components/common";
 import { useRefreshSignal, Modal, Field } from "../../components/common";
-import { showToast } from "../../components/Toast";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import WorkstreamProjectPickerModal from "./WorkstreamProjectPickerModal";
 import {
   type Workstream,
   type WorkstreamContext as WorkstreamContextData,
-  type WorkstreamContextView,
 } from "../../types";
 import type { Route, WorkstreamEntry } from "../../app/routes";
-import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "../sessions/SummaryContent";
+import CollaborationSummary from "../collaboration/CollaborationSummary";
 import WorkstreamSessions from "./WorkstreamSessions";
 import TaskItems from "./TaskItems";
 import TaskSubpageTabs from "./TaskSubpageTabs";
 import CollaborationRoomView from "../collaboration/CollaborationRoomView";
 
-/** Task organization and the current Markdown summary. All reads are pure. */
+/** Task organization. All background reads are pure. */
 import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 export { workstreamDetailCache, clearWorkstreamDetailCache };
@@ -51,13 +51,6 @@ export default function WorkstreamDetailView({
   const [retry, setRetry] = useState(0);
   const [ctx, setCtx] = useState<WorkstreamContextData | null>(() => cached?.ctx ?? null);
   const showSkeleton = useLoadingDelay(!ctx && loadError === "");
-  /** Current items, revision and extraction coverage. */
-  const [ctxState, setCtxState] = useState<WorkstreamContextView | null>(() => cached?.ctxState ?? null);
-  const summaryExpansion = useSummaryExpansion(ctxState?.summary);
-  const [failedSessions, setFailedSessions] = useState<{ session_id: string; error: string }[]>([]);
-  const operation = useOperationState("summary", "task", workstreamId);
-  const [ctxUpdating, setCtxUpdating] = useState<"update" | "regenerate" | false>(false);
-  const [ctxUpdateError, setCtxUpdateError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
@@ -73,15 +66,10 @@ export default function WorkstreamDetailView({
     const currentCached = workstreamDetailCache.get(workstreamId);
     if (currentCached) {
       setCtx(currentCached.ctx);
-      setCtxState(currentCached.ctxState);
     } else {
       setCtx(null);
-      setCtxState(null);
     }
     setLoadError("");
-    setCtxUpdateError(null);
-    setFailedSessions([]);
-    setCtxUpdating(false);
     setEditing(false);
     setConfirmArchive(false);
     setConfirmPurge(false);
@@ -90,85 +78,33 @@ export default function WorkstreamDetailView({
     api.getWorkstreamContext(workstreamId).then((c) => {
       if (cancelled || removedTargets.workstreams.has(workstreamId)) return;
       setCtx(c);
-      const prev = workstreamDetailCache.get(workstreamId);
       workstreamDetailCache.set(workstreamId, {
         ctx: c,
-        ctxState: prev?.ctxState ?? null,
       });
     }).catch(e => { if (!cancelled) setLoadError(String(e)); });
 
-    api.getWorkstreamContextState(workstreamId).then((s) => {
-      if (cancelled || removedTargets.workstreams.has(workstreamId)) return;
-      setCtxState(s);
-      const prev = workstreamDetailCache.get(workstreamId);
-      if (prev) {
-        workstreamDetailCache.set(workstreamId, { ...prev, ctxState: s });
-      }
-    }).catch(e => { if (!cancelled) setCtxUpdateError(contextUpdateErrorDetails(e)); });
 
     return () => {
       cancelled = true;
     };
   }, [workstreamId, retry]);
 
-  // Background refresh only reads task data and summary state.
+  // Background refresh only reads task data.
   const refresh = useCallback(() => {
     api.getWorkstreamContext(workstreamId).then((c) => {
       if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setCtx(c);
-      const prev = workstreamDetailCache.get(workstreamId);
       workstreamDetailCache.set(workstreamId, {
         ctx: c,
-        ctxState: prev?.ctxState ?? null,
       });
     }).catch(console.error);
 
-    api.getWorkstreamContextState(workstreamId).then((s) => {
-      if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
-      setCtxState(s);
-      const prev = workstreamDetailCache.get(workstreamId);
-      if (prev) {
-        workstreamDetailCache.set(workstreamId, { ...prev, ctxState: s });
-      }
-    }).catch(console.error);
 
 
   }, [workstreamId]);
 
   useRefreshSignal(refresh);
 
-  /** 一次点击 → 相关 Session 摘要与 Workstream 状态一起更新（后端一次模型调用）。 */
-  const updateContext = async (regenerate = false) => {
-    if (ctxUpdating || operation.busy || operation.checking) return;
-    setCtxUpdating(regenerate ? "regenerate" : "update");
-    setCtxUpdateError(null);
-    setFailedSessions([]);
-    try {
-      const out = await (regenerate ? api.regenerateWorkstreamContext(workstreamId) : api.updateWorkstreamContext(workstreamId));
-      if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
-      setFailedSessions(out.failed_sessions);
-      showToast(
-        out.status === "no_change"
-          ? "摘要无变化"
-          : out.remaining_pending > 0
-            ? `已更新摘要（待更新 ${out.remaining_pending}）`
-            : out.status === "skipped" ? "没有新的摘要内容" : "已更新摘要",
-      );
-      refresh();
-    } catch (e) {
-      console.error(e);
-      if (currentWorkstreamId.current === workstreamId) setCtxUpdateError(contextUpdateErrorDetails(e));
-    } finally {
-      await refreshOperationStatus(true);
-      if (currentWorkstreamId.current === workstreamId) setCtxUpdating(false);
-    }
-  };
-
-  /** Copy the current summary as Markdown. */
-  const copyContext = async () => {
-    const ok = await copyToClipboard(ctxState?.summary ? summaryMarkdown(ctxState.summary) : "");
-    showToast(ok ? "已复制摘要" : "复制失败");
-  };
 
   // 同 SessionDetailView：加载态也要渲染 PageHeader，否则整条标题栏会先消失再补回来。
   if (!ctx) {
@@ -284,7 +220,7 @@ export default function WorkstreamDetailView({
   const projectRows=ctx.projects;
 
   return (
-    <div className="main task-detail">
+    <DetailPanelProvider key={entry === "collaboration" ? "collaboration" : "task"} kind={entry === "collaboration" ? "collaboration" : "task"}><div className="main detail-page task-detail">
       <PageHeader
         title={
           <span style={{ display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere" }}>
@@ -352,110 +288,26 @@ export default function WorkstreamDetailView({
           archived={archived}
         />
       ) : (
-      <div className="detail-layout task-detail-layout">
-      {/* Workstream 自身（Base Experience）：与另外两个详情页同形——主栏是内容本身
-          （概览、会话、Context），右栏是只读事实（状态、路径、项目）。 */}
-        <div className="detail-main task-detail-main">
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <h2 className="detail-section-title">
-                <Icon name="tasks" />
-                <span>任务描述</span>
-              </h2>
-            </div>
-            {workstream.description ? (
-              <p className="task-description">
-                {workstream.description}
-              </p>
-            ) : (
-              <div className="l1-none">还没有描述。</div>
-            )}
-          </section>
-
-          <TaskItems key={workstream.id} taskId={workstream.id} />
-
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <h2 className="detail-section-title">
-                <Icon name="spark" />
-                <span>任务摘要{ctxState?.summary ? `（${ctxState?.summary.items.length}）` : ""}</span>
-              </h2>
-              <div className="actions" style={{ display: "flex", gap: 8 }}>
-                <SummaryControls expansion={summaryExpansion} />
-                {ctxState?.summary && (
-                  <button
-                    type="button"
-                    className="btn ghost icon-button small"
-                    title="复制摘要"
-                    aria-label="复制摘要"
-                    onClick={copyContext}
-                  >
-                    <Icon name="copy" />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn ghost icon-button small"
-                  disabled={operation.busy || operation.checking || Boolean(ctxUpdating)}
-                  title={operation.error ? "无法读取更新状态" : ctxUpdating === "regenerate" || operation.busy ? "重新生成中…" : "重新生成"}
-                  aria-label="重新生成"
-                  onClick={() => updateContext(true)}
-                >
-                  <Icon name="refresh" className={ctxUpdating === "regenerate" || (operation.busy && !ctxUpdating) ? "spinning" : ""} />
-                </button>
-                {ctxState?.pending && (
-                  <button
-                    type="button"
-                    className="btn primary icon-button small"
-                    disabled={operation.busy || operation.checking || Boolean(ctxUpdating)}
-                    title={operation.error ? "无法读取更新状态" : ctxUpdating === "update" || operation.busy ? "更新中…" : "更新摘要"}
-                    aria-label="更新摘要"
-                    onClick={() => updateContext()}
-                  >
-                    <Icon name="spark" className={ctxUpdating === "update" || operation.busy ? "spinning" : ""} />
-                  </button>
-                )}
-              </div>
-            </div>
-            {ctxState?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{ctxState.pending_sessions > 0 ? `，涉及 ${ctxState.pending_sessions} 个会话` : ""}</p>}
-            {ctxState && ctxState.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
-             >{ctxState.summary ?? {items:[]}}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>尚无任务摘要</p>}
-            {failedSessions.length > 0 && <div role="alert"><p>任务摘要已更新，以下会话仍待重试：</p><ul>{failedSessions.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
-            {ctxUpdateError && <div role="alert"><p>{ctxUpdateError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(ctxUpdateError)); }}>复制错误详情</button></div>}
-          </section>
-        </div>
-
-        <aside className="detail-aside task-detail-aside">
-          <section className="card detail-section">
-            <h2 className="detail-section-title">
+      <DetailLayout panel={<><DetailSection sectionId="properties" label="任务信息" title={<>
               <Icon name="info" />
               <span>任务信息</span>
-            </h2>
-            <span className="badge" style={{ alignSelf: "flex-start" }}>{archived ? "已归档" : "未归档"}</span>
-            <div className="small muted">
-              创建于 {formatDate(workstream.created_at)} · 最近更新 {timeAgo(workstream.updated_at)}
-            </div>
+            </>}>
+
+            <DetailFields>
+            <Field label="状态"><span className="badge">{archived ? "已归档" : "未归档"}</span></Field>
+            <Field label="创建时间">{formatDate(workstream.created_at)}</Field>
+            <Field label="最近更新">{timeAgo(workstream.updated_at)}</Field>
             <Field label="任务 ID" copyValue={workstream.id} copyTitle="复制任务 ID">
               <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
                 {workstream.id}
               </div>
             </Field>
-          </section>
-
-          <WorkstreamSessions
-            sessions={sessions}
-            navigate={navigate}
-            onNewSession={archived || projectRows.length === 0 ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
-            allowActions={!archived && projectRows.length > 0}
-          />
-
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <h2 className="detail-section-title">
+            </DetailFields>
+          </DetailSection>
+<DetailSection sectionId="projects" label="关联项目" title={<>
                 <Icon name="project" />
                 <span>关联项目（{projectRows.length}）</span>
-              </h2>
-              {!archived && (
+              </>} actions={<>{!archived && (
                 <button
                   type="button"
                   className="btn ghost icon-button small"
@@ -465,28 +317,40 @@ export default function WorkstreamDetailView({
                 >
                   <Icon name="plus" />
                 </button>
-              )}
-            </div>
+              )}</>}>
+
             {projectRows.length === 0 && (
-              <div className="l1-none">
+              <div className="detail-empty">
                 暂无项目
               </div>
             )}
-            {projectRows.map((p) => (
-              <div className="list-row" key={p.id} role="link" tabIndex={0}
-                onKeyDown={(e) => { if (e.key === "Enter") navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined }); }}
-                onClick={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}>
-                <div className="grow">
-                  <div className="title" title={p.name ?? p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <Icon name="project" />
-                    <span>{p.name ?? "未命名项目"}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </section>
-        </aside>
-      </div>
+            <DetailList label="关联项目列表">
+              {projectRows.map(p => <DetailListRow key={p.id} icon={<Icon name="project" />}
+                title={p.name ?? "未命名项目"} titleHint={p.name ?? p.id}
+                onOpen={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}
+              />)}
+            </DetailList>
+          </DetailSection></>}><DetailSection sectionId="description" label="任务描述" title={<>
+                <Icon name="tasks" />
+                <span>任务描述</span>
+              </>}>
+
+            {workstream.description ? (
+              <DetailContent label="任务描述内容"><p className="detail-description">
+                {workstream.description}
+              </p></DetailContent>
+            ) : (
+              <div className="detail-empty">还没有描述。</div>
+            )}
+          </DetailSection>
+<TaskItems key={workstream.id} taskId={workstream.id} />
+<CollaborationSummary key={`summary-${workstream.id}`} taskId={workstream.id} />
+<WorkstreamSessions
+            sessions={sessions}
+            navigate={navigate}
+            onNewSession={archived || projectRows.length === 0 ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
+            allowActions={!archived && projectRows.length > 0}
+          /></DetailLayout>
       )}
 
       {projectPickerOpen && (
@@ -518,12 +382,12 @@ export default function WorkstreamDetailView({
             路径、会话归属和上下文都会保留，可取消归档。
           </p>
 
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setConfirmArchive(false)} disabled={busy}>取消</button>
             <button className="btn primary" onClick={archiveTask} disabled={busy}>
               {busy ? "处理中…" : "归档"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
 
@@ -533,15 +397,15 @@ export default function WorkstreamDetailView({
           <p style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
             确定要永久删除 <b>{workstream.title}</b> 吗？任务本身、工作路径列表、Context 和审阅数据会被删除，关联会话及其事件历史会保留。
           </p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setConfirmPurge(false)} disabled={busy}>取消</button>
             <button className="btn danger" onClick={purge} disabled={busy}>
               {busy ? "删除中…" : "永久删除"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
-    </div>
+    </div></DetailPanelProvider>
   );
 }
 

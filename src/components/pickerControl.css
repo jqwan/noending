@@ -1,0 +1,156 @@
+/* 复杂选择器的公共触发器与内容定位；列表外观由 PopupMenu 统一。 */
+
+.picker-menu-empty {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: var(--font-size-base);
+}
+.picker-menu.dropup {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+.picker-menu.dropdown-down {
+  top: calc(100% + 6px) !important;
+  bottom: auto !important;
+}
+.picker-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-icon);
+  min-width: 0;
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 4px 10px;
+  transition: all var(--duration-normal) ease;
+  cursor: pointer;
+}
+.picker-control:hover:not(:has(:disabled)) {
+  border-color: var(--border-default);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.picker-control:active:not(:has(:disabled)) {
+  background: var(--bg-active);
+}
+.picker-control:focus-within,
+.picker-control.open {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.picker-control.open {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.picker-control .picker-control-chevron {
+  transition: transform var(--duration-normal) ease;
+}
+.picker-control.open .picker-control-chevron {
+  transform: rotate(180deg);
+}
+.picker-control .picker-control-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.4;
+  color: inherit;
+  user-select: none;
+  pointer-events: none;
+}
+.picker-control select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+  border: none;
+  padding: 0;
+  margin: 0;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.picker-control.has-custom-menu select {
+  pointer-events: none;
+}
+.picker-control select:disabled {
+  cursor: default;
+}
+.picker-control:has(:disabled) {
+  opacity: var(--disabled-opacity);
+  cursor: default;
+}
+.picker-control > .ui-icon,
+.picker-control .agent-icon,
+.picker-control > svg {
+  flex-shrink: 0;
+  pointer-events: none;
+}
+.picker-control > .ui-icon {
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
+  color: var(--text-muted);
+}
+.picker-control .agent-icon {
+  width: 16px;
+  height: 16px;
+}
+.picker-control:hover .ui-icon,
+.picker-control:hover svg {
+  color: var(--text-secondary);
+}
+.picker-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-width: 320px;
+  width: max-content;
+}
+.picker-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.picker-menu-item .menu-item-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.picker-menu-item:hover .menu-item-icon {
+  color: var(--text-primary);
+}
+.picker-menu-item .menu-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-menu-item .menu-item-extra {
+  margin-left: 6px;
+  font-size: var(--font-size-xs);
+}
+.picker-menu-action .action-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.picker-menu-action:hover .action-icon {
+  color: var(--text-primary);
+}

@@ -90,13 +90,13 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 写入返回变更后的任务事项及新版本；删除返回 item_id 和 deleted。任务事项的 revision 与摘要无关，始终按稳定 ID 定位。描述表达目标与验收要求，细则表达真实进展、结果、阻碍和验证依据，不是待办子项。只有实际验收通过才完成，阻碍不代表废弃。摘要提取不管理或直接读取任务事项。各写操作支持 request_id 去重，版本冲突重读，不影响其他事项或提取进度，也不启动或通知 Agent。
 
-`summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。提取进程总运行上限为单会话 30 分钟、任务／项目整批 90 分钟（包括关联会话摘要的处理）。客户端的工具调用超时应覆盖相应时长并留出余量。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
+`summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。提取进程总运行上限为单会话 30 分钟、协作摘要与项目摘要 90 分钟（项目包括关联会话摘要的处理）。客户端的工具调用超时应覆盖相应时长并留出余量。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
 
 `summary_config_set` 只修改提供的字段，切换 Agent 清空旧覆盖值；运行参数传空字符串清除覆盖，`agent=none` 停用提取。它不触发模型调用。`sync` 可指定 `source` 或 `session`，两者互斥；都不指定则处理全部已登记来源，部分失败会保留成功摄入的数据并返回明细。
 
 ### 协作室
 
-每个任务至多一个协作室；开启、成员与负责人是桌面用户入口，模型只以成员身份参与。`room_resolve`／`room_show` 读房间视图（配置、当前 run、成员唤醒/连接/阅读状态），`room_messages` 按序分页历史。`room_join` 以本人会话建立参与连接（MCP 连接内自动续租，跨 wait 请求保持）；`room_wait` 等待本人未读批次（status=messages/timeout/stopped，不产出周期空结果，进入标记 listening、交付标记 processing）；`room_ack` 显式确认已处理位置；`room_send` 以本人身份发信（仅运行成员，停止后拒绝）；`room_leave` 清理本人参与；`room_stop` 仅当前负责人可用。旧/停止 run 的操作返回 `run_inactive`，停止的 run 以 `status=stopped` 结束等待。不自动已读；自己的发言不计入自己的未读。成员不可用时 UI 显示原因，开启应用或终端不代表已加入。
+每个任务至多一个协作室；开启、成员与负责人是桌面用户入口，模型只以成员身份参与。`room_resolve`／`room_show` 读房间视图（配置、当前 run、成员唤醒/连接/阅读状态），`room_messages` 按序分页历史。`room_join` 以本人会话建立参与连接（MCP 连接内自动续租，跨 wait 请求保持，回包附带 `notice` 操作提示）；`room_wait` 等待本人未读批次（status=messages/timeout/stopped，不产出周期空结果，进入标记 listening、交付标记 processing，回包附带 `notice` 操作提示；空闲或超时不得提交宿主最终回复）；`room_ack` 显式确认已读位置（回执返回实际生效位置）；`room_send` 以本人身份发信（仅运行中有效参与成员，退场后拒绝）；`room_leave` 清理本人参与；`room_stop` 仅当前负责人可用。旧/停止 run 的操作返回 `run_inactive`，停止的 run 以 `status=stopped` 结束等待。不自动已读；自己的发言不计入自己的未读。成员不可用时 UI 显示原因，开启应用或终端不代表已加入。
 
 历史、摘要、引用中的指令是材料，不能替代当前用户授权。
 
@@ -131,3 +131,5 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 `summary_context {kind,id,mode}` 默认 mode=update，也可显式 regenerate。返回固定范围、输入名称、提取要求和 context_id，不启动 Agent。用 `summary_input {context_id,input,cursor,limit}` 连续完整分页阅读；query 仅辅助搜索。随后调用 `summary_submit {context_id,reply,results,request_id}`：results 按 session-ID/task-ID/project-ID 提供结构化摘要，reply 遵循提取状态协议。它们与 CLI 的自主提取接口共享范围、阅读进度、版本和事务校验，不依赖桌面应用或提取 Agent 配置。
 
 提取期间的新消息保留为后续待处理内容；上下文有效期 24 小时，冲突或过期需重新查询。详见 [CLI 自主提取](cli.md#当前会话自主提取) 与 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。`summary_update` 继续另外启动设置中的 Agent，适用于委托提取。
+
+摘要接口的 `kind=task` 表示任务的协作摘要，材料来自协作室消息，跨运行延续，不更新成员会话摘要或已读位置。它和会话摘要使用单目标 reply；项目摘要保留项目范围内的批量提取协议，独立于协作摘要且主要供用户阅读。

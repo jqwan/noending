@@ -564,9 +564,9 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
         .unwrap();
         let view = f.call(&[kind, "summary", id]).unwrap();
         assert_eq!(view["revision"], 1);
-        assert_eq!(view["pending"], true);
+        assert_eq!(view["pending"], kind == "project");
     }
-    assert!(f.db().workstream_frontiers(tid).unwrap().is_empty());
+
     assert!(
         crate::storage::project_context_repo::frontiers(&f.db().read(), pid)
             .unwrap()

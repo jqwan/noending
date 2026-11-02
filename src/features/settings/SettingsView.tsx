@@ -1,3 +1,5 @@
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -52,7 +54,7 @@ function AppearanceSettings() {
   };
 
   return (
-    <section>
+    <section className="ui-section">
       <div className="settings-section-header">
         <div>
           <h3 style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 0 }}>
@@ -137,7 +139,7 @@ function CopyButton({ value, title = "复制路径" }: { value: string; title?: 
   return (
     <button
       type="button"
-      className={`btn ghost icon-button small session-field-copy-btn${copied ? " copied" : ""}`}
+      className={`btn ghost icon-button small detail-field-copy${copied ? " copied" : ""}`}
       title={copied ? "已复制" : title}
       aria-label={copied ? "已复制" : title}
       onClick={onCopy}
@@ -164,7 +166,7 @@ function WorkspaceStorageSettings() {
 
   if (!settings) {
     return (
-      <section>
+      <section className="ui-section">
         <div className="settings-section-header">
           <div>
             <h3>数据存储目录</h3>
@@ -194,7 +196,7 @@ function WorkspaceStorageSettings() {
   const envPinned = settings.home_source === "explicit_env";
 
   return (
-    <section>
+    <section className="ui-section">
       <div className="settings-section-header">
         <div>
           <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
@@ -216,7 +218,7 @@ function WorkspaceStorageSettings() {
         </button>
       </div>
 
-      <div className="settings-storage-card">
+      <div className="inset-card settings-storage-card">
         <div className="settings-storage-card-header">
           <div className="settings-storage-card-title">
             <Icon name="folder" />
@@ -331,10 +333,10 @@ function WarnCallout({ title, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="settings-callout warn">
+    <Notice tone="warning">
       <div className="settings-callout-title">{title}</div>
       <div className="settings-callout-body">{children}</div>
-    </div>
+    </Notice>
   );
 }
 
@@ -455,12 +457,12 @@ function ChangeHomeModal({ current, onClose, onSaved }: {
         </div>
       )}
 
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--border-subtle)", gap: 10 }}>
+      <DialogActions>
         <button className="btn" onClick={onClose} disabled={busy}>取消</button>
         <button className="btn primary" disabled={!canSubmit} onClick={submit}>
           {busy ? "登记中…" : "登记并在下次启动迁移"}
         </button>
-      </div>
+      </DialogActions>
     </Modal>
   );
 }

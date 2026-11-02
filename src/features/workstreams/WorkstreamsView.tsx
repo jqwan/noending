@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
 import { useEffect, useMemo, useState } from "react";
@@ -385,12 +386,12 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           <p style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
             确定要永久删除 <b>{purgeTarget.title}</b> 吗？任务本身、工作路径列表、Context 和审阅数据会被删除，关联会话及其事件历史会保留。
           </p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setPurgeTarget(null)} disabled={Boolean(taskActionId)}>取消</button>
             <button className="btn danger" onClick={purgeTask} disabled={Boolean(taskActionId)}>
               {taskActionId ? "删除中…" : "永久删除"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
 
@@ -408,12 +409,12 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
             工作路径、项目、会话及会话事件历史会保留。某个任务删除失败时，其他任务仍会继续处理，失败的任务会留在已归档。
           </p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
             <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
               {bulkPurgeBusy ? "删除中…" : "删除全部"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
 

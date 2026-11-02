@@ -1,3 +1,4 @@
+import PopupMenu, { PopupMenuItem } from "../components/PopupMenu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../components/Icon";
 import { SIDEBAR_GROUP_OPTIONS, type SidebarGroupBy } from "./sidebarModel";
@@ -44,17 +45,17 @@ export default function SidebarGroupMenu({
         <Icon name="chevronDown" className="sidebar-group-arrow" />
       </button>
       {open && (
-        <div className="sidebar-group-menu" role="menu">
-          <div className="sidebar-group-menu-header">
+        <PopupMenu className="sidebar-group-menu" role="menu" onDismiss={() => setOpen(false)}>
+          <div className="popup-menu-heading">
             <span>会话归类</span>
           </div>
           {SIDEBAR_GROUP_OPTIONS.map((opt) => {
             const active = groupBy === opt.key;
             return (
-              <button
+              <PopupMenuItem selected={active}
                 key={opt.key}
                 type="button"
-                className={`sidebar-group-item${active ? " checked" : ""}`}
+                className="sidebar-group-item"
                 onClick={() => {
                   onSelectGroupBy(opt.key);
                   setOpen(false);
@@ -66,15 +67,11 @@ export default function SidebarGroupMenu({
                   <Icon name={opt.icon} />
                 </span>
                 <span className="sidebar-group-item-label">{opt.fullLabel}</span>
-                {active && (
-                  <span className="sidebar-group-item-check">
-                    <Icon name="check" />
-                  </span>
-                )}
-              </button>
+
+              </PopupMenuItem>
             );
           })}
-        </div>
+        </PopupMenu>
       )}
     </div>
   );

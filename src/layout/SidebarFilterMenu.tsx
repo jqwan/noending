@@ -1,3 +1,4 @@
+import PopupMenu, { PopupMenuItem } from "../components/PopupMenu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "../components/Icon";
 import {
@@ -59,32 +60,30 @@ export default function SidebarFilterMenu({
         <Icon name="sliders" />
       </button>
       {open && (
-        <div className="sidebar-filter-menu" role="menu">
-          <div className="sidebar-filter-menu-header">
+        <PopupMenu className="sidebar-filter-menu" role="menu" onDismiss={() => setOpen(false)}>
+          <div className="popup-menu-heading">
             <span>排序方式</span>
           </div>
           {SIDEBAR_SORT_OPTIONS.map((opt) => {
             const checked = sortBy === opt.key;
             return (
-              <button
+              <PopupMenuItem selected={checked}
                 key={opt.key}
                 type="button"
-                className={`sidebar-filter-item radio${checked ? " checked" : ""}`}
+                className="sidebar-filter-item"
                 onClick={() => onSelectSortBy(opt.key)}
                 role="menuitemradio"
                 aria-checked={checked}
               >
-                <span className="sidebar-filter-radio">
-                  {checked && <span className="sidebar-filter-radio-dot" />}
-                </span>
+
                 <span className="sidebar-filter-label">{opt.label}</span>
-              </button>
+              </PopupMenuItem>
             );
           })}
 
-          <div className="sidebar-filter-menu-divider" />
+          <div className="popup-menu-divider" />
 
-          <div className="sidebar-filter-menu-header">
+          <div className="popup-menu-heading">
             <span>筛选条件</span>
             {filters.length > 0 && (
               <button
@@ -99,40 +98,36 @@ export default function SidebarFilterMenu({
           {SIDEBAR_FILTER_OPTIONS.map((opt) => {
             const checked = filters.includes(opt.key);
             return (
-              <button
+              <PopupMenuItem selected={checked}
                 key={opt.key}
                 type="button"
-                className={`sidebar-filter-item${checked ? " checked" : ""}`}
+                className="sidebar-filter-item"
                 onClick={() => onToggleFilter(opt.key)}
                 role="menuitemcheckbox"
                 aria-checked={checked}
               >
-                <span className="sidebar-filter-check">
-                  {checked && <Icon name="check" />}
-                </span>
+
                 <span className="sidebar-filter-label">{opt.label}</span>
-              </button>
+              </PopupMenuItem>
             );
           })}
 
-          <div className="sidebar-filter-menu-divider" />
+          <div className="popup-menu-divider" />
 
-          <div className="sidebar-filter-menu-header">
+          <div className="popup-menu-heading">
             <span>显示设置</span>
           </div>
-          <button
+          <PopupMenuItem selected={showSessionIcons}
             type="button"
-            className={`sidebar-filter-item${showSessionIcons ? " checked" : ""}`}
+            className="sidebar-filter-item"
             onClick={onToggleShowSessionIcons}
             role="menuitemcheckbox"
             aria-checked={showSessionIcons}
           >
-            <span className="sidebar-filter-check">
-              {showSessionIcons && <Icon name="check" />}
-            </span>
+
             <span className="sidebar-filter-label">显示会话图标</span>
-          </button>
-        </div>
+          </PopupMenuItem>
+        </PopupMenu>
       )}
     </div>
   );

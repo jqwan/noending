@@ -181,11 +181,15 @@ fn context_footprint(db: &Db) -> (i64, i64, i64) {
             |r| r.get(0),
         )
         .unwrap();
-    (
-        count(db, "workstream_session_frontiers"),
-        summaries,
-        count(db, "session_contexts"),
-    )
+    let consumed: i64 = db
+        .read()
+        .query_row(
+            "SELECT COUNT(*) FROM workstream_context_state WHERE processed_through_seq>0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    (consumed, summaries, count(db, "session_contexts"))
 }
 
 /// The core invariant: ingestion runs, Context does not — even for a Session
@@ -251,10 +255,6 @@ fn ingestion_writes_facts_and_zero_context() {
             .summary
             .is_empty(),
         "the Owner Workstream got no summary"
-    );
-    assert!(
-        db.workstream_frontiers(&ws.id).unwrap().is_empty(),
-        "no Workstream frontier was recorded"
     );
     assert_eq!(
         db.get_workstream_context_state(&ws.id)

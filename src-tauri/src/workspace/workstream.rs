@@ -190,14 +190,17 @@ pub fn projects_for_workstream(db: &Db, workstream_id: &str) -> Result<Vec<Works
     let mut projects = Vec::new();
     for id in ids {
         if let Some(project) = db.get_project(&id)? {
-            projects.push(WorkstreamProject {
-                id,
-                name: project.name,
-            });
+            projects.push(project);
         }
     }
-    projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-    Ok(projects)
+    projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+    Ok(projects
+        .into_iter()
+        .map(|project| WorkstreamProject {
+            id: project.id,
+            name: project.name,
+        })
+        .collect())
 }
 
 // Helpers

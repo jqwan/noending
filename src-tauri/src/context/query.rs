@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) enum Input {
+    Collaboration {
+        snapshot: super::collaboration::Snapshot,
+    },
     Session {
         snapshot: SessionSnapshot,
         include_summary: bool,
@@ -31,9 +34,10 @@ pub(super) struct TaskState {
     pub context_revision: i64,
     pub input_revision: i64,
     pub consumed_input_revision: i64,
+    pub through_seq: i64,
 }
 pub(super) fn task_state(conn: &Connection, id: &str) -> Result<TaskState> {
-    Ok(conn.query_row("SELECT context_revision,input_revision,consumed_input_revision FROM workstream_context_state WHERE workstream_id=?1", [id], |r| Ok(TaskState { context_revision:r.get(0)?, input_revision:r.get(1)?, consumed_input_revision:r.get(2)? })).optional()?.unwrap_or(TaskState {context_revision:0,input_revision:0,consumed_input_revision:0}))
+    Ok(conn.query_row("SELECT context_revision,input_revision,consumed_input_revision,processed_through_seq FROM workstream_context_state WHERE workstream_id=?1", [id], |r| Ok(TaskState { context_revision:r.get(0)?, input_revision:r.get(1)?, consumed_input_revision:r.get(2)?, through_seq:r.get(3)? })).optional()?.unwrap_or(TaskState {context_revision:0,input_revision:0,consumed_input_revision:0, through_seq:0}))
 }
 pub(super) struct ProjectState {
     pub revision: i64,
@@ -70,6 +74,7 @@ pub(super) fn target_summary(
 impl Input {
     pub fn count(&self, conn: &Connection) -> Result<usize> {
         match self {
+            Self::Collaboration { snapshot } => snapshot.count(conn),
             Self::Session {
                 snapshot,
                 full_history,
@@ -104,6 +109,7 @@ impl Input {
             return Err(other("游标超出输入范围"));
         }
         let value = match self {
+            Self::Collaboration { snapshot } => snapshot.page(&tx, cursor, limit, search)?,
             Self::Session {
                 snapshot,
                 include_summary,

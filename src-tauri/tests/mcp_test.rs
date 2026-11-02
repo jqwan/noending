@@ -1013,6 +1013,11 @@ fn current_session_extraction_uses_scoped_mcp_pages_and_commits_without_an_agent
         json!({"title":"MCP extraction","description":"Goal"}),
     );
     let id = created["data"]["task"]["id"].as_str().unwrap();
+    let db = Db::open(&f.home.db_path).unwrap();
+    let timestamp = noending_lib::storage::now();
+    db.write().execute("INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at) VALUES(?1,?1,'[]',?2,?2)",rusqlite::params![id,timestamp]).unwrap();
+    db.write().execute("INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES(?1,?1,'stopped',?2)",rusqlite::params![id,timestamp]).unwrap();
+    db.write().execute("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) VALUES('message',?1,?1,1,'text','MCP collaboration decision',?2)",rusqlite::params![id,timestamp]).unwrap();
     let disabled = client.call("summary_config_set", json!({"agent":"none"}));
     assert_eq!(disabled["ok"], true);
     let c = client.call(
@@ -1027,9 +1032,15 @@ fn current_session_extraction_uses_scoped_mcp_pages_and_commits_without_an_agent
     );
     assert_eq!(page["ok"], true, "{page}");
     assert_eq!(page["data"]["end"], true);
-    let out=client.call("summary_submit",json!({"context_id":cid,"reply":{"status":"completed","skipped_session_ids":[]},"results":{format!("task-{id}"):{"summary":{"items":[{"title":"MCP goal","description":"Goal","details":[]}]}}}}));
+    assert_eq!(
+        page["data"]["records"][1]["record"]["content"],
+        "MCP collaboration decision"
+    );
+    let out=client.call("summary_submit",json!({"context_id":cid,"reply":{"status":"completed"},"results":{format!("task-{id}"):{"summary":{"items":[{"title":"MCP goal","description":"Goal","details":[]}]}}}}));
     assert_eq!(out["ok"], true, "{out}");
     let summary = client.call("summary_get", json!({"kind":"task","id":id}));
+    assert_eq!(summary["data"]["pending_messages"], 0);
+    assert_eq!(summary["data"]["processed_through_seq"], 1);
     assert_eq!(summary["data"]["summary"]["items"][0]["title"], "MCP goal");
 }
 
@@ -1076,9 +1087,31 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     let view = c.ok("room_show", json!({"room":room}));
     assert_eq!(view["run"]["status"], "starting");
     assert_eq!(view["members"].as_array().unwrap().len(), 2);
+    let prompts: Vec<&str> = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["join_prompt"].as_str().unwrap_or_default())
+        .collect();
+    assert!(
+        prompts[0].contains("coord") && prompts[1].contains("peer"),
+        "each member prompt carries its own session coordinates: {view}"
+    );
 
     let page = c.ok("room_messages", json!({"room":room,"run":run}));
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
+
+    // Speaking requires a live participation, so the member joins first.
+    let joined = c.ok(
+        "room_join",
+        json!({"room":room,"run":run,"from_session":"peer"}),
+    );
+    assert!(
+        joined["notice"]
+            .as_str()
+            .is_some_and(|n| n.contains("wait")),
+        "join names the next action: {joined}"
+    );
 
     let sent = c.ok(
         "room_send",
@@ -1107,6 +1140,14 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     let last = page["items"].as_array().unwrap().last().unwrap();
     assert_eq!(last["kind"], "stop");
     assert_eq!(last["sender_session_id"], "coord");
+    assert!(
+        view["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["join_prompt"].is_null()),
+        "a stopped run offers nothing to join: {view}"
+    );
 
     let closed = c.call(
         "room_send",
@@ -1167,6 +1208,12 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         json!({"room":room,"run":run,"from_session":"peer"}),
     );
     assert!(joined["connection_id"].as_str().is_some());
+    assert!(
+        joined["notice"]
+            .as_str()
+            .is_some_and(|n| n.contains("room wait")),
+        "a join answer names the next action: {joined}"
+    );
 
     // The start notice is the first batch; the wait returns immediately.
     let waited = c.ok(
@@ -1176,6 +1223,10 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
     assert_eq!(waited["status"], "messages");
     assert_eq!(waited["items"].as_array().unwrap().len(), 1);
     assert_eq!(waited["items"][0]["kind"], "start");
+    assert!(
+        waited["notice"].as_str().is_some_and(|n| n.contains("ack")),
+        "a delivered batch tells the member to read then acknowledge: {waited}"
+    );
 
     // Acknowledge, then an empty mailbox honours the server bound.
     c.ok(
@@ -1187,8 +1238,23 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":1}),
     );
     assert_eq!(waited["status"], "timeout");
+    assert!(
+        waited["notice"]
+            .as_str()
+            .is_some_and(|n| n.contains("协作未结束")),
+        "a timeout must not read as the end of the collaboration: {waited}"
+    );
 
     // A message written by the coordinator arrives in the next wait.
+    db.collaboration_join(
+        &room,
+        &run,
+        "coord",
+        "cli",
+        "cli-coord",
+        &noending_lib::storage::now(),
+    )
+    .unwrap();
     db.collaboration_send(&room, &run, Some("coord"), "来自负责人", "m1")
         .unwrap();
     let waited = c.ok(
@@ -1208,6 +1274,11 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         .unwrap();
     assert_eq!(member["phase"], "processing");
     assert_eq!(member["connection_state"], "connected");
+    let prompt = member["join_prompt"].as_str().unwrap_or_default();
+    assert!(
+        prompt.contains(&run) && prompt.contains("不要因此提交宿主最终回复"),
+        "the member entry carries the backend prompt for this run: {member}"
+    );
 
     // No wait request is active: the MCP participation still renews during
     // model work, and the heartbeat must leave its processing phase intact.
@@ -1252,12 +1323,26 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         "a new MCP connection cannot reuse a resource owned by the closed connection"
     );
 
-    // Leaving also ends an already-pending wait, rather than letting the old
-    // participant keep receiving messages until its optional timeout.
-    c.ok(
+    // A lower ack reports the position that actually took effect.
+    let read_seq = waited["items"][0]["seq"].as_i64().unwrap();
+    let acked = c.ok(
         "room_ack",
-        json!({"room":room,"run":run,"from_session":"peer","through_seq":waited["items"][0]["seq"]}),
+        json!({"room":room,"run":run,"from_session":"peer","through_seq":read_seq}),
     );
+    assert_eq!(acked["through_seq"], read_seq);
+    let lower = c.ok(
+        "room_ack",
+        json!({"room":room,"run":run,"from_session":"peer","through_seq":0}),
+    );
+    assert_eq!(lower["through_seq"], read_seq);
+
+    let accepted_args = json!({"room":room,"run":run,"from_session":"peer",
+        "message":"已查阅负责人消息","request_id":"mcp-accepted-before-leave"});
+    let accepted = c.ok("room_send", accepted_args.clone());
+
+    // Leaving ends a pending wait and rejects new sends, but an accepted
+    // request can still recover its original receipt.
+
     let pending_wait = c.begin(
         "tools/call",
         json!({"name":"room_wait","arguments":
@@ -1305,5 +1390,12 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         json!({"room":room,"run":run,"from_session":"peer","timeout_seconds":1}),
     );
     assert_eq!(premature["error"]["code"], "join_required");
+    let rejected = c.call(
+        "room_send",
+        json!({"room":room,"run":run,"from_session":"peer","message":"退场后新发言"}),
+    );
+    assert_eq!(rejected["error"]["code"], "operation_rejected");
+    let replayed = c.ok("room_send", accepted_args);
+    assert_eq!(replayed["id"], accepted["id"]);
     c.finish();
 }

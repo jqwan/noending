@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
@@ -487,12 +488,12 @@ export default function SessionsView({ navigate, scope }: {
           <div className="card hairline" style={{ marginBottom: 12 }}>
             <p style={{ margin: 0 }}>Agent 原始会话不会被删除，之后可以从已归档恢复。</p>
           </div>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setArchiveSessionId(null)} disabled={archiveBusy}>取消</button>
             <button className="btn primary" onClick={archive} disabled={archiveBusy}>
               {archiveBusy ? "处理中…" : "归档"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
 
@@ -511,12 +512,12 @@ export default function SessionsView({ navigate, scope }: {
             每个会话都会删除 NoEnding 的本地副本；源文件不会被删除，所以源仍存在的会话
             会在后续同步中作为<b>新会话</b>重新入库（新 id、无跟踪任务、无摘要）。
           </p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setBulkPurgeOpen(false)} disabled={bulkPurgeBusy}>取消</button>
             <button className="btn danger" onClick={bulkPurge} disabled={bulkPurgeBusy}>
               {bulkPurgeBusy ? "删除中…" : "删除全部"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
 

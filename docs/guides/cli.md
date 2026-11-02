@@ -196,7 +196,7 @@ ne room leave ROOM --run RUN --from-session SELF
 ne room stop ROOM --run RUN --from-session SELF
 ```
 
-开启、成员选择、负责人更换和单独重试唤醒是桌面用户入口，模型没有开启或配置协作室的接口。成员模型在收到加入提示后用 `join` 建立参与连接（CLI 自动拉起驻留监听进程，每 10 秒续租；30 秒无续租显示连接中断），随后循环 `wait` → 处理批次 → `ack` → 继续 `wait`。`wait` 进入时标记 listening，交付批次标记 processing；不自动已读，`ack` 只确认已处理位置且仅向前。自己的发言不计入自己的未读。停止后的 run 返回 `status=stopped`，旧 run 报 `run_inactive`；`stop` 仅当前负责人可用。`leave` 是本人参与的清理，可重复调用，不解除任务跟踪。
+开启、成员选择、负责人更换和单独重试唤醒是桌面用户入口，模型没有开启或配置协作室的接口。成员模型在收到加入提示后用 `join` 建立参与连接（CLI 自动拉起驻留监听进程，每 10 秒续租；30 秒无续租显示连接中断），随后循环 `wait` → 完整查阅批次 → 按需发言 → `ack` 已读部分 → 继续 `wait`；空闲或超时不得提交宿主最终回复。`join` 与 `wait` 回包附带 `notice` 操作提示；`wait` 进入时标记 listening，交付批次标记 processing；不自动已读，`ack` 回执返回实际生效位置且仅向前。`send` 要求成员有效参与，已退场成员发言被拒（用户入口除外）。自己的发言不计入自己的未读。停止后的 run 返回 `status=stopped`，旧 run 报 `run_inactive`；`stop` 仅当前负责人可用。`leave` 是本人参与的清理，可重复调用，不解除任务跟踪。
 
 ## 摘要
 
@@ -218,7 +218,7 @@ ne project summary <id> --item 1 --revision 2
 
 默认提取要求会话最多 15 个事项，任务和项目最多 10 个事项；建议标题不超过 20 字符、描述不超过 60 字符、每条细则不超过 80 字符、整个事项不超过 300 字符。这些用于指导整理，不据此截断或拒绝结果。延续事项保留 ID，新事项由程序生成 ID。
 
-摘要提取 CLI 进程的总运行上限为：单会话 30 分钟，任务／项目整批 90 分钟。增量更新与重新生成使用相同上限；任务／项目的上限包含关联会话摘要的处理。
+摘要提取 CLI 进程的总运行上限为：单会话 30 分钟，协作摘要与项目摘要 90 分钟。增量更新与重新生成使用相同上限；项目的上限包含关联会话摘要的处理。
 
 ```sh
 ne summary update session <id>
@@ -228,7 +228,7 @@ ne summary update project <id>
 
 ## 任务事项
 
-任务描述保存当前目标、范围、验收要求及一两句已核实的整体现状，说明目前已具备什么、主要还缺什么；重要阶段变化时融合更新，不逐轮追加。任务事项保存具体执行进展和完成情况；任务摘要保存关联会话的背景、决策与成果。任务事项独立存储，摘要提取不会改变它们，提取也不直接读取任务事项作为输入。需要长期稳定保留的执行要求写入描述或任务事项。
+任务描述仍为一个可由用户编辑的文本字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符。目标说明问题和预期结果，必要的范围与验收要求融入其中；现状说明已核实的整体阶段、主要缺口或关键阻碍。Agent 按用户明确要求调整目标，在重要阶段变化时融合更新现状，保留用户确定的要求，不逐轮追加。任务事项保存具体执行进展和完成情况；协作摘要保存该任务协作室的重要共识、原因、依赖和交接背景。任务事项仅作提取背景，保持独立存储，摘要提取不会改变它们或成员已读位置。需要长期稳定保留的执行要求写入描述或任务事项。
 
 追加单条进展使用 `task item note`，无需读取后重写全部细则，也无需 revision。后端在当前值上事务性追加，保留已有细则和完成状态、递增事项版本。重试沿用同一 request_id，避免重复追加；需要融合、修正或精简整份进展时，读取最新细则和 revision 后用 update 替换。追加不自动整理重复内容，不将一条新记录误作完整细则提交。
 
@@ -256,10 +256,10 @@ ne task item delete TASK_ID --item-id ITEM_ID --revision 5
 - `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装 Agent 的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。
 - `sessions` 汇总范围内会话数量、曾成功检查数、从未成功检查数、最近检查失败／来源缺失数，以及成功检查时间的最早／最晚值；这些计数可交叉，曾成功检查的会话也可能最近失败。查询不验证当前磁盘状态。
 - `summary` 与普通摘要读取返回的 `freshness` 含义相同。`refreshed_at` 是最近成功提取并提交的时间（含保留摘要但确认材料已处理的跳过结果）；`updated_at` 表示摘要记录的更新时间，覆盖状态仍需结合消费位置判断。
-- `pending_messages` 是已入库、尚未被目标摘要消费的 user/assistant 消息数，按会话去重，不是长消息分页块数或工具事件数。任务／项目以自身消费位置计算，单独刷新子会话摘要不会将这个计数归零。新关联会话的未覆盖消息也计入，因此它不等同于按时间统计“刚刚新产生”的消息。
+- `pending_messages` 是已入库、尚未被目标摘要消费的 user/assistant 消息数，按会话去重，不是长消息分页块数或工具事件数。协作摘要统计房间消息；项目按自身消费位置计算，单独刷新子会话摘要不会将项目计数归零。新关联会话的未覆盖消息也计入，因此它不等同于按时间统计“刚刚新产生”的消息。
 - `summary_changed_sessions` 表示会话摘要版本变化、尚未汇入目标；`scope_changed` 表示关联或元数据输入变化。`history_rewritten_sessions` 表示已消费历史发生改写；`unknown_coverage_sessions` 表示消费位置无法确定。后两者非零时 `pending_messages=null`，不冒充零条新增；结合 `pending` 决定是否更新或重新提取。
 
-版本 1 数据会在同一事务内兼容升级，保留现有数据。无法还原的同步／提取时间为 `null`；只有可以通过消费版本核实的位置才会补齐。零条待处理只描述已入库材料，尚未检查的源文件可能仍有新内容。
+无法确定的同步／提取时间为 `null`。零条待处理只描述已入库材料，尚未检查的源文件可能仍有新内容。
 
 ## 会话同步
 
@@ -309,10 +309,12 @@ ne summary search-input <context_id> --input <name> --query "关键词"
 ne summary submit <context_id> --file result.json --request-id extraction-1
 ```
 
-`summary context` 只查询范围，返回 context_id、目标、模式、提取要求及输入清单；不会新建业务任务、启动 Agent 或后台工作进程。默认 update：保留有效旧摘要，读取未处理消息；regenerate：按完整历史重新生成。任务／项目范围由后端关联关系决定，包含已归档会话；先处理 need_update=true 的会话，再综合目标摘要。重新生成还需完整阅读清单中的 history_input_file，不以旧摘要为事实依据。
+`summary context` 只查询范围，返回 context_id、目标、模式、提取要求及输入清单；不会新建业务任务、启动 Agent 或后台工作进程。默认 update：保留有效旧摘要，读取未处理消息；regenerate：按完整历史重新生成。kind=task 提取任务协作室消息，跨多次协作运行延续，不提取成员会话摘要；没有协作消息时不调用模型。项目范围由项目目录关联关系决定，包含已归档会话；先处理 need_update=true 的会话，再综合项目摘要。重新生成还需完整阅读清单中的 history_input_file，不以旧摘要为事实依据。
 
 `summary read` 从 cursor=0 开始，跟随 next_cursor 至 end=true，长消息完整拼接；搜索仅供辅助，不计完整阅读。范围固定截止位置，期间追加消息不纳入本次。上下文保存临时版本及阅读进度，有效期 24 小时；历史、关联或摘要版本变化返回冲突，需重新查询，不沿用旧结果。
 
-提交文件为 `{ "reply": {"status":"completed"}, "results": { "session-<id>": {"summary":{"items":[{"title":"结论","description":"说明","details":[]}]}} } }`。任务／项目使用批量 reply（包括 skipped_session_ids，部分失败还包括 failed_sessions）。results 的键为 session-ID/task-ID/project-ID；正常跳过及失败目标不提供结果。后端沿用材料阅读、输出、事项 ID 和并发校验，事务性入库并更新覆盖位置，不修改任务事项。成功后上下文被消费，同一 request_id 重试使用回执。详细规则见 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。
+提交文件为 `{ "reply": {"status":"completed"}, "results": { "session-<id>": {"summary":{"items":[{"title":"结论","description":"说明","details":[]}]}} } }`。会话和协作摘要使用单目标 reply；只有项目使用批量 reply（包括 skipped_session_ids，部分失败还包括 failed_sessions）。results 的键为 session-ID/task-ID/project-ID；正常跳过及失败目标不提供结果。后端沿用材料阅读、输出、事项 ID 和并发校验，事务性入库并更新覆盖位置，不修改任务事项。成功后上下文被消费，同一 request_id 重试使用回执。详细规则见 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。
 
 `summary update/regenerate` 保留原行为，另外启动配置中的 Agent 并等待完成；不要将它们与当前会话自主提取混淆。
+
+`task summary` 返回协作摘要，`processed_through_seq` 为已整理的房间消息位置，`pending_messages` 为未整理消息数；不表示成员已读。项目摘要仍供用户阅读，独立于协作摘要。

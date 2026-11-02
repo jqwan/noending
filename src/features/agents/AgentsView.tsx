@@ -1,3 +1,7 @@
+import { DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import CompactPath from "../../components/CompactPath";
+import DialogActions from "../../components/DialogActions";
 import { useOperationState } from "../../hooks/useOperationState";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -110,86 +114,20 @@ function SourceRow({
   onRemove: (src: IngestSource) => void;
   onCopy: (path: string) => void;
 }) {
-  return (
-    <div className="agent-source-row">
-      <div className="agent-source-main">
-        <span
-          role="button"
-          tabIndex={0}
-          className="mono small agent-source-path path-link path-text-with-icon"
-          style={{
-            userSelect: "all",
-            color: "var(--text-primary)",
-          }}
-          title={src.path}
-          onClick={() => void openPath(src.path)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              void openPath(src.path);
-            }
-          }}
-        >
-          <Icon name="folder" />
-          <span>{src.path}</span>
-        </span>
-        <button
-          type="button"
-          className="btn ghost icon-button small"
-          onClick={(e) => {
-            e.stopPropagation();
-            void onCopy(src.path);
-          }}
-          aria-label="复制完整路径"
-          title="复制完整路径"
-        >
-          <Icon name="copy" />
-        </button>
-        <button
-          type="button"
-          className="btn small ghost icon-button"
-          disabled={running}
-          onClick={() => onScan(src.id)}
-          aria-label="增量同步"
-          title="增量同步"
-        >
-          <Icon name="refresh" />
-        </button>
-        {src.origin === "user" && (
-          <button
-            type="button"
-            className="btn small ghost icon-button"
-            disabled={running}
-            onClick={() => onRemove(src)}
-            aria-label="移除此自定义目录"
-            title="移除目录"
-          >
-            <Icon name="trash" />
-          </button>
-        )}
-        {src.origin === "default" && (
-          <span className="badge" title="按当前 Agent 默认存储目录登记">
-            默认
-          </span>
-        )}
-        {!src.exists && (
-          <span className="badge warn" title="目录不存在">
-            目录不存在
-          </span>
-        )}
-      </div>
-
-      <button
-        type="button"
-        className="btn small ghost agent-reingest-btn"
-        disabled={running}
-        onClick={() => onReingest(src)}
-        title="全量同步"
-      >
-        全量同步
-      </button>
-    </div>
-  );
+  return <DetailListRow icon={<Icon name="folder" />}
+    title={<CompactPath path={src.path} />} titleHint={src.path}
+    onOpen={() => void openPath(src.path)}
+    meta={<>
+      {src.origin === "default" && <span className="badge" title="按当前 Agent 默认存储目录登记">默认</span>}
+      {!src.exists && <span className="badge warn" title="目录不存在">目录不存在</span>}
+    </>}
+    actions={<>
+      <button type="button" className="btn ghost icon-button small" onClick={() => void onCopy(src.path)} aria-label="复制完整路径" title="复制完整路径"><Icon name="copy" /></button>
+      <button type="button" className="btn ghost icon-button small" disabled={running} onClick={() => onScan(src.id)} aria-label="增量同步" title="增量同步"><Icon name="refresh" /></button>
+      {src.origin === "user" && <button type="button" className="btn ghost icon-button small" disabled={running} onClick={() => onRemove(src)} aria-label="移除此自定义目录" title="移除目录"><Icon name="trash" /></button>}
+      <button type="button" className="btn small ghost" disabled={running} onClick={() => onReingest(src)} title="全量同步">全量同步</button>
+    </>}
+  />;
 }
 
 export default function AgentsView({
@@ -464,7 +402,7 @@ export default function AgentsView({
     const agentFormats = SESSION_FORMATS.filter((f) => f.agent === initialAgent);
 
     return (
-      <div className="main agents-page agent-detail-page">
+      <DetailPanelProvider kind="agent"><div className="main agents-page agent-detail-page detail-page">
         <PageHeader
           title={
             <span className="session-title-with-icon" title={AGENT_LABELS[initialAgent]}>
@@ -502,11 +440,11 @@ export default function AgentsView({
             navigate={navigate}
             packagesSection={<AgentPackagesSection agent={initialAgent} navigate={navigate} />}
             sourcesSection={
-              <section className="card agent-settings-section agent-detail-sources">
-                <h2>
+              <DetailSection sectionId="sources" label="历史会话来源" className="agent-detail-sources" title={<>
                   <Icon name="folder" />
-                  <span>历史会话来源</span>
-                </h2>
+                  <span>历史会话来源（{agentSources.length}）</span>
+                </>}>
+
                 {agentFormats.map((fmt, fIdx) => {
                   const formatSources = agentSources.filter((s) => formatOf(s) === fmt.id);
                   const isMultiFormat = agentFormats.length > 1;
@@ -532,7 +470,7 @@ export default function AgentsView({
                             borderBottom: "1px solid var(--border-subtle)",
                           }}
                         >
-                          <span style={{ fontSize: 13, fontWeight: 600 }}>{fmt.label}</span>
+                          <span style={{ fontSize: "var(--font-size-base)", fontWeight: "var(--weight-semibold)" }}>{fmt.label}</span>
                           <span className="badge" title="打开方式">
                             {fmt.methods[0] === "terminal" ? "TUI" : "Desktop"}
                             {fmt.methods[0] === "desktop" && entry != null && !entry.desktop_app_present ? " · 未安装" : ""}
@@ -541,7 +479,7 @@ export default function AgentsView({
                       )}
 
                       {/* 来源目录列表 */}
-                      <div>
+                      <DetailList label="会话来源列表">
                         {formatSources.length === 0 ? (
                           <div className="muted small" style={{ padding: "8px 0" }}>
                             未配置监控来源目录。
@@ -568,11 +506,11 @@ export default function AgentsView({
                         >
                           + 添加来源目录
                         </button>
-                      </div>
+                      </DetailList>
                     </div>
                   );
                 })}
-              </section>
+              </DetailSection>
             }
           />
         </div>
@@ -587,17 +525,17 @@ export default function AgentsView({
               未变化的消息、会话、任务关联和已有 Context 将保留。
               <strong>完整读取成功后，将清理已失效的旧消息</strong>；读取或解析失败时保留上次可靠的消息结果。
             </p>
-            <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+            <DialogActions>
               <button className="btn" onClick={() => setReingestTarget(null)}>
                 取消
               </button>
               <button className="btn primary" onClick={() => void handleConfirmReingest()}>
                 全量同步
               </button>
-            </div>
+            </DialogActions>
           </Modal>
         )}
-      </div>
+      </div></DetailPanelProvider>
     );
   }
 
@@ -990,14 +928,14 @@ export default function AgentsView({
             未变化的消息、会话、任务关联和已有 Context 将保留。
             <strong>完整读取成功后，将清理已失效的旧消息</strong>；读取或解析失败时保留上次可靠的消息结果。
           </p>
-          <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+          <DialogActions>
             <button className="btn" onClick={() => setReingestTarget(null)}>
               取消
             </button>
             <button className="btn primary" onClick={() => void handleConfirmReingest()}>
               全量同步
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
     </div>

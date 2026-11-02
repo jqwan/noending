@@ -1,3 +1,5 @@
+import "./runtimeControls.css";
+import PopupMenu, { PopupMenuItem } from "../../components/PopupMenu";
 import { useEffect, useRef, useState } from "react";
 import Icon from "../../components/Icon";
 import type { Agent, AgentRuntimeOverrides } from "../../types";
@@ -96,45 +98,29 @@ export default function RuntimePopover({
 
       {/* 浮动卡片弹出层 */}
       {open && (
-        <div
+        <PopupMenu onDismiss={() => { setOpen(false); setSubpage("main"); }}
           className={`new-session-runtime-popover${direction === "down" ? " popover-down" : ""}`}
           role="dialog"
           aria-label="模型与推理设置"
         >
           {subpage === "main" && (
             <div className="new-session-popover-main">
-              <div
+              <PopupMenuItem
                 className="new-session-popover-row"
-                role="button"
-                tabIndex={0}
                 onClick={() => setSubpage("model")}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setSubpage("model");
-                  }
-                }}
               >
                 <span className="popover-row-label">模型</span>
                 <span className="popover-row-val">
                   <span className="truncate">{activeModelLabel}</span>
                   <Icon name="chevronRight" />
                 </span>
-              </div>
+              </PopupMenuItem>
 
-              <div
-                className={`new-session-popover-row ${!supportsEffort ? "disabled" : ""}`}
-                role="button"
-                tabIndex={supportsEffort ? 0 : -1}
-                aria-disabled={!supportsEffort}
+              <PopupMenuItem
+                className="new-session-popover-row"
+                disabled={!supportsEffort}
                 onClick={() => {
                   if (supportsEffort) setSubpage("effort");
-                }}
-                onKeyDown={(e) => {
-                  if (supportsEffort && (e.key === "Enter" || e.key === " ")) {
-                    e.preventDefault();
-                    setSubpage("effort");
-                  }
                 }}
               >
                 <span className="popover-row-label">推理等级</span>
@@ -142,7 +128,7 @@ export default function RuntimePopover({
                   <span className="truncate">{effectiveEffort || (supportsEffort ? "Agent 默认" : "不支持")}</span>
                   {supportsEffort && <Icon name="chevronRight" />}
                 </span>
-              </div>
+              </PopupMenuItem>
             </div>
           )}
 
@@ -171,28 +157,28 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
-                <button type="button" className={`popover-option-item ${!value.model ? "selected" : ""}`} onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>
+                <PopupMenuItem selected={!value.model} type="button" className="popover-option-item" onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>
                   <span>Agent 默认</span>
-                  {!value.model && <Icon name="check" />}
-                </button>
+
+                </PopupMenuItem>
                 {value.model && !models.some((m) => m.id === value.model) && (
-                  <button
+                  <PopupMenuItem selected={true}
                     type="button"
                     className="popover-option-item selected"
                     onClick={() => setSubpage("main")}
                     title={value.model}
                   >
                     <span className="truncate">{value.model}</span>
-                    <Icon name="check" />
-                  </button>
+
+                  </PopupMenuItem>
                 )}
                 {models.map((m) => {
                   const isSelected = selectedModelObj === m;
                   return (
-                    <button
+                    <PopupMenuItem selected={isSelected}
                       key={`${m.provider ?? ""}/${m.id}`}
                       type="button"
-                      className={`popover-option-item ${isSelected ? "selected" : ""}`}
+                      className="popover-option-item"
                       onClick={() => {
                         const nextEfforts = hasPerModelEfforts
                           ? m.supported_efforts
@@ -206,8 +192,8 @@ export default function RuntimePopover({
                       title={m.display_name ?? m.id}
                     >
                       <span className="truncate">{m.display_name ?? m.id}</span>
-                      {isSelected && <Icon name="check" />}
-                    </button>
+
+                    </PopupMenuItem>
                   );
                 })}
 
@@ -237,35 +223,35 @@ export default function RuntimePopover({
               </div>
 
               <div className="popover-options-list">
-                <button type="button" className={`popover-option-item ${!effectiveEffort ? "selected" : ""}`} onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>
+                <PopupMenuItem selected={!effectiveEffort} type="button" className="popover-option-item" onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>
                   <span>Agent 默认</span>
-                  {!effectiveEffort && <Icon name="check" />}
-                </button>
+
+                </PopupMenuItem>
                 {effectiveEffort && !availableEfforts.includes(effectiveEffort) && (
-                  <button
+                  <PopupMenuItem selected={true}
                     type="button"
                     className="popover-option-item selected"
                     onClick={() => setSubpage("main")}
                   >
                     <span className="truncate">{effectiveEffort}</span>
-                    <Icon name="check" />
-                  </button>
+
+                  </PopupMenuItem>
                 )}
                 {availableEfforts.map((lvl) => {
                   const isSelected = effectiveEffort === lvl;
                   return (
-                    <button
+                    <PopupMenuItem selected={isSelected}
                       key={lvl}
                       type="button"
-                      className={`popover-option-item ${isSelected ? "selected" : ""}`}
+                      className="popover-option-item"
                       onClick={() => {
                         onChange({ ...value, model: effectiveModelId, effort: lvl });
                         setSubpage("main");
                       }}
                     >
                       <span className="truncate">{lvl}</span>
-                      {isSelected && <Icon name="check" />}
-                    </button>
+
+                    </PopupMenuItem>
                   );
                 })}
 
@@ -277,7 +263,7 @@ export default function RuntimePopover({
               </div>
             </div>
           )}
-        </div>
+        </PopupMenu>
       )}
     </div>
   );

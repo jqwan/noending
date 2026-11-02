@@ -1816,7 +1816,7 @@ fn mailbox_wait_fails_clearly_when_the_recipient_session_is_deleted_mid_wait() {
 }
 
 #[test]
-fn cli_current_session_can_query_read_and_submit_a_task_summary_without_a_model() {
+fn cli_current_session_extracts_shared_collaboration_messages_without_a_model() {
     let f = Fixture::new();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
     let (_, created) = f.run(
@@ -1824,6 +1824,11 @@ fn cli_current_session_can_query_read_and_submit_a_task_summary_without_a_model(
         &["task", "create", "--title", "Scope of current session"],
     );
     let id = created["data"]["task"]["id"].as_str().unwrap();
+    let db = f.db.as_ref().unwrap();
+    let timestamp = noending::storage::now();
+    db.write().execute("INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at) VALUES(?1,?1,'[]',?2,?2)",rusqlite::params![id,timestamp]).unwrap();
+    db.write().execute("INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES(?1,?1,'stopped',?2)",rusqlite::params![id,timestamp]).unwrap();
+    db.write().execute("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) VALUES('message',?1,?1,1,'text','Members agreed on the protocol',?2)",rusqlite::params![id,timestamp]).unwrap();
     let (ok, _) = f.run(exe, &["summary", "config", "set", "--agent", "none"]);
     assert!(ok);
     let (ok, c) = f.run(
@@ -1848,8 +1853,12 @@ fn cli_current_session_can_query_read_and_submit_a_task_summary_without_a_model(
         "Scope of current session"
     );
     assert_eq!(page["data"]["end"], true);
+    assert_eq!(
+        page["data"]["records"][1]["record"]["content"],
+        "Members agreed on the protocol"
+    );
     let file = f.root.join("submission.json");
-    std::fs::write(&file,serde_json::json!({"reply":{"status":"completed","skipped_session_ids":[]},"results":{format!("task-{id}"):{"summary":{"items":[{"title":"Confirmed task scope","description":"Read from task description","details":[]}]}}}}).to_string()).unwrap();
+    std::fs::write(&file,serde_json::json!({"reply":{"status":"completed"},"results":{format!("task-{id}"):{"summary":{"items":[{"title":"Confirmed collaboration decision","description":"Read from shared messages","details":[]}]}}}}).to_string()).unwrap();
     let args = [
         "summary",
         "submit",
@@ -1867,9 +1876,11 @@ fn cli_current_session_can_query_read_and_submit_a_task_summary_without_a_model(
     assert_eq!(retry, out);
     let (ok, summary) = f.run(exe, &["task", "summary", id]);
     assert!(ok);
+    assert_eq!(summary["data"]["processed_through_seq"], 1);
+    assert_eq!(summary["data"]["pending_messages"], 0);
     assert_eq!(
         summary["data"]["summary"]["items"][0]["title"],
-        "Confirmed task scope"
+        "Confirmed collaboration decision"
     );
 }
 
@@ -1970,12 +1981,40 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     assert_eq!(view["data"]["members"].as_array().unwrap().len(), 2);
     assert_eq!(view["data"]["members"][0]["session_id"], "coord");
     assert_eq!(view["data"]["members"][0]["wake_method"], "desktop");
+    let prompt = view["data"]["members"][0]["join_prompt"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        prompt.contains(&run) && prompt.contains("不要因此提交宿主最终回复"),
+        "an active run carries the shared prompt the desktop copies: {view}"
+    );
 
     let (ok, page) = f.run(exe, &["room", "messages", &room, "--run", &run]);
     assert!(ok, "{page}");
     let items = page["data"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 2, "start notice + first user message");
     assert_eq!(items[0]["kind"], "start");
+
+    // Speaking requires a live participation: join first, then report.
+    let (ok, joined) = f.run(
+        exe,
+        &[
+            "room",
+            "join",
+            &room,
+            "--run",
+            &run,
+            "--from-session",
+            "peer",
+        ],
+    );
+    assert!(ok, "{joined}");
+    assert!(
+        joined["data"]["notice"]
+            .as_str()
+            .is_some_and(|n| n.contains("room wait")),
+        "the join answer names the next action: {joined}"
+    );
 
     let (ok, sent) = f.run(
         exe,
@@ -2038,6 +2077,13 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     );
     assert!(ok, "{stopped}");
     assert_eq!(stopped["data"]["run"]["status"], "stopped");
+    let (ok, after) = f.run(exe, &["room", "show", &room]);
+    assert!(ok, "{after}");
+    assert_eq!(
+        after["data"]["members"][0]["join_prompt"],
+        serde_json::Value::Null,
+        "a stopped run offers nothing to join: {after}"
+    );
     let (ok, page) = f.run(exe, &["room", "messages", &room]);
     assert!(ok, "{page}");
     let last = page["data"]["items"].as_array().unwrap().last().unwrap();
@@ -2224,6 +2270,15 @@ fn collaboration_participation_survives_across_real_cli_processes() {
     assert_eq!(waited["data"]["status"], "timeout");
 
     // A delivery from another process wakes the waiter with the batch.
+    db.collaboration_join(
+        &room,
+        &run,
+        "coord",
+        "cli",
+        "cli-coord",
+        &noending_lib::storage::now(),
+    )
+    .unwrap();
     let sent = db
         .collaboration_send(&room, &run, Some("coord"), "来自负责人", "m1")
         .unwrap();

@@ -64,8 +64,9 @@ it("shows and filters every related project in both board views", () => {
   const multiple = { ...card("跨项目任务"), projects: [{ id: "p-a", name: "项目甲" }, { id: "p-b", name: "项目乙" }] };
   state.cards = [multiple, card("无项目任务")];
   render(<WorkstreamsView navigate={() => {}} actionSeq={0} />);
-  const projectFilter = screen.getByText("全部项目").closest("select")!;
-  fireEvent.change(projectFilter, { target: { value: "p-b" } });
+  const projectFilter = screen.getByRole("button", { name: /^全部项目：/ });
+  fireEvent.click(projectFilter);
+  fireEvent.click(screen.getByRole("option", { name: "项目乙" }));
   screen.getByRole("button", { name: "跨项目任务" });
   screen.getByRole("button", { name: "新建会话" });
   expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
@@ -75,7 +76,8 @@ it("shows and filters every related project in both board views", () => {
   const listTask = screen.getByRole("button", { name: /跨项目任务.*项目甲.*项目乙/ });
   expect(within(listTask).getByText("项目甲")).toBeTruthy();
   expect(within(listTask).getByText("项目乙")).toBeTruthy();
-  fireEvent.change(projectFilter, { target: { value: "none" } });
+  fireEvent.click(projectFilter);
+  fireEvent.click(screen.getByRole("option", { name: "无项目" }));
   screen.getByText("无项目任务");
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   expect(screen.queryByText("跨项目任务")).toBeNull();

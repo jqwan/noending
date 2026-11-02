@@ -465,27 +465,16 @@ pub struct SessionContextRecord {
     pub updated_at: String,
 }
 
-/// The Workstream side of the two-level revision scheme.
+/// Current collaboration summary and the room messages it has consumed.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct WorkstreamContextState {
     pub workstream_id: Id,
-    /// Guard for current task-summary writes.
     pub context_revision: i64,
-    /// Marks tracked sessions / project memberships / title / description changes that leave new materials pending.
     pub input_revision: i64,
-    /// The `input_revision` the last successful AI update consumed. A
-    /// Workstream is pending when `input_revision > consumed_input_revision`.
     pub consumed_input_revision: i64,
+    pub processed_through_seq: i64,
     pub summary: super::Summary,
     pub updated_at: Option<String>,
-}
-
-/// What a Workstream has already consumed from one tracked Session.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct WorkstreamSessionFrontier {
-    pub workstream_id: Id,
-    pub session_id: Id,
-    pub session_context_revision: i64,
 }
 
 /// The outcome vocabulary of an explicit Context update command. Every value

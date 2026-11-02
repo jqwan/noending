@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { recentFirst } from "../../components/detailOrder";
+import { DetailList, DetailListRow } from "../../components/DetailSection";
 import { timeAgo } from "../../components/common";
 import AgentIcon from "../../components/AgentIcon";
 import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
@@ -9,9 +10,9 @@ import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
 
 /**
- * 项目详情与任务详情共用的会话迷你列表：整行点击进会话详情。
- * 展示与交互两处逐字节一致——Agent 图标 + 标题一行，右侧相对时间与继续会话按钮；
- * 默认 12 条，「查看全部 / 收起」展开。
+ * 详情页共用的会话列表。
+ * 主入口打开会话详情，时间是补充信息，继续会话是独立操作；
+ * 按最近活动倒序，在固定上限的内容区浏览完整列表。
  */
 export default function SessionMiniList({ sessions, emptyText, navigate, terminals: externalTerminals }: {
   sessions: SessionListItem[];
@@ -19,28 +20,24 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
   navigate: (r: Route) => void;
   terminals?: TerminalSummary[];
 }) {
-  const [showAll, setShowAll] = useState(false);
   const agentStatus = useAgentStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
-  const visibleSessions = sessions.slice(0, showAll ? undefined : 12);
+  const visibleSessions = recentFirst(sessions, session => session.last_activity_at ?? session.started_at);
   const resumeStates = useTerminalResumeStates(visibleSessions
     .filter(s => !s.archived_at && resolveSessionContinueMode(s) === "terminal").map(s => s.id));
 
   return (
-    <>
-      {sessions.length === 0 && <div className="l1-none">{emptyText}</div>}
+    <DetailList label="会话列表">
+      {sessions.length === 0 && <div className="detail-empty">{emptyText}</div>}
       {visibleSessions.map((s) => (
-        <div key={s.id} className="list-row" onClick={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}>
-          <div className="grow">
-            <div className="title mini-title" title={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}>
-              <span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>
-              <span className="truncate">{sessionDisplayTitle(s.title)}</span>
-            </div>
-          </div>
-          <div className="side">
-            <span>{timeAgo(s.last_activity_at ?? s.started_at)}</span>
-            <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex" }}>
+        <DetailListRow key={s.id}
+          icon={<span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>}
+          title={sessionDisplayTitle(s.title)}
+          titleHint={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}
+          description={timeAgo(s.last_activity_at ?? s.started_at)}
+          onOpen={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}
+          actions={
               <SessionResumeButton
                 session={s}
                 resumeState={resumeStates[s.id]}
@@ -49,15 +46,9 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
                 navigate={navigate}
                 terminals={terminals}
               />
-            </span>
-          </div>
-        </div>
+          }
+        />
       ))}
-      {sessions.length > 12 && (
-        <div className="small muted" style={{ marginTop: 6 }}>
-          <button className="btn small ghost" onClick={() => setShowAll(value => !value)}>{showAll ? "收起" : `查看全部 ${sessions.length} 个会话`}</button>
-        </div>
-      )}
-    </>
+    </DetailList>
   );
 }

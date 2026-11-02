@@ -199,42 +199,50 @@ pub(crate) fn emit_external_changes(
     db: &crate::storage::Db,
     cache: &mut std::collections::HashMap<String, String>,
 ) {
+    if let Ok(events) = external_changes(db, cache) {
+        for event in events {
+            let _ = app.emit(EVENT, event);
+        }
+    }
+}
+
+fn external_changes(
+    db: &crate::storage::Db,
+    cache: &mut std::collections::HashMap<String, String>,
+) -> Result<Vec<Value>> {
     // One composite signature per room covering every externally-writable
     // surface the room view projects: run identity/status, message seq,
     // heartbeat, leave, read positions, phase and the config revision. A
     // member that left stops heartbeating, so left_at must be watched or the
     // UI would stay on a stale "connected".
-    let Ok(rooms) =
-        (|| -> std::result::Result<Vec<(String, String, String)>, crate::error::AppError> {
-            let c = db.read();
-            let mut stmt = c.prepare(
+    // Optional timestamps stay empty until members read, change phase or leave.
+    let rooms = {
+        let c = db.read();
+        let mut stmt = c.prepare(
             "SELECT r.id, r.task_id,
                     COALESCE(run.id,'') || '|' || COALESCE(run.status,'') || '|' ||
-                    (SELECT MAX(seq) FROM collaboration_messages m WHERE m.room_id=r.id) || '|' ||
-                    (SELECT MAX(p.last_heartbeat_at) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
-                    (SELECT MAX(p.left_at) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
-                    (SELECT MAX(rd.read_at) FROM collaboration_reads rd WHERE rd.room_id=r.id) || '|' ||
-                    (SELECT MAX(p.phase_since) FROM collaboration_participations p WHERE p.room_id=r.id) || '|' ||
+                    COALESCE((SELECT MAX(seq) FROM collaboration_messages m WHERE m.room_id=r.id),0) || '|' ||
+                    COALESCE((SELECT MAX(p.last_heartbeat_at) FROM collaboration_participations p WHERE p.room_id=r.id),'') || '|' ||
+                    COALESCE((SELECT MAX(p.left_at) FROM collaboration_participations p WHERE p.room_id=r.id),'') || '|' ||
+                    COALESCE((SELECT MAX(rd.read_at) FROM collaboration_reads rd WHERE rd.room_id=r.id),'') || '|' ||
+                    COALESCE((SELECT MAX(p.phase_since) FROM collaboration_participations p WHERE p.room_id=r.id),'') || '|' ||
                     r.revision
              FROM collaboration_rooms r
              LEFT JOIN collaboration_runs run ON run.room_id=r.id
                AND run.id=(SELECT id FROM collaboration_runs cr WHERE cr.room_id=r.id ORDER BY started_at DESC, id DESC LIMIT 1)",
         )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(crate::error::AppError::from)?;
-            Ok(rows)
-        })()
-    else {
-        return;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
     };
+    let mut events = Vec::new();
     for (room_id, task_id, signature) in rooms {
         let previous = cache.get(&room_id);
         if previous == Some(&signature) {
@@ -263,24 +271,15 @@ pub(crate) fn emit_external_changes(
         };
         let run_id = fields.first().copied().unwrap_or_default().to_string();
         cache.insert(room_id.clone(), signature);
-        let _ = app.emit(
-            EVENT,
+        events.push(
             serde_json::json!({"task_id":task_id,"room_id":room_id,"run_id":run_id,"category":category}),
         );
     }
-}
-
-fn join_hint(task_id: &str, room_id: &str, run_id: &str) -> String {
-    // The wake hint stays minimal: ids plus the reading-rules entry point.
-    format!(
-        "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}\n\
-         请使用 noending 技能参与：room join → room wait → 处理后 room ack → 继续 wait。\
-         身份与读取规则见统一技能的信箱/协作参考。"
-    )
+    Ok(events)
 }
 
 /// Wake one member by its recorded method. Terminal members resume in the
-/// embedded terminal with the short join hint (live terminals are reused);
+/// embedded terminal with the shared join prompt (live terminals are reused);
 /// desktop members get their app opened and the user notifies them. Opening
 /// an app or a terminal never fakes a join.
 fn wake_one(
@@ -292,7 +291,7 @@ fn wake_one(
     session_id: &str,
     wake_method: &str,
 ) -> Result<()> {
-    let hint = join_hint(task_id, room_id, run_id);
+    let hint = crate::collaboration::join_prompt(task_id, room_id, run_id, session_id);
     match wake_method {
         crate::storage::collaboration::WAKE_TERMINAL => {
             crate::commands::launch_mailbox_terminal(app, session_id, &hint)?;
@@ -426,4 +425,112 @@ pub fn collaboration_member_wake(
     )?;
     emit_changed(&app, &task_id, &room_id, &run_id, "member");
     Ok(member)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::external_changes;
+    use crate::storage::{collaboration::SelectedMember, Db};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "noending-room-refresh-{}",
+                crate::storage::new_id()
+            )))
+        }
+
+        fn open(&self) -> Db {
+            Db::open(&self.0.join("noending.db")).unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn external_message_notifies_the_open_room_before_any_member_has_left() {
+        let fixture = Fixture::new();
+        let db = Arc::new(fixture.open());
+        db.write().execute_batch(
+            "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES
+              ('task','Live room','2026-01-01','2026-01-01'),
+              ('empty-task','Not started','2026-01-01','2026-01-01');
+             INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
+              ('a','codex','a','jsonl','/a'),('b','codex','b','jsonl','/b');
+             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','task'),('b','task');
+             INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at)
+              VALUES ('empty-room','empty-task','[]','2026-01-01','2026-01-01');"
+        ).unwrap();
+        let members = ["a", "b"].map(|id| SelectedMember {
+            session_id: id.into(),
+            wake_method: "desktop".into(),
+        });
+        let started = db
+            .collaboration_start("task", &members, None, None, None, "start")
+            .unwrap();
+        let room = started.room.id;
+        let run = started.run.id;
+        let mut cache = HashMap::new();
+        let initial = external_changes(&db, &mut cache)
+            .expect("rooms without optional member timestamps remain observable");
+        assert_eq!(
+            initial,
+            [serde_json::json!({"task_id":"task","room_id":room,"run_id":run,"category":"run"})]
+        );
+        assert!(external_changes(&db, &mut cache).unwrap().is_empty());
+
+        let external = fixture.open();
+        external
+            .collaboration_join(
+                &room,
+                &run,
+                "a",
+                "cli",
+                "external-member",
+                &crate::storage::now(),
+            )
+            .unwrap();
+        let member_change = external_changes(&db, &mut cache).unwrap();
+        assert_eq!(member_change[0]["category"], "member");
+        // Reads, phases and exits are still absent. One such room must not
+        // suppress notifications for itself or any other room.
+        let (send, receive) = std::sync::mpsc::channel();
+        let observed = db.clone();
+        let cache = Mutex::new(cache);
+        let watcher = crate::cli::watch_changes(db.clone(), move || {
+            for event in external_changes(&observed, &mut cache.lock().unwrap()).unwrap() {
+                let _ = send.send(event);
+            }
+        });
+        let message = external
+            .collaboration_send(&room, &run, Some("a"), "external CLI message", "message")
+            .unwrap();
+        let event = receive
+            .recv_timeout(Duration::from_secs(5))
+            .expect("message event without navigating away");
+        assert_eq!(
+            event,
+            serde_json::json!({"task_id":"task","room_id":room,"run_id":run,"category":"message"})
+        );
+        assert_eq!(
+            db.collaboration_messages_page(&room, Some(&run), None, 10)
+                .unwrap()
+                .items
+                .last()
+                .unwrap()
+                .id,
+            message.id
+        );
+        watcher.shutdown();
+    }
 }

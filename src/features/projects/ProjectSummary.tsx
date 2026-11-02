@@ -1,3 +1,4 @@
+import { DetailContent, DetailSection } from "../../components/DetailSection";
 import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
@@ -68,13 +69,10 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
 
   const shownError = error ?? readError;
   return (
-    <section className="card detail-section project-summary-section">
-      <div className="row between" style={{ alignItems: "center" }}>
-        <h2 className="detail-section-title">
+    <DetailSection sectionId="summary" label="项目摘要" className="project-summary-section" title={<>
           <Icon name="spark" />
           <span>项目摘要{view?.summary ? `（${view?.summary.items.length}）` : ""}</span>
-        </h2>
-        <div className="actions" style={{ display: "flex", gap: 8 }}>
+        </>} actions={<>
           <SummaryControls expansion={summaryExpansion} />
           {view?.summary && (
             <button
@@ -109,13 +107,17 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
               <Icon name="spark" className={busy === "update" || operation.busy ? "spinning" : ""} />
             </button>
           )}
-        </div>
-      </div>
+        </>} status={<>
       {view?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
-      {view && view.summary ? <div className="md-body" style={{ overflowWrap: "anywhere" }}><SummaryContent expansion={summaryExpansion}
-       >{view.summary ?? {items:[]}}</SummaryContent></div> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
       {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
       {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}
-    </section>
+    </>}>
+
+
+      {view && view.summary ? <DetailContent label="项目摘要内容" className="md-body"><SummaryContent expansion={summaryExpansion}
+       >{view.summary ?? {items:[]}}</SummaryContent></DetailContent> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
+
+
+    </DetailSection>
   );
 }

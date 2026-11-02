@@ -156,13 +156,16 @@ it("shows user-level coverage and disables it by clearing the select-all scope",
   const entry = "/home/test/.agents/skills/review/SKILL.md";
   const skill = resource({ id: "review", name: "review", locations: ["shared"], entry_paths: [entry], entry_links: [true] });
   inventory = { locations: [{ ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills", label: "共享 Skills" }], resources: [skill], warnings: [] };
-  vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes."));
+  vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes.", [projectScope(), projectScope({ project_id: "p2", project_name: "Beta" })]));
   vi.mocked(api.disableSkillAll).mockResolvedValue({ message: "Disabled" });
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
-  expect(within(section).getByText("用户级")).toBeTruthy();
-  expect(within(section).getByRole("img", { name: "Codex" })).toBeTruthy();
-  expect(within(section).getByRole("img", { name: "Pi" })).toBeTruthy();
+  const section = await screen.findByLabelText("启用项目");
+  expect(within(section).getByText("已在用户级启用，对所有项目生效。")).toBeTruthy();
+  expect(within(section).getByRole("heading", { name: "启用项目（2）" })).toBeTruthy();
+  expect(within(section).getByRole("button", { name: "Alpha" })).toBeTruthy();
+  fireEvent.click(within(section).getByRole("button", { name: "Beta" }));
+  expect(navigation).toHaveBeenCalledWith({ view: "project", projectId: "p2", initialTitle: "Beta" });
+  expect(within(section).queryByRole("img")).toBeNull();
   expect(within(section).queryByText(entry)).toBeNull();
   fireEvent.click(within(section).getByRole("button", { name: "配置" }));
   const dialog = await screen.findByRole("dialog", { name: "配置技能" });
@@ -181,7 +184,7 @@ it("keeps unrelated detail actions available while a scope change runs", async (
   let finish!: () => void;
   vi.mocked(api.disableSkillAll).mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve({ message: "Disabled" }); }));
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
+  const section = await screen.findByLabelText("启用项目");
   fireEvent.click(within(section).getByRole("button", { name: "配置" }));
   const dialog = await screen.findByRole("dialog", { name: "配置技能" });
   fireEvent.click(await within(dialog).findByRole("checkbox", { name: /全选/ }));
@@ -203,7 +206,7 @@ it("adds project-level configuration from the detail page", async () => {
   ]);
   vi.mocked(api.enableSkillProjects).mockResolvedValue({ message: "Enabled" });
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
+  const section = await screen.findByLabelText("启用项目");
   fireEvent.click(within(section).getByRole("button", { name: "配置" }));
   fireEvent.click(await screen.findByRole("checkbox", { name: /Alpha/ }));
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -216,8 +219,8 @@ it("marks a physical source scope without offering disable", async () => {
   inventory = { locations: [{ ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills" }], resources: [skill], warnings: [] };
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes."));
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
-  expect(within(section).getAllByText("物理入口").length).toBeGreaterThan(0);
+  const section = await screen.findByLabelText("启用项目");
+  expect(within(section).getByText("用户级物理入口")).toBeTruthy();
 });
 
 it.each([true, false])("registers a physical Skill source with migration=%s", async migrateSource => {
@@ -249,7 +252,7 @@ it.each([true, false])("registers a physical Skill source with migration=%s", as
   fireEvent.click(within(dialog).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.registerDiscoveredSkill).toHaveBeenCalledWith("review", migrateSource));
   if (migrateSource) await waitFor(() => expect(navigation).toHaveBeenLastCalledWith(expect.objectContaining({ view: "skill", resourceId: "migrated-review", initialTitle: "review" })));
-  else await waitFor(() => expect(within(screen.getByLabelText("启用范围")).getByRole("button", { name: "配置" })).toBeTruthy());
+  else await waitFor(() => expect(within(screen.getByLabelText("启用项目")).getByRole("button", { name: "配置" })).toBeTruthy());
 });
 
 it("references a discovered Skill in place and refreshes the same detail as managed", async () => {
@@ -273,7 +276,7 @@ it("references a discovered Skill in place and refreshes the same detail as mana
   expect(removeSource.disabled).toBe(false);
   fireEvent.click(within(dialog).getByRole("button", { name: "托管" }));
   await waitFor(() => expect(api.registerDiscoveredSkill).toHaveBeenCalledWith("review", false));
-  await waitFor(() => expect(within(screen.getByLabelText("启用范围")).getByRole("button", { name: "配置" })).toBeTruthy());
+  await waitFor(() => expect(within(screen.getByLabelText("启用项目")).getByRole("button", { name: "配置" })).toBeTruthy());
   expect(within(section).getByRole("button", { name: "迁移到 NoEnding" })).toBeTruthy();
   expect(navigation).not.toHaveBeenCalled();
   expect(api.getSkillDetail).toHaveBeenCalledTimes(2);
@@ -360,8 +363,8 @@ it("keeps a disabled registered Skill listed and enables it from the detail", as
   expect(within(row).getByText("未启用")).toBeTruthy();
   expect(within(row).queryByRole("button", { name: "托管" })).toBeNull();
   fireEvent.click(row);
-  const section = await screen.findByLabelText("启用范围");
-  expect(within(section).getByText("当前未在任何作用域启用。")).toBeTruthy();
+  const section = await screen.findByLabelText("启用项目");
+  expect(within(section).getByText("当前未在任何项目启用。")).toBeTruthy();
   fireEvent.click(within(section).getByRole("button", { name: "配置" }));
   const dialog = await screen.findByRole("dialog", { name: "配置技能" });
   fireEvent.click(await within(dialog).findByRole("checkbox", { name: /全选/ }));
@@ -505,11 +508,12 @@ it("sorts by name by default and by enablement scope on request", async () => {
   const section = await screen.findByRole("region", { name: "技能" });
   const names = () => within(section).getAllByRole("button", { name: /^(alpha|beta|zeta)/ }).map(button => button.textContent?.match(/^(alpha|beta|zeta)/)?.[0]);
   expect(names()).toEqual(["alpha", "beta", "zeta"]);
-  fireEvent.change(screen.getByRole("combobox", { name: "排序" }), { target: { value: "scope" } });
+  fireEvent.click(screen.getByRole("button", { name: /^排序：/ }));
+  fireEvent.click(screen.getByRole("option", { name: "启用范围" }));
   expect(names()).toEqual(["beta", "zeta", "alpha"]);
 });
 
-it("summarizes user-level Agent coverage read-only when every Agent is covered", async () => {
+it("summarizes multiple user-level entries as one global enablement notice", async () => {
   const locations: SkillLocation[] = [
     { ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills", label: "共享 Skills" },
     { ...loc, id: "claude", agent: "claude_code", path: "/home/test/.claude/skills", label: "Claude Code Skills" },
@@ -524,15 +528,12 @@ it("summarizes user-level Agent coverage read-only when every Agent is covered",
   inventory = { locations, resources: [skill], warnings: [] };
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes."));
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
-  expect(within(section).getByText("用户级")).toBeTruthy();
-  expect(within(section).getByRole("img", { name: "Codex" })).toBeTruthy();
-  expect(within(section).getByRole("img", { name: "Pi" })).toBeTruthy();
-  expect(within(section).getByRole("img", { name: "Antigravity" })).toBeTruthy();
+  const section = await screen.findByLabelText("启用项目");
+  expect(within(section).getByText("已在用户级启用，对所有项目生效。")).toBeTruthy();
 });
 
-it("shows project enablement read-only without a project association", async () => {
-  const skill = resource({ id: "review", name: "review", locations: ["shared"], entry_paths: ["/home/test/.agents/skills/review/SKILL.md"], entry_links: [true] });
+it("lists enabled projects with navigation and excludes disabled projects", async () => {
+  const skill = resource({ id: "review", name: "review", locations: [], entry_paths: [], entry_links: [] });
   inventory = { locations: [{ ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills", label: "共享 Skills" }], resources: [skill], warnings: [] };
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes.", [projectScope({
     workspaces: [
@@ -546,12 +547,14 @@ it("shows project enablement read-only without a project association", async () 
     workspaces: [{ workspace_path_id: "w3", path: "/work/beta", entries: [] }],
   })]));
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
+  const section = await screen.findByLabelText("启用项目");
   expect(api.getSkillDetail).toHaveBeenCalledWith("review");
   expect(api.listSkillCatalog).not.toHaveBeenCalled();
-  expect(within(section).getByText("Alpha")).toBeTruthy();
+  expect(within(section).getByRole("heading", { name: "启用项目（1）" })).toBeTruthy();
+  fireEvent.click(within(section).getByRole("button", { name: "Alpha" }));
+  expect(navigation).toHaveBeenCalledWith({ view: "project", projectId: "p1", initialTitle: "Alpha" });
+  expect(within(section).queryByRole("img")).toBeNull();
   expect(within(section).queryByText("/work/alpha/.agents/skills/review/SKILL.md")).toBeNull();
-  expect(within(section).getByRole("img", { name: "Antigravity" })).toBeTruthy();
   expect(within(section).queryByText("Beta")).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
 });
@@ -574,7 +577,7 @@ it("marks a physical project scope as a source directory and keeps the detail re
     full: true,
   })]));
   render(<SkillDetailView resourceId="review" initialTitle="review" navigate={navigation} />);
-  const section = await screen.findByLabelText("启用范围");
+  const section = await screen.findByLabelText("启用项目");
   expect(within(section).getByText("Beta")).toBeTruthy();
   expect(within(section).getAllByText("物理入口").length).toBeGreaterThan(0);
 });

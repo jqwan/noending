@@ -1,3 +1,5 @@
+import { DetailLayout } from "../../components/DetailLayout";
+import { DetailSection } from "../../components/DetailSection";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -9,9 +11,11 @@ import type {
   SessionListItem,
 } from "../../types";
 import CollaborationCandidates from "./CollaborationCandidates";
+import CollaborationCoordinator from "./CollaborationCoordinator";
 import CollaborationMembers from "./CollaborationMembers";
 import RoomMessages from "./RoomMessages";
-import { RUN_LABEL, joinPrompt } from "./collaborationState";
+import CollaborationSummary from "./CollaborationSummary";
+import { RUN_LABEL } from "./collaborationState";
 import { useCollaborationRoom } from "./useCollaborationRoom";
 import "./collaboration.css";
 
@@ -230,16 +234,10 @@ export default function CollaborationRoomView({
     }
   };
 
+  /** 加入提示由后端随成员状态给出；没有活动运行或没有提示时不复制伪内容。 */
   const copyPrompt = async (sessionId: string) => {
-    if (!config || !run) return;
-    const text = joinPrompt({
-      taskId,
-      taskTitle: title,
-      roomId: config.id,
-      runId: run.id,
-      selfSessionId: sessionId,
-      coordinator: config.coordinator_session_id === sessionId,
-    });
+    const text = room?.members.find(m => m.session_id === sessionId)?.join_prompt ?? null;
+    if (!text) { showToast("该成员暂无加入提示"); return; }
     showToast(await copyToClipboard(text) ? "已复制加入提示" : "复制失败");
   };
 
@@ -248,46 +246,11 @@ export default function CollaborationRoomView({
   }
 
   return (
-    <div className="detail-layout task-detail-layout">
-      <div className="detail-main task-detail-main">
+    <DetailLayout mainClassName="detail-main-collaboration" label="成员与设置" panel={<><DetailSection sectionId="members" label="成员" className="collab-room" title={<>
+            <Icon name="agent" />
+            <span>成员（{running ? room!.members.length : selection.selected.length}）</span>
+          </>}>
 
-        <section className="card detail-section">
-          <h2 className="detail-section-title">
-            <Icon name="chat" />
-            <span>协作消息{messages.length ? `（${messages.length}）` : ""}</span>
-          </h2>
-          <RoomMessages
-            messages={messages}
-            sessions={sessions}
-            sending={busy}
-            draft={draft}
-            onDraftChange={setDraft}
-            onSend={() => void send()}
-            sendLabel={running ? "发送" : "发送并开启"}
-            placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
-            disabled={archived}
-          />
-        </section>
-      </div>
-
-      <aside className="detail-aside">
-        <section className="card detail-section collab-room">
-          <div className="row between" style={{ alignItems: "center" }}>
-            <h2 className="detail-section-title">
-              <Icon name="chatLines" />
-              <span>协作室</span>
-              {run && <span className={`badge small collab-run-${run.status}`}>{RUN_LABEL[run.status]}</span>}
-            </h2>
-            <button
-              type="button"
-              className={`btn small ${running ? "danger" : "primary"}`}
-              disabled={busy || archived || (!running && !enoughMembers)}
-              title={archived ? "已归档任务不能开启协作" : running ? "停止本次协作" : "开启协作"}
-              onClick={() => void (running ? stop() : start(draft.trim() || null))}
-            >
-              {busy ? "处理中…" : running ? "停止协作" : "开启协作"}
-            </button>
-          </div>
 
           {archived && <p className="small muted" style={{ margin: 0 }}>任务已归档，不能开启新的协作；已有协作在归档时已被终止。</p>}
           {run?.status === "stopped" && (
@@ -300,16 +263,6 @@ export default function CollaborationRoomView({
               至少 2 名成员确认加入、且负责人加入后才进入协作中。单人失败可以单独重试。
             </p>
           )}
-          {actionError && <p role="alert" className="small warning">{actionError}</p>}
-          {unconfirmed && (
-            <p className="small warning" role="status">
-              上次开启未得到确认（后端可能已生效）。
-              <button type="button" className="btn small" disabled={busy}
-                onClick={() => void submitStart(unconfirmed)}>重试确认</button>
-              会沿用同一次请求，不会重复写入首条消息。
-            </p>
-          )}
-          {error && <p role="alert" className="small warning">{error}</p>}
 
           {running ? (
             <>
@@ -322,22 +275,9 @@ export default function CollaborationRoomView({
                 onWake={sessionId => void wake(sessionId)}
                 onCopyPrompt={sessionId => void copyPrompt(sessionId)}
               />
-              <fieldset className="collab-coordinator" disabled={busy}>
-                <legend className="small">负责人（仅本次成员，可更换或清除）</legend>
-                <label className="collab-radio">
-                  <input type="radio" name="collab-run-coordinator" checked={!config?.coordinator_session_id}
-                    onChange={() => void changeCoordinator(null)} />
-                  <span>不由成员负责，由我协调</span>
-                </label>
-                {room!.members.map(member => (
-                  <label key={member.session_id} className="collab-radio">
-                    <input type="radio" name="collab-run-coordinator"
-                      checked={config?.coordinator_session_id === member.session_id}
-                      onChange={() => void changeCoordinator(member.session_id)} />
-                    <span className="truncate">{sessionLabel(member.session_id, sessions)}</span>
-                  </label>
-                ))}
-              </fieldset>
+              <CollaborationCoordinator value={config?.coordinator_session_id ?? null} disabled={busy}
+                members={room!.members.map(member => ({ id: member.session_id, title: sessionLabel(member.session_id, sessions) }))}
+                onChange={id => void changeCoordinator(id)} />
             </>
           ) : (
             <CollaborationCandidates
@@ -349,13 +289,12 @@ export default function CollaborationRoomView({
               disabled={busy || archived}
             />
           )}
-        </section>
-
-        <section className="card detail-section">
-          <h2 className="detail-section-title">
+        </DetailSection>
+<DetailSection sectionId="run-info" label="本次协作" title={<>
             <Icon name="info" />
             <span>本次协作</span>
-          </h2>
+          </>}>
+
           <p className="small muted" style={{ margin: 0 }}>
             消息只在本房间保存一份。成员各自维护阅读位置；任务进展由负责人统一维护，成员在这里简要汇报。
           </p>
@@ -370,8 +309,50 @@ export default function CollaborationRoomView({
             </div>
           )}
           {!config && <p className="small muted" style={{ margin: 0 }}>还没有协作室：勾选成员后开启会在保存配置的同时创建本次运行。</p>}
-        </section>
-      </aside>
-    </div>
+        </DetailSection></>}><CollaborationSummary key={taskId} taskId={taskId} latestSeq={messages[messages.length - 1]?.seq ?? 0} initiallyCollapsed /><section className="card collab-chat" aria-label="协作室聊天">
+        <header className="collab-chat-header">
+          <h2 className="detail-section-title">
+            <Icon name="chat" />
+            <span>协作室{messages.length ? `（${messages.length}）` : ""}</span>
+            {run && <span className={`badge small collab-run-${run.status}`}>{RUN_LABEL[run.status]}</span>}
+          </h2>
+          <div className="collab-chat-actions">
+            <button
+              type="button"
+              className={`btn small ${running ? "danger" : "primary"}`}
+              disabled={busy || archived || (!running && !enoughMembers)}
+              title={archived ? "已归档任务不能开启协作" : running ? "停止本次协作" : "开启协作"}
+              onClick={() => void (running ? stop() : start(draft.trim() || null))}
+            >
+              {busy ? "处理中…" : running ? "停止协作" : "开启协作"}
+            </button>
+
+          </div>
+        </header>
+        {(actionError || unconfirmed || error) && <div className="collab-chat-feedback">
+          {actionError && <p role="alert" className="small warning">{actionError}</p>}
+          {unconfirmed && (
+            <p className="small warning" role="status">
+              上次开启未得到确认（后端可能已生效）。
+              <button type="button" className="btn small" disabled={busy}
+                onClick={() => void submitStart(unconfirmed)}>重试确认</button>
+              会沿用同一次请求，不会重复写入首条消息。
+            </p>
+          )}
+          {error && <p role="alert" className="small warning">{error}</p>}
+        </div>}
+        <RoomMessages
+          key={taskId}
+          messages={messages}
+          sessions={sessions}
+          sending={busy}
+          draft={draft}
+          onDraftChange={setDraft}
+          onSend={() => void send()}
+          sendLabel={running ? "发送" : "发送并开启"}
+          placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
+          disabled={archived}
+        />
+      </section></DetailLayout>
   );
 }

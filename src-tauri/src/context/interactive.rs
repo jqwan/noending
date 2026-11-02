@@ -70,17 +70,7 @@ fn guard(db: &Db, kind: &str, id: &str) -> Result<Value> {
             let session = db.get_session(id)?.ok_or_else(stale)?;
             json!({"project":session.project_id})
         }
-        "task" => {
-            let task = db.get_workstream(id)?.ok_or_else(stale)?;
-            let state = query::task_state(&db.read(), id)?;
-            let mut sessions: Vec<_> = db
-                .sessions_for_workstream(id)?
-                .into_iter()
-                .map(|s| s.id)
-                .collect();
-            sessions.sort();
-            json!({"title":task.title,"description":task.description,"projects":task_projects(&db.read(),id)?,"revision":state.context_revision,"input_revision":state.input_revision,"sessions":sessions})
-        }
+        "task" => collaboration::guard(&db.read(), id)?,
         "project" => {
             json!({"fingerprint":project::ProjectInput::read(&db.read(),id)?.fingerprint,"revision":query::project_state(&db.read(),id)?.revision})
         }
@@ -88,6 +78,15 @@ fn guard(db: &Db, kind: &str, id: &str) -> Result<Value> {
     })
 }
 impl Scope {
+    pub(super) fn collaboration_snapshot(&self) -> Result<collaboration::Snapshot> {
+        self.inputs
+            .values()
+            .find_map(|input| match input {
+                query::Input::Collaboration { snapshot } => Some(snapshot.clone()),
+                _ => None,
+            })
+            .ok_or_else(stale)
+    }
     pub(super) fn validate(&self, db: &Db) -> Result<()> {
         if guard(db, &self.kind, &self.target)? != self.guard {
             return Err(stale());
@@ -122,7 +121,7 @@ pub(crate) fn context(
     let regenerate = mode.regenerate();
     let sessions = match kind {
         "session" => vec![db.get_session(id)?.ok_or_else(stale)?],
-        "task" => db.sessions_for_workstream(id)?,
+        "task" => vec![],
         "project" => {
             let conn = db.read();
             let mut st=conn.prepare("SELECT s.id FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE wp.project_id=?1 ORDER BY s.id")?;
@@ -149,20 +148,18 @@ pub(crate) fn context(
             !regenerate && s.summary_generation == Some(s.generation),
             false,
         );
+    } else if kind == "task" {
+        let snapshot = collaboration::Snapshot::read(&db.read(), id, regenerate)?;
+        files.inputs.lock().unwrap().insert(
+            format!("task-{id}.jsonl"),
+            query::Input::Collaboration { snapshot },
+        );
     } else {
-        let (header, revision) = if kind == "task" {
-            let task = db.get_workstream(id)?.ok_or_else(stale)?;
-            (
-                json!({"type":"task","title":task.title,"description":task.description,"related_projects":crate::workspace::workstream::projects_for_workstream(db,id)?}),
-                query::task_state(&db.read(), id)?.context_revision,
-            )
-        } else {
-            let input = project::ProjectInput::read(&db.read(), id)?;
-            (
-                input.header(home),
-                query::project_state(&db.read(), id)?.revision,
-            )
-        };
+        let input = project::ProjectInput::read(&db.read(), id)?;
+        let (header, revision) = (
+            input.header(home),
+            query::project_state(&db.read(), id)?.revision,
+        );
         add_batch_inputs(&files, kind, id, header, revision, regenerate, &sessions);
     }
     let scope = Scope {
@@ -469,63 +466,57 @@ mod tests {
     }
 
     #[test]
-    fn task_and_project_contexts_keep_scope_partial_failures_and_independent_task_items() {
-        for kind in ["task", "project"] {
-            let f = ServiceFixture::new();
-            let a = f.add_session(2, 20);
-            let b = f.add_session(1, 20);
-            let outside = f.add_session(1, 20);
-            let task = crate::context::tests::task(&f, &[&a, &b]);
-            let (project, _) =
-                crate::context::tests::project_fixture(&f, "direct-scope", &[&a, &b]);
-            let target = if kind == "task" {
-                &task.id
-            } else {
-                &project.id
-            };
-            let item = crate::workspace::task_items::create(
-                f.db(),
-                &task.id,
-                crate::workspace::task_items::CreateItem {
-                    title: "验收事项".into(),
-                    description: None,
-                },
-            )
-            .unwrap();
-            let c = context(f.db(), &f.home(), kind, target, Mode::Regenerate).unwrap();
-            assert!(!c["inputs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|i| i["name"].as_str().unwrap().contains(&outside)));
-            read_all(&f, &c);
-            let mut results = result(&a, "A 事实");
-            results.insert(format!("{kind}-{target}"),json!({"summary":{"items":[{"title":"范围结论","description":"B 未完成提取","details":[]}]}}));
-            let out=submit(f.db(),&f.home(),c["context_id"].as_str().unwrap(),json!({"status":"partial","failed_sessions":[{"session_id":b,"error":"材料不完整"}],"skipped_session_ids":[]}),results).unwrap();
-            assert_eq!(out["status"], "partial");
-            assert_eq!(out["failed_sessions"][0]["session_id"], b);
-            assert_eq!(session_context_view(f.db(), &a).unwrap().revision, 1);
-            assert_eq!(session_context_view(f.db(), &b).unwrap().revision, 0);
-            assert_eq!(
-                crate::workspace::task_items::list(f.db(), &task.id).unwrap(),
-                vec![item]
-            );
-            let next = context(f.db(), &f.home(), kind, target, Mode::Update).unwrap();
-            read_all(&f, &next);
-            let mut results = result(&b, "B 事实");
-            results.insert(format!("{kind}-{target}"),json!({"summary":{"items":[{"title":"完整范围结论","description":"A 与 B","details":[]}]}}));
-            let out = submit(
-                f.db(),
-                &f.home(),
-                next["context_id"].as_str().unwrap(),
-                json!({"status":"completed","skipped_session_ids":[]}),
-                results,
-            )
-            .unwrap();
-            assert_eq!(out["status"], "updated");
-            assert_eq!(out["remaining_pending"], 0);
-            assert_eq!(session_context_view(f.db(), &outside).unwrap().revision, 0);
-        }
+    fn project_context_keeps_scope_partial_failures_and_independent_task_items() {
+        let kind = "project";
+        let f = ServiceFixture::new();
+        let a = f.add_session(2, 20);
+        let b = f.add_session(1, 20);
+        let outside = f.add_session(1, 20);
+        let task = crate::context::tests::task(&f, &[&a, &b]);
+        let (project, _) = crate::context::tests::project_fixture(&f, "direct-scope", &[&a, &b]);
+        let target = &project.id;
+        let item = crate::workspace::task_items::create(
+            f.db(),
+            &task.id,
+            crate::workspace::task_items::CreateItem {
+                title: "验收事项".into(),
+                description: None,
+            },
+        )
+        .unwrap();
+        let c = context(f.db(), &f.home(), kind, target, Mode::Regenerate).unwrap();
+        assert!(!c["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["name"].as_str().unwrap().contains(&outside)));
+        read_all(&f, &c);
+        let mut results = result(&a, "A 事实");
+        results.insert(format!("{kind}-{target}"),json!({"summary":{"items":[{"title":"范围结论","description":"B 未完成提取","details":[]}]}}));
+        let out=submit(f.db(),&f.home(),c["context_id"].as_str().unwrap(),json!({"status":"partial","failed_sessions":[{"session_id":b,"error":"材料不完整"}],"skipped_session_ids":[]}),results).unwrap();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["failed_sessions"][0]["session_id"], b);
+        assert_eq!(session_context_view(f.db(), &a).unwrap().revision, 1);
+        assert_eq!(session_context_view(f.db(), &b).unwrap().revision, 0);
+        assert_eq!(
+            crate::workspace::task_items::list(f.db(), &task.id).unwrap(),
+            vec![item]
+        );
+        let next = context(f.db(), &f.home(), kind, target, Mode::Update).unwrap();
+        read_all(&f, &next);
+        let mut results = result(&b, "B 事实");
+        results.insert(format!("{kind}-{target}"),json!({"summary":{"items":[{"title":"完整范围结论","description":"A 与 B","details":[]}]}}));
+        let out = submit(
+            f.db(),
+            &f.home(),
+            next["context_id"].as_str().unwrap(),
+            json!({"status":"completed","skipped_session_ids":[]}),
+            results,
+        )
+        .unwrap();
+        assert_eq!(out["status"], "updated");
+        assert_eq!(out["remaining_pending"], 0);
+        assert_eq!(session_context_view(f.db(), &outside).unwrap().revision, 0);
     }
     #[test]
     fn scope_changes_expiry_and_other_input_names_are_rejected() {

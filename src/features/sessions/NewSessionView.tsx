@@ -1,3 +1,5 @@
+import "../../components/pickerControl.css";
+import PopupMenu, { PopupMenuItem } from "../../components/PopupMenu";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./newSession.css";
@@ -529,11 +531,11 @@ export default function NewSessionView({
         <form className="new-session-form" onSubmit={(e) => { e.preventDefault(); void start(); }}>
           <div className="new-session-context">
             <div
-              className={`new-session-picker new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
+              className={`picker-control new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
               ref={projectRef}
               onClick={(e) => {
                 if (busy) return;
-                if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                if ((e.target as HTMLElement).closest(".picker-menu")) return;
                 setProjectMenuOpen((v) => !v);
                 setDirMenuOpen(false);
                 setAgentMenuOpen(false);
@@ -557,8 +559,8 @@ export default function NewSessionView({
               title={projectLabel}
             >
               <Icon name="project" />
-              <span className="new-session-picker-label truncate">{projectLabel}</span>
-              <Icon name="chevronDown" className="new-session-chevron" />
+              <span className="picker-control-label truncate">{projectLabel}</span>
+              <Icon name="chevronDown" className="picker-control-chevron" />
               <select
                 aria-label="所属项目"
                 title={projectLabel}
@@ -581,15 +583,15 @@ export default function NewSessionView({
               </select>
 
               {projectMenuOpen && (
-                <div className="new-session-dropdown-menu" role="menu" aria-label="所属项目列表">
-                  <div className="new-session-menu-list">
+                <PopupMenu className="picker-menu" role="menu" aria-label="所属项目列表" onDismiss={() => setProjectMenuOpen(false)}>
+                  <div className="picker-menu-list">
                     {selectableProjects.map((p) => {
                       const isSelected = selectedProjectId === p.id;
                       return (
-                        <button
+                        <PopupMenuItem selected={isSelected}
                           key={p.id}
                           type="button"
-                          className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                          className="picker-menu-item"
                           onClick={() => {
                             handleProjectChange(p.id);
                             setProjectMenuOpen(false);
@@ -598,17 +600,15 @@ export default function NewSessionView({
                         >
                           <span className="menu-item-icon"><Icon name="project" /></span>
                           <span className="menu-item-label">{p.name}</span>
-                          {isSelected && (
-                            <span className="menu-item-check"><Icon name="check" /></span>
-                          )}
-                        </button>
+
+                        </PopupMenuItem>
                       );
                     })}
                   </div>
-                  <div className="new-session-menu-divider" />
-                  <button
+                  <div className="popup-menu-divider" />
+                  <PopupMenuItem
                     type="button"
-                    className="new-session-menu-action"
+                    className="picker-menu-action"
                     onClick={() => {
                       void handleAddNewProject();
                       setProjectMenuOpen(false);
@@ -616,8 +616,8 @@ export default function NewSessionView({
                   >
                     <span className="action-icon"><Icon name="plus" /></span>
                     <span>新增项目</span>
-                  </button>
-                </div>
+                  </PopupMenuItem>
+                </PopupMenu>
               )}
             </div>
 
@@ -625,11 +625,11 @@ export default function NewSessionView({
               const canSwitchDir = projectDirs.length > 1;
               return (
                 <div
-                  className={`new-session-picker new-session-dir${canSwitchDir ? " has-custom-menu" : ""}${dirMenuOpen && canSwitchDir ? " open" : ""}`}
+                  className={`picker-control new-session-dir${canSwitchDir ? " has-custom-menu" : ""}${dirMenuOpen && canSwitchDir ? " open" : ""}`}
                   ref={dirRef}
                   onClick={(e) => {
                     if (busy || !canSwitchDir) return;
-                    if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                    if ((e.target as HTMLElement).closest(".picker-menu")) return;
                     setDirMenuOpen((v) => !v);
                     setProjectMenuOpen(false);
                     setAgentMenuOpen(false);
@@ -653,10 +653,10 @@ export default function NewSessionView({
                   title={currentDir || dirLabel}
                 >
                   <Icon name="folder" />
-                  <span className="new-session-picker-label truncate" title={currentDir || dirLabel}>
+                  <span className="picker-control-label truncate" title={currentDir || dirLabel}>
                     {dirLabel}
                   </span>
-                  {canSwitchDir && <Icon name="chevronDown" className="new-session-chevron" />}
+                  {canSwitchDir && <Icon name="chevronDown" className="picker-control-chevron" />}
                   <select
                     aria-label="项目目录"
                     title={currentDir || dirLabel}
@@ -673,15 +673,15 @@ export default function NewSessionView({
                   </select>
 
                   {dirMenuOpen && canSwitchDir && (
-                    <div className="new-session-dropdown-menu" role="menu" aria-label="项目目录列表">
-                      <div className="new-session-menu-list">
+                    <PopupMenu className="picker-menu" role="menu" aria-label="项目目录列表" onDismiss={() => setDirMenuOpen(false)}>
+                      <div className="picker-menu-list">
                         {projectDirs.map((dir) => {
                           const isSelected = (selectedDirPath || projectDirs[0]) === dir;
                           return (
-                            <button
+                            <PopupMenuItem selected={isSelected}
                               key={dir}
                               type="button"
-                              className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                              className="picker-menu-item"
                               onClick={() => {
                                 handleDirChange(dir);
                                 setDirMenuOpen(false);
@@ -692,14 +692,12 @@ export default function NewSessionView({
                                 <Icon name="folder" />
                               </span>
                               <span className="menu-item-label">{dir}</span>
-                              {isSelected && (
-                                <span className="menu-item-check"><Icon name="check" /></span>
-                              )}
-                            </button>
+
+                            </PopupMenuItem>
                           );
                         })}
                       </div>
-                    </div>
+                    </PopupMenu>
                   )}
                 </div>
               );
@@ -710,7 +708,7 @@ export default function NewSessionView({
                   勾选框藏在里面键盘和读屏都够不到。 */}
               <div className="new-session-task-picker" ref={taskRef}>
                 <div
-                  className={`new-session-picker has-custom-menu${taskMenuOpen ? " open" : ""}${trackedTasks.length > 0 ? " is-set" : ""}`}
+                  className={`picker-control has-custom-menu${taskMenuOpen ? " open" : ""}${trackedTasks.length > 0 ? " is-set" : ""}`}
                   onClick={() => {
                     if (busy) return;
                     setTaskMenuOpen((v) => !v);
@@ -738,22 +736,23 @@ export default function NewSessionView({
                   title={taskTitle}
                 >
                   <Icon name="tasks" />
-                  <span className="new-session-picker-label truncate">{taskLabel}</span>
-                  <Icon name="chevronDown" className="new-session-chevron" />
+                  <span className="picker-control-label truncate">{taskLabel}</span>
+                  <Icon name="chevronDown" className="picker-control-chevron" />
                 </div>
 
                 {taskMenuOpen && (
-                  <div className="new-session-dropdown-menu" role="group" aria-label="跟踪任务列表">
+                  <PopupMenu className="picker-menu" role="group" aria-label="跟踪任务列表" onDismiss={() => setTaskMenuOpen(false)}>
                     {availableTasks.length === 0 ? (
-                      <p className="new-session-menu-empty">该项目下还没有跟踪任务</p>
+                      <p className="picker-menu-empty">该项目下还没有跟踪任务</p>
                     ) : (
-                      <div className="new-session-menu-list">
+                      <div className="picker-menu-list">
                         {availableTasks.map(task => {
                           const selected = trackedWorkstreamIds.includes(task.id);
                           return (
                             <label
                               key={task.id}
-                              className={`new-session-task-option${selected ? " selected" : ""}`}
+                              className="popup-menu-item new-session-task-option"
+                              data-selected={selected || undefined}
                               title={task.title}
                             >
                               <input
@@ -768,10 +767,10 @@ export default function NewSessionView({
                         })}
                       </div>
                     )}
-                    <div className="new-session-menu-divider" />
-                    <button
+                    <div className="popup-menu-divider" />
+                    <PopupMenuItem
                       type="button"
-                      className="new-session-menu-action"
+                      className="picker-menu-action"
                       disabled={busy || !selectedProject}
                       onClick={() => {
                         setTaskMenuOpen(false);
@@ -780,8 +779,8 @@ export default function NewSessionView({
                     >
                       <span className="action-icon"><Icon name="plus" /></span>
                       <span>新建任务</span>
-                    </button>
-                  </div>
+                    </PopupMenuItem>
+                  </PopupMenu>
                 )}
               </div>
             </section>
@@ -827,11 +826,11 @@ export default function NewSessionView({
             <div className="new-session-composer-footer">
               <div className="new-session-composer-footer-left">
                 <div
-                  className={`new-session-picker new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
+                  className={`picker-control new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
                   ref={agentRef}
                   onClick={(e) => {
                     if (busy) return;
-                    if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                    if ((e.target as HTMLElement).closest(".picker-menu")) return;
                     setAgentMenuOpen((v) => !v);
                     setProjectMenuOpen(false);
                     setDirMenuOpen(false);
@@ -855,8 +854,8 @@ export default function NewSessionView({
                   title={agentLabel}
                 >
                   <AgentIcon agent={selectedAgent} size={16} />
-                  <span className="new-session-picker-label">{agentLabel}</span>
-                  <Icon name="chevronDown" className="new-session-chevron" />
+                  <span className="picker-control-label">{agentLabel}</span>
+                  <Icon name="chevronDown" className="picker-control-chevron" />
                   <select
                     aria-label="Agent"
                     title={agentLabel}
@@ -874,16 +873,16 @@ export default function NewSessionView({
                   </select>
 
                   {agentMenuOpen && (
-                    <div className="new-session-dropdown-menu dropup" role="menu" aria-label="Agent 列表">
-                      <div className="new-session-menu-list">
+                    <PopupMenu className="picker-menu dropup" role="menu" aria-label="Agent 列表" onDismiss={() => setAgentMenuOpen(false)}>
+                      <div className="picker-menu-list">
                         {cliAgents.map((a) => {
                           const isSelected = a === selectedAgent;
                           const notDetected = agentStatus && !agentStatus[a]?.detected;
                           return (
-                            <button
+                            <PopupMenuItem selected={isSelected}
                               key={a}
                               type="button"
-                              className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                              className="picker-menu-item"
                               onClick={() => {
                                 handleAgentChange(a);
                                 setAgentMenuOpen(false);
@@ -897,14 +896,12 @@ export default function NewSessionView({
                                 {AGENT_LABELS[a]}
                                 {notDetected && <span className="menu-item-extra muted"> (未检测到 TUI)</span>}
                               </span>
-                              {isSelected && (
-                                <span className="menu-item-check"><Icon name="check" /></span>
-                              )}
-                            </button>
+
+                            </PopupMenuItem>
                           );
                         })}
                       </div>
-                    </div>
+                    </PopupMenu>
                   )}
                 </div>
                 <RuntimePopover

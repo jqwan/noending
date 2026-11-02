@@ -1,3 +1,6 @@
+import SessionTrackedTasks from "./SessionTrackedTasks";
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailContent, DetailFields, DetailSection } from "../../components/DetailSection";
 import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { MailboxHistory } from "./MailboxMessages";
 import { removedTargets } from "../../app/removedTargets";
@@ -30,7 +33,7 @@ import {
   type SessionContextView,
   type SessionDetail,
 } from "../../types";
-import type { Route } from "../../app/routes";
+import { EVT_SYNCED, type Route } from "../../app/routes";
 
 /**
  * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
@@ -52,6 +55,14 @@ export default function SessionDetailView({
   initialAgent?: Agent;
   navigate: (r: Route) => void;
 }) {
+  const [trackingBusy, setTrackingBusy] = useState(false);
+  const [trackingError, setTrackingError] = useState("");
+  const trackingPending = useRef(false);
+  const trackingTarget = useRef<string | null>(sessionId);
+  useEffect(() => {
+    trackingTarget.current = sessionId; setTrackingError(""); setTrackingBusy(false);
+    return () => { trackingTarget.current = null; };
+  }, [sessionId]);
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const showSkeleton = useLoadingDelay(!detail && !failed);
@@ -137,6 +148,20 @@ export default function SessionDetailView({
    * 没拿到数据时也要把 PageHeader 画出来：标题行吸在应用标题栏那条 band 上，
    * 加载态若不渲染它，整条标题栏会先消失再补回来，比"内容区里一行加载中"显眼得多。
    */
+  const removeTracking = async (taskId: string) => {
+    if (trackingPending.current) return;
+    trackingPending.current = true; setTrackingBusy(true); setTrackingError("");
+    try {
+      await api.setSessionTaskTracking(sessionId, taskId, false);
+      window.dispatchEvent(new Event(EVT_SYNCED));
+    } catch (reason) {
+      if (trackingTarget.current === sessionId) setTrackingError(String(reason));
+    } finally {
+      trackingPending.current = false;
+      if (trackingTarget.current === sessionId) setTrackingBusy(false);
+    }
+  };
+
   if (!detail) {
     return (
       <div className="main session-detail" role="status">
@@ -259,7 +284,7 @@ export default function SessionDetailView({
   };
 
   return (
-    <div className="main session-detail">
+    <DetailPanelProvider kind="session"><div className="main session-detail detail-page">
       <PageHeader
         title={
           <span className="session-title-with-icon" title={title}>
@@ -295,143 +320,11 @@ export default function SessionDetailView({
       />
 
       {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
-      <div className="detail-layout session-detail-layout">
-        <div className="detail-main session-detail-main">
-          <MailboxHistory sessionId={sessionId} />
-          {/* 更新合并增量，重新生成读取完整历史。 */}
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <div className="detail-section-title">
-                <Icon name="spark" />
-                <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
-              </div>
-              <div className="actions" style={{ display: "flex", gap: 8 }}>
-                <SummaryControls expansion={summaryExpansion} />
-                {sessionCtx?.fields?.summary && (
-                  <button
-                    type="button"
-                    className="btn ghost icon-button small"
-                    title="复制摘要"
-                    aria-label="复制摘要"
-                    onClick={copyContext}
-                  >
-                    <Icon name="copy" />
-                  </button>
-                )}
-                {canRegenerateSummary && (
-                  <button
-                    type="button"
-                    className="btn ghost icon-button small"
-                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
-                    title={operation.error ? "无法读取更新状态" : ctxBusy === "regenerate" || operation.busy ? "重新生成中…" : "重新生成"}
-                    aria-label="重新生成"
-                    onClick={() => updateSummary(true)}
-                  >
-                    <Icon name="refresh" className={ctxBusy === "regenerate" || (operation.busy && !ctxBusy) ? "spinning" : ""} />
-                  </button>
-                )}
-                {canUpdateSummary && (
-                  <button
-                    type="button"
-                    className="btn primary icon-button small"
-                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
-                    title={operation.error ? "无法读取更新状态" : ctxBusy === "update" || operation.busy ? "更新中…" : "更新摘要"}
-                    aria-label="更新摘要"
-                    onClick={() => updateSummary()}
-                  >
-                    <Icon name="spark" className={ctxBusy === "update" || operation.busy ? "spinning" : ""} />
-                  </button>
-                )}
-              </div>
-            </div>
-            {sessionCtx?.pending && (
-              <div className="small muted">
-                有新消息待并入摘要。
-              </div>
-            )}
-            {ctxReadError && (
-              <div className="badge warn" style={{ overflowWrap: "anywhere" }}>
-                {ctxReadError.message}
-              </div>
-            )}
-            {ctxError && (
-              <div className="badge warn" style={{ overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
-                <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
-                {ctxError.operationId && (
-                  <button className="btn small ghost" onClick={async () => {
-                    const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
-                    showToast(ok ? "已复制错误详情" : "复制失败");
-                  }}>复制错误详情</button>
-                )}
-              </div>
-            )}
-            {sessionCtx && sessionCtx.fields ? (
-              <div className="md-body" style={{ overflowWrap: "anywhere" }}>
-                <SummaryContent expansion={summaryExpansion}
-                 >
-                  {sessionCtx.fields?.summary ?? {items:[]}}
-                </SummaryContent>
-              </div>
-            ) : sessionCtx === null ? (
-              <div className="skeleton" style={{ height: 48, borderRadius: "var(--radius-md)" }} />
-            ) : (
-              <div className="l1-none">
-                {!hasMessages ? "暂无消息" : "暂无摘要"}
-              </div>
-            )}
-          </section>
-
-          {/* 消息 */}
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <div className="detail-section-title">
-                <Icon name="chatLines" />
-                <span>最近消息</span>
-              </div>
-              {detail.ingested_message_sequence > 0 && (
-                <button
-                  className="btn small ghost"
-                  onClick={() =>
-                    navigate({
-                      view: "session",
-                      sessionId,
-                      entry: "conversation",
-                      initialTitle: title,
-                      initialAgent: session.agent,
-                      initialTotal: detail.ingested_message_sequence,
-                    })
-                  }
-                >
-                  查看全部历史消息（共 {detail.ingested_message_sequence} 条）
-                </button>
-              )}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {recentMessages.map((m) => (
-                <SessionMessage key={m.sequence} msg={messageData(m, session.agent)} ordinal={m.ordinal} />
-              ))}
-              {messages.length === 0 && (
-                <div className="empty">
-                  还没有同步消息。
-                  <div className="small" style={{ marginTop: 4 }}>
-                    重新读取以加载已同步的原始会话。
-                  </div>
-                  <div className="invite">
-                    <button className="btn small" onClick={refresh}>重新读取</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-
-        <aside className="detail-aside session-detail-aside">
-          {/* 只读事实在右栏模块化卡片中展示 */}
-          <section className="card detail-section">
-            <div className="detail-section-title">
+      <DetailLayout panel={<><DetailSection sectionId="properties" label="会话信息" title={<>
               <Icon name="info" />
               <span>会话信息</span>
-            </div>
+            </>}>
+
             {(untitled || archived) && (
               <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
@@ -440,7 +333,7 @@ export default function SessionDetailView({
             )}
 
             {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
-            <div className="session-info-fields">
+            <DetailFields>
               <Field label="Agent">
                 <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                   <button
@@ -646,59 +539,131 @@ export default function SessionDetailView({
                   )}
                 </Field>
               )}
-            </div>
-          </section>
-
-          <section className="card detail-section">
-            <div className="row between" style={{ alignItems: "center" }}>
-              <div className="detail-section-title">
-                <Icon name="tasks" />
-                <span>跟踪任务（{detail.tracked_workstreams.length}）</span>
-              </div>
-              <button
-                type="button"
-                className="btn ghost icon-button small"
-                title="添加跟踪任务"
-                aria-label="添加跟踪任务"
-                onClick={() => setTrackModalOpen(true)}
-              >
-                <Icon name="plus" />
-              </button>
-            </div>
-
-            {detail.tracked_workstreams.length === 0 ? (
-              <div className="l1-none">未跟踪任何任务</div>
-            ) : (
-              <div className="session-tracked-list">
-                {detail.tracked_workstreams.map((task) => (
-                  <div
-                    key={task.id}
-                    className="list-row session-tracked-task-row"
-                    role="link"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title });
-                      }
-                    }}
-                    onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
+            </DetailFields>
+          </DetailSection>
+<SessionTrackedTasks tasks={detail.tracked_workstreams} navigate={navigate}
+            busy={trackingBusy} error={trackingError} onAdd={() => setTrackModalOpen(true)}
+            onRemove={id => void removeTracking(id)} /></>}><MailboxHistory sessionId={sessionId} />
+<DetailSection sectionId="summary" label="会话摘要" title={<>
+                <Icon name="spark" />
+                <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
+              </>} actions={<>
+                <SummaryControls expansion={summaryExpansion} />
+                {sessionCtx?.fields?.summary && (
+                  <button
+                    type="button"
+                    className="btn ghost icon-button small"
+                    title="复制摘要"
+                    aria-label="复制摘要"
+                    onClick={copyContext}
                   >
-                    <div className="grow">
-                      <div className="title mini-title" title={task.title}>
-                        <span><Icon name="tasks" /></span>
-                        <span className="truncate">{task.title}</span>
-                      </div>
-                    </div>
-                    <div className="side">
-                      {task.visibility === "archived" && <span className="badge warn">已归档</span>}
-                    </div>
-                  </div>
-                ))}
+                    <Icon name="copy" />
+                  </button>
+                )}
+                {canRegenerateSummary && (
+                  <button
+                    type="button"
+                    className="btn ghost icon-button small"
+                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
+                    title={operation.error ? "无法读取更新状态" : ctxBusy === "regenerate" || operation.busy ? "重新生成中…" : "重新生成"}
+                    aria-label="重新生成"
+                    onClick={() => updateSummary(true)}
+                  >
+                    <Icon name="refresh" className={ctxBusy === "regenerate" || (operation.busy && !ctxBusy) ? "spinning" : ""} />
+                  </button>
+                )}
+                {canUpdateSummary && (
+                  <button
+                    type="button"
+                    className="btn primary icon-button small"
+                    disabled={operation.busy || operation.checking || Boolean(ctxBusy)}
+                    title={operation.error ? "无法读取更新状态" : ctxBusy === "update" || operation.busy ? "更新中…" : "更新摘要"}
+                    aria-label="更新摘要"
+                    onClick={() => updateSummary()}
+                  >
+                    <Icon name="spark" className={ctxBusy === "update" || operation.busy ? "spinning" : ""} />
+                  </button>
+                )}
+              </>} status={<>
+      {sessionCtx?.pending && (
+              <div className="small muted">
+                有新消息待并入摘要。
               </div>
             )}
-          </section>
-        </aside>
-      </div>
+      {ctxReadError && (
+              <div className="badge warn" style={{ overflowWrap: "anywhere" }}>
+                {ctxReadError.message}
+              </div>
+            )}
+      {ctxError && (
+              <div className="badge warn" style={{ overflowWrap: "anywhere", display: "flex", gap: 8, alignItems: "center" }}>
+                <span>{ctxError.message}{ctxError.operationId ? ` · 操作 ID ${ctxError.operationId}` : ""}</span>
+                {ctxError.operationId && (
+                  <button className="btn small ghost" onClick={async () => {
+                    const ok = await copyToClipboard(contextUpdateErrorCopyText(ctxError));
+                    showToast(ok ? "已复制错误详情" : "复制失败");
+                  }}>复制错误详情</button>
+                )}
+              </div>
+            )}
+    </>}>
+
+
+
+
+            {sessionCtx && sessionCtx.fields ? (
+              <DetailContent label="会话摘要内容" className="md-body">
+                <SummaryContent expansion={summaryExpansion}
+                 >
+                  {sessionCtx.fields?.summary ?? {items:[]}}
+                </SummaryContent>
+              </DetailContent>
+            ) : sessionCtx === null ? (
+              <div className="skeleton" style={{ height: 48, borderRadius: "var(--radius-md)" }} />
+            ) : (
+              <div className="detail-empty">
+                {!hasMessages ? "暂无消息" : "暂无摘要"}
+              </div>
+            )}
+          </DetailSection>
+<DetailSection sectionId="messages" label="最近消息" title={<>
+                <Icon name="chatLines" />
+                <span>最近消息</span>
+              </>} actions={<>{detail.ingested_message_sequence > 0 && (
+                <button
+                  className="btn small ghost"
+                  onClick={() =>
+                    navigate({
+                      view: "session",
+                      sessionId,
+                      entry: "conversation",
+                      initialTitle: title,
+                      initialAgent: session.agent,
+                      initialTotal: detail.ingested_message_sequence,
+                    })
+                  }
+                >
+                  查看全部历史消息（共 {detail.ingested_message_sequence} 条）
+                </button>
+              )}</>}>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {recentMessages.map((m) => (
+                <SessionMessage key={m.sequence} msg={messageData(m, session.agent)} ordinal={m.ordinal} />
+              ))}
+              {messages.length === 0 && (
+                <div className="empty">
+                  还没有同步消息。
+                  <div className="small" style={{ marginTop: 4 }}>
+                    重新读取以加载已同步的原始会话。
+                  </div>
+                  <div className="invite">
+                    <button className="btn small" onClick={refresh}>重新读取</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </DetailSection></DetailLayout>
 
       {/* 危险操作：删除只在正常状态下出现；已归档的动作在顶部横幅。
           归档的确认弹窗在 SessionHeaderActions 里。 */}
@@ -722,6 +687,6 @@ export default function SessionDetailView({
         />
       )}
 
-    </div>
+    </div></DetailPanelProvider>
   );
 }

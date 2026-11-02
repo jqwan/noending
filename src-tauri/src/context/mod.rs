@@ -1,5 +1,6 @@
 //! Summary reads and extraction, delegated to an Agent or performed by the
 //! current session. Both paths validate before a snapshot-guarded transaction.
+mod collaboration;
 pub(crate) mod diagnostics;
 pub mod freshness;
 pub(crate) mod interactive;
@@ -11,10 +12,7 @@ pub mod summary;
 pub mod tools;
 use crate::domain::{ContextUpdateError, ContextUpdateStatus, Session, SessionContextFields};
 use crate::error::{other, AppError, Result};
-use crate::storage::context_repo::{
-    self, commit_session_context_conn, commit_workstream_summary_conn,
-    get_workstream_context_state_conn, set_workstream_frontier_conn,
-};
+use crate::storage::context_repo::commit_session_context_conn;
 use crate::storage::Db;
 use crate::sync::extractor::{self, CliExtractor, ExtractionSettings};
 pub use project::{
@@ -45,7 +43,8 @@ pub struct WorkstreamContextView {
     pub updated_at: Option<String>,
     pub pending: bool,
     pub freshness: freshness::SummaryFreshness,
-    pub pending_sessions: usize,
+    pub pending_messages: i64,
+    pub processed_through_seq: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionUpdateOutcome {
@@ -58,10 +57,8 @@ pub struct WorkstreamUpdateOutcome {
     pub workstream_id: String,
     pub status: ContextUpdateStatus,
     pub context_revision: i64,
-    pub updated_sessions: Vec<String>,
-    pub skipped_session_ids: Vec<String>,
-    pub failed_sessions: Vec<SessionFailure>,
-    pub remaining_pending: usize,
+    pub processed_through_seq: i64,
+    pub remaining_pending: i64,
 }
 
 #[derive(Clone, Serialize, serde::Deserialize)]
@@ -195,34 +192,7 @@ pub fn session_context_view(db: &Db, id: &str) -> Result<SessionContextView> {
     })
 }
 pub fn workstream_context_view(db: &Db, id: &str) -> Result<WorkstreamContextView> {
-    db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
-    let state = db.get_workstream_context_state(id)?;
-    let frontiers: HashMap<_, _> = db
-        .workstream_frontiers(id)?
-        .into_iter()
-        .map(|f| (f.session_id.clone(), f))
-        .collect();
-    let sessions = db.sessions_for_workstream(id)?;
-    let mut pending_sessions = 0;
-    for session in &sessions {
-        let view = session_context_view(db, &session.id)?;
-        let consumed = frontiers.get(&session.id);
-        if view.pending || consumed.is_none_or(|f| f.session_context_revision != view.revision) {
-            pending_sessions += 1;
-        }
-    }
-    let membership_changed = frontiers.len() != sessions.len();
-    Ok(WorkstreamContextView {
-        workstream_id: id.into(),
-        summary: (!state.summary.is_empty()).then_some(state.summary),
-        context_revision: state.context_revision,
-        updated_at: state.updated_at,
-        pending: state.input_revision != state.consumed_input_revision
-            || membership_changed
-            || pending_sessions > 0,
-        pending_sessions,
-        freshness: freshness::summary(&db.read(), "task", id)?,
-    })
+    collaboration::view(db, id)
 }
 
 type ContextRunner<'a> = dyn FnMut(
@@ -480,152 +450,9 @@ fn extract_task_using(
     scope: Option<&interactive::Scope>,
     runner: &mut ContextRunner<'_>,
 ) -> Result<WorkstreamUpdateOutcome> {
-    with_operation(
-        db,
-        id,
-        home,
-        "workstream",
-        scope,
-        |launch, operation, activity| {
-            let ws = db.get_workstream(id)?.ok_or_else(|| other("任务不存在"))?;
-            let state = query::task_state(&db.read(), id)?;
-            let project_ids = task_projects(&db.read(), id)?;
-            let snapshots = db
-                .sessions_for_workstream(id)?
-                .into_iter()
-                .map(|s| snapshot_for(db, s, false, launch.scope.as_ref()))
-                .collect::<Result<Vec<_>>>()?;
-            let ids: Vec<String> = snapshots.iter().map(|s| s.session.id.clone()).collect();
-            activity.add_sessions(ids.clone())?;
-            let frontiers = db.workstream_frontiers(id)?;
-            let pending = state.input_revision != state.consumed_input_revision
-                || frontiers.len() != snapshots.len()
-                || snapshots.iter().any(|s| {
-                    s.pending()
-                        || frontiers
-                            .iter()
-                            .find(|f| f.session_id == s.session.id)
-                            .is_none_or(|f| f.session_context_revision != s.revision())
-                });
-            if !regenerate && !pending {
-                return Ok((
-                    WorkstreamUpdateOutcome {
-                        workstream_id: id.into(),
-                        status: ContextUpdateStatus::NoChange,
-                        context_revision: state.context_revision,
-                        updated_sessions: vec![],
-                        skipped_session_ids: vec![],
-                        failed_sessions: vec![],
-                        remaining_pending: 0,
-                    },
-                    "no_change",
-                ));
-            }
-            let batch = run_batch(
-                db,
-                id,
-                "task",
-                serde_json::json!({"type":"task","title":ws.title,"description":ws.description,
-            "related_projects":crate::workspace::workstream::projects_for_workstream(db,id)?}),
-                state.context_revision,
-                &snapshots,
-                regenerate,
-                launch,
-                operation,
-                runner,
-            )?;
-            operation.set_stage("database_commit");
-            let (revision, updated) = db.tx(|tx| {
-            let current = get_workstream_context_state_conn(tx, id)?;
-            let current_ws: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT title,description FROM workstreams WHERE id=?1",
-                    [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let mut current_ids: Vec<String> = {
-                let mut st =
-                    tx.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1) ORDER BY id")?;
-                let rows = st
-                    .query_map([id], |r| r.get(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                rows
-            };
-            let mut expected_ids = ids.clone();
-            current_ids.sort();
-            expected_ids.sort();
-            if current.context_revision != state.context_revision
-                || current.input_revision != state.input_revision
-                || current_ws != Some((ws.title.clone(), ws.description.clone()))
-                || current_ids != expected_ids
-                || task_projects(tx, id)? != project_ids
-            {
-                return Err(stale());
-            }
-            for s in &snapshots {
-                s.validate(tx, Some(id))?;
-            }
-            let mut updated = vec![];
-            for s in &snapshots {
-                let Some(fields) = batch.results.get(&s.session.id) else {
-                    continue;
-                };
-                let revision = if s.pending() {
-                    updated.push(s.session.id.clone());
-                    commit_session_context_conn(
-                        tx,
-                        &s.session.id,
-                        fields,
-                        s.revision(),
-                        s.generation,
-                        s.latest,
-                    ).and_then(|revision| {
-                        crate::storage::freshness::mark_refreshed(tx, &s.session.id)?;
-                        Ok(revision)
-                    })?
-                } else {
-                    s.revision()
-                };
-                set_workstream_frontier_conn(
-                    tx,
-                    &crate::domain::WorkstreamSessionFrontier {
-                        workstream_id: id.into(),
-                        session_id: s.session.id.clone(),
-                        session_context_revision: revision,
-                    },
-                )?;
-            }
-            context_repo::delete_unowned_workstream_frontiers_conn(tx, id)?;
-            let revision = commit_workstream_summary_conn(tx, id, &batch.summary)?;
-            Ok((revision, updated))
-        })?;
-            let status = if !batch.failed.is_empty() {
-                ContextUpdateStatus::Partial
-            } else if batch.target_skipped {
-                ContextUpdateStatus::Skipped
-            } else {
-                ContextUpdateStatus::Updated
-            };
-            Ok((
-                WorkstreamUpdateOutcome {
-                    workstream_id: id.into(),
-                    status,
-                    context_revision: revision,
-                    updated_sessions: updated,
-                    skipped_session_ids: batch.skipped,
-                    failed_sessions: batch.failed,
-                    remaining_pending: workstream_context_view(db, id)?.pending_sessions,
-                },
-                match status {
-                    ContextUpdateStatus::Partial => "partial",
-                    ContextUpdateStatus::Skipped => "skipped",
-                    _ => "updated",
-                },
-            ))
-        },
-    )
+    collaboration::extract(db, id, home, regenerate, scope, runner)
 }
+
 struct BatchOutput {
     // Hold the locks and files until the transaction finishes.
     _files: ExtractionFiles,

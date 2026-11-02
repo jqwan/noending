@@ -157,10 +157,12 @@ describe("AgentsView", () => {
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
     expect(await screen.findByText(/同步发现 5 条记录 · 写入 12 条新消息/)).toBeTruthy();
 
-    expect(await screen.findByRole("combobox", { name: "状态" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: /^状态：/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^状态：/ }));
     expect(screen.getByRole("option", { name: "全部" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "已就绪" })).toBeTruthy();
     expect(screen.getByRole("option", { name: "未就绪" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
 
     expect(screen.getByRole("button", { name: "查看 Antigravity Agent 详情" })).toBeTruthy();
     expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
@@ -215,7 +217,7 @@ describe("AgentsView", () => {
     expect(desktopBtn.getAttribute("aria-pressed")).toBe("false");
 
     // Readiness select exists with options
-    const statusSelect = screen.getByRole("combobox", { name: "状态" });
+    const statusSelect = screen.getByRole("button", { name: /^状态：/ });
     expect(statusSelect).toBeTruthy();
 
     // Default TUI shows TUI agents
@@ -224,18 +226,21 @@ describe("AgentsView", () => {
     expect(screen.getByText("Pi")).toBeTruthy();
 
     // Filter by unready in TUI: Pi has detected: false
-    fireEvent.change(statusSelect, { target: { value: "unready" } });
+    fireEvent.click(statusSelect);
+    fireEvent.click(screen.getByRole("option", { name: "未就绪" }));
     expect(screen.getByText("Pi")).toBeTruthy();
     expect(screen.queryByText("Claude Code")).toBeNull();
 
     // Filter by ready in TUI: Claude Code and Codex are ready
-    fireEvent.change(statusSelect, { target: { value: "ready" } });
+    fireEvent.click(statusSelect);
+    fireEvent.click(screen.getByRole("option", { name: "已就绪" }));
     expect(screen.getByText("Claude Code")).toBeTruthy();
     expect(screen.getByText("Codex")).toBeTruthy();
     expect(screen.queryByText("Pi")).toBeNull();
 
     // Reset to all
-    fireEvent.change(statusSelect, { target: { value: "all" } });
+    fireEvent.click(statusSelect);
+    fireEvent.click(screen.getByRole("option", { name: "全部" }));
     expect(screen.getByText("Claude Code")).toBeTruthy();
 
     // Switch to desktop surface
@@ -418,17 +423,15 @@ it("sorts agents by recent activity, name, and session count", async () => {
   expect(cards[1].getAttribute("aria-label")).toContain("Claude Code");
 
   // Switch to "sessions"
-  fireEvent.change(screen.getByRole("combobox", { name: "排序" }), {
-    target: { value: "sessions" },
-  });
+  fireEvent.click(screen.getByRole("button", { name: /^排序：/ }));
+  fireEvent.click(screen.getByRole("option", { name: "会话数" }));
   const cardsBySessions = container.querySelectorAll(".agent-card");
   expect(cardsBySessions[0].getAttribute("aria-label")).toContain("Antigravity");
   expect(cardsBySessions[1].getAttribute("aria-label")).toContain("Codex");
 
   // Switch to "name"
-  fireEvent.change(screen.getByRole("combobox", { name: "排序" }), {
-    target: { value: "name" },
-  });
+  fireEvent.click(screen.getByRole("button", { name: /^排序：/ }));
+  fireEvent.click(screen.getByRole("option", { name: "名称" }));
   const cardsByName = container.querySelectorAll(".agent-card");
   expect(cardsByName[0].getAttribute("aria-label")).toContain("Antigravity");
   expect(cardsByName[1].getAttribute("aria-label")).toContain("Claude Code");
@@ -468,6 +471,6 @@ it("renders immediately without flash when cached data is available", async () =
   // Second render has data in cache immediately, rendering without delay or placeholder
   const view2 = render(<AgentsView navigate={vi.fn()} />);
   expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
-  expect(screen.getByRole("combobox", { name: "状态" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^状态：/ })).toBeTruthy();
   view2.unmount();
 });

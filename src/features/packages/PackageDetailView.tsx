@@ -1,3 +1,7 @@
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailContent, DetailFields, DetailSection } from "../../components/DetailSection";
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
@@ -90,7 +94,7 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
 
   const toggle = (enable: boolean) => entry && operate("toggle", () =>
     enable ? api.enablePackage(entry.id, entry.revision) : api.disablePackage(entry.id, entry.revision));
-  return <div className="main package-detail-page">
+  return <DetailPanelProvider kind="package"><div className="main package-detail-page detail-page">
     <PageHeader title={<><Icon name="puzzle" /><span>{entry?.name ?? initialTitle ?? "插件包"}</span></>} actions={<>
       {configurable && userScope && <button className={"btn ghost icon-button" + (userScope.state === "enabled" ? " is-on" : " is-off")}
         title={userScope.state === "enabled" ? "用户级停用" : "用户级启用"}
@@ -100,35 +104,10 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
       ><Icon name="power" /></button>}
       {entry && entry.capabilities.uninstall && <button className="btn ghost icon-button danger" aria-label="卸载插件包" title="卸载插件包" disabled={busy || loading} onClick={() => setUninstalling(true)}><Icon name="trash" /></button>}
     </>} />
-    {error && <div role="alert" className="package-error">{error}</div>}
-    {!entry ? (loading ? <p className="small muted" role="status">正在读取插件包…</p> : null) : <div className="detail-layout">
-      <div className="detail-main">
-        <section className="card detail-section" aria-label="插件包详情">
-          <h2><Icon name="info" />描述</h2>
-          {entry.description
-            ? <p className="package-description">{entry.description}</p>
-            : <p className="small muted">暂无描述。</p>}
-          {entry.error && <div className="package-error">{entry.error}</div>}
-        </section>
-        <section className="card detail-section" aria-label="包内内容">
-          <h2><Icon name="folder" />包内内容</h2>
-          {detail && detail.contents.skills.length === 0 && detail.contents.mcp_files.length === 0
-            ? <p className="small muted">未识别到包内 Skill 或 MCP 配置。</p>
-            : <>
-              {detail && detail.contents.skills.length > 0 && <div className="package-contents">
-                {detail.contents.skills.map(skill => <span key={skill} className="badge" title="包内 Skill（由所属 Agent 加载，NoEnding 只读展示）">Skill · {skill}</span>)}
-              </div>}
-              {detail && detail.contents.mcp_files.length > 0 && <div className="package-contents">
-                {detail.contents.mcp_files.map(file => <span key={file} className="badge" title="包内 MCP 配置（由所属 Agent 加载，NoEnding 只读展示）">MCP · {file}</span>)}
-              </div>}
-              <p className="small muted">包内资源由提供方 Agent 加载，NoEnding 只读展示。</p>
-            </>}
-        </section>
-      </div>
-      <aside className="detail-aside">
-        <section className="card detail-section" aria-label="属性">
-          <h2><Icon name="file" />属性</h2>
-          <div className="session-info-fields">
+    {error && <Notice role="alert" >{error}</Notice>}
+    {!entry ? (loading ? <p className="small muted" role="status">正在读取插件包…</p> : null) : <DetailLayout panel={<><DetailSection sectionId="properties" label="属性" title={<><Icon name="file" />属性</>}>
+
+          <DetailFields>
             <Field label="Agent">
               {entry.agent
                 ? <button type="button" className="link" title={`打开 Agent：${AGENT_LABELS[entry.agent]}`}
@@ -167,18 +146,36 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
                 <span>{scope.config_path}（尚未创建）</span>
               </span>}
             </Field>)}
-          </div>
-        </section>
-      </aside>
-    </div>}
+          </DetailFields>
+        </DetailSection></>}><DetailSection sectionId="description" label="插件包详情" title={<><Icon name="info" />描述</>}>
+
+          {entry.description
+            ? <DetailContent label="插件包描述内容"><p className="detail-description">{entry.description}</p></DetailContent>
+            : <p className="small muted">暂无描述。</p>}
+          {entry.error && <Notice>{entry.error}</Notice>}
+        </DetailSection>
+<DetailSection sectionId="contents" label="包内内容" title={<><Icon name="folder" />包内内容</>}>
+
+          {detail && detail.contents.skills.length === 0 && detail.contents.mcp_files.length === 0
+            ? <p className="small muted">未识别到包内 Skill 或 MCP 配置。</p>
+            : <>
+              {detail && detail.contents.skills.length > 0 && <div className="package-contents">
+                {detail.contents.skills.map(skill => <span key={skill} className="badge" title="包内 Skill（由所属 Agent 加载，NoEnding 只读展示）">Skill · {skill}</span>)}
+              </div>}
+              {detail && detail.contents.mcp_files.length > 0 && <div className="package-contents">
+                {detail.contents.mcp_files.map(file => <span key={file} className="badge" title="包内 MCP 配置（由所属 Agent 加载，NoEnding 只读展示）">MCP · {file}</span>)}
+              </div>}
+              <p className="small muted">包内资源由提供方 Agent 加载，NoEnding 只读展示。</p>
+            </>}
+        </DetailSection></DetailLayout>}
     {uninstalling && entry && <Modal title="卸载插件包" onClose={() => { if (!busy) setUninstalling(false); }}>
       <p>将通过 {entry.agent ? AGENT_LABELS[entry.agent] : "该 Agent"} 的原生命令卸载该插件包。</p>
       <p className="small muted">注册表中的安装条目随卸载一起消失，作用域内的启停配置不再生效；已有终端需要重新加载。</p>
-      {error && <div role="alert" className="package-error">{error}</div>}
-      <div className="row package-dialog-actions">
+      {error && <Notice role="alert" >{error}</Notice>}
+      <DialogActions>
         <button className="btn" disabled={busy} onClick={() => setUninstalling(false)}>取消</button>
         <button className="btn danger" disabled={busy} onClick={() => void uninstall()}>{busyAction === "uninstall" ? "处理中…" : "卸载"}</button>
-      </div>
+      </DialogActions>
     </Modal>}
-  </div>;
+  </div></DetailPanelProvider>;
 }

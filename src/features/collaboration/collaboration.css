@@ -1,11 +1,38 @@
 /* 协作室：任务详情的一个子页。复用 detail-section / badge / btn，不新增一套组件体系。 */
 
-.collab-candidates,
-.collab-room,
-.collab-messages {
+.detail-main-collaboration > .collab-chat {
+  flex: 1;
+  flex-shrink: 1;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  padding: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 0;
+}
+.collab-chat-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.collab-chat-header .detail-section-title { margin: 0; flex-wrap: wrap; min-width: 0; }
+.collab-chat-actions { display: flex; align-items: center; gap: var(--space-sm); flex-shrink: 0; }
+.collab-chat-feedback { padding: 8px 16px; max-height: 30%; overflow-y: auto; }
+.collab-chat-feedback p { margin: 0 0 6px; }
+
+
+
+.collab-candidates,
+.collab-room {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }
 
 .collab-candidate-list,
@@ -21,7 +48,7 @@
 .collab-candidate {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-md);
   padding: 6px 4px;
   border-bottom: 1px solid var(--border-subtle);
   flex-wrap: wrap;
@@ -31,8 +58,8 @@
 .collab-candidate-main {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 1 1 220px;
+  gap: var(--space-sm);
+  flex: 1 1 120px;
   min-width: 0;
   cursor: pointer;
 }
@@ -41,56 +68,55 @@
 .collab-candidate-wake {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-icon);
   flex: 0 0 auto;
   white-space: nowrap;
 }
-.collab-candidate-wake select { width: auto; }
+.collab-candidate-wake .btn[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
+.collab-candidate-wake .btn:disabled { opacity: 1; }
 
 .collab-coordinator {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: 8px 10px 10px;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.collab-coordinator legend { padding: 0 4px; color: var(--text-secondary); }
-.collab-radio {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
+  color: var(--text-secondary);
 }
+.collab-coordinator > svg, .collab-coordinator > span { flex-shrink: 0; }
+.collab-coordinator .custom-select-control { flex: 1; min-width: 0; max-width: none; }
 
 .collab-member {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 8px 4px;
+  gap: var(--space-xs);
+  padding: 10px 0;
   border-bottom: 1px solid var(--border-subtle);
 }
 .collab-member:last-child { border-bottom: 0; }
 .collab-member-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
-  flex-wrap: wrap;
 }
-.collab-member-name { min-width: 0; font-weight: 500; }
+.collab-member-name { flex: 1; min-width: 0; font-weight: var(--weight-medium); }
+.collab-member-wake, .collab-member-coordinator { display: inline-flex; flex-shrink: 0; }
+.collab-member-coordinator { color: var(--accent); }
 .collab-member-meta {
   display: flex;
-  gap: 12px;
+  align-items: center;
+  gap: var(--space-sm);
   flex-wrap: wrap;
+  padding-left: 24px;
 }
+.collab-member-read, .collab-member-unread { display: inline-flex; align-items: center; gap: 3px; }
+.collab-member-meta .ui-icon { width: 13px; height: 13px; }
+.collab-member-unread { margin-left: auto; color: var(--accent); }
 .collab-member-actions {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  flex-shrink: 0;
 }
-.collab-member-actions:empty { display: none; }
 
 /* 连接与处理阶段分开着色：心跳活着 ≠ 模型能响应。 */
 .collab-tone-waiting { background: var(--bg-hover); color: var(--text-secondary); }
@@ -106,18 +132,67 @@
 .collab-run-active { background: var(--accent-wash); color: var(--accent); }
 .collab-run-stopped { background: var(--bg-hover); color: var(--text-muted); }
 
-/* 消息列表与会话详情页「最近消息」一致：气泡之间 12px，条目本身不加内边距与底色。 */
-.collab-message-list { gap: 12px; }
+.collab-messages { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.collab-history { position: relative; flex: 1; min-height: 0; display: flex; }
+.collab-message-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 20px 24px;
+}
+.collab-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-base);
+  text-align: center;
+}
+.collab-empty > svg { width: 32px; height: 32px; opacity: .5; }
+.collab-latest {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--bg-app);
+  box-shadow: var(--shadow-md);
+}
+/* 气泡复用会话消息组件，用户靠右、成员靠左。 */
+.collab-message-list { gap: var(--space-md); }
 .collab-message { list-style: none; }
 .collab-notice { margin: 0; text-align: center; }
 
 .collab-compose {
+  flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle);
 }
 .collab-compose textarea {
   width: 100%;
-  resize: vertical;
+  min-height: 72px;
+  max-height: 25vh;
+  resize: none;
 }
+.collab-compose-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-md); }
+
+@media (max-width: 760px) {
+  .collab-message-scroll { padding: 16px; }
+  .collab-chat-header { padding: 10px 12px; }
+  .collab-compose-actions .small { font-size: var(--font-size-xs); }
+}
+
+.detail-panel .collab-candidate-list,
+.detail-panel .collab-member-list { max-height: none; overflow: visible; }
+
+.detail-main-collaboration > .collaboration-summary { flex: 0 1 auto; min-height: 0; max-height: 45%; overflow: hidden; }
+.detail-main-collaboration > .collaboration-summary > .detail-section-header,
+.detail-main-collaboration > .collaboration-summary > .detail-section-status { flex: none; }
+.detail-main-collaboration .collaboration-summary > .detail-section-body { overflow: hidden; }
+.detail-main-collaboration .collaboration-summary .detail-content { max-height: none; }
+.detail-main-collaboration .collaboration-summary > .detail-section-body > p { flex: none; }

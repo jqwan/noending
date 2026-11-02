@@ -1,3 +1,5 @@
+import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -88,20 +90,19 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
     }
   };
 
-  return <section className="card detail-section" aria-label="技能">
-    <div className="row between" style={{ alignItems: "center", minHeight: 24 }}>
-      <h2 className="detail-section-title">
+  return <DetailSection sectionId="skills" label="技能" title={<>
         <Icon name="skill" />
         <span>技能（{visibleRows.length}）</span>
-      </h2>
-      <button type="button" className="btn ghost icon-button small" title="配置技能" aria-label="配置技能" disabled={loading} onClick={() => setAdding(true)}>
+      </>} actions={<><button type="button" className="btn ghost icon-button small" title="配置技能" aria-label="配置技能" disabled={loading} onClick={() => setAdding(true)}>
         <Icon name="sliders" />
-      </button>
-    </div>
-    {error && <div role="alert" className="skill-error">{error}</div>}
+      </button></>} status={<>
+      {error && <Notice role="alert" >{error}</Notice>}
+    </>}>
+
+
     {loading ? <p className="small muted" role="status">正在读取技能配置…</p>
       : !visibleRows.length ? <p className="small muted">当前项目还没有启用的技能。</p>
-      : <div className="skill-config-list">
+      : <DetailList label="技能列表">
         {visibleRows.map(row => {
           const entries = projectEntries(row);
           const userScopeEntries = userEntries(row);
@@ -112,30 +113,20 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
             return SKILL_AGENTS.every(agent => inPath.some(entry => locationSupportsAgent(entry.location, agent)));
           });
           const userEffective = userScopeEntries.length > 0;
-          return <div className="skill-config-row" key={row.id} role="button" tabIndex={0}
-            onClick={() => navigate(skillDetailRoute(row))}
-            onKeyDown={e => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                navigate(skillDetailRoute(row));
-              }
-            }}>
-            <div className="skill-config-copy">
-              <span className="skill-config-name"><Icon name="skill" />{row.name}</span>
-              {row.error && <span className="small skill-config-error">{row.error}</span>}
-            </div>
-            <div className="skill-config-actions">
+          return <DetailListRow key={row.id} icon={<Icon name="skill" />}
+            title={row.name} onOpen={() => navigate(skillDetailRoute(row))}
+            description={row.error && <span className="danger">{row.error}</span>}
+            meta={<>
               {!row.registered && <span className="badge">未托管</span>}
               {physical && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 不停用该入口，迁移或卸载时才会处理">物理入口</span>}
-              {!userEffective && row.registered && enabled && !full && <button className="btn small" disabled={busy === row.id} onClick={e => { e.stopPropagation(); void apply(row, true); }}>补齐</button>}
-            </div>
-          </div>;
+            </>}
+            actions={!userEffective && row.registered && enabled && !full && <button className="btn small" disabled={busy === row.id} onClick={() => void apply(row, true)}>补齐</button>}
+          />;
         })}
-      </div>}
+      </DetailList>}
     {adding && <ProjectSkillDialog projectId={projectId} resources={rows.filter(row => row.registered)}
       enabledIds={enabledIds(projectEntries)} userEffectiveIds={enabledIds(userEntries)}
       physicalIds={rows.filter(row => projectEntries(row).some(entry => !entry.link)).map(row => row.id)}
       onClose={() => setAdding(false)} onDone={async () => { await load(true); setAdding(false); }} />}
-  </section>;
+  </DetailSection>;
 }

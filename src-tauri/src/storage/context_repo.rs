@@ -6,8 +6,8 @@
 //!   conversation) and `session_message_projection` (which messages ARE that
 //!   conversation, in order). Only ingestion writes these.
 //! * **NoEnding-owned Context** — `session_contexts` (the current summary) and
-//!   `workstream_context_state` / `workstream_session_frontiers` (the two
-//!   revision counters and what a Workstream has already consumed). Only an
+//!   `workstream_context_state` (summary revisions and the
+//!   collaboration-message cursor). Only an
 //!   explicit user action writes these.
 //!
 //! Every read of the conversation goes through the projection, so a message a
@@ -16,9 +16,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::domain::{
-    SessionContextFields, SessionContextRecord, WorkstreamContextState, WorkstreamSessionFrontier,
-};
+use crate::domain::{SessionContextFields, SessionContextRecord, WorkstreamContextState};
 use crate::error::{other, Result};
 use crate::storage::{now, Db};
 
@@ -273,21 +271,22 @@ pub fn commit_session_context_conn(
     Ok(revision)
 }
 
-/// Persist the current task summary after the caller validates its snapshot.
+/// Persist the current collaboration summary after the caller validates its snapshot.
 pub fn commit_workstream_summary_conn(
     conn: &Connection,
     workstream_id: &str,
     summary: &crate::domain::Summary,
+    through_seq: i64,
 ) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
     conn.execute("UPDATE workstream_context_state SET summary = ?2, updated_at = ?3, refreshed_at = ?3,
-        context_revision = context_revision + 1, consumed_input_revision = input_revision WHERE workstream_id = ?1",
-        params![workstream_id, summary, now()])?;
+        context_revision = context_revision + 1, consumed_input_revision = input_revision, processed_through_seq = ?4 WHERE workstream_id = ?1",
+        params![workstream_id, summary, now(), through_seq])?;
 
     Ok(get_workstream_context_state_conn(conn, workstream_id)?.context_revision)
 }
 
-// Workstream Context revisions and per-Session frontiers
+// Collaboration summary revisions
 
 pub fn get_workstream_context_state_conn(
     conn: &Connection,
@@ -295,7 +294,7 @@ pub fn get_workstream_context_state_conn(
 ) -> Result<WorkstreamContextState> {
     Ok(conn
         .query_row(
-            "SELECT workstream_id, context_revision, input_revision, consumed_input_revision, summary, updated_at
+            "SELECT workstream_id, context_revision, input_revision, consumed_input_revision, summary, updated_at, processed_through_seq
              FROM workstream_context_state WHERE workstream_id = ?1",
             params![workstream_id],
             |r| {
@@ -306,6 +305,7 @@ pub fn get_workstream_context_state_conn(
                     consumed_input_revision: r.get(3)?,
                     summary: r.get(4)?,
                     updated_at: r.get(5)?,
+                    processed_through_seq: r.get(6)?,
                 })
             },
         )
@@ -315,6 +315,7 @@ pub fn get_workstream_context_state_conn(
             context_revision: 0,
             input_revision: 0,
             consumed_input_revision: 0,
+            processed_through_seq: 0,
             summary: Default::default(),
             updated_at: None,
         }))
@@ -343,75 +344,6 @@ pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Resul
     Ok(get_workstream_context_state_conn(conn, workstream_id)?.input_revision)
 }
 
-pub fn set_workstream_frontier_conn(
-    conn: &Connection,
-    f: &WorkstreamSessionFrontier,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO workstream_session_frontiers
-           (workstream_id, session_id, session_context_revision, ingest_generation, processed_through_seq)
-         VALUES (?1, ?2, ?3,
-          (SELECT ingest_generation FROM session_contexts WHERE session_id=?2 AND revision=?3),
-          (SELECT processed_through_seq FROM session_contexts WHERE session_id=?2 AND revision=?3))
-         ON CONFLICT(workstream_id, session_id) DO UPDATE SET
-           session_context_revision = ?3, ingest_generation=excluded.ingest_generation, processed_through_seq=excluded.processed_through_seq",
-        params![f.workstream_id, f.session_id, f.session_context_revision,],
-    )?;
-    Ok(())
-}
-
-pub fn delete_workstream_frontier_conn(
-    conn: &Connection,
-    workstream_id: &str,
-    session_id: &str,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM workstream_session_frontiers WHERE workstream_id = ?1 AND session_id = ?2",
-        params![workstream_id, session_id],
-    )?;
-    Ok(())
-}
-
-/// Delete frontiers only for Sessions that no longer belong to this Workstream.
-/// Sessions that are unchanged or omitted from a partial update still own
-/// their frontier and must not have their consumed message prefix replayed.
-pub fn delete_unowned_workstream_frontiers_conn(
-    conn: &Connection,
-    workstream_id: &str,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM workstream_session_frontiers
-         WHERE workstream_id = ?1
-           AND NOT EXISTS (
-             SELECT 1 FROM sessions s
-             WHERE s.id = workstream_session_frontiers.session_id
-               AND EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1)
-           )",
-        params![workstream_id],
-    )?;
-    Ok(())
-}
-
-pub fn frontiers_for_workstream_conn(
-    conn: &Connection,
-    workstream_id: &str,
-) -> Result<Vec<WorkstreamSessionFrontier>> {
-    let mut st = conn.prepare(
-        "SELECT workstream_id, session_id, session_context_revision
-         FROM workstream_session_frontiers WHERE workstream_id = ?1",
-    )?;
-    let rows = st
-        .query_map(params![workstream_id], |r| {
-            Ok(WorkstreamSessionFrontier {
-                workstream_id: r.get(0)?,
-                session_id: r.get(1)?,
-                session_context_revision: r.get(2)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
 // Db-level wrappers
 
 impl Db {
@@ -432,14 +364,6 @@ impl Db {
     ) -> Result<WorkstreamContextState> {
         let conn = self.read();
         get_workstream_context_state_conn(&conn, workstream_id)
-    }
-
-    pub fn workstream_frontiers(
-        &self,
-        workstream_id: &str,
-    ) -> Result<Vec<WorkstreamSessionFrontier>> {
-        let conn = self.read();
-        frontiers_for_workstream_conn(&conn, workstream_id)
     }
 
     /// The ordered message ids of a Session's CURRENT conversation.

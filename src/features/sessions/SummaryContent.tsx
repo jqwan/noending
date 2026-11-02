@@ -1,3 +1,4 @@
+import "./sessions.css";
 import { useId, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -6,6 +7,7 @@ import Icon from "../../components/Icon";
 import { showToast } from "../../components/Toast";
 import { MD_COMPONENTS } from "./SessionMessage";
 import type { SummaryDocument, SummaryItem } from "../../types";
+import { useDetailSectionControls } from "../../components/DetailSection";
 
 function itemMarkdown(item: SummaryItem): string {
   return [
@@ -47,12 +49,13 @@ type SummaryExpansion = ReturnType<typeof useSummaryExpansion>;
 
 /** Place these controls beside the summary section's existing header actions. */
 export function SummaryControls({ expansion, disabled = false }: { expansion: SummaryExpansion; disabled?: boolean }) {
+  const section = useDetailSectionControls();
   return <>
     {expansion.hasDetails && <button
       type="button" className="btn ghost icon-button small"
       title={expansion.allExpanded ? "全部收起" : "全部展开"}
       aria-label={expansion.allExpanded ? "全部收起" : "全部展开"}
-      disabled={disabled} onClick={expansion.toggleAll}
+      disabled={disabled} onClick={() => { if (!expansion.allExpanded) section?.expand(); expansion.toggleAll(); }}
     ><Icon name={expansion.allExpanded ? "collapseAll" : "expandAll"} /></button>}
   </>;
 }

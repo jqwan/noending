@@ -918,7 +918,7 @@ impl Service {
             }
             Kind::Task => {
                 let view = context::workstream_context_view(&self.db, id)?;
-                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_sessions":view.pending_sessions})
+                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_messages":view.pending_messages,"processed_through_seq":view.processed_through_seq})
             }
             Kind::Project => {
                 let view = context::project_context_view(&self.db, id)?;

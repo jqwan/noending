@@ -31,8 +31,7 @@ export function prepareNavigationTitle(route: Route): Route | Promise<Route> {
     const initialTitle = route.initialTitle ?? workstreamDetailCache.get(route.workstreamId)?.ctx.workstream.title;
     if (initialTitle !== undefined) return { ...route, initialTitle };
     return api.getWorkstreamContext(route.workstreamId).then(ctx => {
-      const cached = workstreamDetailCache.get(route.workstreamId);
-      if (!isRemovedRoute(route)) workstreamDetailCache.set(route.workstreamId, { ctx, ctxState: cached?.ctxState ?? null });
+      if (!isRemovedRoute(route)) workstreamDetailCache.set(route.workstreamId, { ctx });
       return { ...route, initialTitle: ctx.workstream.title };
     });
   }

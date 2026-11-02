@@ -18,9 +18,11 @@ pub struct SummaryFreshness {
 }
 
 pub fn summary(conn: &Connection, kind: &str, id: &str) -> Result<SummaryFreshness> {
+    if kind == "task" {
+        return super::collaboration::freshness(conn, id);
+    }
     let (state, key, scope) = match kind {
         "session" => ("session_contexts", "session_id", "s.id=?1"),
-        "task" => ("workstream_context_state", "workstream_id", "EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1)"),
         "project" => ("project_context_state", "project_id", "EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.id=s.workspace_path_id AND wp.project_id=?1)"),
         _ => return Err(other("无效的记忆范围")),
     };
@@ -33,9 +35,6 @@ pub fn summary(conn: &Connection, kind: &str, id: &str) -> Result<SummaryFreshne
         .optional()?
         .flatten();
     let frontier = match kind {
-        "task" => {
-            "LEFT JOIN workstream_session_frontiers f ON f.session_id=s.id AND f.workstream_id=?1"
-        }
         "project" => {
             "LEFT JOIN project_session_frontiers f ON f.session_id=s.id AND f.project_id=?1"
         }
@@ -91,11 +90,7 @@ pub fn summary(conn: &Connection, kind: &str, id: &str) -> Result<SummaryFreshne
             total += latest - through.unwrap();
         }
     }
-    if kind == "task" {
-        let state = super::query::task_state(conn, id)?;
-        let removed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_session_frontiers f WHERE f.workstream_id=?1 AND NOT EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.workstream_id=?1 AND sw.session_id=f.session_id))", [id], |r|r.get(0))?;
-        result.scope_changed |= state.input_revision != state.consumed_input_revision || removed;
-    } else if kind == "project" {
+    if kind == "project" {
         result.scope_changed |= super::project::input_changed(conn, id)?;
     }
     if result.history_rewritten_sessions > 0 || result.unknown_coverage_sessions > 0 {

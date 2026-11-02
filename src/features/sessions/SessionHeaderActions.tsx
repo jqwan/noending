@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { useState } from "react";
 import { api } from "../../api";
@@ -96,12 +97,12 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
               <b>归档</b> = 将会话移至「已归档」。Agent 原始会话不会被删除。
             </p>
           </div>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={() => setConfirmArchive(false)} disabled={archiveBusy}>取消</button>
             <button className="btn primary" onClick={doArchive} disabled={archiveBusy}>
               {archiveBusy ? "处理中…" : "归档"}
             </button>
-          </div>
+          </DialogActions>
         </Modal>
       )}
   </>;

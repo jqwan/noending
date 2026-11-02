@@ -68,6 +68,27 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn associated_projects_are_newest_first_without_changing_membership() {
+    let f = Fixture::new();
+    let task = f.task("Project order", &["a", "b"]);
+    let mut a = f.db().get_project("a").unwrap().unwrap();
+    let mut b = f.db().get_project("b").unwrap().unwrap();
+    a.updated_at = "2026-10-01T00:00:00Z".into();
+    b.updated_at = "2026-10-29T00:00:00Z".into();
+    f.db().upsert_project(&a).unwrap();
+    f.db().upsert_project(&b).unwrap();
+    let ordered = workstream::projects_for_workstream(f.db(), &task).unwrap();
+    assert_eq!(
+        ordered.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    assert_eq!(
+        relations::project_ids_for_workstream(&f.db().read(), &task).unwrap(),
+        ["a", "b"]
+    );
+}
+
+#[test]
 fn multiple_tasks_track_one_session_without_duplicate_membership_or_project_mutation() {
     let f = Fixture::new();
     let a = f.task("Task one", &["a"]);
@@ -334,7 +355,6 @@ fn task_search_rename_and_purge_follow_all_tracking_links_and_remove_only_task_d
     for id in [&task, &sibling] {
         f.db().set_session_tracking(&f.sid, id, true).unwrap();
     }
-    f.db().write().execute("INSERT INTO workstream_session_frontiers(workstream_id,session_id,session_context_revision) VALUES (?1,?2,1)",rusqlite::params![task,f.sid]).unwrap();
     workstream::update_workstream_fields(f.db(), &task, Some("Search new"), None).unwrap();
     let body: String = f
         .db()
@@ -354,7 +374,6 @@ fn task_search_rename_and_purge_follow_all_tracking_links_and_remove_only_task_d
         "workstream_projects",
         "session_workstreams",
         "workstream_context_state",
-        "workstream_session_frontiers",
     ] {
         let count: i64 = f
             .db()

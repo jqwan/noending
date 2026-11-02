@@ -255,12 +255,11 @@ fn validate(conn: &Connection) -> Result<()> {
                 "notify_immediately",
             ][..],
         ),
-        ("workstream_context_state", &["refreshed_at"][..]),
-        ("project_context_state", &["refreshed_at"][..]),
         (
-            "workstream_session_frontiers",
-            &["ingest_generation", "processed_through_seq"][..],
+            "workstream_context_state",
+            &["refreshed_at", "processed_through_seq"][..],
         ),
+        ("project_context_state", &["refreshed_at"][..]),
         (
             "project_session_frontiers",
             &["ingest_generation", "processed_through_seq"][..],
@@ -485,33 +484,17 @@ const CURRENT_SCHEMA: &str = r#"
       updated_at TEXT NOT NULL,
       refreshed_at TEXT
     );
-    -- The Workstream side of the two-level revision scheme.
-    -- context_revision guards summary writes;
-    -- input_revision marks tracked sessions / projects / title /
-    -- description changes that leave inputs pending; AI records the
-    -- input_revision it consumed so its own success does not leave the
-    -- Workstream "pending" again. Created as (0, 1, 0) so the first explicit
-    -- generation is allowed.
+    -- One collaboration summary per task; the message cursor spans all runs.
     CREATE TABLE IF NOT EXISTS workstream_context_state (
       workstream_id TEXT PRIMARY KEY REFERENCES workstreams(id) ON DELETE CASCADE,
       context_revision INTEGER NOT NULL DEFAULT 0,
       input_revision INTEGER NOT NULL DEFAULT 0,
       consumed_input_revision INTEGER NOT NULL DEFAULT 0,
+      processed_through_seq INTEGER NOT NULL DEFAULT 0,
       summary TEXT NOT NULL DEFAULT '{"items":[]}'
         CHECK(json_valid(summary) AND json_type(summary) = 'object' AND json_type(summary, '$.items') IS 'array'),
       updated_at TEXT,
       refreshed_at TEXT
-    );
-    -- What the Workstream has already consumed from each tracked Session.
-    -- Written in the same transaction as a combined update; a Session that
-    -- is no longer tracked is cleaned up on the next successful synthesis.
-    CREATE TABLE IF NOT EXISTS workstream_session_frontiers (
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      session_context_revision INTEGER NOT NULL DEFAULT 0,
-      ingest_generation INTEGER,
-      processed_through_seq INTEGER,
-      PRIMARY KEY (workstream_id, session_id)
     );
     -- One current project summary, an input fingerprint and consumed session
     -- summary revisions. Metadata changes mark pending, never discard a summary.
@@ -583,8 +566,6 @@ END;
       ON sessions(COALESCE(last_conversation_at, last_activity_at, started_at) DESC, id)
       WHERE archived_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_sessions_fork_parent ON sessions(forked_from_session_id);
-    CREATE INDEX IF NOT EXISTS idx_workstream_frontiers_session
-      ON workstream_session_frontiers(session_id);
     CREATE INDEX IF NOT EXISTS idx_project_frontiers_session
       ON project_session_frontiers(session_id);
 

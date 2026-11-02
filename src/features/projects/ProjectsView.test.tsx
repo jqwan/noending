@@ -122,9 +122,8 @@ describe("Projects Board", () => {
     expect(within(screen.getByText("Unavailable").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
     expect(within(screen.getByText("Missing Single Directory").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
 
-    fireEvent.change(screen.getByDisplayValue("全部"), {
-      target: { value: "missing" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /^筛选：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "有目录缺失" }));
 
     expect(screen.getByText("Broken")).toBeTruthy();
     expect(screen.getByText("Unavailable")).toBeTruthy();
@@ -141,20 +140,21 @@ describe("Projects Board", () => {
     render(<ProjectsView navigate={navigate} />);
     await screen.findByText("Normal Directory");
 
-    fireEvent.change(screen.getByLabelText("项目类型"), {
-      target: { value: "git" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /^项目类型：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Git 项目" }));
 
     expect(screen.getByText("Git Project")).toBeTruthy();
     expect(screen.queryByText("Normal Directory")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "single_directory" } });
+    fireEvent.click(screen.getByRole("button", { name: /^项目类型：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "单目录项目" }));
     expect(screen.getByText("Normal Directory")).toBeTruthy();
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Renamed Chats")).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("项目类型"), { target: { value: "directory_group" } });
+    fireEvent.click(screen.getByRole("button", { name: /^项目类型：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "目录组项目" }));
     expect(screen.getByText("Renamed Chats")).toBeTruthy();
     expect(screen.queryByText("Git Project")).toBeNull();
     expect(screen.queryByText("Normal Directory")).toBeNull();
@@ -329,7 +329,8 @@ it("intersects complete lookup matches with project filters and preserves sortin
   vi.mocked(api.matchObjects).mockResolvedValue([...Array.from({length:30},(_,n)=>`outside-${n}`),"late","healthy","archived"]);
   render(<ProjectsView navigate={navigate} />);
   await screen.findByText("Healthy result");
-  fireEvent.change(screen.getByRole("combobox", {name:"筛选"}), {target:{value:"missing"}});
+  fireEvent.click(screen.getByRole("button", { name: /^筛选：/ }));
+  fireEvent.click(screen.getByRole("option", { name: "有目录缺失" }));
   fireEvent.change(screen.getByRole("textbox", {name:"搜索项目"}), {target:{value:"result"}});
   await screen.findByText("Late result");
   expect(screen.queryByText("Healthy result")).toBeNull();

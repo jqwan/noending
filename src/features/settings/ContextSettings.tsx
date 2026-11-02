@@ -1,3 +1,5 @@
+import "../../components/pickerControl.css";
+import PopupMenu, { PopupMenuItem } from "../../components/PopupMenu";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
@@ -108,7 +110,7 @@ export default function ContextSettings() {
     : (AGENT_LABELS[settings.agent] ?? settings.agent);
 
   return (
-    <section>
+    <section className="ui-section">
       <div className="settings-section-header">
         <div>
           <h3 style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
@@ -131,15 +133,15 @@ export default function ContextSettings() {
           <p className="muted small" role="status">正在读取提取配置…</p>
         )
       ) : (
-        <div className="extraction-settings-card">
+        <div className="inset-card extraction-settings-card">
           <div className="extraction-controls-row">
             <div className="extraction-control-group">
               <span className="extraction-control-label">提取 Agent</span>
               <div
-                className={`new-session-picker new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
+                className={`picker-control new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
                 ref={agentRef}
                 onClick={(e) => {
-                  if ((e.target as HTMLElement).closest(".new-session-dropdown-menu")) return;
+                  if ((e.target as HTMLElement).closest(".picker-menu")) return;
                   setAgentMenuOpen((v) => !v);
                 }}
                 onKeyDown={(e) => {
@@ -162,8 +164,8 @@ export default function ContextSettings() {
                 ) : (
                   <Icon name="minus" />
                 )}
-                <span className="new-session-picker-label">{agentLabel}</span>
-                <Icon name="chevronDown" className="new-session-chevron" />
+                <span className="picker-control-label">{agentLabel}</span>
+                <Icon name="chevronDown" className="picker-control-chevron" />
                 <select
                   aria-label="提取 Agent"
                   title={agentLabel}
@@ -179,16 +181,16 @@ export default function ContextSettings() {
                 </select>
 
                 {agentMenuOpen && (
-                  <div className="new-session-dropdown-menu dropdown-down" role="menu" aria-label="提取 Agent 列表">
-                    <div className="new-session-menu-list">
+                  <PopupMenu className="picker-menu dropdown-down" role="menu" aria-label="提取 Agent 列表" onDismiss={() => setAgentMenuOpen(false)}>
+                    <div className="picker-menu-list">
                       {EXTRACTION_AGENTS.map((a) => {
                         const isSelected = a === settings.agent;
                         const label = a === "none" ? "停用后台提取" : AGENT_LABELS[a];
                         return (
-                          <button
+                          <PopupMenuItem selected={isSelected}
                             key={a}
                             type="button"
-                            className={`new-session-menu-item${isSelected ? " selected" : ""}`}
+                            className="picker-menu-item"
                             onClick={() => {
                               void handleAgentChange(a);
                               setAgentMenuOpen(false);
@@ -199,14 +201,12 @@ export default function ContextSettings() {
                               {a !== "none" ? <AgentIcon agent={a} size={16} /> : <Icon name="minus" />}
                             </span>
                             <span className="menu-item-label">{label}</span>
-                            {isSelected && (
-                              <span className="menu-item-check"><Icon name="check" /></span>
-                            )}
-                          </button>
+
+                          </PopupMenuItem>
                         );
                       })}
                     </div>
-                  </div>
+                  </PopupMenu>
                 )}
               </div>
             </div>

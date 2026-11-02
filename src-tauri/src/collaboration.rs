@@ -32,6 +32,19 @@ fn connection_state(
     }
 }
 
+/// The participation rules every entry point shows. The desktop wake hint and
+/// `member.join_prompt` render this same text, so the UI copies one fact instead
+/// of re-typing rules that would drift from the backend.
+pub(crate) fn join_prompt(task_id: &str, room_id: &str, run_id: &str, session_id: &str) -> String {
+    format!(
+        "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}｜你的会话 {session_id}\n\
+         协作期间只用本房间沟通：暂无任务、发言完毕或一次 wait timeout 都不表示协作结束，不要因此提交宿主最终回复。\n\
+         闭环：room join → room wait → 完整读完本批（next_cursor 非空先续读）→ 按需回复 → room ack 到已读 seq → 继续 wait；纯已读用 ack 表达，不刷「收到」。\n\
+         只有收到 stopped、用户明确退出或不可恢复限制时才收尾；正常退场先 ack 已读部分再 room leave。\n\
+         身份与参数规则见统一 noending 技能的协作参考。"
+    )
+}
+
 /// The full room view for one task: configuration, current run and one member
 /// entry per selected session, composed from four storage projections.
 pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
@@ -50,6 +63,11 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
         None => vec![],
     };
     let run_id = run.as_ref().map(|r| r.id.clone());
+    // A stopped or missing run has nothing to join, so members get no prompt.
+    let active_run = run
+        .as_ref()
+        .filter(|run| run.status != "stopped")
+        .map(|run| run.id.as_str());
     let run_members = match &run_id {
         Some(id) => db.collaboration_run_members(id)?,
         None => vec![],
@@ -93,6 +111,15 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 "session_id": selected.session_id,
                 "wake_method": selected.wake_method,
                 "wake_status": wake_status,
+                "join_prompt": match active_run {
+                    Some(run_id) => json!(join_prompt(
+                        task_id,
+                        &room.id,
+                        run_id,
+                        &selected.session_id
+                    )),
+                    None => Value::Null,
+                },
                 "connection_state": connection_state(participation, now),
                 "phase": participation.and_then(|p| p.phase.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
                 "phase_since": participation.and_then(|p| p.phase_since.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
@@ -418,6 +445,11 @@ pub(crate) fn join(db: &Db, home: &NoEndingHome, p: RoomJoin) -> CliResult<Value
         "role": outcome.role.map(|r| json!(r)).unwrap_or(Value::Null),
         "through_seq": outcome.through_seq,
         "beat_seconds": BEAT_SECS,
+        "notice": if outcome.reused {
+            "已复用现有参与连接：不要再起第二个监听进程，直接 room wait 取未读。"
+        } else {
+            "已加入：room wait 取未读；完整读完这一批再 ack 到已读 seq；空闲或 timeout 都继续 wait。"
+        },
     }))
 }
 
@@ -597,11 +629,22 @@ fn room_wait_loop(
 }
 
 fn wait_value(status: &str, page: &store::CollaborationMessagesPage) -> Value {
+    // Every wait answer names the next action, so a timeout reads as "this wait
+    // ended" instead of "the collaboration ended".
+    let notice = match status {
+        "messages" if page.next_cursor.is_some() => {
+            "本批未读完：用 next_cursor 续读，读完再 ack，然后继续 wait。"
+        }
+        "messages" => "完整读完本批，按需回复，ack 到已读到的 seq，然后继续 wait。",
+        "timeout" => "本次等待结束，协作未结束：继续 room wait，不提交宿主最终回复。",
+        _ => "本运行已停止：不再 wait 或接新工作，leave 清理本人参与后收尾。",
+    };
     json!({
         "status": status,
         "items": page.items,
         "next_cursor": page.next_cursor,
         "latest_seq": page.latest_seq,
+        "notice": notice,
     })
 }
 
@@ -723,6 +766,17 @@ mod room_wait_tests {
                 "r1",
             )
             .unwrap();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+        // The author joins before posting.
+        t.1.collaboration_join(
+            &started.room.id,
+            &started.run.id,
+            "a",
+            "cli",
+            "cli-author",
+            &cutoff,
+        )
+        .unwrap();
         let mail =
             t.1.collaboration_send(
                 &started.room.id,
@@ -734,7 +788,6 @@ mod room_wait_tests {
             .unwrap();
         // The wait loop verifies its participation each iteration; it holds
         // the connection id the join produced.
-        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
         let participation =
             t.1.collaboration_join(
                 &started.room.id,

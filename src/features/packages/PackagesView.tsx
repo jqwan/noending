@@ -1,3 +1,6 @@
+import EmptyState from "../../components/EmptyState";
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
@@ -184,14 +187,14 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
         </div>
       </div>
     </div>
-    {error && <div role="alert" className="package-error">{error}</div>}
+    {error && <Notice role="alert" >{error}</Notice>}
     {inventory.warnings.length > 0 && <details className="package-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</details>}
     {/* 列表与卡片是互斥结构：容器与条目都用视图专属 key，切换时整体卸载重挂，
         避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/Agent
         看板同一问题的既定修法）。 */}
     <section key={viewMode === "cards" ? "packages-cards" : "packages-list"}
       className={viewMode === "cards" ? "ws-grid board-grid package-cards" : "package-list"} aria-label="插件包">
-      {!loading && !visibleRows.length && <div className="empty">{tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"}</div>}
+      {!loading && !visibleRows.length && <EmptyState title={tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"} />}
       {visibleRows.map(entry => viewMode === "cards" ? (
         <article key={`card-${entry.id}`} className="ws-card full package-card" tabIndex={0} role="button"
           onClick={() => openDetail(entry)}
@@ -257,10 +260,10 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
     {uninstalling && <Modal title="卸载插件包" onClose={() => { if (!uninstallBusy) setUninstalling(null); }}>
       <p>将通过 {uninstalling.agent ? AGENT_LABELS[uninstalling.agent] : "该 Agent"} 的原生命令卸载「{uninstalling.name}」。</p>
       <p className="small muted">注册表中的安装条目随卸载一起消失，作用域内的启停配置不再生效；已有终端需要重新加载。源目录不受影响。</p>
-      <div className="row package-dialog-actions">
+      <DialogActions>
         <button className="btn" disabled={uninstallBusy} onClick={() => setUninstalling(null)}>取消</button>
         <button className="btn danger" disabled={uninstallBusy} onClick={() => void confirmUninstall()}>{uninstallBusy ? "处理中…" : "卸载"}</button>
-      </div>
+      </DialogActions>
     </Modal>}
     {importing && <PackageImportDialog
       onClose={() => setImporting(false)}

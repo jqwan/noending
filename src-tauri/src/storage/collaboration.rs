@@ -707,8 +707,9 @@ impl Db {
     }
 
     /// Append one message to the current run. Models write only as their own
-    /// member session; the user writes through the desktop with no sender.
-    /// Repeating a request id returns the stored message unchanged.
+    /// member session and only while their participation is still active; the
+    /// user writes through the desktop with no sender. Repeating a request id
+    /// returns the stored message unchanged.
     pub fn collaboration_send(
         &self,
         room_id: &str,
@@ -742,6 +743,18 @@ impl Db {
             }
             if let Some(sender) = sender {
                 require_sender_member(tx, run_id, sender)?;
+                // New messages require participation; accepted replays above
+                // remain valid after the member leaves.
+                let participating = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM collaboration_participations WHERE run_id=?1 AND session_id=?2 AND left_at IS NULL)",
+                        params![run_id, sender],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .map_err(crate::error::AppError::from)?;
+                if !participating {
+                    return Err(other("请先加入协作再发言"));
+                }
             }
             let message =
                 append_message_conn(tx, room_id, run_id, sender, "text", body, Some(request_id))?;
@@ -818,7 +831,8 @@ impl Db {
     }
 
     /// Explicit read acknowledgement. The sequence must sit inside the room's
-    /// current history and may only move forward; old runs are rejected.
+    /// current history and may only move forward; old runs are rejected. The
+    /// returned value is the position that took effect, not the request.
     pub fn collaboration_ack(
         &self,
         room_id: &str,
@@ -866,7 +880,15 @@ impl Db {
                 params![room_id, session_id, run_id, through_seq, now()],
             )
             .map_err(crate::error::AppError::from)?;
-            Ok(through_seq)
+            // A repeated or lower acknowledgement returns the persisted maximum.
+            let applied: i64 = tx
+                .query_row(
+                    "SELECT through_seq FROM collaboration_reads WHERE room_id=?1 AND session_id=?2 AND run_id=?3",
+                    params![room_id, session_id, run_id],
+                    |r| r.get(0),
+                )
+                .map_err(crate::error::AppError::from)?;
+            Ok(applied)
         })
     }
 

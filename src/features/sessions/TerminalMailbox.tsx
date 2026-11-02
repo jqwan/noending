@@ -1,3 +1,5 @@
+import { DetailPanelFooter } from "../../components/DetailLayout";
+import { DetailSection } from "../../components/DetailSection";
 import { useEffect, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 import { api } from "../../api";
 import type { MailboxMessage, TerminalNotifications } from "../../types";
@@ -65,17 +67,17 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
   };
   const enabled = notification?.enabled ?? false;
   const mutable = !enabled && !notification?.writing;
-  return <section className="terminal-mailbox" aria-label="信箱">
-    <div className="mailbox-head"><h3>信箱{page ? `（${page.unread}）` : ""}</h3>
-      <div className="mailbox-actions">
+  return <DetailSection sectionId="mailbox" label="信箱" className="terminal-mailbox" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.unread}）` : ""}</span></>} actions={<>
         <button className="btn small" disabled={!session || busy} aria-pressed={enabled} onClick={() => {
           if (enabled) void run(() => toggle(false));
           else if (skipHint) void run(() => toggle(true));
           else setConfirm(true);
         }}>{enabled ? "关闭自动通知" : "开启自动通知"}</button>
         <button className="btn small ghost" disabled={!page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}>提醒查收</button>
-      </div>
-    </div>
+      </>} status={<>
+      {(error || loadError || listError || notification?.error) && <p role="alert" className="small warning">{error || loadError || listError || notification?.error}</p>}
+    </>}>
+
     {enabled && <p className="small muted">自动通知已开启；请通过信箱输入消息。操作终端授权或菜单前请关闭自动通知。</p>}
     {!enabled && session && <p className="small muted">手动提醒会立即插队，请保持终端聊天输入框可用且没有草稿。</p>}
     {!session && <p className="small muted">终端绑定会话后可使用信箱。</p>}
@@ -94,15 +96,15 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     {page?.items.length === 0 && <p className="small muted">暂无未读消息</p>}
     {page?.next_cursor != null && <button className="btn small" onClick={() => void more()}>加载更多</button>}
     </div>
-    <form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!session || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(session, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
+    <DetailPanelFooter><form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!session || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(session, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
       <label htmlFor={`mailbox-input-${terminalId}`} className="small">发送消息</label>
       <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!session || busy} rows={4} onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径" />
       <button className="btn small primary" type="submit" disabled={!session || busy || !draft.trim()}>发送到信箱</button>
-    </form>
-    {(error || loadError || listError || notification?.error) && <p role="alert" className="small warning">{error || loadError || listError || notification?.error}</p>}
+    </form></DetailPanelFooter>
+
     {confirm && <Modal title="开启自动通知" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动通知</button></>}>
       <p>请保持 Agent 聊天输入框可用且没有草稿，并退出授权或设置菜单。开启后终端输入由 NoEnding 管理，通过侧栏信箱发送消息。</p>
       <label><input type="checkbox" checked={skip} onChange={e => setSkip(e.target.checked)} />不再提示</label>
     </Modal>}
-  </section>;
+  </DetailSection>;
 }

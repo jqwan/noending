@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useEffect, useState } from "react";
 import type { LaunchResult } from "../../types";
 import { Modal } from "../../components/common";
@@ -14,9 +15,9 @@ export default function LaunchResultModal({ result, onClose }: {
       <p className="small">{result.note}</p>
       <h3>执行的命令</h3>
       <div className="card mono small">{result.command_line}</div>
-      <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+      <DialogActions>
         <button className="btn primary" onClick={onClose}>关闭</button>
-      </div>
+      </DialogActions>
     </Modal>
   );
 }

@@ -1,3 +1,5 @@
+import "./workstreams.css";
+import DialogActions from "../../components/DialogActions";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -63,7 +65,7 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
 
   return (
     <Modal title={workstream ? "编辑任务" : "新建任务"} onClose={() => { if (!busy) onClose(); }}>
-      <form onSubmit={(e) => { e.preventDefault(); void save(); }} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <form className="ui-form" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <label className="field">
           <span>标题</span>
           <input
@@ -81,8 +83,8 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             disabled={busy}
-            rows={3}
-            placeholder="简要说明任务目标与背景（可选）..."
+            rows={5}
+            placeholder={"目标：要解决的问题、希望达到的结果\n\n现状：当前已做到哪里、主要还缺什么"}
           />
         </label>
         <div className="field workstream-projects-field">
@@ -142,24 +144,14 @@ export default function WorkstreamFormModal({ onClose,onCreated,onSaved,workstre
             }}
           />
         )}
-        <div
-          className="modal-actions row between"
-          style={{
-            marginTop: 12,
-            paddingTop: 16,
-            borderTop: "1px solid var(--border-subtle)",
-          }}
-        >
-          <div />
-          <div className="row" style={{ gap: 10 }}>
+        <DialogActions>
             <button type="button" className="btn" disabled={busy} onClick={onClose}>
               取消
             </button>
             <button type="submit" className="btn primary" disabled={busy || !title.trim()}>
               {busy ? "保存中…" : workstream ? "保存" : "创建"}
             </button>
-          </div>
-        </div>
+        </DialogActions>
       </form>
     </Modal>
   );

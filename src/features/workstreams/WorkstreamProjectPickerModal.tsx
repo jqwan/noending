@@ -1,3 +1,5 @@
+import "./workstreams.css";
+import DialogActions from "../../components/DialogActions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -156,7 +158,7 @@ export default function WorkstreamProjectPickerModal({
                   {p.visibility === "archived" && (
                     <span
                       className="badge muted small"
-                      style={{ flexShrink: 0, fontSize: 11, padding: "1px 6px" }}
+                      style={{ flexShrink: 0, fontSize: "var(--font-size-xs)", padding: "1px 6px" }}
                     >
                       已归档
                     </span>
@@ -180,21 +182,14 @@ export default function WorkstreamProjectPickerModal({
 
         {error && <p role="alert" className="warning" style={{ margin: 0 }}>{error}</p>}
 
-        <div
-          className="modal-actions row between"
-          style={{
-            marginTop: 8,
-            paddingTop: 12,
-            borderTop: "1px solid var(--border-subtle)",
-          }}
-        >
+        <DialogActions>
           <button type="button" className="btn" disabled={busy} onClick={onClose}>
             取消
           </button>
           <button type="button" className="btn primary" disabled={busy} onClick={() => void handleConfirm()}>
             {busy ? "保存中…" : "确定"}
           </button>
-        </div>
+        </DialogActions>
       </div>
     </Modal>
   );

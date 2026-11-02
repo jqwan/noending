@@ -3,6 +3,7 @@ import { api } from "../../api";
 import Icon from "../../components/Icon";
 import type { CollaborationCandidate, CollaborationStartedMember, SessionListItem } from "../../types";
 import { WAKE_LABEL, defaultWakeMethod } from "./collaborationState";
+import CollaborationCoordinator from "./CollaborationCoordinator";
 
 const PAGE = 20;
 
@@ -88,7 +89,7 @@ export default function CollaborationCandidates({
   return (
     <div className="collab-candidates">
       <p className="small muted" style={{ margin: 0 }}>
-        勾选本次参与的会话（至少 2 个，你本人不计数）。唤醒方式按会话实际能力给出，打开应用不等于已加入。
+        选择至少 2 个会话参与协作。
       </p>
 
       {loading ? (
@@ -114,21 +115,14 @@ export default function CollaborationCandidates({
                   {blocked && <span className="badge muted small" title={blocked}>{blocked}</span>}
                 </label>
                 {chosenMember && (
-                  <label className="collab-candidate-wake small">
-                    <span className="muted">唤醒</span>
-                    {candidate.wake_modes.length > 1 ? (
-                      <select
-                        value={chosenMember.wake_method}
-                        disabled={disabled}
-                        aria-label={`${candidateName(candidate, sessions)} 的唤醒方式`}
-                        onChange={e => setWake(candidate.session_id, e.target.value as CollaborationStartedMember["wake_method"])}
-                      >
-                        {candidate.wake_modes.map(mode => <option key={mode} value={mode}>{WAKE_LABEL[mode]}</option>)}
-                      </select>
-                    ) : (
-                      <span>{WAKE_LABEL[chosenMember.wake_method]}</span>
-                    )}
-                  </label>
+                  <div className="collab-candidate-wake" role="group" aria-label={`${candidateName(candidate, sessions)} 的唤醒方式`}>
+                    {candidate.wake_modes.map(mode => (
+                      <button key={mode} type="button" className="btn ghost icon-button small"
+                        aria-label={WAKE_LABEL[mode]} title={WAKE_LABEL[mode]} aria-pressed={chosenMember.wake_method === mode}
+                        disabled={disabled || candidate.wake_modes.length === 1}
+                        onClick={() => setWake(candidate.session_id, mode)}><Icon name={mode} /></button>
+                    ))}
+                  </div>
                 )}
               </li>
             );
@@ -142,32 +136,12 @@ export default function CollaborationCandidates({
         </button>
       )}
 
-      <fieldset className="collab-coordinator" disabled={disabled || chosen === 0}>
-        <legend className="small">负责人（可选，必须是本次成员）</legend>
-        {chosen === 0 ? (
-          <p className="small muted" style={{ margin: 0 }}>先选成员。</p>
-        ) : (
-          <>
-            <label className="collab-radio">
-              <input type="radio" name="collab-coordinator" checked={coordinator === null}
-                onChange={() => onChange({ selected, coordinator: null })} />
-              <span>不由成员负责，由我协调</span>
-            </label>
-            {selected.map(member => {
-              const candidate = items.find(c => c.session_id === member.session_id);
-              return (
-                <label key={member.session_id} className="collab-radio">
-                  <input type="radio" name="collab-coordinator" checked={coordinator === member.session_id}
-                    onChange={() => onChange({ selected, coordinator: member.session_id })} />
-                  <span className="truncate">
-                    {candidate ? candidateName(candidate, sessions) : sessions.find(s => s.id === member.session_id)?.title ?? member.session_id.slice(0, 8)}
-                  </span>
-                </label>
-              );
-            })}
-          </>
-        )}
-      </fieldset>
+      <CollaborationCoordinator value={coordinator} disabled={disabled}
+        members={selected.map(member => {
+          const candidate = items.find(c => c.session_id === member.session_id);
+          return { id: member.session_id, title: candidate ? candidateName(candidate, sessions) : sessions.find(s => s.id === member.session_id)?.title ?? member.session_id.slice(0, 8) };
+        })}
+        onChange={id => onChange({ selected, coordinator: id })} />
 
       {chosen > 0 && chosen < 2 && (
         <p className="small warning" role="status">还需要再选 1 个会话才能开启协作。</p>

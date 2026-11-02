@@ -433,7 +433,6 @@ fn permanent_delete_purges_local_rows_only() {
         "session_messages",
         "session_contexts",
         "session_message_projection",
-        "workstream_session_frontiers",
     ] {
         assert_eq!(
             count(

@@ -65,11 +65,9 @@ function session(over: Partial<Session> = {}): Session {
   };
 }
 
-/** The 任务 filter select, found by its own options rather than by index. */
-function taskFilter(): HTMLSelectElement {
-  const select = screen.getByText("全部任务").closest("select");
-  if (!select) throw new Error("任务筛选下拉框未渲染");
-  return select as HTMLSelectElement;
+function chooseTask(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: /^全部任务：/ }));
+  fireEvent.click(screen.getByRole("option", { name }));
 }
 
 beforeEach(() => {
@@ -99,12 +97,12 @@ describe("Sessions 页按跟踪任务筛选", () => {
 
     await screen.findByText("全部任务");
     // 选中一个真实任务后，只剩 tracked_workstream_ids 包含它的那一条。
-    fireEvent.change(taskFilter(), { target: { value: "w1" } });
+    chooseTask("会话与 Workstream 重构");
     screen.getByText("有归属");
     expect(screen.queryByText("没归属")).toBeNull();
 
     // 「未归属任务」是 `tracked_workstream_ids.length === 0`，与任何任务 id 都不相等。
-    fireEvent.change(taskFilter(), { target: { value: "unassigned" } });
+    chooseTask("未跟踪任务");
     screen.getByText("没归属");
     expect(screen.queryByText("有归属")).toBeNull();
   });
@@ -185,7 +183,7 @@ it("matches all session identities before the visible card limit and intersects 
   render(<SessionsView navigate={navigate} />);
   await screen.findByText("Session 0");
   expect(screen.queryByText("Session 124")).toBeNull();
-  fireEvent.change(taskFilter(), {target:{value:"w1"}});
+  chooseTask("会话与 Workstream 重构");
   fireEvent.change(screen.getByRole("textbox",{name:"搜索会话"}),{target:{value:"native-id"}});
   await screen.findByText("Session 124");
   expect(screen.queryByText("Session 0")).toBeNull();

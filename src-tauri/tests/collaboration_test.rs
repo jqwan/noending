@@ -276,7 +276,7 @@ fn stop_is_atomic_records_the_real_initiator_and_stays_idempotent() {
 }
 
 #[test]
-fn send_requires_membership_accepts_starting_and_deduplicates_requests() {
+fn send_requires_joined_membership_and_replays_past_success_after_leaving() {
     let f = Fixture::new();
     let db = f.db();
     let started = db
@@ -284,6 +284,10 @@ fn send_requires_membership_accepts_starting_and_deduplicates_requests() {
         .unwrap();
     let run_id = started.run.id.clone();
     let room_id = started.room.id.clone();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    // Join before writing as a member.
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-a", &cutoff)
+        .unwrap();
 
     let member = db
         .collaboration_send(&room_id, &run_id, Some("a"), "成员发言", "m1")
@@ -294,12 +298,16 @@ fn send_requires_membership_accepts_starting_and_deduplicates_requests() {
         .unwrap();
     assert!(user.sender_session_id.is_none());
 
-    // A session outside the run cannot write.
+    // A session outside the run cannot write, joined or not.
     assert!(db
         .collaboration_send(&room_id, &run_id, Some("c"), "外人", "m3")
         .is_err());
     assert!(db
         .collaboration_send(&room_id, &run_id, Some("a"), "  ", "m4")
+        .is_err());
+    // A selected member must join before writing.
+    assert!(db
+        .collaboration_send(&room_id, &run_id, Some("b"), "未加入就发言", "mb")
         .is_err());
 
     let replay = db
@@ -315,10 +323,27 @@ fn send_requires_membership_accepts_starting_and_deduplicates_requests() {
         "start notice + member message + user message"
     );
 
+    // Leaving ends the right to speak, but never rewrites an accepted send:
+    // the replay still returns the original message after the member has left.
+    db.collaboration_leave(&room_id, &run_id, "a").unwrap();
+    let left = db
+        .collaboration_send(&room_id, &run_id, Some("a"), "退场后发言", "m5")
+        .unwrap_err();
+    assert!(left.to_string().contains("请先加入"), "{left}");
+    assert_eq!(
+        db.collaboration_send(&room_id, &run_id, Some("a"), "成员发言", "m1")
+            .unwrap()
+            .id,
+        member.id
+    );
+    assert!(db
+        .collaboration_send(&room_id, &run_id, None, "退场后用户照常", "m6")
+        .is_ok());
+
     db.collaboration_stop(&room_id, &run_id, None, "s1")
         .unwrap();
     let error = db
-        .collaboration_send(&room_id, &run_id, Some("a"), "停后发言", "m5")
+        .collaboration_send(&room_id, &run_id, Some("a"), "停后发言", "m7")
         .unwrap_err();
     assert!(error.to_string().contains("已停止"), "{error}");
 }
@@ -332,6 +357,9 @@ fn messages_page_walks_back_and_forward_without_overlap_or_cross_room() {
         .unwrap();
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-hist", &cutoff)
+        .unwrap();
     for i in 0..5 {
         db.collaboration_send(
             &room_id,
@@ -398,6 +426,9 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
         .unwrap();
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-author", &cutoff)
+        .unwrap();
     db.collaboration_send(&room_id, &run_id, Some("a"), "hello", "m1")
         .unwrap();
 
@@ -405,8 +436,7 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
     let unread = db.collaboration_unread_of(&room_id, &run_id, "b").unwrap();
     assert_eq!(unread.count, 2, "start notice + member message");
 
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    // Without a live participation the ack is rejected.
+    // Without participation the ack is rejected.
     assert!(db.collaboration_ack(&room_id, &run_id, "b", 1).is_err());
     db.collaboration_join(&room_id, &run_id, "b", "cli", "cli-resident", &cutoff)
         .unwrap();
@@ -419,8 +449,10 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
         .unwrap();
     assert_eq!(read.through_seq, 1);
 
-    // Acknowledgement only moves forward.
-    db.collaboration_ack(&room_id, &run_id, "b", 0).unwrap();
+    // Acknowledgement only moves forward, and the receipt is the position that
+    // took effect — a backwards or repeated ack must not report a lower one.
+    assert_eq!(db.collaboration_ack(&room_id, &run_id, "b", 0).unwrap(), 1);
+    assert_eq!(db.collaboration_ack(&room_id, &run_id, "b", 1).unwrap(), 1);
     assert_eq!(
         db.collaboration_read_of(&room_id, "b", &run_id)
             .unwrap()
@@ -465,10 +497,10 @@ fn session_purge_keeps_real_senders_but_drops_participation_state() {
         .unwrap();
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
-    db.collaboration_send(&room_id, &run_id, Some("a"), "来自将删除的会话", "m1")
-        .unwrap();
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    db.collaboration_send(&room_id, &run_id, Some("a"), "来自将删除的会话", "m1")
         .unwrap();
     db.collaboration_ack(&room_id, &run_id, "a", 2).unwrap();
 
@@ -742,6 +774,9 @@ fn wait_page_reads_forward_from_the_acknowledged_position() {
         .unwrap();
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-author", &cutoff)
+        .unwrap();
     for i in 0..3 {
         db.collaboration_send(
             &room_id,
@@ -789,6 +824,11 @@ fn review_same_message_request_cannot_change_body_or_sender() {
         .unwrap();
     let room = &started.room.id;
     let run = &started.run.id;
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(room, run, "a", "cli", "cli-a", &cutoff)
+        .unwrap();
+    db.collaboration_join(room, run, "b", "cli", "cli-b", &cutoff)
+        .unwrap();
     let saved = db
         .collaboration_send(room, run, Some("a"), "原始正文", "review-message")
         .unwrap();
@@ -911,10 +951,10 @@ fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
         .unwrap();
     let room_id = started.room.id.clone();
     let run_id = started.run.id.clone();
-    db.collaboration_send(&room_id, &run_id, Some("a"), "历史发件人", "m1")
-        .unwrap();
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
     db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
+        .unwrap();
+    db.collaboration_send(&room_id, &run_id, Some("a"), "历史发件人", "m1")
         .unwrap();
 
     // The real purge entry: archive, then permanently delete through the

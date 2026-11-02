@@ -1,3 +1,6 @@
+import "./packages.css";
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -106,8 +109,8 @@ export default function PackageImportDialog({ onClose, onDone }: {
         }}>选择目录</button>
       </div>
     </label>
-    {previewError && <div role="alert" className="package-error">{previewError}</div>}
-    {preview?.kind === "package" && single && <div className="package-preview" aria-label="导入预览">
+    {previewError && <Notice role="alert" >{previewError}</Notice>}
+    {preview?.kind === "package" && single && <div className="inset-card compact package-preview" aria-label="导入预览">
       <div className="package-preview-head">
         <Icon name="puzzle" />
         <span className="package-preview-name">{single.name || "未命名插件包"}</span>
@@ -118,7 +121,7 @@ export default function PackageImportDialog({ onClose, onDone }: {
         : <p className="small muted">清单未提供描述。</p>}
       <p className="small muted package-preview-agent">将安装到 {AGENT_LABELS[single.agent]}</p>
     </div>}
-    {preview?.kind === "package" && !single && <div className="package-preview" aria-label="导入预览">
+    {preview?.kind === "package" && !single && <div className="inset-card compact package-preview" aria-label="导入预览">
       <p className="small muted">该目录包含多种清单格式，勾选要安装的：</p>
       {preview.options.map(option => (
         <label key={option.agent} className="package-check">
@@ -129,7 +132,7 @@ export default function PackageImportDialog({ onClose, onDone }: {
         </label>
       ))}
     </div>}
-    {preview?.kind === "marketplace" && <div className="package-preview" aria-label="导入预览">
+    {preview?.kind === "marketplace" && <div className="inset-card compact package-preview" aria-label="导入预览">
       {preview.options.map(option => (
         <div key={option.agent} className="package-market-option">
           <div className="package-preview-head">
@@ -150,12 +153,12 @@ export default function PackageImportDialog({ onClose, onDone }: {
       ))}
     </div>}
     {!preview && !previewError && previewing && <p className="small muted" role="status">正在读取清单…</p>}
-    {error && <div role="alert" className="package-error">{error}</div>}
-    <div className="row package-dialog-actions">
+    {error && <Notice role="alert" >{error}</Notice>}
+    <DialogActions>
       <button className="btn" disabled={busy} onClick={onClose}>取消</button>
       <button className="btn" disabled={busy || !ready} onClick={() => void submit()}>
         {busy ? "处理中…" : "安装"}
       </button>
-    </div>
+    </DialogActions>
   </Modal>;
 }

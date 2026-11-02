@@ -163,6 +163,7 @@ vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 let restoreUserAgent: () => void;
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
+  localStorage.clear();
   Object.values(removedTargets).forEach(ids => ids.clear());
   const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   restoreUserAgent = () => userAgent.mockRestore();
@@ -944,13 +945,13 @@ it("collapses the status sidebar without changing ownership or losing a composer
   const view = renderView();
   const input = await screen.findByRole("textbox", { name: "发送消息" });
   fireEvent.change(input, { target: { value: "keep this draft" } });
-  fireEvent.click(screen.getByRole("button", { name: "收起状态栏" }));
-  expect(screen.queryByRole("complementary", { name: "终端状态栏" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
+  expect(screen.queryByRole("complementary", { name: "终端详情栏" })).toBeNull();
   expect(api.terminalAutoNotifications).not.toHaveBeenCalled();
   view.unmount();
   renderView();
-  await screen.findByRole("button", { name: "展开状态栏" });
-  fireEvent.click(screen.getByRole("button", { name: "展开状态栏" }));
+  await screen.findByRole("button", { name: "展开详情栏" });
+  fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
   expect((screen.getByRole("textbox", { name: "发送消息" }) as HTMLTextAreaElement).value).toBe("keep this draft");
   expect(screen.getByRole("region", { name: "跟踪任务" })).toBeTruthy();
 });
@@ -993,7 +994,7 @@ it("restores managed focus routing after remount and keeps a collapsed sidebar f
   const input = screen.getByRole("textbox", { name: "发送消息" });
   FakeTerminal.last!.focus();
   expect(document.activeElement).toBe(input);
-  fireEvent.click(screen.getByRole("button", { name: "收起状态栏" }));
+  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
   FakeTerminal.last!.focus();
   expect(document.activeElement).not.toBe(input);
   expect(document.activeElement).not.toBe(FakeTerminal.last!.textarea);

@@ -152,7 +152,7 @@ export default function PathListEditor({ entries, onChange }: PathListEditorProp
                 </div>
               </div>
               <div className="side row">
-                <button type="button" className="btn small ghost icon-only" title="移除路径" aria-label={`移除 ${entry.raw}`} onClick={() => remove(i)}><Icon name="close" /></button>
+                <button type="button" className="btn small ghost icon-button" title="移除路径" aria-label={`移除 ${entry.raw}`} onClick={() => remove(i)}><Icon name="close" /></button>
               </div>
             </div>
           ))}

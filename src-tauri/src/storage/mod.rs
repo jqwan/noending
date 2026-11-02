@@ -29,9 +29,8 @@ pub mod workstream_projects;
 
 pub use context_repo::{
     apply_projection_conn, bump_input_revision_conn, commit_session_context_conn,
-    delete_workstream_frontier_conn, frontiers_for_workstream_conn, get_ingest_state_conn,
-    get_session_context_conn, get_workstream_context_state_conn, projection_ids_conn,
-    set_workstream_frontier_conn, ProjectionOutcome,
+    get_ingest_state_conn, get_session_context_conn, get_workstream_context_state_conn,
+    projection_ids_conn, ProjectionOutcome,
 };
 
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};

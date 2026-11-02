@@ -30,6 +30,9 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it("creates work, preserves progress across completion and reopening, and restores it on remount", async () => {
   const firstRender = render(<TaskItems taskId="task" />);
   await screen.findByText("暂无任务事项");
+  expect(screen.getByRole("region", {name:"任务事项内容"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name:"任务事项（0）"}));
+  expect(screen.queryByRole("region", {name:"任务事项内容"})).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "新增事项" }));
   const form = screen.getByRole("form", { name: "新增事项" });
   fireEvent.change(within(form).getByRole("textbox", { name: "事项标题" }), { target: { value: "修复同步" } });
@@ -134,4 +137,17 @@ it("shows all items, sorts completed work last, and exposes completion through t
   fireEvent.click(screen.getByRole("button", { name: "标记未完成：实现与验收" }));
   await screen.findByRole("button", { name: "标记完成：实现与验收" });
   expect(titles()).toEqual(["实现与验收", "之前完成的工作"]);
+});
+
+it("keeps unfinished work first and orders each completion state by latest update", async () => {
+  stored = [
+    { ...first(), id: "done-old", title: "较早完成", completed: true },
+    { ...first(), id: "open-old", title: "较早待办" },
+    { ...first(), id: "open-new", title: "最近待办", updated_at: "2026-10-29T00:00:00Z" },
+    { ...first(), id: "done-new", title: "最近完成", completed: true, updated_at: "2026-10-30T00:00:00Z" },
+  ];
+  render(<TaskItems taskId="task" />);
+  await screen.findByRole("button", { name: "标记完成：最近待办" });
+  const list = screen.getByRole("region", { name: "任务事项内容" });
+  expect(within(list).getAllByRole("heading", { level: 3 }).map(node => node.textContent)).toEqual(["最近待办", "较早待办", "最近完成", "较早完成"]);
 });

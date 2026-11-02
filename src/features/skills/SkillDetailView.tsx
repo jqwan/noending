@@ -1,17 +1,18 @@
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailContent, DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
 import { copyToClipboard, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import PageHeader from "../../layout/PageHeader";
 import { displayPath } from "../../pathDisplay";
-import { AGENT_LABELS, type Agent, type SkillLocation, type SkillProjectScope, type SkillResourceDetail, type SkillScopeEntry, type SkillSourceKind, type SkillUninstallPreview } from "../../types";
-import { locationSupportsAgent } from "./skillPresentation";
-import { SKILL_AGENTS } from "./skillAgents";
+import type { SkillLocation, SkillProjectScope, SkillResourceDetail, SkillSourceKind, SkillUninstallPreview } from "../../types";
 import SkillConfigDialog from "./SkillConfigDialog";
 import SkillRegisterDialog from "./SkillRegisterDialog";
 import { skillDetailCache, clearSkillDetailCache } from "./skillDetailCache";
@@ -19,20 +20,11 @@ import "./skills.css";
 
 export { skillDetailCache, clearSkillDetailCache };
 
-function AgentIcons({ agents }: { agents: Agent[] }) {
-  return <>{agents.map(agent => <span key={agent} role="img" aria-label={AGENT_LABELS[agent]} title={AGENT_LABELS[agent]}><AgentIcon agent={agent} size={16} /></span>)}</>;
-}
-
 const SOURCE_KIND_LABELS: Record<SkillSourceKind, string> = {
   library: "NoEnding 源库",
   agent: "Agent 目录",
   external: "外部目录",
 };
-
-function scopeAgents(entries: SkillScopeEntry[]) {
-  const present = new Set(entries.flatMap(entry => entry.agents));
-  return SKILL_AGENTS.filter(agent => present.has(agent));
-}
 
 export default function SkillDetailView({ resourceId, initialTitle, navigate }: {
   resourceId: string; initialTitle?: string;
@@ -146,43 +138,17 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
     showToast((await copyToClipboard(detail.content)) ? "已复制" : "复制失败");
   };
   const userEntries = row ? row.entry_paths.map((entry, i) => ({ entry, link: row.entry_links[i] === true, location: locations.find(l => l.id === row.locations[i]) })).filter(entry => entry.location?.scope === "user") : [];
-  const userScopeEntries: SkillScopeEntry[] = userEntries.map(entry => ({
-    path: entry.entry,
-    link: entry.link,
-    label: entry.location?.label ?? "",
-    agents: entry.location ? SKILL_AGENTS.filter(agent => locationSupportsAgent(entry.location!, agent)) : [],
-  }));
-  const projects = projectScopes ?? [];
-  const enabledProjects = projects.filter(project => project.enabled);
+  const userEnabled = userEntries.length > 0;
+  const enabledProjects = (projectScopes ?? []).filter(project => userEnabled || project.enabled);
   const canConfigure = !!row && row.registered;
 
-  return <div className="main skill-detail-page">
+  return <DetailPanelProvider kind="skill"><div className="main skill-detail-page detail-page">
     <PageHeader title={<><Icon name="skill" /><span>{row?.name ?? initialTitle ?? "技能"}</span></>} actions={<>
       {row && <button className="btn ghost icon-button danger" aria-label="卸载 Skill" title="卸载 Skill" disabled={busy || loading} onClick={() => void openSkillUninstall()}><Icon name="trash" /></button>}
     </>} />
-    {error && <div role="alert" className="skill-error">{error}</div>}
-    {!row ? null : <div className="detail-layout">
-      <div className="detail-main">
-        <section className="card detail-section" aria-label="技能详情">
-          <div className="row between" style={{ alignItems: "center" }}>
-            <h2><Icon name="file" />正文</h2>
-            {!!detail?.content.trim() && (
-              <button
-                type="button"
-                className="btn small ghost"
-                onClick={() => void copyContent()}
-              >
-                复制全文
-              </button>
-            )}
-          </div>
-          <SkillContent content={detail?.content ?? ""} />
-          {row.error && <div className="skill-error">{row.error}</div>}
-        </section>
-      </div>
-      <aside className="detail-aside">
-        <section className="card detail-section" aria-label="源目录">
-          <h2><Icon name="folder" />源目录</h2>
+    {error && <Notice role="alert" >{error}</Notice>}
+    {!row ? null : <DetailLayout panel={<><DetailSection sectionId="source" label="源目录" title={<><Icon name="folder" />源目录</>}>
+
           <div className="skill-source-location">
             <span
               role="button"
@@ -206,11 +172,8 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
             </div>
             <span className="small muted">{row.registered ? "已引用原目录，可选择迁入 NoEnding 技能库。" : sourceKind === "agent" ? "源目录位于 Agent 加载位置，托管时可选择是否迁移。" : "源目录位于外部目录，托管时可选择是否迁移。"}</span>
           </div>}
-        </section>
-        {row && <section className="card detail-section" aria-label="启用范围">
-          <div className="row between" style={{ alignItems: "center" }}>
-            <h2><Icon name="folder" />启用范围</h2>
-            {canConfigure && (
+        </DetailSection>
+{row && <DetailSection sectionId="scopes" label="启用项目" title={<><Icon name="project" />启用项目{projectScopes !== null && `（${enabledProjects.length}）`}</>} actions={<>{canConfigure && (
               <button
                 type="button"
                 className="btn ghost icon-button small"
@@ -221,30 +184,40 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
               >
                 <Icon name="sliders" />
               </button>
-            )}
-          </div>
-          <p className="small muted">{!row.registered
-            ? "尚未托管，托管到 NoEnding 后可在用户级或项目中配置。"
-            : "用户级对所有项目生效；项目级按项目添加。"}</p>
+            )}</>}>
+
+          <p className="small muted">{userEnabled
+            ? "已在用户级启用，对所有项目生效。"
+            : !row.registered
+              ? "尚未托管，托管到 NoEnding 后可配置启用项目。"
+              : "仅在以下项目中启用。"}</p>
           {row.registered && row.entry_links.some(link => !link) && <p className="small muted">物理入口会保持启用，不能直接停用；迁移到 NoEnding 后可通过链接控制。</p>}
-          {projectScopes === null ? <p className="small muted" role="status">正在读取启用范围…</p>
-            : !userScopeEntries.length && !enabledProjects.length ? <p className="small muted">当前未在任何作用域启用。</p>
-            : <dl className="skill-scope-summary">
-              {userScopeEntries.length > 0 && <div className="skill-scope-summary-row">
-                <dt>用户级{userScopeEntries.some(entry => !entry.link) && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 只读，迁移或卸载时才会处理">物理入口</span>}</dt>
-                <dd><span className="skill-scope-agents"><AgentIcons agents={scopeAgents(userScopeEntries)} /></span></dd>
-              </div>}
+          {userEntries.some(entry => !entry.link) && <span className="badge" title="用户级加载入口是真实目录而不是链接">用户级物理入口</span>}
+          {projectScopes === null ? <p className="small muted" role="status">正在读取项目…</p>
+            : !enabledProjects.length ? <p className="small muted">{userEnabled ? "暂无项目。" : "当前未在任何项目启用。"}</p>
+            : <DetailList label="启用项目列表">
               {enabledProjects.map(project => {
                 const entries = project.workspaces.flatMap(workspace => workspace.entries);
-                return <div className="skill-scope-summary-row" key={project.project_id}>
-                  <dt>{project.project_name}{entries.some(entry => !entry.link) && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 只读，迁移或卸载时才会处理">物理入口</span>}</dt>
-                  <dd><span className="skill-scope-agents"><AgentIcons agents={scopeAgents(entries)} /></span></dd>
-                </div>;
+                return <DetailListRow key={project.project_id} icon={<Icon name="project" />}
+                  title={project.project_name} titleHint={project.project_name}
+                  onOpen={() => navigate({ view: "project", projectId: project.project_id, initialTitle: project.project_name })}
+                  description={entries.some(entry => !entry.link) && <span className="badge" title="该加载入口是真实目录而不是链接；NoEnding 只读，迁移或卸载时才会处理">物理入口</span>}
+                />;
               })}
-            </dl>}
-        </section>}
-      </aside>
-    </div>}
+            </DetailList>}
+        </DetailSection>}</>}><DetailSection sectionId="content" label="技能详情" title={<><Icon name="file" />正文</>} actions={<>{!!detail?.content.trim() && (
+              <button
+                type="button"
+                className="btn small ghost"
+                onClick={() => void copyContent()}
+              >
+                复制全文
+              </button>
+            )}</>}>
+
+          <SkillContent content={detail?.content ?? ""} />
+          {row.error && <Notice>{row.error}</Notice>}
+        </DetailSection></DetailLayout>}
     {removing && row && <Modal title="卸载 Skill" onClose={closeRemove}>
       <>
         <p>将移除该 Skill 在用户级和所有项目中的全部加载入口。</p>
@@ -252,20 +225,20 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
         {deleteRequired && <p className="small muted">源目录位于 Agent 生效目录，必须删除源文件。</p>}
         <p className="skill-path mono">{displayPath(preview?.source_path ?? row.path)}</p>
       </>
-      {error && <div role="alert" className="skill-error">{error}</div>}
-      <div className="row skill-dialog-actions"><button className="btn" disabled={busyAction === "uninstall"} onClick={closeRemove}>取消</button><button className="btn danger" disabled={busyAction === "uninstall" || previewing} onClick={() => {
+      {error && <Notice role="alert" >{error}</Notice>}
+      <DialogActions><button className="btn" disabled={busyAction === "uninstall"} onClick={closeRemove}>取消</button><button className="btn danger" disabled={busyAction === "uninstall" || previewing} onClick={() => {
         void operation(() => api.uninstallSkill(row.id, row.revision, deleteSource || deleteRequired));
-      }}>{busyAction === "uninstall" ? "处理中…" : previewing ? "读取中…" : deleteSource || deleteRequired ? "删除并卸载" : "仅移除"}</button></div>
+      }}>{busyAction === "uninstall" ? "处理中…" : previewing ? "读取中…" : deleteSource || deleteRequired ? "删除并卸载" : "仅移除"}</button></DialogActions>
     </Modal>}
     {unregistering && row && <Modal title="取消托管" onClose={() => { if (!busy) setUnregistering(false); }}>
       <p>取消托管后，NoEnding 将不再管理该技能，源文件会保留。</p>
       <label className="skill-check"><input type="checkbox" checked={removeLinks} disabled={busy} onChange={e => setRemoveLinks(e.target.checked)} />同时移除所有链接入口</label>
       <p className="small muted">{removeLinks ? "移除用户级及所有已登记项目中的该技能链接入口；物理入口和上级目录链接保持不变，仍可能继续生效。" : "保留所有加载入口，当前已生效的配置继续生效。"}</p>
-      {error && <div role="alert" className="skill-error">{error}</div>}
-      <div className="row skill-dialog-actions">
+      {error && <Notice role="alert" >{error}</Notice>}
+      <DialogActions>
         <button className="btn" disabled={busy} onClick={() => setUnregistering(false)}>取消</button>
         <button className="btn danger" disabled={busy} onClick={() => void operation(() => api.unregisterSkill(row.id, removeLinks), "unregister")}>{busyAction === "unregister" ? "处理中…" : "确认取消托管"}</button>
-      </div>
+      </DialogActions>
     </Modal>}
     {configuring && row && <SkillConfigDialog resource={row} locations={locations}
       onClose={() => setConfiguring(false)} onDone={async () => { try { await refresh(true); } finally { setConfiguring(false); } }} />}
@@ -276,7 +249,7 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
           if (result.resource_id === resourceId) void refresh(true).catch(() => {});
           else navigate({ view: "skill", resourceId: result.resource_id, initialTitle: result.name });
         }} />}
-  </div>;
+  </div></DetailPanelProvider>;
 }
 
 export function parseFrontmatter(raw: string): { key: string; value: string }[] {
@@ -319,13 +292,13 @@ function SkillContent({ content }: { content: string }) {
   const cleanContent = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
 
   return (
-    <div className="skill-markdown">
+    <DetailContent label="技能正文" className="skill-markdown">
       {frontmatterPairs.length > 0 ? (
-        <div className="skill-frontmatter-box">
+        <div className="inset-card compact skill-frontmatter-box">
           <dl className="skill-properties">
             {frontmatterPairs.map(({ key, value }) => (
               <div key={key} style={{ display: "contents" }}>
-                <dt className="mono" style={{ fontWeight: 600 }}>{key}</dt>
+                <dt className="mono" style={{ fontWeight: "var(--weight-semibold)" }}>{key}</dt>
                 <dd style={{ whiteSpace: "pre-wrap" }}>{value}</dd>
               </div>
             ))}
@@ -342,6 +315,6 @@ function SkillContent({ content }: { content: string }) {
           {cleanContent}
         </ReactMarkdown>
       )}
-    </div>
+    </DetailContent>
   );
 }

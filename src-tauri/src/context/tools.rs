@@ -111,11 +111,13 @@ impl Bridge<'_> {
         let mut excluded = HashSet::new();
         let mut skipped = HashSet::new();
         let mut failed = false;
-        let target_skipped = if kind == "session" {
+        let target_skipped = if kind == "session" || kind == "task" {
             match summary::parse_session_reply(&raw)? {
                 SessionReply::Completed {} => false,
                 SessionReply::Skipped { .. } => {
-                    skipped.insert(id.to_string());
+                    if kind == "session" {
+                        skipped.insert(id.to_string());
+                    }
                     true
                 }
                 SessionReply::Failed { .. } => {

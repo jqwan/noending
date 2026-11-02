@@ -1,3 +1,6 @@
+import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import "./packages.css";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -45,12 +48,14 @@ export default function AgentPackagesSection({ agent, navigate }: {
   const configurable = (entry: PackageEntry) =>
     entry.capabilities.toggle && entry.scopes.some(scope => scope.scope === "user");
 
-  return <section className="card agent-settings-section agent-packages" aria-label="插件包">
-    <h2>
+  return <DetailSection sectionId="packages" label="插件包" className="agent-packages" title={<>
       <Icon name="puzzle" />
-      <span>插件包</span>
-    </h2>
-    {error && <div role="alert" className="package-error">{error}</div>}
+      <span>插件包{packages !== null ? `（${packages.length}）` : ""}</span>
+    </>} status={<>
+      {error && <Notice role="alert" >{error}</Notice>}
+    </>}>
+
+
     {packages === null ? (
       <div className="muted small" style={{ padding: "8px 0" }} role="status">正在读取插件包…</div>
     ) : packages.length === 0 ? (
@@ -58,17 +63,13 @@ export default function AgentPackagesSection({ agent, navigate }: {
         {AGENT_LABELS[agent]} 未安装任何插件包。安装与导入请前往插件包看板。
       </div>
     ) : (
-      <div>
+      <DetailList label="插件包列表">
         {packages.map(entry => (
-          <div className="agent-package-row" key={entry.id}>
-            <button type="button" className="package-open"
-              onClick={() => navigate(packageDetailRoute(entry))}
-              title={entry.description || entry.name}>
-              <Icon name="puzzle" />
-              <span className="truncate" style={{ fontWeight: 600 }}>{entry.name}</span>
-              {entry.version && <span className="badge">v{entry.version}</span>}
-            </button>
-            {configurable(entry) && <button
+          <DetailListRow key={entry.id} icon={<Icon name="puzzle" />}
+            title={entry.name} titleHint={entry.description || entry.name}
+            onOpen={() => navigate(packageDetailRoute(entry))}
+            meta={entry.version && <span className="badge">v{entry.version}</span>}
+            actions={configurable(entry) && <button
               type="button"
               className={"btn small ghost icon-button" + (entryState(entry) === "enabled" ? " is-on" : " is-off")}
               title={entryState(entry) === "enabled" ? "用户级停用" : "用户级启用"}
@@ -76,9 +77,9 @@ export default function AgentPackagesSection({ agent, navigate }: {
               disabled={togglingId === entry.id}
               onClick={() => void togglePackage(entry)}
             ><Icon name="power" /></button>}
-          </div>
+          />
         ))}
-      </div>
+      </DetailList>
     )}
-  </section>;
+  </DetailSection>;
 }

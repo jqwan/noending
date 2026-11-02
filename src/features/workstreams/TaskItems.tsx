@@ -1,3 +1,5 @@
+import { recentFirst } from "../../components/detailOrder";
+import { DetailContent, DetailSection } from "../../components/DetailSection";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -89,17 +91,19 @@ export default function TaskItems({ taskId }: { taskId: string }) {
       <button type="button" className="btn ghost icon-button small" title="编辑事项" aria-label={`编辑事项：${item.title}`} disabled={busy || Boolean(draft)} onClick={() => start(item)}><Icon name="edit" /></button>
     </>;
   };
-  const ordered = [...items].sort((a, b) => Number(a.completed) - Number(b.completed));
-  return <section className="card detail-section" aria-label="任务事项">
-    <div className="row between"><h2 className="detail-section-title"><Icon name="tasks" /><span>任务事项（{items.length}）</span></h2><div className="row"><SummaryControls expansion={expansion} disabled={Boolean(draft)} /><button type="button" className="btn ghost icon-button small" aria-label="新增事项" title="新增事项" disabled={loading || busy || Boolean(draft)} onClick={() => start(null)}><Icon name="plus" /></button></div></div>
-    {error && !draft && <div role="alert"><span>{error}</span><button type="button" className="btn ghost small" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重新读取</button></div>}
+  const ordered = recentFirst(items, item => item.updated_at).sort((a, b) => Number(a.completed) - Number(b.completed));
+  return <DetailSection sectionId="items" label="任务事项" title={<><Icon name="tasks" /><span>任务事项（{items.length}）</span></>} actions={({ expand }) => <><SummaryControls expansion={expansion} disabled={Boolean(draft)} /><button type="button" className="btn ghost icon-button small" aria-label="新增事项" title="新增事项" disabled={loading || busy || Boolean(draft)} onClick={() => { expand(); start(null); }}><Icon name="plus" /></button></>} status={<>
+      {error && !draft && <div role="alert"><span>{error}</span><button type="button" className="btn ghost small" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重新读取</button></div>}
+    </>}>
+
+
     {loading ? <div className="small muted">读取任务事项…</div> : <>
-      <div className="md-body"><SummaryContent
+      <DetailContent label="任务事项内容" className="md-body"><SummaryContent
         expansion={expansion} actions={actions} editing={Boolean(draft)}
         renderEditor={item => draft?.original?.id === item.id ? editor : null}
-      >{documentOf(ordered)}</SummaryContent></div>
+      >{documentOf(ordered)}</SummaryContent></DetailContent>
       {items.length === 0 && !draft && <div className="small muted">暂无任务事项</div>}
       {draft && (!draft.original || !items.some(item => item.id === draft.original?.id)) && editor}
     </>}
-  </section>;
+  </DetailSection>;
 }

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionDetailView, { sessionDetailCache, sessionContextCache } from "./SessionDetailView";
 import { api } from "../../api";
@@ -582,4 +582,21 @@ it("shows the physical compressed source and uses it for copy and reveal", async
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("compressed"));
   fireEvent.click(screen.getByRole("button", { name: "复制源会话路径" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(path));
+});
+
+it("orders tracked tasks by their update time without changing the task navigation", async () => {
+  const older = { id: "old", title: "旧任务", description: "", visibility: "normal" as const, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" };
+  const newer = { ...older, id: "new", title: "近期任务", updated_at: "2026-10-29T00:00:00Z" };
+  const { navigate } = await renderDetail(detail(session("s1"), { tracked_workstreams: [older, newer] }));
+  const list = screen.getByRole("region", { name: "跟踪任务列表" });
+  expect(within(list).getAllByRole("button", { name: /^(近期任务|旧任务)$/ }).map(node => node.textContent)).toEqual(["近期任务", "旧任务"]);
+  fireEvent.click(within(list).getByRole("button", { name: "近期任务" }));
+  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "new", initialTitle: "近期任务" });
+  navigate.mockClear();
+  vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("s1"), { tracked_workstreams: [older] }));
+  fireEvent.click(within(list).getByRole("button", { name: "取消跟踪：近期任务" }));
+  await waitFor(() => expect(api.setSessionTaskTracking).toHaveBeenCalledWith("s1", "new", false));
+  await waitFor(() => expect(within(list).queryByRole("button", { name: "近期任务" })).toBeNull());
+  expect(within(list).getByRole("button", { name: "旧任务" })).toBeTruthy();
+  expect(navigate).not.toHaveBeenCalled();
 });

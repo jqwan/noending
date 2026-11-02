@@ -1,3 +1,5 @@
+import { DetailSection } from "../../components/DetailSection";
+import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
@@ -94,7 +96,7 @@ function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; on
   return <Modal title="发送信箱消息" onClose={() => { if (!sending.current) onClose(); }}>
     <form className="mailbox-compose mailbox-history-compose" onSubmit={e => { e.preventDefault(); void send(); }}>
       <textarea aria-label="消息内容" placeholder="向此会话发送消息" value={body} disabled={busy} onChange={e => setBody(e.target.value)} />
-      {error && <div role="alert" className="badge warn">{error}</div>}
+      {error && <Notice role="alert" >{error}</Notice>}
       <div className="mailbox-compose-actions"><button type="submit" className="btn primary" disabled={busy || !body.trim()}>{busy ? "发送中…" : "发送到信箱"}</button></div>
     </form>
   </Modal>;
@@ -103,14 +105,13 @@ function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; on
 function MailboxHistoryContent({ sessionId }: { sessionId: string }) {
   const { page, error, more, refresh } = useMailboxMessages(sessionId, "all");
   const [composing, setComposing] = useState(false);
-  return <section aria-label="会话信箱" className="card detail-section mailbox-history">
-    <div className="mailbox-history-head">
-      <h2 className="detail-section-title"><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></h2>
-      <button type="button" className="btn small ghost" onClick={() => setComposing(true)}><Icon name="chatPlus" />发送消息</button>
-    </div>
-    {error && <div role="alert" className="badge warn mailbox-history-error">{error}</div>}
+  return <DetailSection sectionId="mailbox" label="会话信箱" className="mailbox-history" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></>} actions={<><button type="button" className="btn small ghost" onClick={() => setComposing(true)}><Icon name="chatPlus" />发送消息</button></>} status={<>
+      {error && <div role="alert" className="badge warn mailbox-history-error">{error}</div>}
+    </>}>
+
+
     {!page && !error && <div className="skeleton mailbox-history-loading" />}
-    <div className="mailbox-history-list" role="region" aria-label="信箱消息列表" tabIndex={0}>
+    <div className="mailbox-history-list detail-scroll" role="region" aria-label="信箱消息列表" tabIndex={0}>
       {page?.items.map(m => <article className="mailbox-history-entry" key={`${sessionId}:${m.id}`}>
         <MailboxMessagePreview message={m} />
       </article>)}
@@ -118,5 +119,5 @@ function MailboxHistoryContent({ sessionId }: { sessionId: string }) {
       {page?.next_cursor != null && <div className="mailbox-history-footer"><button className="btn small ghost" onClick={() => void more()}>加载更多</button></div>}
     </div>
     {composing && <MailboxComposer sessionId={sessionId} onClose={() => setComposing(false)} onSent={() => { setComposing(false); void refresh(); }} />}
-  </section>;
+  </DetailSection>;
 }

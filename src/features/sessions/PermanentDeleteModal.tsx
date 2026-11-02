@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
@@ -107,10 +108,10 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10, overflowWrap: "anywhere" }}>
             {errorText}
           </div>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
+          <DialogActions>
             <button className="btn" onClick={onClose}>关闭</button>
             <button className="btn primary" onClick={load}>重试</button>
-          </div>
+          </DialogActions>
         </>
       )}
 
@@ -137,7 +138,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             关联的内嵌终端将关闭并移除；关联任务及其 Context 内容不受影响。
           </p>
 
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
+          <DialogActions>
             <button className="btn" disabled={busy} onClick={onClose}>取消</button>
             <button
               className="btn danger"
@@ -146,7 +147,7 @@ export default function PermanentDeleteModal({ sessionId, onClose, onDeleted }: 
             >
               {busy ? "删除中…" : "删除"}
             </button>
-          </div>
+          </DialogActions>
         </>
       )}
     </Modal>

@@ -71,6 +71,7 @@ fn card_stats_follow_sessions_and_active_state() {
                 tx,
                 &w.id,
                 &noending_lib::domain::Summary::single("修复 source-driven identity migration"),
+                0,
             )
         })
         .unwrap();

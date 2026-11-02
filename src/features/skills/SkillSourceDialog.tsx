@@ -1,3 +1,6 @@
+import "./skills.css";
+import DialogActions from "../../components/DialogActions";
+import Notice from "../../components/Notice";
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
@@ -29,8 +32,8 @@ export default function SkillSourceDialog({ onClose, onDone }: { onClose: () => 
           ? "源目录将移入 NoEnding 技能库，原加载入口改为链接。"
           : "只登记原路径，不移动或复制文件。原目录若位于 Agent 生效路径，对应作用域会保持启用，不能直接停用该物理入口。"}</p>
       </div>
-      {error && <div role="alert" className="skill-error">{error}</div>}
-      <div className="row skill-dialog-actions"><button className="btn" disabled={busy} onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !source.trim()} onClick={() => void submit()}>{busy ? "处理中…" : "托管源"}</button></div>
+      {error && <Notice role="alert" >{error}</Notice>}
+      <DialogActions><button className="btn" disabled={busy} onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !source.trim()} onClick={() => void submit()}>{busy ? "处理中…" : "托管源"}</button></DialogActions>
     </div>
   </Modal>;
 }

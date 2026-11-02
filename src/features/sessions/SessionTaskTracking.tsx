@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import Icon from "../../components/Icon";
+import SessionTrackedTasks from "./SessionTrackedTasks";
 import { EVT_SYNCED, type Route } from "../../app/routes";
 import type { SessionTracking } from "../../types";
 import SessionTaskTrackingModal from "./SessionTaskTrackingModal";
@@ -62,64 +62,15 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
     }
   };
 
-  const trackedCount = data?.tracked_workstreams.length ?? 0;
-
-  return <section className="session-tracking-panel" aria-label="跟踪任务">
-        <div className="session-tracking-head">
-          <div className="session-tracking-head-title">
-            <Icon name="tasks" />
-            <h3>跟踪任务{trackedCount > 0 ? ` (${trackedCount})` : ""}</h3>
-          </div>
-          <div className="session-tracking-actions">
-            <button
-              className="btn ghost icon-button small"
-              title="添加跟踪任务"
-              aria-label="添加跟踪任务"
-              disabled={busy || !data || !sessionId}
-              onClick={() => setModalOpen(true)}
-            >
-              <Icon name="plus" />
-            </button>
-          </div>
-        </div>
-
-        <div className="session-tracking-list">
-          {data?.tracked_workstreams.map(task => (
-            <div className="session-tracking-row" key={task.id}>
-              <button
-                className="session-tracking-link"
-                title={task.title}
-                onClick={() => navigate({ view: "workstream", workstreamId: task.id, initialTitle: task.title })}
-              >
-                <Icon name="tasks" />
-                <span className="truncate">{task.title}</span>
-              </button>
-              {task.visibility === "archived" && <span className="badge">已归档</span>}
-              <button
-                className="btn ghost icon-button small session-tracking-remove"
-                disabled={busy}
-                title="取消跟踪"
-                aria-label={`取消跟踪：${task.title}`}
-                onClick={() => void change([task.id], false)}
-              >
-                <Icon name="close" />
-              </button>
-            </div>
-          ))}
-          {data && data.tracked_workstreams.length === 0 && (
-            <p className="muted small">未跟踪任何任务，点击右上角「+」添加。</p>
-          )}
-          {!sessionId && <p className="muted small">绑定会话后可管理跟踪任务。</p>}
-          {sessionId && !data && !error && <p className="muted small">正在读取任务…</p>}
-        </div>
-
-        {error && <p role="alert" className="warning session-tracking-error">{error}</p>}
-
+  return <>
+    <SessionTrackedTasks tasks={data?.tracked_workstreams ?? null} navigate={navigate}
+      bound={Boolean(sessionId)} busy={busy} error={error}
+      onAdd={() => setModalOpen(true)} onRemove={id => void change([id], false)} />
         {modalOpen && sessionId && (
           <SessionTaskTrackingModal
             sessionId={sessionId}
             onClose={() => setModalOpen(false)}
           />
         )}
-      </section>;
+      </>;
 }

@@ -171,7 +171,7 @@ describe("ProjectDetail", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "从项目新建的任务" } });
     fireEvent.submit(screen.getByRole("textbox", { name: "标题" }).closest("form")!);
     await waitFor(() => expect(api.createWorkstream).toHaveBeenCalledWith("从项目新建的任务", "", ["p1"]));
-    const taskLink = await screen.findByRole("link", { name: "从项目新建的任务" });
+    const taskLink = await screen.findByRole("button", { name: "从项目新建的任务" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByRole("heading", { name: "关联任务（1）" })).toBeTruthy();
     fireEvent.click(taskLink);
@@ -186,6 +186,25 @@ describe("ProjectDetail", () => {
     // Even though /a/linked/worktree is alphabetically earlier, /z/main/worktree is git_kind: "main" and comes first
     expect(screen.getAllByTitle(/\/worktree$/).map(link => link.getAttribute("title")))
       .toEqual(["/z/main/worktree", "/a/linked/worktree"]);
+  });
+
+  it("shows every session newest first using actual time across offsets, with unknown times last", async () => {
+    const d = mockDetail();
+    const base = d.sessions[0];
+    d.sessions = [
+      { ...base, id: "unknown", title: "未知时间会话", started_at: null, last_activity_at: null },
+      ...Array.from({ length: 12 }, (_, i) => ({ ...base, id: `dated-${i}`, title: `会话${i + 1}`, last_activity_at: `2026-10-${String(i + 1).padStart(2, "0")}T00:00:00Z` })),
+      { ...base, id: "earlier", title: "跨时区较早会话", last_activity_at: "2026-10-29T01:30:00Z" },
+      { ...base, id: "later", title: "跨时区较新会话", last_activity_at: "2026-10-29T10:00:00+08:00" },
+    ];
+    vi.mocked(api.getProjectDetail).mockResolvedValue(d);
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    const list = await screen.findByRole("region", { name: "会话列表" });
+    expect(within(list).getAllByText(/^(会话\d+|跨时区.*会话|未知时间会话)$/).map(node => node.textContent)).toEqual([
+      "跨时区较新会话", "跨时区较早会话", "会话12", "会话11", "会话10", "会话9", "会话8", "会话7", "会话6", "会话5", "会话4", "会话3", "会话2", "会话1", "未知时间会话",
+    ]);
+    fireEvent.click(within(list).getByRole("button", { name: /^未知时间会话/ }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "unknown" }));
   });
 
   it("renders desktop continue for desktop-only session rows and stops row navigation", async () => {
@@ -312,6 +331,7 @@ describe("ProjectDetail", () => {
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
     const section = await screen.findByLabelText("技能");
     expect(within(section).getByRole("heading", { name: "技能（2）" })).toBeTruthy();
+    navigate.mockClear();
     fireEvent.click((await within(section).findAllByRole("button", { name: "补齐" }))[0]);
     await waitFor(() => expect(api.enableSkillProjects).toHaveBeenCalledWith(["p1"], "review"));
     await waitFor(() => expect(api.listSkillCatalog).toHaveBeenCalledTimes(2));
@@ -320,6 +340,9 @@ describe("ProjectDetail", () => {
     expect(buttons[0].disabled).toBe(true);
     expect(buttons[1].disabled).toBe(false);
     await act(async () => { finish(inventory); });
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(within(section).getByRole("button", { name: "review" }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "skill", resourceId: "review" }));
   });
 
   it("keeps a user-level project Skill read-only", async () => {

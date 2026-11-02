@@ -1,3 +1,4 @@
+import PopupMenu, { PopupMenuItem } from "../../components/PopupMenu";
 import TerminalActivityIndicator from "./TerminalActivityIndicator";
 import { useTerminalActivitySeen } from "./useTerminalActivitySeen";
 import { useEffect, useRef, useState } from "react";
@@ -128,15 +129,15 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
       </>}
     </div>
     <span className="session-action-divider" aria-hidden="true" />
-    {open && <div className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端">
-      {peers.map(t => <button key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
+    {open && <PopupMenu className="continue-split-menu terminal-menu" role="menu" aria-label="会话终端" onDismiss={() => setOpen(false)}>
+      {peers.map(t => <PopupMenuItem selected={t.terminal_id === (terminalId ?? selected?.terminal_id)} key={t.terminal_id} className="continue-menu-item" role="menuitemradio"
         aria-checked={t.terminal_id === (terminalId ?? selected?.terminal_id)}
         onClick={() => { setOpen(false); navigate({ ...terminalDestination(t), initialTitle: title ?? t.session_title ?? undefined }); }}>
         <span className={`terminal-menu-icon ${t.live ? "terminal-running" : "terminal-exited"}`}><Icon name="terminal" /></span>
         <span className="menu-label">{terminalCreatedLabel(t.created_at)}</span>
         <TerminalActivityIndicator terminal={t} />
-        <span className="menu-check" aria-hidden="true">{t.terminal_id === (terminalId ?? selected?.terminal_id) && <Icon name="check" />}</span>
-      </button>)}
-    </div>}
+
+      </PopupMenuItem>)}
+    </PopupMenu>}
   </div>;
 }

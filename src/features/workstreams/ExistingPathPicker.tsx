@@ -1,3 +1,4 @@
+import DialogActions from "../../components/DialogActions";
 import { useEffect, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -66,10 +67,10 @@ export default function ExistingPathPicker({ exclude, onClose, onSelect }: {
             );
           })}
       </div>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
+      <DialogActions>
         <button className="btn" onClick={onClose}>取消</button>
         <button className="btn primary" disabled={!selected.length} onClick={() => onSelect(selected)}>添加{selected.length ? `（${selected.length}）` : ""}</button>
-      </div>
+      </DialogActions>
     </Modal>
   );
 }
