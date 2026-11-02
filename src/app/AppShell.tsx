@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 import Sidebar from "../layout/Sidebar";
 import NavigationRail, { isSessionRoute } from "../layout/NavigationRail";
+import WindowsWindowControls from "../layout/WindowsWindowControls";
 import Router, { preloadCommonRoutes } from "./Router";
 import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
@@ -113,6 +114,7 @@ export default function AppShell() {
     if (isSessionRoute(route)) lastSessionRoute.current = withoutAction(route);
   }, [route]);
   const isMac = /Macintosh|Mac OS X/.test(navigator.userAgent);
+  const isWindows = /Windows/.test(navigator.userAgent);
 
   useEffect(() => {
     localStorage.setItem("noending.sidebarCollapsed", String(sidebarCollapsed));
@@ -286,9 +288,9 @@ export default function AppShell() {
   }, []);
 
   return (
-    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed without-session-sidebar" : ""}`}>
+    <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${isWindows ? " windows-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed without-session-sidebar" : ""}`}>
       <header className="app-titlebar">
-        {isMac && <div className="window-drag-region" data-tauri-drag-region />}
+        {(isMac || isWindows) && <div className="window-drag-region" data-tauri-drag-region />}
         <div className="history-controls" aria-label="页面导航">
           <button
             className="history-button"
@@ -344,6 +346,7 @@ export default function AppShell() {
         </div>
         <div className="titlebar-divider" aria-hidden="true" />
       </header>
+      {isWindows && <WindowsWindowControls />}
       <NavigationRail route={route} navigate={navigate} />
       <Sidebar
         route={route}

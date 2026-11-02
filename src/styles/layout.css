@@ -15,6 +15,8 @@
 .app.mac-titlebar { --titlebar-gutter: 211px; } /* 87 + 28*4 + 4*3 */
 .app.sidebar-collapsed { --titlebar-gutter: 168px; } /* 12 + 28*5 + 4*4 */
 .app.mac-titlebar.sidebar-collapsed { --titlebar-gutter: 243px; } /* 87 + 28*5 + 4*4 */
+.app.windows-titlebar { --window-controls-width: calc(var(--window-control-width) * 3); }
+.app.windows-titlebar:has(.windows-window-controls[hidden]) { --window-controls-width: 0px; }
 .app-titlebar { position: absolute; inset: 0 0 auto; height: var(--titlebar-height); display: flex; align-items: center; padding-left: 12px; }
 .mac-titlebar .app-titlebar { padding-left: 87px; }
 /* 窗口拖动只有一条路：带 data-tauri-drag-region 的元素（tauri 注入的 scripts/drag.js
@@ -27,6 +29,44 @@
   inset: 0 0 auto;
   height: 100%;
   z-index: 4;
+}
+/* WebView2's non-client regions keep touch/pen window dragging native. */
+.windows-titlebar .window-drag-region,
+.windows-titlebar .page-head { app-region: drag; }
+.windows-titlebar .page-head :is(button, a, input, select, textarea, [tabindex], [role="button"], [data-tauri-drag-region="false"]) { app-region: no-drag; }
+.windows-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2100;
+  height: var(--titlebar-height);
+  display: flex;
+  user-select: none;
+  app-region: no-drag;
+}
+.windows-window-controls[hidden] { display: none; }
+.windows-window-controls button {
+  width: var(--window-control-width);
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  cursor: default;
+}
+.windows-window-controls button:hover { background: var(--bg-hover); }
+.windows-window-controls button:active { background: var(--bg-active); }
+.windows-window-controls button:focus-visible { outline-offset: -3px; }
+.windows-window-controls svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1; }
+.windows-window-controls[data-focused="false"] button:not(:hover) { color: var(--text-muted); }
+.windows-window-controls .window-close:hover,
+.windows-window-controls .window-close:active { background: var(--window-close-hover); color: var(--on-solid); }
+@media (forced-colors: active) {
+  .windows-window-controls button:hover { background: Highlight; color: HighlightText; }
 }
 .app-content {
   position: relative;
@@ -285,6 +325,12 @@
 }
 /* 侧栏收起后内容顶到最左，标题行必须让开历史按钮那一段，否则标题压在按钮下面。 */
 .app.without-session-sidebar .page-head { padding-left: calc(var(--titlebar-gutter) - var(--rail-width) + 16px); }
+/* All page headers, including full-width terminal pages, reserve the same
+   space for window controls so their own actions stay reachable. */
+.app.windows-titlebar .page-head { padding-right: calc(32px + var(--window-controls-width)); }
+@media (max-width: 800px) {
+  .app.windows-titlebar .page-head { padding-right: calc(24px + var(--window-controls-width)); }
+}
 .page-head .page-title {
   min-width: 0;
   margin: 0;

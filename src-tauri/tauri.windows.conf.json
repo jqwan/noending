@@ -1,4 +1,18 @@
 {
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "NoEnding",
+        "decorations": false,
+        "shadow": true,
+        "width": 1360,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640
+      }
+    ]
+  },
   "bundle": {
     "resources": {
       "resources/conpty/conpty.dll": "conpty-bundle/conpty.dll",

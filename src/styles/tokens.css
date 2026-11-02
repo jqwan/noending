@@ -87,6 +87,8 @@
   --radius-lg: 12px;
   --radius-pill: 999px;
   --sidebar-width: 248px;
+  --window-control-width: 46px;
+  --window-close-hover: #c42b1c;
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.06);
