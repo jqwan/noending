@@ -42,10 +42,6 @@ pub(super) fn check_revision(actual: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn parse_json(raw: &str) -> Result<serde_json::Value> {
-    serde_json::from_str(raw).map_err(|e| crate::error::other(format!("配置无法解析：{e}")))
-}
-
 /// Same-directory temp file + rename, so a failed write never leaves a
 /// half-written config behind.
 pub(super) fn write_atomic(path: &Path, content: &str) -> Result<()> {

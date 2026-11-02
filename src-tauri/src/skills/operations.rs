@@ -2092,10 +2092,10 @@ fn copy_migration_tree(source: &Path, dest: &Path, depth: usize) -> Result<()> {
     if depth > 64 {
         return Err(other("Skill 目录嵌套过深"));
     }
-    let info = fs::symlink_metadata(source)?;
+    let _info = fs::symlink_metadata(source)?;
     fs::create_dir(dest)?;
     #[cfg(unix)]
-    fs::set_permissions(dest, info.permissions())?;
+    fs::set_permissions(dest, _info.permissions())?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let kind = entry.file_type()?;

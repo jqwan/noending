@@ -13,12 +13,14 @@ impl RuntimeFile {
     pub fn create(bytes: &[u8], extension: &str) -> std::io::Result<Self> {
         let root =
             std::env::temp_dir().join(format!("noending-runtime-{}", crate::storage::new_id()));
-        let mut builder = fs::DirBuilder::new();
+        let builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder.create(&root)?;
         let file = Self {
             path: root.join(format!("message.{extension}")),
