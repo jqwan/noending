@@ -2,7 +2,7 @@
 .popup-menu {
   z-index: 2000;
   padding: 4px;
-  background: var(--bg-panel);
+  background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-menu);

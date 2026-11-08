@@ -316,6 +316,18 @@ pub fn archive_project(state: State<AppState>, project_id: String) -> Result<Pro
 }
 
 #[tauri::command]
+pub async fn clean_missing_project_paths(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<usize> {
+    let db = Arc::clone(&state.db);
+    super::run_on_blocking_worker(move || {
+        crate::workspace::project::clean_missing_project_paths(&db, &project_id)
+    })
+    .await?
+}
+
+#[tauri::command]
 pub fn restore_project(state: State<AppState>, project_id: String) -> Result<Project> {
     with_db(&state, |db| {
         crate::workspace::project::set_project_archived(db, &project_id, false)

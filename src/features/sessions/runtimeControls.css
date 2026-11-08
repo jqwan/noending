@@ -37,8 +37,8 @@
   flex-shrink: 0;
 }
 .new-session-runtime-pill-btn .runtime-pill-chevron {
-  width: 12px;
-  height: 12px;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
   color: var(--text-muted);
   transition: transform var(--duration-normal) ease;
   flex-shrink: 0;
@@ -77,8 +77,8 @@
   max-width: 170px;
 }
 .popover-row-val .ui-icon {
-  width: 12px;
-  height: 12px;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
   color: var(--text-muted);
   flex-shrink: 0;
 }

@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { DetailPanelProvider } from "../../components/DetailLayout";
 import PageHeader from "../../layout/PageHeader";
 import { viewState } from "../../hooks/useViewState";
@@ -18,7 +19,7 @@ import type {
 const { handlers } = vi.hoisted(() => ({ handlers: new Map<string, Set<(event: { payload: unknown }) => void>>() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("../../api", () => ({ api: {
-  getOperationStatus: vi.fn(), getWorkstreamContextState: vi.fn(), updateWorkstreamContext: vi.fn(), regenerateWorkstreamContext: vi.fn(),
+  getOperationStatus: vi.fn(),
   collaborationRoomGet: vi.fn(),
   collaborationRoomMessages: vi.fn(),
   collaborationCandidates: vi.fn(),
@@ -80,7 +81,7 @@ const stoppedRun: RoomView = {
 };
 
 function mount() {
-  return render(<DetailPanelProvider kind="collaboration"><PageHeader title="协作室" /><CollaborationRoomView taskId="task-1" taskTitle="跨会话聊天室开发" sessions={sessions} /></DetailPanelProvider>);
+  return render(<DetailPanelProvider kind="collaboration"><PageHeader title="协作室" /><CollaborationRoomView taskId="task-1" taskTitle="跨会话聊天室开发" sessions={sessions} navigate={vi.fn()} /></DetailPanelProvider>);
 }
 
 function chooseCoordinator(name: string) {
@@ -93,11 +94,11 @@ function emit(payload: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  clearReadResources();
   localStorage.clear(); viewState.clear();
   vi.resetAllMocks();
   handlers.clear();
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
-  vi.mocked(api.getWorkstreamContextState).mockResolvedValue({workstream_id:"task-1",summary:null,context_revision:0,updated_at:null,pending:false,pending_messages:0,processed_through_seq:0,freshness:{refreshed_at:null,pending_messages:0,history_rewritten_sessions:0,unknown_coverage_sessions:0,summary_changed_sessions:0,scope_changed:false,pending:false}});
   vi.mocked(listen).mockImplementation(async (name, callback) => {
     const fn = callback as unknown as (event: { payload: unknown }) => void;
     const set = handlers.get(name) ?? new Set();
@@ -116,6 +117,8 @@ it("sends with Enter but lets composition and Shift+Enter stay in the composer",
   vi.mocked(api.collaborationRoomSend).mockResolvedValue(message(2, "准备开始", null));
   mount();
   const box = await screen.findByRole("textbox", { name: "在协作室说一句" });
+  expect(await within(screen.getByRole("form", { name: "发送协作消息" })).findByText("1 条消息")).toBeTruthy();
+  expect(within(screen.getByRole("group", { name: "本次协作" })).queryByText("1 条消息")).toBeNull();
   fireEvent.change(box, { target: { value: "准备开始" } });
   fireEvent.keyDown(box, { key: "Enter", isComposing: true });
   fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
@@ -129,14 +132,51 @@ it("sends with Enter but lets composition and Shift+Enter stay in the composer",
   await waitFor(() => expect((box as HTMLTextAreaElement).value).toBe(""));
 });
 
+it("shows members independently of message history and keeps them visible during a return visit", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
+  vi.mocked(api.collaborationRoomMessages).mockImplementation(() => new Promise(() => {}));
+  const first = mount();
+  const members = within(screen.getByRole("region", { name: "关联会话" }));
+  await members.findByRole("listitem", { name: "后端会话" });
+  expect(members.getByRole("listitem", { name: "前端会话" })).toBeTruthy();
+  first.unmount();
+  vi.mocked(api.collaborationRoomGet).mockImplementation(() => new Promise(() => {}));
+  mount();
+  const restored = within(screen.getByRole("region", { name: "关联会话" }));
+  expect(restored.getByRole("listitem", { name: "后端会话" })).toBeTruthy();
+  expect(restored.getByRole("listitem", { name: "前端会话" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "关联会话（3）" })).toBeTruthy();
+});
+
+it("restores stopped-room candidates immediately and retains them if revalidation fails", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(stoppedRun);
+  const first = mount();
+  await screen.findByRole("checkbox", { name: "后端会话" });
+  first.unmount();
+  let fail!: (reason: Error) => void;
+  vi.mocked(api.collaborationCandidates).mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+  mount();
+  expect(screen.getByRole("checkbox", { name: "后端会话" })).toBeTruthy();
+  expect(screen.queryByText("正在读取候选会话…")).toBeNull();
+  await waitFor(() => expect(fail).toBeTypeOf("function"));
+  await act(async () => { fail(new Error("候选读取失败")); });
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Error: 候选读取失败");
+  expect(screen.getByRole("checkbox", { name: "后端会话" })).toBeTruthy();
+});
+
 it("keeps chosen members when their settings are hidden and restored", async () => {
   mount();
-  fireEvent.click(await screen.findByRole("checkbox", { name: "后端会话" }));
+  const candidate = await screen.findByRole("checkbox", { name: "后端会话" });
+  expect(screen.queryByRole("group", { name: "后端会话 的唤醒方式" })).toBeNull();
+  fireEvent.click(candidate);
+  expect(screen.getByRole("group", { name: "后端会话 的唤醒方式" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
   expect(screen.queryByRole("checkbox", { name: "后端会话" })).toBeNull();
   expect(screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
   expect((screen.getByRole("checkbox", { name: "后端会话" }) as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
+  expect(screen.queryByRole("group", { name: "后端会话 的唤醒方式" })).toBeNull();
 });
 
 it("leaves the reader on older messages until they choose to follow new ones", () => {
@@ -265,7 +305,7 @@ it("keeps messages readable after stopping and reports that this run ended", asy
   await screen.findByRole("button", { name: "停止协作" });
   fireEvent.click(screen.getByRole("button", { name: "停止协作" }));
 
-  await screen.findByText(/上次协作已停止/);
+  await waitFor(() => expect(within(screen.getByRole("group", { name: "本次协作" })).getByText("已停止")).toBeTruthy());
   expect(screen.getByRole("button", { name: "开启协作" })).toBeTruthy();
   // 正文仍可查阅：停止不删消息，也不把成员状态写成仍在工作。
   expect(screen.getByText("先对齐契约")).toBeTruthy();
@@ -310,7 +350,7 @@ it("reuses the same request id when a failed send is retried unchanged and start
   expect(vi.mocked(api.collaborationRoomSend).mock.calls[2][3]).not.toBe(calls[0][3]);
 });
 
-it("loads the whole room history into the card and offers no paging entry", async () => {
+it("loads the whole room history into the card", async () => {
   const newest = Array.from({ length: 40 }, (_, i) => message(70 + i, `m${70 + i}`));
   const older = Array.from({ length: 40 }, (_, i) => message(30 + i, `m${30 + i}`));
   const oldest = Array.from({ length: 29 }, (_, i) => message(1 + i, `m${1 + i}`));
@@ -324,7 +364,6 @@ it("loads the whole room history into the card and offers no paging entry", asyn
   await screen.findByText("m109");
   // 最早一条也在同一个卡里：按游标一路翻到底，不需要用户点。
   expect(await screen.findByText("m1")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "加载更早的消息" })).toBeNull();
 
   const list = screen.getByRole("list", { name: "协作消息" });
   expect(within(list).getAllByRole("listitem")).toHaveLength(109);
@@ -498,30 +537,21 @@ it("shows processing time after joining and expires the connection without anoth
   expect(terminal.queryByLabelText(/已处理/)).toBeNull();
 });
 
-it("keeps shared summary collapsed in the room and refreshes it without changing chat messages", async () => {
-  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
-  const initial = {
-    workstream_id: "task-1", summary: { items: [{ id: "decision", title: "已确认分工", description: "后端负责消息协议", details: [] }] },
-    context_revision: 1, updated_at: null, pending: true, pending_messages: 2, processed_through_seq: 1,
-    freshness: { refreshed_at: null, pending_messages: 2, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: true },
-  };
-  vi.mocked(api.getWorkstreamContextState).mockResolvedValue(initial);
-  let complete!: () => void;
-  vi.mocked(api.updateWorkstreamContext).mockImplementation(() => new Promise(resolve => { complete = () => resolve({workstream_id:"task-1",status:"updated",context_revision:2,processed_through_seq:3,remaining_pending:0}); }));
+it("keeps the chat surface and composer mounted while loading, without a room summary", async () => {
+  let resolve!: (view: RoomView) => void;
+  vi.mocked(api.collaborationRoomGet).mockReturnValue(new Promise(done => { resolve = done; }));
   mount();
-  await screen.findByText("有 2 条协作消息待整理");
-  expect(screen.queryByRole("heading", { name: "已确认分工" })).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "协作摘要（1）" }));
-  expect(screen.getByRole("heading", { name: "已确认分工" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
-  await waitFor(() => expect((screen.getByRole("button", {name:"更新摘要"}) as HTMLButtonElement).disabled).toBe(true));
-  expect((screen.getByRole("button", {name:"重新生成"}) as HTMLButtonElement).disabled).toBe(true);
-  expect(screen.getByRole("textbox", { name:"在协作室说一句" })).toBeTruthy();
-  vi.mocked(api.getWorkstreamContextState).mockResolvedValue({...initial,pending:false,pending_messages:0,processed_through_seq:3});
-  await act(async () => complete());
-  await waitFor(() => expect(screen.queryByRole("button", {name:"更新摘要"})).toBeNull());
-  expect(screen.getByText("先对齐契约")).toBeTruthy();
-  expect(api.collaborationRoomSend).not.toHaveBeenCalled();
+  const history = screen.getByRole("region", { name: "协作消息记录" });
+  const composer = screen.getByRole("textbox", { name: "首条消息（随开启一起写入）" });
+  expect(history.getAttribute("aria-busy")).toBe("true");
+  expect((composer as HTMLTextAreaElement).disabled).toBe(true);
+  expect(screen.getByRole("complementary", { name: "任务详情栏" })).toBeTruthy();
+  await act(async () => resolve(activeRun));
+  await screen.findByText("先对齐契约");
+  expect(screen.getByRole("region", { name: "协作消息记录" })).toBe(history);
+  expect(screen.getByRole("textbox", { name: "在协作室说一句" })).toBe(composer);
+  expect((composer as HTMLTextAreaElement).disabled).toBe(false);
+  expect(screen.queryByRole("heading", { name: /协作摘要/ })).toBeNull();
 });
 
 it("copies the join prompt the backend supplied instead of building one", async () => {
@@ -547,4 +577,15 @@ it("copies the join prompt the backend supplied instead of building one", async 
   fireEvent.click(withoutPrompt.getByRole("button", { name: "复制加入提示" }));
   await Promise.resolve();
   expect(writeText).toHaveBeenCalledTimes(1);
+});
+
+it("drops unlinked stopped members and their coordinator before the next start", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(stoppedRun);
+  const props = { taskId: "task-1", taskTitle: "跨会话聊天室开发", navigate: vi.fn() };
+  const page = render(<DetailPanelProvider kind="collaboration"><CollaborationRoomView {...props} sessions={sessions} /></DetailPanelProvider>);
+  await screen.findByRole("button", { name: "负责人：后端会话" });
+  page.rerender(<DetailPanelProvider kind="collaboration"><CollaborationRoomView {...props} sessions={sessions.filter(session => session.id !== "s1")} /></DetailPanelProvider>);
+  expect(screen.getByRole("button", { name: "负责人：由我协调" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "开启协作" })).toHaveProperty("disabled", true);
+  expect(within(screen.getByRole("group", { name: "本次协作" })).getByText("已选 1 个")).toBeTruthy();
 });

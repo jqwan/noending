@@ -1,35 +1,41 @@
-import { DetailSection } from "../../components/DetailSection";
+import { DetailLoading, DetailSection } from "../../components/DetailSection";
 import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
-import type { MailboxMessage, MailboxPage } from "../../types";
+import type { MailboxMessage } from "../../types";
 import Icon from "../../components/Icon";
-import { Modal } from "../../components/common";
+import { copyToClipboard, Modal } from "../../components/common";
 import { formatDateTime } from "./SessionTable";
+import type { Route } from "../../app/routes";
+import { sessionDisplayTitle } from "./sessionDisplay";
+import { showToast } from "../../components/Toast";
+
+import { mailboxes } from "./mailboxResources";
 
 export function useMailboxMessages(session: string | null, filter: "all" | "unread") {
-  const [page, setPage] = useState<MailboxPage | null>(null);
+  const resource = mailboxes[filter];
+  const page = resource.useValue(session ?? "") ?? null;
   const [error, setError] = useState("");
   const request = useRef(0);
   const refresh = useCallback(async () => {
     const token = ++request.current;
-    if (!session) { setPage(null); return; }
-    try { const next = await api.mailboxList(session, filter); if (request.current === token) { setPage(next); setError(""); } }
+    if (!session) return;
+    try { await resource.refresh(session); if (request.current === token) setError(""); }
     catch (e) { if (request.current === token) setError(String(e)); }
-  }, [session, filter]);
+  }, [session, resource]);
   const more = async () => {
     if (!session || page?.next_cursor == null) return;
     const token = ++request.current;
     try {
       const next = await api.mailboxList(session, filter, page.next_cursor);
-      if (request.current === token) setPage(old => ({ ...next, items: [...(old?.items ?? []), ...next.items] }));
+      if (request.current === token) resource.set(session, { ...next, items: [...(resource.get(session)?.items ?? []), ...next.items] });
     } catch (e) { if (request.current === token) setError(String(e)); }
   };
   useEffect(() => {
     let active = true;
     const stops: (() => void)[] = [];
-    setPage(null); void refresh();
+    void refresh();
     void Promise.all(["mailbox-changed", "cli-data-changed"].map(name => listen(name, () => { if (active) void refresh(); })
       .then(stop => { if (active) stops.push(stop); else stop(); }))).then(() => { if (active) void refresh(); })
       .catch(e => { if (active) setError(String(e)); });
@@ -37,11 +43,21 @@ export function useMailboxMessages(session: string | null, filter: "all" | "unre
   }, [refresh]);
   return { page, error, refresh, more };
 }
-function MailboxMetadata({ message }: { message: MailboxMessage }) {
+function MailboxMetadata({ message, navigate }: { message: MailboxMessage; navigate: (route: Route) => void }) {
+  const senderId = message.sender_session_id;
+  const sender = message.sender;
+  const title = sender ? sessionDisplayTitle(sender.title) : `已删除会话 ${senderId?.slice(0, 8)}`;
+  const copySender = async () => {
+    if (senderId) showToast(await copyToClipboard(`NoEnding ID：${senderId}`) ? "已复制会话 ID" : "复制失败");
+  };
   return <span className="mailbox-history-meta">
     <span className="mailbox-history-sender">
-      <span>{message.sender_session_id ? "会话" : "用户"}</span>
-      {message.sender_session_id && <span className="mono mailbox-sender-id" title={message.sender_session_id}>{message.sender_session_id}</span>}
+      {!senderId ? <span>用户</span> : <>
+        {sender ? <button type="button" className="link mailbox-sender-name" title={`${title}\nNoEnding ID：${senderId}`}
+          aria-label={`打开发件会话：${title}`} onClick={() => navigate({ view: "session", sessionId: senderId, initialTitle: title, initialAgent: sender.agent })}>{title}</button>
+          : <span className="mailbox-sender-name" title={`NoEnding ID：${senderId}`}>{title}</span>}
+        <button type="button" className="btn ghost icon-button small" aria-label="复制发件会话 ID" title="复制发件会话 ID" onClick={() => void copySender()}><Icon name="copy" /></button>
+      </>}
     </span>
     <span className="mailbox-history-status">
       <time dateTime={message.created_at}>{formatDateTime(message.created_at)}</time>
@@ -50,18 +66,22 @@ function MailboxMetadata({ message }: { message: MailboxMessage }) {
   </span>;
 }
 
-export function MailboxMessagePreview({ message }: { message: MailboxMessage }) {
+export function MailboxMessagePreview({ message, navigate }: { message: MailboxMessage; navigate: (route: Route) => void }) {
   const [open, setOpen] = useState(false);
   const characters = Array.from(message.body.replace(/\s+/g, " ").trim());
   const preview = characters.slice(0, 120).join("") + (characters.length > 120 ? "…" : "");
+  const openSender = (route: Route) => { setOpen(false); navigate(route); };
   return <>
-    <button type="button" className="mailbox-message-preview" aria-label={`查看消息：${preview}`} aria-haspopup="dialog" onClick={() => setOpen(true)}>
-      <MailboxMetadata message={message} />
-      <span className="mailbox-preview-line"><span className="mailbox-preview-text">{preview}</span><Icon name="chevronRight" /></span>
-    </button>
+    <div className="mailbox-message-item">
+      <MailboxMetadata message={message} navigate={openSender} />
+      <button type="button" className="mailbox-message-preview" aria-label={`查看消息：${preview}`} aria-haspopup="dialog" onClick={() => setOpen(true)}>
+        <span className="mailbox-preview-line"><span className="mailbox-preview-text">{preview}</span><Icon name="chevronRight" /></span>
+      </button>
+    </div>
     {open && <Modal title="信箱消息" onClose={() => setOpen(false)}>
       <div className="mailbox-message-detail">
-        <MailboxMetadata message={message} />
+        <MailboxMetadata message={message} navigate={openSender} />
+        {message.sender_session_id && <div className="small muted mailbox-message-id">发件会话 ID：<span className="mono">{message.sender_session_id}</span></div>}
         <div className="small muted mailbox-message-id">消息 ID：<span className="mono">{message.id}</span></div>
         <div className="mailbox-body">{message.body}</div>
       </div>
@@ -69,8 +89,8 @@ export function MailboxMessagePreview({ message }: { message: MailboxMessage }) 
   </>;
 }
 
-export function MailboxHistory({ sessionId }: { sessionId: string }) {
-  return <MailboxHistoryContent key={sessionId} sessionId={sessionId} />;
+export function MailboxHistory({ sessionId, navigate }: { sessionId: string; navigate: (route: Route) => void }) {
+  return <MailboxHistoryContent key={sessionId} sessionId={sessionId} navigate={navigate} />;
 }
 
 function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; onClose: () => void; onSent: () => void }) {
@@ -102,18 +122,18 @@ function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; on
   </Modal>;
 }
 
-function MailboxHistoryContent({ sessionId }: { sessionId: string }) {
+function MailboxHistoryContent({ sessionId, navigate }: { sessionId: string; navigate: (route: Route) => void }) {
   const { page, error, more, refresh } = useMailboxMessages(sessionId, "all");
   const [composing, setComposing] = useState(false);
-  return <DetailSection sectionId="mailbox" label="会话信箱" className="mailbox-history" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></>} actions={<><button type="button" className="btn small ghost" onClick={() => setComposing(true)}><Icon name="chatPlus" />发送消息</button></>} status={<>
+  return <DetailSection sectionId="mailbox" label="会话信箱" className="mailbox-history" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></>} actions={<button type="button" className="btn small ghost icon-button" title="发送消息" aria-label="发送消息" onClick={() => setComposing(true)}><Icon name="chatPlus" /></button>} status={<>
       {error && <div role="alert" className="badge warn mailbox-history-error">{error}</div>}
     </>}>
 
 
-    {!page && !error && <div className="skeleton mailbox-history-loading" />}
+    {!page && !error && <DetailLoading>正在读取信箱…</DetailLoading>}
     <div className="mailbox-history-list detail-scroll" role="region" aria-label="信箱消息列表" tabIndex={0}>
       {page?.items.map(m => <article className="mailbox-history-entry" key={`${sessionId}:${m.id}`}>
-        <MailboxMessagePreview message={m} />
+        <MailboxMessagePreview message={m} navigate={navigate} />
       </article>)}
       {page?.items.length === 0 && <div className="l1-none">暂无信箱消息</div>}
       {page?.next_cursor != null && <div className="mailbox-history-footer"><button className="btn small ghost" onClick={() => void more()}>加载更多</button></div>}

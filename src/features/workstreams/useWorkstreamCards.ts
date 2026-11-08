@@ -4,29 +4,31 @@ import { api } from "../../api";
 import { useRefreshSignal } from "../../components/common";
 import type { Agent, WorkstreamCardData } from "../../types";
 
-let cachedCards: WorkstreamCardData[] | null = null;
-let cachedDefaultAgent: Agent | null = null;
+export const workstreamCardsCache = {
+  cards: null as WorkstreamCardData[] | null,
+  defaultAgent: null as Agent | null,
+};
 
 export function clearWorkstreamCardsCache() {
-  cachedCards = null;
-  cachedDefaultAgent = null;
+  workstreamCardsCache.cards = null;
+  workstreamCardsCache.defaultAgent = null;
 }
 
 /** Cards and default agent for the task board. */
 export function useWorkstreamCards() {
   const [loadError, setLoadError] = useState("");
-  const [cards, setCards] = useState<WorkstreamCardData[] | null>(cachedCards);
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(cachedDefaultAgent);
+  const [cards, setCards] = useState<WorkstreamCardData[] | null>(workstreamCardsCache.cards);
+  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(workstreamCardsCache.defaultAgent);
 
   const refresh = useCallback(() => {
     setLoadError("");
     api.listWorkstreamCards().then((cs) => {
       const current = cs.filter(w => !removedTargets.workstreams.has(w.id));
-      cachedCards = current;
+      workstreamCardsCache.cards = current;
       setCards(current);
     }).catch(e => setLoadError(String(e)));
     api.getDefaultAgent().then((a) => {
-      cachedDefaultAgent = a;
+      workstreamCardsCache.defaultAgent = a;
       setDefaultAgent(a);
     }).catch(console.error);
 

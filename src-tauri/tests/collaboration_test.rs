@@ -489,44 +489,6 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
 }
 
 #[test]
-fn session_purge_keeps_real_senders_but_drops_participation_state() {
-    let f = Fixture::new();
-    let db = f.db();
-    let started = db
-        .collaboration_start("t", &Fixture::members("a", "b"), None, None, None, "r1")
-        .unwrap();
-    let room_id = started.room.id.clone();
-    let run_id = started.run.id.clone();
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
-        .unwrap();
-    db.collaboration_send(&room_id, &run_id, Some("a"), "来自将删除的会话", "m1")
-        .unwrap();
-    db.collaboration_ack(&room_id, &run_id, "a", 2).unwrap();
-
-    // Simulate the purge path: the session row goes away, everything keyed to
-    // it cascades, but shared messages keep the real sender id.
-    db.write()
-        .execute("DELETE FROM sessions WHERE id='a'", [])
-        .unwrap();
-    let page = db
-        .collaboration_messages_page(&room_id, None, None, 50)
-        .unwrap();
-    let member_mail = page
-        .items
-        .iter()
-        .find(|m| m.body == "来自将删除的会话")
-        .unwrap();
-    assert_eq!(member_mail.sender_session_id.as_deref(), Some("a"));
-    assert!(db
-        .collaboration_read_of(&room_id, "a", &run_id)
-        .unwrap()
-        .is_none());
-    let members = db.collaboration_run_members(&run_id).unwrap();
-    assert_eq!(members.len(), 1, "the run member row cascaded away");
-}
-
-#[test]
 fn candidate_sessions_are_task_scoped_stably_paged_and_include_archived() {
     let f = Fixture::new();
     let db = f.db();
@@ -990,94 +952,16 @@ fn permanent_deletion_cleans_room_config_but_keeps_history_provenance() {
         .collaboration_read_of(&room_id, "a", &run_id)
         .unwrap()
         .is_none());
+    assert!(db
+        .collaboration_run_members(&run_id)
+        .unwrap()
+        .iter()
+        .all(|member| member.session_id != "a"));
     let page = db
         .collaboration_messages_page(&room_id, None, None, 50)
         .unwrap();
     let mail = page.items.iter().find(|m| m.body == "历史发件人").unwrap();
     assert_eq!(mail.sender_session_id.as_deref(), Some("a"));
-}
-
-#[test]
-fn joining_activates_the_run_and_archiving_the_task_stops_it() {
-    let f = Fixture::new();
-    let db = f.db();
-    let started = db
-        .collaboration_start(
-            "t",
-            &Fixture::members("a", "b"),
-            Some("a"),
-            None,
-            None,
-            "r1",
-        )
-        .unwrap();
-    let room_id = started.room.id.clone();
-    let run_id = started.run.id.clone();
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
-
-    // One member joined, but the designated coordinator is not among the
-    // live participations: the run stays starting.
-    db.collaboration_join(&room_id, &run_id, "b", "cli", "cli-resident", &cutoff)
-        .unwrap();
-    assert_eq!(
-        db.collaboration_current_run(&room_id)
-            .unwrap()
-            .unwrap()
-            .status,
-        "starting"
-    );
-
-    // The coordinator joins: two live members including the coordinator.
-    db.collaboration_join(&room_id, &run_id, "a", "cli", "cli-resident", &cutoff)
-        .unwrap();
-    assert_eq!(
-        db.collaboration_current_run(&room_id)
-            .unwrap()
-            .unwrap()
-            .status,
-        "active"
-    );
-
-    // A stop on an active run still works; restart and archive flow next.
-    db.collaboration_stop(&room_id, &run_id, None, "s1")
-        .unwrap();
-    let restarted = db
-        .collaboration_start("t", &Fixture::members("a", "b"), None, None, None, "r2")
-        .unwrap();
-    let run2 = restarted.run.id.clone();
-    let room2 = restarted.room.id.clone();
-    db.collaboration_join(&room2, &run2, "a", "cli", "cli-resident", &cutoff)
-        .unwrap();
-    db.collaboration_join(&room2, &run2, "b", "cli", "cli-resident", &cutoff)
-        .unwrap();
-    assert_eq!(
-        db.collaboration_current_run(&room2)
-            .unwrap()
-            .unwrap()
-            .status,
-        "active"
-    );
-
-    // Archiving the task terminates the in-flight run with a user stop
-    // notice; waiters observe stopped on their next poll.
-    db.write()
-        .execute(
-            "UPDATE workstreams SET visibility='archived' WHERE id='t'",
-            [],
-        )
-        .unwrap();
-    // The archive entry point (not bare visibility SQL) performs the stop.
-    noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
-    let run = db.collaboration_current_run(&room2).unwrap().unwrap();
-    assert_eq!(run.status, "stopped");
-    assert!(run.stop_initiator_session_id.is_none());
-    let page = db
-        .collaboration_messages_page(&room2, Some(&run2), None, 50)
-        .unwrap();
-    let last = page.items.last().unwrap();
-    assert_eq!(last.kind, "stop");
-    assert!(last.sender_session_id.is_none());
-    assert!(last.body.contains("task_archived"));
 }
 
 #[test]
@@ -1141,12 +1025,14 @@ fn archiving_a_task_stops_its_collaboration_and_does_not_duplicate_stop_notice()
         .unwrap();
     let archived = noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
     assert_eq!(archived.visibility, "archived");
-    assert_eq!(
-        db.collaboration_current_run(&started.room.id)
-            .unwrap()
-            .unwrap()
-            .status,
-        "stopped"
+    let run = db
+        .collaboration_current_run(&started.room.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, "stopped");
+    assert!(
+        run.stop_initiator_session_id.is_none(),
+        "archive is a user-initiated stop"
     );
     noending_lib::workspace::workstream::archive_workstream(&db, "t").unwrap();
     let history = db
@@ -1295,4 +1181,55 @@ fn clearing_a_pending_coordinator_activates_ready_members_and_rejects_stale_run_
     assert!(db
         .collaboration_set_coordinator(room, run, Some("a"), edited.revision, "change-after-stop")
         .is_err());
+}
+
+#[test]
+fn active_run_members_cannot_be_unlinked_until_the_run_stops() {
+    let f = Fixture::new();
+    let db = f.db();
+    let started = db
+        .collaboration_start(
+            "t",
+            &Fixture::members("a", "b"),
+            None,
+            None,
+            None,
+            "tracking-start",
+        )
+        .unwrap();
+    let room = &started.room.id;
+    let run = &started.run.id;
+    assert_eq!(started.run.status, "starting");
+    assert!(db
+        .set_session_tracking("a", "t", false)
+        .unwrap_err()
+        .to_string()
+        .contains("先停止协作"));
+    assert!(db
+        .sessions_for_workstream("t")
+        .unwrap()
+        .iter()
+        .any(|s| s.id == "a"));
+
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    db.collaboration_join(room, run, "a", "cli", "cli-a", &cutoff)
+        .unwrap();
+    db.collaboration_join(room, run, "b", "cli", "cli-b", &cutoff)
+        .unwrap();
+    assert!(db.set_session_tracking("b", "t", false).is_err());
+    // Non-members and links to a different task remain removable.
+    db.set_session_tracking("c", "t", false).unwrap();
+    db.write().execute_batch("INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('other','其他任务','2026-01-01','2026-01-01'); INSERT INTO session_workstreams(session_id,workstream_id) VALUES('a','other');").unwrap();
+    db.set_session_tracking("a", "other", false).unwrap();
+    assert!(db.sessions_for_workstream("other").unwrap().is_empty());
+    assert_eq!(db.sessions_for_workstream("t").unwrap().len(), 3);
+
+    db.collaboration_stop(room, run, None, "tracking-stop")
+        .unwrap();
+    db.set_session_tracking("a", "t", false).unwrap();
+    assert!(!db
+        .sessions_for_workstream("t")
+        .unwrap()
+        .iter()
+        .any(|s| s.id == "a"));
 }

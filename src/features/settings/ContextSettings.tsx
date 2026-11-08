@@ -9,11 +9,12 @@ import { AGENT_LABELS, type AgentRuntimeOverrides, type ExtractionSettings } fro
 import { useAgentRuntime } from "../agents/useAgentRuntime";
 import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
+import { extractionSettingsResource } from "./settingsResources";
 
 const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "none"] as const;
 
 export default function ContextSettings() {
-  const [settings, setSettings] = useState<ExtractionSettings | null>(null);
+  const settings = extractionSettingsResource.useValue("settings") ?? null;
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
@@ -27,11 +28,7 @@ export default function ContextSettings() {
     active.current = true;
     setError("");
     let cancelled = false;
-    api.getExtractionSettings().then(value => {
-      if (!cancelled) {
-        setSettings(value);
-      }
-    }).catch(e => {
+    extractionSettingsResource.revalidate("settings").catch(e => {
       if (!cancelled) setError(String(e));
     });
     return () => {
@@ -61,12 +58,13 @@ export default function ContextSettings() {
   }, [agentMenuOpen]);
 
   const applySettings = async (next: ExtractionSettings) => {
-    setSettings(next);
+    extractionSettingsResource.set("settings", next);
     setError("");
     try {
       const saved = await api.setExtractionSettings(next);
+      extractionSettingsResource.set("settings", saved);
       if (active.current) {
-        setSettings(saved);
+        extractionSettingsResource.set("settings", saved);
       }
     } catch (e) {
       if (active.current) {

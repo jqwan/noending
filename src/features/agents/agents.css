@@ -19,10 +19,10 @@
 }
 
 .board-toolbar .agents-sync-status-strip {
-  padding: 10px 2px 0;
+  padding: var(--space-sm) 0 0;
   border-top: 1px solid var(--border-subtle);
   border-bottom: none;
-  margin-top: 12px;
+  margin-top: 0;
   margin-bottom: 0;
 }
 

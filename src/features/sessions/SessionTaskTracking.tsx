@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import SessionTrackedTasks from "./SessionTrackedTasks";
-import { EVT_SYNCED, type Route } from "../../app/routes";
-import type { SessionTracking } from "../../types";
+import { notifyDataChanged, EVT_SYNCED, type Route } from "../../app/routes";
 import SessionTaskTrackingModal from "./SessionTaskTrackingModal";
+import { sessionTrackingResource } from "./sessionTrackingResource";
+import { sessionDetailCache } from "./sessionDetailCache";
 
 /** State survives navigation; the window stays inside the session content so hiding it hides the window too. */
 export default function SessionTaskTracking({ sessionId, navigate }: {
@@ -11,7 +12,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
   navigate: (route: Route) => void;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
-  const [data, setData] = useState<SessionTracking | null>(null);
+  const data = sessionTrackingResource.useValue(sessionId ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const serial = useRef(0);
@@ -27,9 +28,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
     const request = ++serial.current;
     if (!sessionId) return;
     try {
-      const next = await api.getSessionTracking(sessionId);
-      if (!active.current || request !== serial.current) return;
-      setData(next);
+      await sessionTrackingResource.refresh(sessionId);
     } catch (reason) {
       if (active.current && request === serial.current) setError(String(reason));
     }
@@ -55,7 +54,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
       if (active.current) setError(String(reason));
     } finally {
       pending.current = false;
-      window.dispatchEvent(new Event(EVT_SYNCED));
+      notifyDataChanged([]);
       if (active.current) {
         setBusy(false);
       }
@@ -63,7 +62,7 @@ export default function SessionTaskTracking({ sessionId, navigate }: {
   };
 
   return <>
-    <SessionTrackedTasks tasks={data?.tracked_workstreams ?? null} navigate={navigate}
+    <SessionTrackedTasks tasks={data?.tracked_workstreams ?? (sessionId ? sessionDetailCache.get(sessionId)?.tracked_workstreams : null) ?? null} navigate={navigate}
       bound={Boolean(sessionId)} busy={busy} error={error}
       onAdd={() => setModalOpen(true)} onRemove={id => void change([id], false)} />
         {modalOpen && sessionId && (

@@ -1,31 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { api } from "../../api";
-import { EVT_SYNCED, EVT_TERMINALS, onEvent } from "../../app/routes";
+import { affectsSidebar, EVT_SYNCED, EVT_TERMINALS, onEvent } from "../../app/routes";
 import type { TerminalResumeState } from "../../types";
+import { createReadResource } from "../../hooks/readResource";
+
+const resumeStates = createReadResource<Record<string, TerminalResumeState>>(async key => {
+  const ids: string[] = JSON.parse(key);
+  if (!ids.length) return {};
+  try { return await api.getSessionTerminalStates(ids); }
+  catch { return Object.fromEntries(ids.map(id => [id, { available: false, reason: "无法检查终端可用性，请稍后重试" }])); }
+});
 
 /** Batch fresh prerequisites separately from history loading; never block the page. */
 export function useTerminalResumeStates(sessionIds: string[]) {
   const key = JSON.stringify([...new Set(sessionIds)].sort());
-  const [snapshot, setSnapshot] = useState<{ key: string; states: Record<string, TerminalResumeState> }>({ key: "", states: {} });
+  const states = resumeStates.useValue(key);
   useEffect(() => {
-    const ids: string[] = JSON.parse(key);
-    let active = true;
-    let sequence = 0;
     const refresh = () => {
-      const request = ++sequence;
-      if (!ids.length) { setSnapshot({ key, states: {} }); return; }
-      void api.getSessionTerminalStates(ids).then(states => {
-        if (active && sequence === request) setSnapshot({ key, states });
-      }).catch(() => {
-        if (active && sequence === request) setSnapshot({ key, states: Object.fromEntries(ids.map(id =>
-          [id, { available: false, reason: "无法检查终端可用性，请稍后重试" }])) });
-      });
+      void resumeStates.refresh(key);
     };
-    refresh();
-    const offSync = onEvent(EVT_SYNCED, refresh);
+    void resumeStates.revalidate(key);
+    const synced = (event: Event) => { if (affectsSidebar(event, "sessions")) refresh(); };
+    window.addEventListener(EVT_SYNCED, synced);
     const offTerminals = onEvent(EVT_TERMINALS, refresh);
     window.addEventListener("focus", refresh);
-    return () => { active = false; offSync(); offTerminals(); window.removeEventListener("focus", refresh); };
+    return () => { window.removeEventListener(EVT_SYNCED, synced); offTerminals(); window.removeEventListener("focus", refresh); };
   }, [key]);
-  return snapshot.key === key ? snapshot.states : {};
+  return states ?? {};
 }

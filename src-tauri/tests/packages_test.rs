@@ -139,8 +139,7 @@ fn codex_ambiguous_cache_versions_report_no_root() {
 #[test]
 fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
     let f = Fixture::new();
-    let install_path =
-        f.dir("home/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0");
+    f.dir("home/.claude/plugins/cache/claude-plugins-official/superpowers/5.1.0");
     // A cache directory without a registry entry must not count as installed.
     f.dir("home/.claude/plugins/cache/claude-plugins-official/ghost/1.0.0");
     f.write(
@@ -174,7 +173,6 @@ fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
         .iter()
         .all(|entry| entry.scopes[0].scope == packages::Scope::User));
     assert!(inventory.packages.iter().all(|entry| entry.name != "ghost"));
-    let _ = install_path;
 }
 
 #[test]

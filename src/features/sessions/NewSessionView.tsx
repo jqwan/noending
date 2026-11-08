@@ -517,7 +517,7 @@ export default function NewSessionView({
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
-      <PageHeader title="新建会话" />
+      <PageHeader title="新建会话" icon={<Icon name="chatPlus" />} />
       <div className="new-session-content">
         <div className="new-session-heading">
           <BrandLockup cap={13} />
@@ -925,9 +925,7 @@ export default function NewSessionView({
                   disabled={!canSend}
                 >
                   {busy ? <span className="new-session-spinner" aria-hidden="true" /> : (
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M12 19V5m-6 6 6-6 6 6" />
-                    </svg>
+                    <Icon name="arrowUp" />
                   )}
                 </button>
               </div>

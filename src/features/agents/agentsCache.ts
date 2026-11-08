@@ -1,5 +1,8 @@
 import { api } from "../../api";
 import type { Agent, AgentStatusEntry, IngestSource, IngestTaskStatus } from "../../types";
+import { createReadResource } from "../../hooks/readResource";
+
+export const agentStatusResource = createReadResource(() => api.getAgentStatus());
 
 export interface AgentsCache {
   agentStatus: Record<string, AgentStatusEntry> | null;
@@ -10,7 +13,8 @@ export interface AgentsCache {
 }
 
 export const agentsCache: AgentsCache = {
-  agentStatus: null,
+  get agentStatus() { return agentStatusResource.get("agents") ?? null; },
+  set agentStatus(value) { if (value === null) agentStatusResource.clear("agents"); else agentStatusResource.set("agents", value); },
   sources: null,
   status: null,
   sessionCounts: null,
@@ -30,11 +34,11 @@ let preloadPromise: Promise<void> | null = null;
 /**
  * 提前预热 Agent 看板数据，使得用户点击或进入该界面时可直接使用缓存，实现首帧完整渲染、零闪烁与零布局抖动。
  */
-export function preloadAgentsCache(): Promise<void> {
-  if (agentsCache.agentStatus !== null) return Promise.resolve();
+export function preloadAgentsCache(): Promise<void> | undefined {
+  if (Object.values(agentsCache).every(value => value !== null)) return;
   if (!preloadPromise) {
     preloadPromise = Promise.all([
-      api.getAgentStatus().then((res) => { agentsCache.agentStatus = res; }),
+      agentStatusResource.revalidate("agents"),
       api.listIngestSources().then((res) => { agentsCache.sources = res; }),
       api.getIngestionStatus().then((res) => { agentsCache.status = res; }),
       api.getSessionCountsByAgent().then((res) => { agentsCache.sessionCounts = res; }),

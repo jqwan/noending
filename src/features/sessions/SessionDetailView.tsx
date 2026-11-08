@@ -1,39 +1,30 @@
-import SessionTrackedTasks from "./SessionTrackedTasks";
+import SessionDetailPanel from "./SessionDetailPanel";
 import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
-import { DetailContent, DetailFields, DetailSection } from "../../components/DetailSection";
+import { DetailContent, DetailSection } from "../../components/DetailSection";
 import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { MailboxHistory } from "./MailboxMessages";
 import { removedTargets } from "../../app/removedTargets";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "./SummaryContent";
 import Icon from "../../components/Icon";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./sessions.css";
 import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
 import AgentIcon from "../../components/AgentIcon";
-import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, Field, openPath, timeAgo, useRefreshSignal } from "../../components/common";
+import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
 import SessionSubpageTabs from "./SessionSubpageTabs";
 import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
-import SessionTaskTrackingModal from "./SessionTaskTrackingModal";
-import {
-  agentDisplayLabel,
-  formatDateTime,
-  projectCellFor,
-  sessionDisplayTitle,
-  NO_CWD,
-  UNTITLED_SESSION,
-} from "./SessionTable";
+import { sessionDisplayTitle } from "./SessionTable";
 import {
   type Agent,
-  type Project,
   type SessionContextView,
   type SessionDetail,
 } from "../../types";
-import { EVT_SYNCED, type Route } from "../../app/routes";
+import type { Route } from "../../app/routes";
 
 /**
  * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
@@ -55,14 +46,6 @@ export default function SessionDetailView({
   initialAgent?: Agent;
   navigate: (r: Route) => void;
 }) {
-  const [trackingBusy, setTrackingBusy] = useState(false);
-  const [trackingError, setTrackingError] = useState("");
-  const trackingPending = useRef(false);
-  const trackingTarget = useRef<string | null>(sessionId);
-  useEffect(() => {
-    trackingTarget.current = sessionId; setTrackingError(""); setTrackingBusy(false);
-    return () => { trackingTarget.current = null; };
-  }, [sessionId]);
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
   const [failed, setFailed] = useState(false);
   const showSkeleton = useLoadingDelay(!detail && !failed);
@@ -79,14 +62,6 @@ export default function SessionDetailView({
   // SessionHeaderActions（三个子页共用）。
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
-  const [trackModalOpen, setTrackModalOpen] = useState(false);
-  /**
-   * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字；
-   * 派生链自带名字，正常情况下不多这一次读取。
-   */
-  const [projects, setProjects] = useState<Project[] | null>(null);
-
-
 
   useEffect(() => {
     setCtxError(null);
@@ -121,51 +96,19 @@ export default function SessionDetailView({
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  const needsProjectName = !detail?.workspace_path && !!detail?.session.project_id;
-  useEffect(() => {
-    if (!needsProjectName || projects) return;
-    api.listProjects().then(setProjects).catch(console.error);
-  }, [needsProjectName, projects]);
-  const projectNameById = useMemo(
-    () => new Map((projects ?? []).map((p) => [p.id, p.name])),
-    [projects],
-  );
-
   const fallbackAgent = initialAgent;
   const fallbackRawTitle = initialTitle;
   const fallbackDisplayTitle = fallbackRawTitle ? sessionDisplayTitle(fallbackRawTitle) : "";
-
-  const fallbackHeaderTitle = fallbackAgent ? (
-    <span className="session-title-with-icon" title={typeof fallbackDisplayTitle === "string" ? fallbackDisplayTitle : undefined}>
-      <AgentIcon agent={fallbackAgent} size={18} />
-      <span className="session-title-text">{fallbackDisplayTitle}</span>
-    </span>
-  ) : (
-    fallbackDisplayTitle
-  );
 
   /**
    * 没拿到数据时也要把 PageHeader 画出来：标题行吸在应用标题栏那条 band 上，
    * 加载态若不渲染它，整条标题栏会先消失再补回来，比"内容区里一行加载中"显眼得多。
    */
-  const removeTracking = async (taskId: string) => {
-    if (trackingPending.current) return;
-    trackingPending.current = true; setTrackingBusy(true); setTrackingError("");
-    try {
-      await api.setSessionTaskTracking(sessionId, taskId, false);
-      window.dispatchEvent(new Event(EVT_SYNCED));
-    } catch (reason) {
-      if (trackingTarget.current === sessionId) setTrackingError(String(reason));
-    } finally {
-      trackingPending.current = false;
-      if (trackingTarget.current === sessionId) setTrackingBusy(false);
-    }
-  };
 
   if (!detail) {
     return (
       <div className="main session-detail" role="status">
-        <PageHeader title={fallbackHeaderTitle} actions={<SessionSubpageTabs sessionId={sessionId} title={fallbackDisplayTitle} agent={fallbackAgent} navigate={navigate} />}>
+        <PageHeader title={fallbackDisplayTitle} icon={fallbackAgent ? <AgentIcon agent={fallbackAgent} size={18} /> : <Icon name="chat" />} navigation={<SessionSubpageTabs sessionId={sessionId} title={fallbackDisplayTitle} agent={fallbackAgent} navigate={navigate} />}>
           {failed && (
             <>
               <p className="muted small">
@@ -229,8 +172,6 @@ export default function SessionDetailView({
   };
 
   const title = sessionDisplayTitle(session.title);
-  const untitled = title === UNTITLED_SESSION;
-  const cwd = (session.cwd ?? "").trim();
   /** 单一生命周期权威：null = 正常，时间戳 = 在已归档。 */
   const archived = session.archived_at !== null;
 
@@ -251,12 +192,6 @@ export default function SessionDetailView({
   };
   /** 派生链自带的路径与 Project。 */
   const workspacePath = detail.workspace_path;
-  const projectIdOnlyCell = projectCellFor(session, projectNameById);
-  const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
-    ? workspacePath.project_name
-    : null;
-  /** 这条会话「属于」哪个项目：工作目录与 Session API 使用相同的项目派生链。 */
-
   /** Conversation：只有 root 的 user/assistant prose。仅展示最近 3 条消息。 */
   const messages = detail.messages;
   const recentMessages = messages.slice(-3);
@@ -269,33 +204,11 @@ export default function SessionDetailView({
     && sessionCtx.pending;
   const canRegenerateSummary = sessionCtx !== null && hasMessages;
 
-  /** 源会话：会话自己的源文件 + 详情加载时的新鲜结论。 */
-  const sourceMissing = detail.source_status === "missing";
-  const sourceUnavailable = detail.source_status === "unavailable";
-  /** 源在，路径本身才是入口；源不在就只是可复制的文本，点了也只会报错。 */
-  const canRevealSource = !sourceMissing && !sourceUnavailable;
-
-  const revealSource = async () => {
-    try {
-      await api.revealSessionSource(sessionId);
-    } catch (e) {
-      showToast(`定位失败：${String(e)}`);
-    }
-  };
-
   return (
     <DetailPanelProvider kind="session"><div className="main session-detail detail-page">
       <PageHeader
-        title={
-          <span className="session-title-with-icon" title={title}>
-            <AgentIcon agent={session.agent} size={18} />
-            <span className="session-title-text">{title}</span>
-          </span>
-        }
-        actions={(
-          <>
-            {/* 顶部切换：历史消息、详情和终端实例。 */}
-            <SessionSubpageTabs
+        title={title} icon={<AgentIcon agent={session.agent} size={18} />}
+        navigation={<SessionSubpageTabs
               sessionId={sessionId}
               title={title}
               entry={undefined}
@@ -303,7 +216,9 @@ export default function SessionDetailView({
               sourceKind={session.source_kind}
               archived={archived}
               navigate={navigate}
-            />
+            />}
+        actions={(
+          <>
             <SessionHeaderActions
               sessionId={sessionId}
               agent={session.agent}
@@ -320,230 +235,7 @@ export default function SessionDetailView({
       />
 
       {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
-      <DetailLayout panel={<><DetailSection sectionId="properties" label="会话信息" title={<>
-              <Icon name="info" />
-              <span>会话信息</span>
-            </>}>
-
-            {(untitled || archived) && (
-              <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                {untitled && <span className="badge" title="原始转录里没有可用的标题">无标题</span>}
-                {archived && <span className="badge warn">已归档</span>}
-              </div>
-            )}
-
-            {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
-            <DetailFields>
-              <Field label="Agent">
-                <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className="link"
-                    title={`打开 Agent：${agentDisplayLabel(session.agent)}`}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                    onClick={() => navigate({ view: "agents", agent: session.agent })}
-                  >
-                    <AgentIcon agent={session.agent} size={16} />
-                    <span>{agentDisplayLabel(session.agent)}</span>
-                  </button>
-                </span>
-              </Field>
-              <Field label="项目">
-                {workspacePath ? (
-                  derivedProjectName ? (
-                    <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                      <button
-                        className="link"
-                        title={`打开项目：${derivedProjectName}`}
-                        style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                        onClick={() => navigate({ view: "project", projectId: workspacePath.project_id, initialTitle: derivedProjectName })}
-                      >
-                        <Icon name="project" />
-                        <span>{derivedProjectName}</span>
-                      </button>
-                    </span>
-                  ) : (
-                    <span className="muted small">项目信息暂不可用</span>
-                  )
-                ) : session.project_id ? (
-                  <span className="muted small" style={{ wordBreak: "break-word" }}>
-                    {projectIdOnlyCell.text}
-                    {" —— "}
-                    {projectIdOnlyCell.hint}
-                  </span>
-                ) : (
-                  <span className="muted small">无关联项目</span>
-                )}
-              </Field>
-              <Field
-                label="工作目录"
-                copyValue={workspacePath ? workspacePath.canonical_path : (cwd || undefined)}
-                copyTitle="复制工作目录"
-              >
-                {workspacePath ? (
-                  <>
-                    <button
-                      type="button"
-                      className="link mono path-text-with-icon"
-                      title={workspacePath.canonical_path}
-                      onClick={() => void openPath(workspacePath.canonical_path)}
-                    >
-                      <Icon name="folder" />
-                      <span>{workspacePath.canonical_path}</span>
-                    </button>
-                    {cwd !== "" && cwd !== workspacePath.canonical_path && (
-                      <div className="muted small" style={{ marginTop: 4 }}>
-                        Agent 原始记录：
-                        <button
-                          type="button"
-                          className="link mono path-text-with-icon"
-                          title={cwd}
-                          onClick={() => void openPath(cwd)}
-                        >
-                          <Icon name="folder" />
-                          <span>{cwd}</span>
-                        </button>
-                      </div>
-                    )}
-                    {!workspacePath.exists && (
-                      <div style={{ marginTop: 4 }}>
-                        <span
-                          className="badge warn"
-                          title="磁盘中未找到该目录"
-                        >
-                          目录不存在
-                        </span>
-                      </div>
-                    )}
-                  </>
-                ) : cwd ? (
-                  <>
-                    <button
-                      type="button"
-                      className="link mono path-text-with-icon"
-                      title={cwd}
-                      onClick={() => void openPath(cwd)}
-                    >
-                      <Icon name="folder" />
-                      <span>{cwd}</span>
-                    </button>
-                    <div className="muted small" style={{ marginTop: 4 }}>
-                      未登记为工作路径
-                    </div>
-                  </>
-                ) : (
-                  <span className="muted">{NO_CWD}（无目录记录）</span>
-                )}
-              </Field>
-              <Field label="开始时间">
-                {session.started_at
-                  ? <span title={session.started_at}>{formatDateTime(session.started_at)}</span>
-                  : <span className="muted">未知</span>}
-              </Field>
-              <Field label="最近活动">
-                {session.last_activity_at ? (
-                  <span title={session.last_activity_at}>
-                    {timeAgo(session.last_activity_at)}
-                    <span className="muted small"> · {formatDateTime(session.last_activity_at)}</span>
-                  </span>
-                ) : <span className="muted">未知</span>}
-              </Field>
-              {archived && session.archived_at && (
-                <Field label="归档时间">
-                  <span title={session.archived_at}>{formatDateTime(session.archived_at)}</span>
-                </Field>
-              )}
-              <Field label="会话统计">
-                <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
-                  <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
-                  <span>Agent 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
-                </span>
-              </Field>
-              {/* 源会话：会话自己的源文件。
-                  状态是详情加载时对源的新鲜结论，missing / unavailable 都如实说出。
-                  路径本身就是「在文件管理器中显示」的入口，不再另配一行链接。 */}
-              <Field
-                label="源会话"
-                copyValue={session.source_path}
-                copyTitle="复制源会话路径"
-              >
-                {canRevealSource ? (
-                  <button
-                    className="link mono"
-                    title={session.source_path}
-                    style={{ minWidth: 0, wordBreak: "break-all", textAlign: "left" }}
-                    onClick={() => void revealSource()}
-                  >
-                    {session.source_path}
-                  </button>
-                ) : (
-                  <span
-                    className="mono"
-                    title={session.source_path}
-                    style={{ minWidth: 0, wordBreak: "break-all", userSelect: "all" }}
-                  >
-                    {session.source_path}
-                  </span>
-                )}
-                {session.agent === "codex" && session.source_path.endsWith(".jsonl.zst") && (
-                  <span className="badge muted" title="读取时自动解压，不修改源文件">Zstd 压缩</span>
-                )}
-                {sourceMissing && (
-                  <div className="session-source-warning">源会话已不存在</div>
-                )}
-                {sourceUnavailable && (
-                  <div className="session-source-warning">无法确认源会话状态</div>
-                )}
-              </Field>
-              <Field label="会话 ID" copyValue={`NoEnding ID：${session.id}`} copyTitle="复制会话 ID">
-                <div className="mono" style={{ wordBreak: "break-all", userSelect: "all" }}>
-                  {session.id}
-                </div>
-              </Field>
-              <Field
-                label="Agent 会话 ID"
-                copyValue={session.root_agent_session_id}
-                copyTitle="复制 Agent 会话 ID"
-              >
-                <div
-                  className="mono"
-                  title="原始会话 ID"
-                  style={{ wordBreak: "break-all", userSelect: "all" }}
-                >
-                  {session.root_agent_session_id}
-                </div>
-              </Field>
-              {/* Fork：唯一的会话→会话链接。来源只是 provenance，
-                  生命周期完全独立；来源不在本地库时也如实说明。 */}
-              {(detail.forked_from || session.forked_from_session_id) && (
-                <Field label="来源">
-                  {detail.forked_from ? (
-                    <button
-                      className="link"
-                      style={{ textAlign: "left", wordBreak: "break-word" }}
-                      title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
-                      onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialAgent: detail.forked_from!.agent })}
-                    >
-                      分叉自：{sessionDisplayTitle(detail.forked_from.title)}
-                      {detail.forked_from.archived_at !== null && (
-                        <span className="badge warn" style={{ marginLeft: 6 }}>已归档</span>
-                      )}
-                    </button>
-                  ) : (
-                    <span className="muted small">
-                      来源会话不在 NoEnding 库里
-                      <span className="mono" style={{ wordBreak: "break-all" }}>
-                        {" · "}{session.forked_from_session_id}
-                      </span>
-                    </span>
-                  )}
-                </Field>
-              )}
-            </DetailFields>
-          </DetailSection>
-<SessionTrackedTasks tasks={detail.tracked_workstreams} navigate={navigate}
-            busy={trackingBusy} error={trackingError} onAdd={() => setTrackModalOpen(true)}
-            onRemove={id => void removeTracking(id)} /></>}><MailboxHistory sessionId={sessionId} />
+      <DetailLayout panel={<SessionDetailPanel key={sessionId} detail={detail} navigate={navigate} />}><MailboxHistory sessionId={sessionId} navigate={navigate} />
 <DetailSection sectionId="summary" label="会话摘要" title={<>
                 <Icon name="spark" />
                 <span>会话摘要{sessionCtx?.fields?.summary ? `（${sessionCtx?.fields?.summary.items.length}）` : ""}</span>
@@ -607,9 +299,6 @@ export default function SessionDetailView({
               </div>
             )}
     </>}>
-
-
-
 
             {sessionCtx && sessionCtx.fields ? (
               <DetailContent label="会话摘要内容" className="md-body">
@@ -677,13 +366,6 @@ export default function SessionDetailView({
             setPurgeOpen(false);
             navigate({ view: "sessions", scope: "archived" });
           }}
-        />
-      )}
-
-      {trackModalOpen && (
-        <SessionTaskTrackingModal
-          sessionId={sessionId}
-          onClose={() => setTrackModalOpen(false)}
         />
       )}
 

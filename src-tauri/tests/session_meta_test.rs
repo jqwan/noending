@@ -126,7 +126,7 @@ fn a_later_upsert_refreshes_cwd_and_activity() {
             Some("/Users/jqk/projects/r/stock_quant"),
             None,
             None,
-            None,
+            Some("2026-08-20T10:00:00Z"),
             Some("2026-08-19T09:00:00Z"),
         )
         .unwrap();

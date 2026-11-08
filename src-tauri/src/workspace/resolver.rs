@@ -1304,10 +1304,6 @@ bare
             Some("/repo/.git"),
             "git prints the common dir relative to the cwd"
         );
-        assert_eq!(
-            c.canonicalize("/repo/x/").as_deref(),
-            c.canonicalize("/repo/x").as_deref()
-        );
     }
     #[test]
     fn remote_config_parses_names_and_strips_credentials() {

@@ -77,3 +77,15 @@ it("uses independent task work item IDs and revisions over IPC", async () => {
     ["delete_task_item", { taskId: "task", itemId: "work", revision: 4 }],
   ]);
 });
+
+it("cleans directory registrations without invalidating the surviving project", async () => {
+  vi.mocked(invoke).mockResolvedValue(2);
+  const listener = vi.fn();
+  window.addEventListener(EVT_REMOVED, listener);
+  try {
+    await expect(api.cleanMissingProjectPaths("project")).resolves.toBe(2);
+    expect(invoke).toHaveBeenCalledWith("clean_missing_project_paths", { projectId: "project" });
+    expect(listener).not.toHaveBeenCalled();
+    expect(removedTargets.projects.has("project")).toBe(false);
+  } finally { window.removeEventListener(EVT_REMOVED, listener); }
+});

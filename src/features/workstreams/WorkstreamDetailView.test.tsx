@@ -1,8 +1,10 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
 import { api } from "../../api";
-import type { WorkstreamContext, WorkstreamContextView } from "../../types";
+import { viewState } from "../../hooks/useViewState";
+import type { SessionListItem, WorkstreamContext, WorkstreamContextView } from "../../types";
 
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
@@ -13,6 +15,8 @@ vi.mock("../../api", () => ({
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
     listTaskItems: vi.fn().mockResolvedValue([]),
     getWorkstreamContext: vi.fn(),
+    collaborationRoomGet: vi.fn(),
+    collaborationCandidates: vi.fn(),
     getWorkstreamContextState: vi.fn().mockResolvedValue(null),
     regenerateWorkstreamContext: vi.fn(),
     updateWorkstreamContext: vi.fn().mockResolvedValue({
@@ -28,14 +32,22 @@ vi.mock("../../api", () => ({
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
     setWorkstreamProjects: vi.fn().mockResolvedValue(undefined),
+    listSessions: vi.fn().mockResolvedValue([]),
+    setSessionTaskTracking: vi.fn(),
     restoreWorkstream: vi.fn().mockResolvedValue({ id: "w1", visibility: "normal" }),
     deleteWorkstreamPermanently: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
 beforeEach(() => {
+  clearReadResources();
+  viewState.clear(); localStorage.clear();
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "w1", title: "接口设计", room: null, run: null, members: [] });
+  vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [], next_cursor: null });
   vi.mocked(api.getWorkstreamContext).mockReset().mockResolvedValue(context());
   vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(contextState());
+  vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
+  vi.mocked(api.setSessionTaskTracking).mockReset();
 });
 afterEach(() => {
   clearWorkstreamDetailCache();
@@ -79,11 +91,54 @@ async function renderDetail(navigate = vi.fn()) {
   return navigate;
 }
 
-it("opens the new-session page with the current task selected", async () => {
+it("restores collaboration summary immediately while the refreshed summary is still pending", async () => {
+  const first = render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByRole("heading", { name: "任务状态" });
+  first.unmount();
+  vi.mocked(api.getWorkstreamContextState).mockImplementation(() => new Promise(() => {}));
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "任务状态" })).toBeTruthy();
+  expect(screen.queryByText("正在读取摘要…")).toBeNull();
+});
+
+it("adds an existing session from an associated project without creating a new session", async () => {
+  const session = { id: "existing", title: "项目中的已有会话", agent: "codex", project_id: "pr", tracked_workstream_ids: [], archived_at: null } as unknown as SessionListItem;
+  vi.mocked(api.listSessions).mockResolvedValue([session]);
   const navigate = await renderDetail();
-  fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "new-session", workstreamId: "w1" });
-  expect(screen.queryByRole("dialog")).toBeNull();
+  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => {
+    vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [session] });
+    vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [{ session_id: session.id, title: session.title, agent: "codex", wake_modes: ["terminal"], unavailable_reason: null }], next_cursor: null });
+    return session as never;
+  });
+  fireEvent.click(screen.getByRole("button", { name: "管理关联会话" }));
+  const dialog = screen.getByRole("dialog", { name: "管理关联会话" });
+  fireEvent.click(await within(dialog).findByRole("checkbox", { name: session.title! }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.listSessions).toHaveBeenCalledWith("pr", undefined, "all");
+  expect(api.setSessionTaskTracking).toHaveBeenCalledWith("existing", "w1", true);
+  expect(screen.getByRole("heading", { name: "关联会话（1）" })).toBeTruthy();
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+it("keeps the header and shared right-hand cards mounted and collapsed across task subpages", async () => {
+  const props = { workstreamId: "w1", navigate: vi.fn(), goBack: vi.fn() };
+  const page = render(<WorkstreamDetailView {...props} />);
+  await screen.findByRole("heading", { name: "任务描述" });
+  const panel = screen.getByRole("complementary", { name: "任务详情栏" });
+  const cards = ["任务信息", /^关联项目（/, /^关联会话（/];
+  for (const name of cards) fireEvent.click(within(panel).getByRole("button", { name }));
+  const edit = screen.getByRole("button", { name: "编辑任务" });
+  edit.focus();
+  page.rerender(<WorkstreamDetailView {...props} entry="collaboration" />);
+  expect(document.activeElement).toBe(edit);
+  expect(screen.getByRole("button", { name: "编辑任务" })).toBe(edit);
+  await screen.findByRole("region", { name: "协作消息记录" });
+  expect(screen.getByRole("complementary", { name: "任务详情栏" })).toBe(panel);
+  for (const name of cards) expect(within(panel).getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
+  page.rerender(<WorkstreamDetailView {...props} />);
+  expect(document.activeElement).toBe(edit);
+  expect(screen.getByRole("heading", { name: /协作摘要/ })).toBeTruthy();
 });
 
 it("shows the task identity and copies its full ID", async () => {
@@ -103,11 +158,23 @@ it("shows the task identity and copies its full ID", async () => {
   }
 });
 
-it("hides the new-session entry when the task has no associated projects", async () => {
+it("hides the add-session entry when the task has no associated projects", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), projects: [] });
   render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
   await screen.findByText("任务描述");
-  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "管理关联会话" })).toBeNull();
+});
+
+it.each(["room", "candidates"])("keeps linked sessions accessible when collaboration %s cannot be read", async failedRead => {
+  const session = { id: "linked", title: "已关联的会话", agent: "codex", archived_at: null } as SessionListItem;
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [session] });
+  if (failedRead === "room") vi.mocked(api.collaborationRoomGet).mockRejectedValue(new Error("协作状态读取失败"));
+  else vi.mocked(api.collaborationCandidates).mockRejectedValue(new Error("候选状态读取失败"));
+  const navigate = vi.fn();
+  render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: /^已关联的会话/ }));
+  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "linked" }));
 });
 
 it("renders the returned task sessions and navigates to the selected session", async () => {
@@ -130,13 +197,14 @@ it("renders the returned task sessions and navigates to the selected session", a
 
   }];
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
+  vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [{ session_id: "s1", title: "归属于本任务的会话", agent: "codex", wake_modes: ["terminal"], unavailable_reason: null }], next_cursor: null });
   const navigate = vi.fn();
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
 
   await screen.findByText("任务描述");
   // 只有跟踪此任务的会话会出现在这里。
   screen.getByRole("heading", { name: "关联会话（1）" });
-  fireEvent.click(screen.getByText("归属于本任务的会话"));
+  fireEvent.click(await screen.findByRole("button", { name: "归属于本任务的会话" }));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
   expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
 });
@@ -278,4 +346,32 @@ it("keeps the task summary readable while execution items remain separate", asyn
   within(section).getByRole("button", {name:"重新生成"});
   expect(within(section).queryByRole("button", {name:/编辑事项|新增事项|删除事项/})).toBeNull();
   screen.getByRole("button", {name:"新增事项"});
+});
+
+it("lets unrelated sessions be removed while active collaboration members remain linked", async () => {
+  const member = { id: "member", title: "正在协作的会话", agent: "codex", project_id: "pr" } as SessionListItem;
+  const other = { id: "other", title: "未参与的会话", agent: "codex", project_id: "pr" } as SessionListItem;
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [member, other] });
+  vi.mocked(api.listSessions).mockResolvedValue([member, other]);
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "w1", title: "接口设计",
+    room: { id: "room", revision: 1, coordinator_session_id: null, selected_members: [{ session_id: "member", wake_method: "terminal" }] },
+    run: { id: "run", status: "active", started_at: null, stopped_at: null },
+    members: [{ session_id: "member", wake_method: "terminal", wake_status: "opened", connection_state: "pending", phase: "idle", unread_count: 0 }],
+  } as never);
+  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => {
+    vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [member] });
+    return other as never;
+  });
+  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
+  await screen.findByRole("button", { name: "停止协作" });
+  fireEvent.click(screen.getByRole("button", { name: "管理关联会话" }));
+  const dialog = within(screen.getByRole("dialog", { name: "管理关联会话" }));
+  await dialog.findByRole("checkbox", { name: "未参与的会话" });
+  expect(dialog.getByRole("checkbox", { name: "正在协作的会话" })).toHaveProperty("disabled", true);
+  fireEvent.click(dialog.getByRole("checkbox", { name: "未参与的会话" }));
+  fireEvent.click(dialog.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.setSessionTaskTracking).toHaveBeenCalledWith("other", "w1", false);
+  expect(screen.getByRole("heading", { name: "关联会话（1）" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "停止协作" })).toBeTruthy();
 });

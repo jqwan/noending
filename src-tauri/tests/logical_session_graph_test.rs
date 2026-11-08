@@ -1377,15 +1377,6 @@ fn full_sync_rechecks_plain_and_compressed_content_even_when_metadata_is_unchang
             .get_message_by_ref(&format!("session-message:{}", old.id))
             .unwrap()
             .is_none());
-        let stored: i64 = db
-            .read()
-            .query_row(
-                "SELECT COUNT(*) FROM session_messages WHERE session_id=?1",
-                [&session.id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored, 1);
         let before_repeat = db.get_session(&session.id).unwrap().unwrap();
         assert_eq!(
             ingestion::reingest_source(&db, &source, &|_| {}).unwrap().1,

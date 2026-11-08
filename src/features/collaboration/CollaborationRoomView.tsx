@@ -1,9 +1,8 @@
 import { DetailLayout } from "../../components/DetailLayout";
-import { DetailSection } from "../../components/DetailSection";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { DetailFields } from "../../components/DetailSection";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../api";
-import Icon from "../../components/Icon";
-import { copyToClipboard, timeAgo } from "../../components/common";
+import { copyToClipboard, timeAgo, Field } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import type {
   CollaborationMemberState,
@@ -14,10 +13,12 @@ import CollaborationCandidates from "./CollaborationCandidates";
 import CollaborationCoordinator from "./CollaborationCoordinator";
 import CollaborationMembers from "./CollaborationMembers";
 import RoomMessages from "./RoomMessages";
-import CollaborationSummary from "./CollaborationSummary";
 import { RUN_LABEL } from "./collaborationState";
 import { useCollaborationRoom } from "./useCollaborationRoom";
 import "./collaboration.css";
+import WorkstreamSessions from "../workstreams/WorkstreamSessions";
+import SessionMiniList from "../sessions/SessionMiniList";
+import type { Route } from "../../app/routes";
 
 interface Selection {
   selected: CollaborationStartedMember[];
@@ -74,14 +75,24 @@ export default function CollaborationRoomView({
   taskTitle,
   sessions,
   archived = false,
+  navigate,
+  onManageSessions,
+  showChat = true,
+  children,
+  detailsPanel,
 }: {
   taskId: string;
   taskTitle: string;
   sessions: SessionListItem[];
   archived?: boolean;
+  navigate: (route: Route) => void;
+  onManageSessions?: () => void;
+  showChat?: boolean;
+  children?: ReactNode;
+  detailsPanel?: ReactNode;
 }) {
-  const { room, messages, loading, error, refreshRoom, loadAll, loadLatest, setRoom } =
-    useCollaborationRoom(taskId);
+  const { room, roomLoading, messages, loading, error, refreshRoom, loadAll, loadLatest, setRoom } =
+    useCollaborationRoom(taskId, showChat);
   const [edited, setEdited] = useState<{ revision: number; value: Selection } | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -110,7 +121,12 @@ export default function CollaborationRoomView({
     [config],
   );
   // 用户本次改动优先。空成员数组与 null 负责人都是有效选择，不能被配置回填覆盖。
-  const selection = edited && edited.revision === revision ? edited.value : saved;
+  const draftSelection = edited && edited.revision === revision ? edited.value : saved;
+  const selection = useMemo<Selection>(() => {
+    const linked = new Set(sessions.map(session => session.id));
+    const selected = draftSelection.selected.filter(member => linked.has(member.session_id));
+    return { selected, coordinator: selected.some(member => member.session_id === draftSelection.coordinator) ? draftSelection.coordinator : null };
+  }, [draftSelection, sessions]);
   const setSelection = (value: Selection) => setEdited({ revision, value });
   const enoughMembers = selection.selected.length >= 2;
 
@@ -241,95 +257,7 @@ export default function CollaborationRoomView({
     showToast(await copyToClipboard(text) ? "已复制加入提示" : "复制失败");
   };
 
-  if (loading) {
-    return <section className="card detail-section" role="status"><p className="small muted">正在读取协作室…</p></section>;
-  }
-
-  return (
-    <DetailLayout mainClassName="detail-main-collaboration" label="成员与设置" panel={<><DetailSection sectionId="members" label="成员" className="collab-room" title={<>
-            <Icon name="agent" />
-            <span>成员（{running ? room!.members.length : selection.selected.length}）</span>
-          </>}>
-
-
-          {archived && <p className="small muted" style={{ margin: 0 }}>任务已归档，不能开启新的协作；已有协作在归档时已被终止。</p>}
-          {run?.status === "stopped" && (
-            <p className="small muted" style={{ margin: 0 }}>
-              上次协作已停止{run.stopped_at ? `（${timeAgo(run.stopped_at)}）` : ""}。消息保留可查阅；重新开启是新的运行。
-            </p>
-          )}
-          {run?.status === "starting" && (
-            <p className="small muted" style={{ margin: 0 }}>
-              至少 2 名成员确认加入、且负责人加入后才进入协作中。单人失败可以单独重试。
-            </p>
-          )}
-
-          {running ? (
-            <>
-              <CollaborationMembers
-                room={{ ...room!, title }}
-                sessions={sessions}
-                now={now}
-                busySessionId={waking}
-                disabled={busy}
-                onWake={sessionId => void wake(sessionId)}
-                onCopyPrompt={sessionId => void copyPrompt(sessionId)}
-              />
-              <CollaborationCoordinator value={config?.coordinator_session_id ?? null} disabled={busy}
-                members={room!.members.map(member => ({ id: member.session_id, title: sessionLabel(member.session_id, sessions) }))}
-                onChange={id => void changeCoordinator(id)} />
-            </>
-          ) : (
-            <CollaborationCandidates
-              taskId={taskId}
-              sessions={sessions}
-              selected={selection.selected}
-              coordinator={selection.coordinator}
-              onChange={setSelection}
-              disabled={busy || archived}
-            />
-          )}
-        </DetailSection>
-<DetailSection sectionId="run-info" label="本次协作" title={<>
-            <Icon name="info" />
-            <span>本次协作</span>
-          </>}>
-
-          <p className="small muted" style={{ margin: 0 }}>
-            消息只在本房间保存一份。成员各自维护阅读位置；任务进展由负责人统一维护，成员在这里简要汇报。
-          </p>
-          {config && (
-            <div className="small"><span className="muted">房间</span> <span className="mono">{config.id.slice(0, 8)}</span></div>
-          )}
-          {run && (
-            <div className="small">
-              <span className="muted">运行</span> <span className="mono">{run.id.slice(0, 8)}</span>
-              {" · "}{RUN_LABEL[run.status]}
-              {run.started_at ? ` · 开始于 ${timeAgo(run.started_at)}` : ""}
-            </div>
-          )}
-          {!config && <p className="small muted" style={{ margin: 0 }}>还没有协作室：勾选成员后开启会在保存配置的同时创建本次运行。</p>}
-        </DetailSection></>}><CollaborationSummary key={taskId} taskId={taskId} latestSeq={messages[messages.length - 1]?.seq ?? 0} initiallyCollapsed /><section className="card collab-chat" aria-label="协作室聊天">
-        <header className="collab-chat-header">
-          <h2 className="detail-section-title">
-            <Icon name="chat" />
-            <span>协作室{messages.length ? `（${messages.length}）` : ""}</span>
-            {run && <span className={`badge small collab-run-${run.status}`}>{RUN_LABEL[run.status]}</span>}
-          </h2>
-          <div className="collab-chat-actions">
-            <button
-              type="button"
-              className={`btn small ${running ? "danger" : "primary"}`}
-              disabled={busy || archived || (!running && !enoughMembers)}
-              title={archived ? "已归档任务不能开启协作" : running ? "停止本次协作" : "开启协作"}
-              onClick={() => void (running ? stop() : start(draft.trim() || null))}
-            >
-              {busy ? "处理中…" : running ? "停止协作" : "开启协作"}
-            </button>
-
-          </div>
-        </header>
-        {(actionError || unconfirmed || error) && <div className="collab-chat-feedback">
+  const feedback = ((actionError || unconfirmed || error) && <div className="collab-chat-feedback">
           {actionError && <p role="alert" className="small warning">{actionError}</p>}
           {unconfirmed && (
             <p className="small warning" role="status">
@@ -340,7 +268,70 @@ export default function CollaborationRoomView({
             </p>
           )}
           {error && <p role="alert" className="small warning">{error}</p>}
-        </div>}
+        </div>);
+
+  return (
+    <DetailLayout mainClassName={showChat ? "detail-main-collaboration" : ""} label="任务详情栏" panel={<><WorkstreamSessions sessions={sessions} onManageSessions={onManageSessions}>
+          {roomLoading ? <SessionMiniList sessions={sessions} emptyText="还没有关联会话。" navigate={navigate} /> : running ? (
+            <>
+              <CollaborationMembers
+                room={{ ...room!, title }}
+                sessions={sessions}
+                now={now}
+                busySessionId={waking}
+                disabled={busy}
+                onWake={sessionId => void wake(sessionId)}
+                onCopyPrompt={sessionId => void copyPrompt(sessionId)}
+                navigate={navigate}
+              />
+              {sessions.some(session => !room!.members.some(member => member.session_id === session.id)) && <div>
+                <p className="small muted">未参与本次协作</p>
+                <SessionMiniList sessions={sessions.filter(session => !room!.members.some(member => member.session_id === session.id))} emptyText="" navigate={navigate} />
+              </div>}
+            </>
+          ) : (
+            <CollaborationCandidates
+              taskId={taskId}
+              sessions={sessions}
+              selected={selection.selected}
+              coordinator={selection.coordinator}
+              onChange={setSelection}
+              disabled={roomLoading || busy || archived}
+              navigate={navigate}
+            />
+          )}
+        <div className="collab-run-controls" role="group" aria-label="本次协作">
+          <CollaborationCoordinator
+            value={running ? config?.coordinator_session_id ?? null : selection.coordinator}
+            disabled={roomLoading || busy || archived}
+            members={(running ? room!.members : selection.selected).map(member => ({ id: member.session_id, title: sessionLabel(member.session_id, sessions) }))}
+            onChange={id => { if (running) void changeCoordinator(id); else setSelection({ ...selection, coordinator: id }); }} />
+          <div className="collab-run-toolbar">
+            <div className="collab-run-status small muted">
+              <span className={`badge small${run ? ` collab-run-${run.status}` : ""}`}>{archived ? "已归档" : run ? RUN_LABEL[run.status] : "未开启"}</span>
+              <span className="collab-run-count" title={running ? `${room!.members.length} 名成员` : `已选 ${selection.selected.length} 个`}>{running ? `${room!.members.length} 名成员` : `已选 ${selection.selected.length} 个`}</span>
+            </div>
+            <button type="button" className={`btn small ${running ? "danger" : "primary"}`}
+              disabled={roomLoading || busy || archived || (!running && !enoughMembers)}
+              title={archived ? "已归档任务不能开启协作" : running ? "停止本次协作" : !enoughMembers ? "至少选择 2 个会话" : "开启协作"}
+              onClick={() => void (running ? stop() : start(draft.trim() || null))}>
+              {busy ? "处理中…" : running ? "停止协作" : "开启协作"}
+            </button>
+          </div>
+          {run?.status === "starting" && <p className="small muted">等待至少 2 名成员及负责人加入。</p>}
+          {(config || run) && <details className="collab-run-details small muted">
+            <summary>协作信息</summary>
+            <DetailFields>
+              {config && <Field label="房间 ID" copyValue={config.id}><span className="mono">{config.id}</span></Field>}
+              {run && <Field label="运行 ID" copyValue={run.id}><span className="mono">{run.id}</span></Field>}
+              {run?.started_at && <Field label="开始时间">{timeAgo(run.started_at)}</Field>}
+              {run?.stopped_at && <Field label="停止时间">{timeAgo(run.stopped_at)}</Field>}
+            </DetailFields>
+          </details>}
+        </div>
+        </WorkstreamSessions>
+        {detailsPanel}</>}>{showChat ? <section className="collab-chat" aria-label="协作室聊天">
+        {feedback}
         <RoomMessages
           key={taskId}
           messages={messages}
@@ -351,8 +342,9 @@ export default function CollaborationRoomView({
           onSend={() => void send()}
           sendLabel={running ? "发送" : "发送并开启"}
           placeholder={running ? "在协作室说一句" : "首条消息（随开启一起写入）"}
-          disabled={archived}
+          disabled={archived || loading}
+          loading={loading}
         />
-      </section></DetailLayout>
+      </section> : <>{feedback}{children}</>}</DetailLayout>
   );
 }

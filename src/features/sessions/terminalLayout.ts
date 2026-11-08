@@ -2,9 +2,9 @@ import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 
 /** Mounted-view work only. Output/parser and renderer stay with the cache. */
-export function connectTerminalLayout(term: Pick<Terminal, "cols" | "rows" | "element" | "textarea" | "focus">, fit: Pick<FitAddon, "fit">, container: HTMLElement,
+export function connectTerminalLayout(term: Pick<Terminal, "cols" | "rows" | "element" | "textarea" | "focus" | "refresh" | "clearTextureAtlas">, fit: Pick<FitAddon, "fit">, container: HTMLElement,
   resize: (cols: number, rows: number) => Promise<unknown>, initial: { cols: number; rows: number },
-): () => void {
+) {
   let disposed = false;
   let frame = 0;
   let visible = false;
@@ -12,6 +12,7 @@ export function connectTerminalLayout(term: Pick<Terminal, "cols" | "rows" | "el
   let sent = `${initial.cols}/${initial.rows}`;
   let desired = sent;
   let resizing = false;
+  let repaint = false;
   const flushSize = async () => {
     if (resizing) return;
     resizing = true;
@@ -31,7 +32,9 @@ export function connectTerminalLayout(term: Pick<Terminal, "cols" | "rows" | "el
       visible = false;
       return;
     }
+    if (repaint) term.clearTextureAtlas();
     fit.fit();
+    if (repaint) { term.refresh(0, term.rows - 1); repaint = false; }
     desired = `${term.cols}/${term.rows}`;
     void flushSize();
     if (!visible && restoreFocus && !document.querySelector('[role="dialog"]')) term.focus();
@@ -63,16 +66,19 @@ export function connectTerminalLayout(term: Pick<Terminal, "cols" | "rows" | "el
   document.fonts?.addEventListener("loadingdone", schedule);
   term.element?.addEventListener("terminal-renderer-changed", schedule);
   schedule();
-  return () => {
-    disposed = true;
-    cancelAnimationFrame(frame);
-    observer.disconnect();
-    density?.removeEventListener("change", densityChanged);
-    window.removeEventListener("resize", schedule);
-    window.removeEventListener("blur", blur);
-    window.removeEventListener("focus", focus);
-    document.removeEventListener("visibilitychange", schedule);
-    document.fonts?.removeEventListener("loadingdone", schedule);
-    term.element?.removeEventListener("terminal-renderer-changed", schedule);
+  return {
+    redraw() { repaint = true; schedule(); },
+    dispose() {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      density?.removeEventListener("change", densityChanged);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("focus", focus);
+      document.removeEventListener("visibilitychange", schedule);
+      document.fonts?.removeEventListener("loadingdone", schedule);
+      term.element?.removeEventListener("terminal-renderer-changed", schedule);
+    },
   };
 }

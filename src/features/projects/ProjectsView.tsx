@@ -1,3 +1,5 @@
+import BoardLoading from "../../components/BoardLoading";
+import BoardToolbar from "../../components/BoardToolbar";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import Icon from "../../components/Icon";
@@ -162,16 +164,14 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
   return (
     <div className="main board-page" ref={scrollRef}>
       <PageHeader
-        title="项目"
-        actions={
-          <>
-            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="项目列表范围">
+        title="项目" icon={<Icon name="project" />}
+        navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="项目列表范围">
               <button className={archivedMode ? "" : "on"} aria-pressed={!archivedMode} aria-label="未归档" title="未归档"
                 onClick={() => navigate({ view: "projects", scope: "unarchived" })}><Icon name="project" /></button>
               <button className={archivedMode ? "on" : ""} aria-pressed={archivedMode} aria-label="已归档" title="已归档"
                 onClick={() => navigate({ view: "projects", scope: "archived" })}><Icon name="archive" /></button>
-            </div>
-            <span className="session-action-divider" aria-hidden="true" />
+            </div>}
+        actions={<>
             {archivedMode ? (
               <button className="btn ghost icon-button danger" aria-label="删除全部" title="删除全部可删除的已归档项目"
                 disabled={deletableProjects.length === 0 || bulkDeleteBusy} onClick={() => setBulkDeleteOpen(true)}><Icon name="trash" /></button>
@@ -184,16 +184,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
         }
       />
 
-      <div className="board-toolbar">
-      <input
-        type="text"
-        className="ws-search"
-        aria-label="搜索项目"
-        placeholder="搜索项目…（名称或工作目录）"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-
+      <BoardToolbar searchLabel="搜索项目" placeholder="搜索项目…（名称或工作目录）" query={query} onQueryChange={setQuery}>
       <div className="toolbar ws-controls">
         <div className="ws-controls-group">
           <div className="ws-control">
@@ -282,24 +273,10 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
         </div>
       </div>
 
-      </div>
+      </BoardToolbar>
 
       <ObjectSearchFeedback search={search} />
-      {cards === null && listError === "" && (
-        viewMode === "cards" ? (
-          <div className="board-grid" role="status">
-            <div className="skeleton card" style={{ minHeight: 132 }} />
-            <div className="skeleton card" style={{ minHeight: 132 }} />
-            <div className="skeleton card" style={{ minHeight: 132 }} />
-          </div>
-        ) : (
-          <div className="project-list" aria-busy="true">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
-            ))}
-          </div>
-        )
-      )}
+      <BoardLoading loading={cards === null && !listError} viewMode={viewMode} />
       {listError !== "" && (
         <div className="card hairline" style={{ padding: 14 }}>
           <div className="small" style={{ color: "var(--danger)" }}>{listError}</div>
@@ -343,8 +320,8 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 <div className="project-list-title" title={c.name}>
                   <Icon name="project" />
                   <span>{c.name}</span>
-                  {c.missing_path_count > 0 && (
-                    <span className="badge warn">{isProjectAllPathsMissing(c) ? "全部目录缺失" : "部分目录缺失"}</span>
+                  {c.missing_path_count > 0 && isProjectAllPathsMissing(c) && (
+                    <span className="badge warn">全部目录缺失</span>
                   )}
                 </div>
                 <div className="project-list-meta">
@@ -424,9 +401,9 @@ function ProjectCard({ card, navigate, onChanged, onRequestDelete }: {
           <Icon name="project" />
           <span className="truncate">{card.name}</span>
         </div>
-        {card.missing_path_count > 0 && (
+        {card.missing_path_count > 0 && isProjectAllPathsMissing(card) && (
           <div className="ws-card-side">
-            <span className="badge warn">{isProjectAllPathsMissing(card) ? "全部目录缺失" : "部分目录缺失"}</span>
+            <span className="badge warn">全部目录缺失</span>
           </div>
         )}
       </div>

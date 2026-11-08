@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
@@ -8,7 +9,7 @@ import SessionTaskTracking from "./SessionTaskTracking";
 vi.mock("../../api", () => ({ api: { getSessionTracking: vi.fn(), setSessionTaskTracking: vi.fn() } }));
 const task = (id: string, visibility: Workstream["visibility"] = "normal"): Workstream => ({ id, title: id, description: "", visibility, created_at: "", updated_at: "" });
 const data = (): SessionTracking => ({ session: { id: "s", project_id: "p", tracked_workstream_ids: ["existing"] } as SessionTracking["session"], tracked_workstreams: [task("existing", "archived")], available_workstreams: [task("first"), task("second")] });
-beforeEach(() => { vi.resetAllMocks(); viewState.clear(); vi.mocked(api.getSessionTracking).mockResolvedValue(data()); });
+beforeEach(() => { clearReadResources(); vi.resetAllMocks(); viewState.clear(); vi.mocked(api.getSessionTracking).mockResolvedValue(data()); });
 afterEach(cleanup);
 it("shows tracked tasks inline and follows the containing sidebar visibility", async () => {
   const navigate = vi.fn();
@@ -21,8 +22,9 @@ it("shows tracked tasks inline and follows the containing sidebar visibility", a
   view.rerender(layout());
   expect(screen.getByRole("button", { name: "existing" })).toBeTruthy();
   view.unmount();
+  vi.mocked(api.getSessionTracking).mockImplementation(() => new Promise(() => {}));
   render(layout());
-  expect(await screen.findByRole("button", { name: "existing" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "existing" })).toBeTruthy();
 });
 
 it("opens task selection modal, supports multi-select checkboxes and quick untracking", async () => {

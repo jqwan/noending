@@ -26,8 +26,9 @@
 //!   is NOT NULL: a WorkspacePath belongs to exactly one Project.
 //! * Split-created projects inherit the source archive state; joining an existing
 //!   project keeps the destination state, and in-place conversions keep their own.
-//! * Projects and registered paths are never garbage-collected. Users can
-//!   archive any project independently of its tasks and sessions.
+//! * Projects and registered paths are never automatically garbage-collected.
+//!   Explicit cleanup may remove missing paths without session references.
+//!   Users can archive any project independently of its tasks and sessions.
 //! * Permanent deletion requires archive state, no associated sessions and no
 //!   chat/assistant purpose; it detaches task projects and never deletes directories.
 //! * `name_customized` wins over every automatic rename, and automatic naming
@@ -467,6 +468,52 @@ pub fn set_project_archived(db: &Db, id: &str, archived: bool) -> Result<Project
             )?;
         }
         get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))
+    })
+}
+
+/// Explicitly forget missing, unused paths. Recheck the filesystem without a DB
+/// lock; unreadable paths and symlinks are retained. The transaction then checks
+/// ownership and all session references again, including archived sessions.
+pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
+    if db.get_project(project_id)?.is_none() {
+        return Err(other(format!("Project {project_id} 不存在")));
+    }
+    let candidates = {
+        let conn = db.read();
+        let mut statement = conn.prepare(
+            "SELECT id,canonical_path FROM workspace_paths WHERE project_id=?1 AND exists_on_disk=0
+             AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=workspace_paths.id)",
+        )?;
+        let rows = statement.query_map([project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let missing: Vec<_> = candidates.into_iter()
+        .filter(|(_, path)| {
+            matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        })
+        .collect();
+    db.tx(|tx| {
+        if get_project_conn(tx, project_id)?.is_none() {
+            return Err(other(format!("Project {project_id} 不存在")));
+        }
+        let mut removed = 0;
+        for (id, path) in &missing {
+            removed += tx.execute(
+                "DELETE FROM workspace_paths WHERE id=?1 AND project_id=?2
+                 AND canonical_path=?3 AND exists_on_disk=0
+                 AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=?1)",
+                rusqlite::params![id, project_id, path],
+            )?;
+        }
+        if removed > 0 {
+            tx.execute(
+                "UPDATE projects SET updated_at=?2 WHERE id=?1",
+                rusqlite::params![project_id, now()],
+            )?;
+        }
+        Ok(removed)
     })
 }
 
@@ -1231,9 +1278,11 @@ mod tests {
         // classify_git canonicalizes the common dir against the observed
         // directory before a GitDetection is ever built — production only ever
         // hands this function absolute answers.
+        // Production only passes absolute paths; a trailing separator must not
+        // mint a second common_dir.
         assert_eq!(
-            resolve_common_dir("/repo/.git/worktrees/y"),
-            normalize_path("/repo/.git/worktrees/y").unwrap()
+            resolve_common_dir("/repo/.git/worktrees/y/"),
+            resolve_common_dir("/repo/.git/worktrees/y")
         );
         assert_eq!(resolve_common_dir("   "), "");
         assert_eq!(resolve_common_dir("relative/.git"), "");

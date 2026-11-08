@@ -1,7 +1,14 @@
 import { createContext, useContext, useId, useRef, type ReactNode } from "react";
 import { booleanPreference, useViewPreference } from "../hooks/useViewState";
-import { useDetailPageKind } from "./DetailLayout";
+import { useDetailSectionKind } from "./DetailLayout";
 import Icon from "./Icon";
+import { useLoadingDelay } from "../hooks/useLoadingDelay";
+
+/** 快速读取不插入短暂提示；空内容只在读取完成后由业务卡片展示。 */
+export function DetailLoading({ children }: { children: ReactNode }) {
+  const visible = useLoadingDelay(true);
+  return visible ? <p className="detail-empty" role="status">{children}</p> : null;
+}
 
 type SectionControls = { expanded: boolean; expand: () => void };
 const SectionContext = createContext<SectionControls | null>(null);
@@ -19,7 +26,7 @@ export function DetailSection({ sectionId, label, title, actions, status, childr
   className?: string;
   defaultExpanded?: boolean;
 }) {
-  const kind = useDetailPageKind();
+  const kind = useDetailSectionKind();
   const [expanded, setExpanded] = useViewPreference(`details.${kind}.sections.${sectionId}`, defaultExpanded, booleanPreference);
   const id = useId();
   const button = useRef<HTMLButtonElement>(null);
@@ -51,8 +58,8 @@ function DetailSectionHeader({ title, actions }: {
   </header>;
 }
 
-export function DetailList({ children, label }: { children: ReactNode; label: string }) {
-  return <div className="detail-list detail-scroll" role="region" aria-label={label} tabIndex={0}>{children}</div>;
+export function DetailList({ children, label, compact = false }: { children: ReactNode; label: string; compact?: boolean }) {
+  return <div className={`detail-list detail-scroll${compact ? " detail-list-compact" : ""}`} role="region" aria-label={label} tabIndex={0}>{children}</div>;
 }
 
 /** 长正文与事项只滚动内容，标题及操作始终留在卡片外层。 */

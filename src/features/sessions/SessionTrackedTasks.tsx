@@ -1,4 +1,4 @@
-import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import { DetailList, DetailListRow, DetailLoading, DetailSection } from "../../components/DetailSection";
 import { recentFirst } from "../../components/detailOrder";
 import Icon from "../../components/Icon";
 import Notice from "../../components/Notice";
@@ -15,14 +15,14 @@ export default function SessionTrackedTasks({ tasks, navigate, onAdd, onRemove, 
   bound?: boolean;
   error?: string;
 }) {
-  return <DetailSection sectionId="tracked-tasks" label="跟踪任务" title={<><Icon name="tasks" /><span>跟踪任务（{tasks?.length ?? 0}）</span></>} actions={<button type="button" className="btn ghost icon-button small" title="添加跟踪任务" aria-label="添加跟踪任务"
+  return <DetailSection sectionId="tracked-tasks" label="跟踪任务" title={<><Icon name="tasks" /><span>跟踪任务{tasks && `（${tasks.length}）`}</span></>} actions={<button type="button" className="btn ghost icon-button small" title="添加跟踪任务" aria-label="添加跟踪任务"
         disabled={busy || !bound || !tasks} onClick={onAdd}><Icon name="plus" /></button>} status={<>
       {error && <Notice>{error}</Notice>}
     </>}>
 
 
     {!bound ? <p className="detail-empty">绑定会话后可管理跟踪任务。</p>
-      : !tasks ? <p className="detail-empty">正在读取任务…</p>
+      : !tasks ? (!error && <DetailLoading>正在读取任务…</DetailLoading>)
       : !tasks.length ? <p className="detail-empty">未跟踪任何任务</p>
       : <DetailList label="跟踪任务列表">
         {recentFirst(tasks, task => task.updated_at).map(task => <DetailListRow key={task.id} icon={<Icon name="tasks" />}

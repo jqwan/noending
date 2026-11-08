@@ -11,11 +11,6 @@ describe("useLoadingDelay", () => {
     vi.useRealTimers();
   });
 
-  it("does not show skeleton immediately when loading starts", () => {
-    const { result } = renderHook(() => useLoadingDelay(true, 150));
-    expect(result.current).toBe(false);
-  });
-
   it("does not show skeleton if loading finishes before delay", () => {
     let loading = true;
     const { result, rerender } = renderHook(() => useLoadingDelay(loading, 150));

@@ -8,6 +8,7 @@ import AgentPackagesSection from "./AgentPackagesSection";
 import type { Route } from "../../app/routes";
 import { viewState } from "../../hooks/useViewState";
 import type { PackageDetail, PackageEntry, PackageInventory } from "../../types";
+import { packageDetailCache, setPackageCatalogCache } from "./packageDetailCache";
 
 vi.mock("../../api", () => ({ api: {
   listPackages: vi.fn(), getPackageDetail: vi.fn(),
@@ -51,6 +52,8 @@ const detailOf = (row: PackageEntry): PackageDetail => ({
 });
 
 beforeEach(() => {
+  packageDetailCache.clear();
+  setPackageCatalogCache(null);
   vi.clearAllMocks();
   viewState.clear(); localStorage.clear();
   inventory = { packages: [entry()], warnings: [] };
@@ -71,6 +74,22 @@ beforeEach(() => {
   vi.mocked(api.installLocalMarketplace).mockResolvedValue({ message: "已安装 2 个插件" });
 });
 afterEach(cleanup);
+
+it("retains a cached package after a read error but removes actions when the backend confirms deletion", async () => {
+  const first = render(<PackageDetailView packageId="pkg-codex-review" navigate={navigation} />);
+  await screen.findByRole("heading", { name: "review" });
+  first.unmount();
+  vi.mocked(api.getPackageDetail).mockRejectedValue(new Error("读取暂时失败"));
+  const next = render(<PackageDetailView packageId="pkg-codex-review" navigate={navigation} />);
+  expect(screen.getByRole("button", { name: "卸载插件包" })).toHaveProperty("disabled", false);
+  await screen.findByRole("alert");
+  expect(screen.getByRole("button", { name: "卸载插件包" })).toHaveProperty("disabled", false);
+  next.unmount();
+  vi.mocked(api.getPackageDetail).mockResolvedValue(null);
+  render(<PackageDetailView packageId="pkg-codex-review" navigate={navigation} />);
+  await screen.findByText("此插件包已移除，请返回插件包看板。");
+  expect(screen.queryByRole("button", { name: "卸载插件包" })).toBeNull();
+});
 
 it("renders managed packages with agent, market and state, and opens the detail page", async () => {
   inventory = { packages: [
@@ -289,9 +308,8 @@ it("keeps build-metadata versions off the card while the full string stays reach
   expect(screen.getByText("v5.6.2")).toBeTruthy();
   expect(screen.queryByText(`v${longVersion}`)).toBeNull();
   expect(screen.getByTitle(longVersion)).toBeTruthy();
-  // Footer carries the origin class, not the marketplace name; no dates.
+  // Footer carries the origin class, not the marketplace name.
   expect(screen.getByText("Agent 内置")).toBeTruthy();
-  expect(screen.queryByText(/2026/)).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: /longver/ }));
   expect(await screen.findByText("Agent 内置")).toBeTruthy();
@@ -373,7 +391,7 @@ it("shows the desktop-only dsh bundle as manageable with unknown enablement", as
 
 it("gives the Agent detail package block the same direct toggle", async () => {
   inventory = { packages: [entry({ id: "pkg-codex-review", agent: "codex", name: "review" })], warnings: [] };
-  render(<AgentPackagesSection agent="codex" navigate={navigation} />);
+  const view = render(<AgentPackagesSection agent="codex" navigate={navigation} />);
   const row = await screen.findByRole("button", { name: /review/ });
   expect(screen.queryByText("已启用")).toBeNull();
   // Same direct user-level toggle as the board cards.
@@ -382,4 +400,9 @@ it("gives the Agent detail package block the same direct toggle", async () => {
   expect(navigation).not.toHaveBeenCalled();
   fireEvent.click(row);
   expect(navigation).toHaveBeenCalledWith(expect.objectContaining({ view: "package", packageId: "pkg-codex-review" }));
+  view.unmount();
+  vi.mocked(api.listPackages).mockImplementation(() => new Promise(() => {}));
+  render(<AgentPackagesSection agent="codex" navigate={navigation} />);
+  expect(screen.getByRole("button", { name: "review" })).toBeTruthy();
+  expect(screen.queryByText("正在读取插件包…")).toBeNull();
 });

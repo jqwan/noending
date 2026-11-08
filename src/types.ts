@@ -755,6 +755,8 @@ export interface MailboxMessage {
   id: string;
   recipient_session_id: string;
   sender_session_id: string | null;
+  /** 界面读取时附带当前发件会话信息；缺失且有发件 ID 表示会话已删除。 */
+  sender?: { title: string | null; agent: Agent };
   body: string;
   created_at: string;
   read_at: string | null;

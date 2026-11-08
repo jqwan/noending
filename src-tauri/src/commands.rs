@@ -1169,7 +1169,9 @@ pub fn mailbox_list(
     cursor: Option<i64>,
     limit: usize,
 ) -> Result<crate::storage::mailbox::MailboxPage> {
-    state.db.mailbox_list(&session, &filter, cursor, limit)
+    state
+        .db
+        .mailbox_list_latest(&session, &filter, cursor, limit)
 }
 #[tauri::command]
 pub fn mailbox_send(

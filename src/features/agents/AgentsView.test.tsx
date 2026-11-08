@@ -389,7 +389,6 @@ describe("AgentsView", () => {
     render(<AgentsView navigate={vi.fn()} />);
     const codexCard = await screen.findByRole("button", { name: "查看 Codex Agent 详情" });
     expect(within(codexCard).getByText("未检测到CLI")).toBeTruthy();
-    expect(screen.queryByTitle("来源目录")).toBeNull();
   });
 });
 

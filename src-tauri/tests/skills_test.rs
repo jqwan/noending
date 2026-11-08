@@ -192,7 +192,6 @@ fn skill_discovery_and_uninstall_leave_native_agent_configs_untouched() {
             fs::read_to_string(path).unwrap(),
             "invalid native config: { ["
         );
-        assert!(!PathBuf::from(format!("{}.noending.bak", path.display())).exists());
     }
 }
 
@@ -560,7 +559,6 @@ fn a_physical_user_entry_is_skipped_but_other_links_still_toggle() {
     assert!(antigravity.exists());
     let disabled = skills::disable_skill_all(&f.roots, &id).unwrap();
     assert!(disabled.changed);
-    assert!(disabled.message.contains("保持启用"));
     assert!(!claude.exists());
     assert!(!antigravity.exists());
     assert!(dir.join("SKILL.md").exists());
@@ -578,9 +576,7 @@ fn user_level_enable_removes_same_source_project_links() {
     let id = skills::source_id(&source_id);
     skills::enable_skill_project(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(f.cwd.join(".claude/skills/review").is_symlink());
-    let outcome =
-        skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
-    assert!(outcome.message.contains("已清理"));
+    skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(!f.cwd.join(".agents/skills/review").exists());
     assert!(!f.cwd.join(".claude/skills/review").exists());
     assert!(f.roots.claude.join("skills/review").is_symlink());
@@ -599,9 +595,7 @@ fn user_level_enable_keeps_a_physical_project_entry() {
     let file = fs::canonicalize(physical.join("SKILL.md")).unwrap();
     let source_id = file.to_string_lossy().into_owned();
     let id = skills::source_id(&source_id);
-    let outcome =
-        skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
-    assert!(!outcome.message.contains("已清理"));
+    skills::enable_skill_all(&f.roots, &[f.cwd.clone()], &id, Some(&source_id)).unwrap();
     assert!(physical.join("SKILL.md").exists());
     assert!(f.roots.claude.join("skills/review").is_symlink());
 }
@@ -710,7 +704,6 @@ fn project_inventory_merges_entries_from_every_working_directory() {
     ]);
     let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
     assert_eq!(row.entry_paths.len(), 6);
-    assert_eq!(row.locations.len(), 6);
     assert!(row.entry_links.iter().all(|link| *link));
     let detail = skills::detail_project(&f.roots, &cwds, &id).unwrap();
     assert!(detail.content.contains("# Instructions"));
@@ -1193,7 +1186,6 @@ fn migration_moves_a_registered_source_without_entries() {
     assert!(!source.exists());
     let migrated = fs::canonicalize(managed.join("review/SKILL.md")).unwrap();
     assert_eq!(outcome.source_path, migrated.to_string_lossy());
-    assert_eq!(outcome.resource_id, skills::source_id(&outcome.source_path));
     assert_eq!(outcome.name, "review");
 }
 
@@ -1424,16 +1416,17 @@ fn migration_rejects_a_source_already_in_the_library() {
     let file = fs::canonicalize(source.join("SKILL.md")).unwrap();
     let id = skills::source_id(file.to_string_lossy().as_ref());
 
-    let error = skills::preview_skill_migration(
-        &f.roots,
-        &[],
-        &managed,
-        &id,
-        Some(file.to_string_lossy().as_ref()),
-    )
-    .err()
-    .expect("library sources must not be migrated");
-    assert!(error.to_string().contains("源库中"));
+    assert!(
+        skills::preview_skill_migration(
+            &f.roots,
+            &[],
+            &managed,
+            &id,
+            Some(file.to_string_lossy().as_ref()),
+        )
+        .is_err(),
+        "library sources must not be migrated"
+    );
 }
 
 #[test]

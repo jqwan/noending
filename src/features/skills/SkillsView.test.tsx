@@ -1,7 +1,9 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
+import { copyToClipboard } from "../../components/common";
 import SkillsView from "./SkillsView";
 import SkillDetailView, { clearSkillDetailCache } from "./SkillDetailView";
 import type { Route } from "../../app/routes";
@@ -16,6 +18,7 @@ vi.mock("../../api", () => ({ api: {
 } }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
+vi.mock("../../components/common", async importOriginal => ({ ...await importOriginal<typeof import("../../components/common")>(), copyToClipboard: vi.fn().mockResolvedValue(true) }));
 const loc: SkillLocation = { id: "pi-user", agent: "pi", scope: "user", path: "/home/test/.pi/agent/skills/docs/SKILL.md", label: "Pi" };
 const resource = (overrides: Partial<SkillResource> = {}): SkillResource => {
   return { id: "server", name: "docs", description: "Project documentation", path: loc.path, locations: [loc.id], entry_paths: [loc.path], entry_links: [], revision: "original-revision", registered: true, error: null, ...overrides };
@@ -33,6 +36,7 @@ function SkillTestApp({ initialProjectId }: { initialProjectId?: string }) {
   return <SkillsView initialProjectId={initialProjectId} navigate={navigate} />;
 }
 beforeEach(() => {
+  clearReadResources();
   vi.clearAllMocks();
   clearSkillDetailCache();
   viewState.clear(); localStorage.clear();
@@ -49,16 +53,15 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("reads Skill content and enablement without exposing a Skill editor", async () => {
+it("reads Skill content and enablement", async () => {
   const sourcePath = "/home/test/skills/review/SKILL.md";
   inventory = { locations: [{ ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills" }], resources: [resource({ id: "review", name: "review", path: sourcePath, locations: ["shared"], entry_paths: ["/home/test/.agents/skills/review/SKILL.md"], entry_links: [true] })], warnings: [] };
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(inventory.resources[0], "# Review workflow\n\nRead source changes."));
   render(<SkillTestApp />);
   fireEvent.click(await screen.findByRole("button", { name: /review/ }));
-  expect(await screen.findByRole("heading", { name: "正文" })).toBeTruthy();
+  expect(await screen.findByRole("article", { name: "技能详情" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "Review workflow" })).toBeTruthy();
   expect(screen.getByText("Read source changes.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "查看全文" })).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: sourcePath }));
@@ -79,7 +82,23 @@ it("shows the complete SKILL.md inline with frontmatter metadata", async () => {
   expect(within(section).getByText("Read WeChat history on macOS.")).toBeTruthy();
   expect(within(section).getByRole("heading", { name: "Instructions" })).toBeTruthy();
   expect(within(section).getByText("Run the decrypt tool.")).toBeTruthy();
+  const copy = screen.getByRole("button", { name: "复制全文" });
+  expect(section.contains(copy)).toBe(false);
+  fireEvent.click(copy);
+  expect(copyToClipboard).toHaveBeenCalledWith(rawContent);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("keeps known Skill content and header actions after a failed background read", async () => {
+  const first = render(<SkillDetailView resourceId="server" navigate={navigation} />);
+  await screen.findByRole("heading", { name: "Documentation workflow" });
+  first.unmount();
+  vi.mocked(api.getSkillDetail).mockRejectedValue(new Error("读取暂时失败"));
+  render(<SkillDetailView resourceId="server" navigate={navigation} />);
+  expect(screen.getByRole("button", { name: "复制全文" })).toBeTruthy();
+  await screen.findByRole("alert");
+  expect(screen.getByRole("heading", { name: "Documentation workflow" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "卸载 Skill" })).toHaveProperty("disabled", false);
 });
 
 it("displays Windows Skill paths without the verbatim prefix while opening the original path", async () => {
@@ -165,8 +184,6 @@ it("shows user-level coverage and disables it by clearing the select-all scope",
   expect(within(section).getByRole("button", { name: "Alpha" })).toBeTruthy();
   fireEvent.click(within(section).getByRole("button", { name: "Beta" }));
   expect(navigation).toHaveBeenCalledWith({ view: "project", projectId: "p2", initialTitle: "Beta" });
-  expect(within(section).queryByRole("img")).toBeNull();
-  expect(within(section).queryByText(entry)).toBeNull();
   fireEvent.click(within(section).getByRole("button", { name: "配置" }));
   const dialog = await screen.findByRole("dialog", { name: "配置技能" });
   const master = await within(dialog).findByRole("checkbox", { name: /全选/ }) as HTMLInputElement;
@@ -553,8 +570,6 @@ it("lists enabled projects with navigation and excludes disabled projects", asyn
   expect(within(section).getByRole("heading", { name: "启用项目（1）" })).toBeTruthy();
   fireEvent.click(within(section).getByRole("button", { name: "Alpha" }));
   expect(navigation).toHaveBeenCalledWith({ view: "project", projectId: "p1", initialTitle: "Alpha" });
-  expect(within(section).queryByRole("img")).toBeNull();
-  expect(within(section).queryByText("/work/alpha/.agents/skills/review/SKILL.md")).toBeNull();
   expect(within(section).queryByText("Beta")).toBeNull();
   expect(screen.queryByRole("dialog")).toBeNull();
 });

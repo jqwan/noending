@@ -1,3 +1,5 @@
+import { clearReadResources } from "../hooks/readResource";
+import { preloadAgentsCache } from "../features/agents/agentsCache";
 import { invalidateTargets, removedTargets } from "./removedTargets";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -9,6 +11,14 @@ import { sessionDetailCache, sessionContextCache } from "../features/sessions/se
 import { useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useRefreshSignal } from "../components/common";
+import { projectDetailCache } from "../features/projects/projectDetailCache";
+import { workstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
+import { skillDetailCache, clearSkillDetailCache } from "../features/skills/skillDetailCache";
+import { clearProjectCardsCache } from "../features/projects/projectCardsCache";
+import { clearWorkstreamCardsCache } from "../features/workstreams/useWorkstreamCards";
+import { clearSessionsCache } from "../features/sessions/sessionsCache";
+import { setPackageCatalogCache } from "../features/packages/packageDetailCache";
+const modulePreparation = vi.hoisted(() => vi.fn());
 
 const focusListener = vi.hoisted(() => ({
   callback: undefined as undefined | ((event: { payload: boolean }) => void),
@@ -24,11 +34,18 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
-vi.mock("../api", () => ({ api: { appForeground, getSessionDetail: vi.fn(), getSessionContext: vi.fn() } }));
-vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
+vi.mock("../api", () => ({ api: {
+  appForeground, getSessionDetail: vi.fn(), getSessionContext: vi.fn(), collaborationRoomGet: vi.fn(), collaborationCandidates: vi.fn(),
+  listProjectCards: vi.fn(), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), listSessions: vi.fn(), listProjects: vi.fn(), listWorkstreams: vi.fn(),
+  listSkillCatalog: vi.fn(), listPackages: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(), mailboxList: vi.fn(), getOperationStatus: vi.fn(),
+  getExtractionSettings: vi.fn(), getWorkspaceSettings: vi.fn(), getProjectContextState: vi.fn(),
+} }));
+// 导航用例默认 Agent 数据已预热，首次读取的等待由下面的独立用例覆盖。
+vi.mock("../features/agents/agentsCache", () => ({ preloadAgentsCache: vi.fn() }));
+vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside id="session-sidebar" aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
 const pageNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
-vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
+vi.mock("./Router", () => ({ prepareRouteModule: modulePreparation, preloadCommonRoutes: vi.fn(), default: ({ route, navigate }: { route: Route; navigate: (route: Route) => void }) => {
   const [draft, setDraft] = useState("");
   pageNavigation.navigate = navigate;
   if (["new-session", "sessions", "session", "terminal"].includes(route.view)) sessionNavigation.navigate = navigate;
@@ -38,17 +55,38 @@ vi.mock("./Router", () => ({ default: ({ route, navigate }: { route: Route; navi
     {route.view === "new-session" && <input aria-label="会话草稿" value={draft} onChange={e => setDraft(e.target.value)} />}
   </>;
 } }));
-vi.mock("../components/Toast", () => ({ default: () => null }));
+vi.mock("../components/Toast", () => ({ default: () => null, showToast: vi.fn() }));
 vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }: { navigate: (route: Route) => void; onClose: () => void }) => <div role="dialog" aria-label="查找">
   <button onClick={() => { navigate({ view: "agents", agent: "codex" }); onClose(); }}>进入 Agent 详情</button>
 </div> }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
+  vi.mocked(preloadAgentsCache).mockReset();
+  clearReadResources(); clearProjectCardsCache(); clearWorkstreamCardsCache(); clearSessionsCache(); clearSkillDetailCache(); setPackageCatalogCache(null);
+  vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([]);
+  vi.mocked(api.listSkillCatalog).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
+  vi.mocked(api.listPackages).mockReset().mockResolvedValue({ packages: [], warnings: [] });
+  vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue(null);
+  vi.mocked(api.listTaskItems).mockReset().mockResolvedValue([]);
+  vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(null as never);
+  vi.mocked(api.mailboxList).mockReset().mockResolvedValue({ items: [], unread: 0, total: 0, next_cursor: null });
+  vi.mocked(api.getOperationStatus).mockReset().mockResolvedValue([]);
+  vi.mocked(api.getExtractionSettings).mockReset().mockResolvedValue({ agent: "none", runtime: { model: null, provider: null, effort: null } });
+  vi.mocked(api.getWorkspaceSettings).mockReset().mockResolvedValue({} as never);
+  vi.mocked(api.getProjectContextState).mockReset().mockResolvedValue(null as never);
+  vi.mocked(api.collaborationRoomGet).mockReset().mockResolvedValue({ task_id: "task", title: "任务", room: null, run: null, members: [] });
+  vi.mocked(api.collaborationCandidates).mockReset().mockResolvedValue({ items: [], next_cursor: null });
   Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(listen).mockClear();
   sessionDetailCache.clear();
   sessionContextCache.clear();
+  projectDetailCache.clear(); workstreamDetailCache.clear(); skillDetailCache.clear();
+  modulePreparation.mockReset();
   vi.mocked(api.getSessionDetail).mockReset();
   vi.mocked(api.getSessionContext).mockReset().mockImplementation(async session_id => ({
     session_id, fields: null, revision: 0, ingest_generation: 0,
@@ -60,6 +98,29 @@ beforeEach(() => {
   sessionNavigation.navigate = undefined;
 });
 afterEach(cleanup);
+
+it("keeps the current page until Agent header prerequisites are ready", async () => {
+  let finish!: () => void;
+  vi.mocked(preloadAgentsCache).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  render(<AppShell />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => { finish(); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+});
+
+it("prepares collaboration members and stopped-room candidates before changing pages", async () => {
+  workstreamDetailCache.set("task", { ctx: { workstream: { id: "task", title: "协作任务" } } } as never);
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "task", title: "协作任务", room: null, run: null, members: [] });
+  let finish!: (page: Awaited<ReturnType<typeof api.collaborationCandidates>>) => void;
+  vi.mocked(api.collaborationCandidates).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  render(<AppShell />);
+  await act(async () => { pageNavigation.navigate!({ view: "workstream", workstreamId: "task", entry: "collaboration" }); });
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => { finish({ items: [], next_cursor: null }); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("workstream");
+});
 
 it("refreshes visible data when a CLI business operation completes", async () => {
   function RefreshConsumer() {
@@ -74,78 +135,83 @@ it("refreshes visible data when a CLI business operation completes", async () =>
   expect(screen.getByRole("status", { name: "数据刷新次数" }).textContent).toBe("1");
 });
 
-it("keeps icon navigation fixed and allows toggling the session sidebar in any section", () => {
+it("keeps icon navigation fixed and allows toggling the session sidebar in any section", async () => {
   render(<AppShell />);
   const rail = screen.getByRole("navigation", { name: "工作区导航" });
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "收起侧边栏" })).toBeTruthy();
+  const toggle = screen.getByRole("button", { name: "收起侧边栏" });
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toBe(screen.getByRole("complementary", { name: "会话侧边栏" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
   expect(screen.getByRole("navigation", { name: "工作区导航" })).toBe(rail);
 
   // In projects section, session sidebar is still available and can be collapsed
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "收起侧边栏" })); });
   expect(screen.queryByRole("complementary", { name: "会话侧边栏" })).toBeNull();
   expect(screen.queryByRole("separator")).toBeNull();
   expect(screen.getByRole("button", { name: "展开侧边栏" })).toBeTruthy();
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
   // Re-expand in projects section
-  fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "展开侧边栏" })); });
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
   expect(screen.getByRole("separator")).toBeTruthy();
 
   // Clicking 会话 restores the previous session page (new-session); clicking again navigates to sessions board
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
 });
 
-it("preserves the session page's unsent state while opening Agent details from lookup", () => {
+it("preserves the session page's unsent state while opening Agent details from lookup", async () => {
   render(<AppShell />);
   fireEvent.change(screen.getByRole("textbox", { name: "会话草稿" }), { target: { value: "未发送的消息" } });
-  fireEvent.click(screen.getByRole("button", { name: "任务" }));
-  fireEvent.click(screen.getByRole("button", { name: "查找" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "任务" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "查找" })); });
   expect(screen.getByRole("dialog", { name: "查找" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "进入 Agent 详情" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "进入 Agent 详情" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   expect((screen.getByRole("textbox", { name: "会话草稿" }) as HTMLInputElement).value).toBe("未发送的消息");
 });
 
-it("restores the last session page and parameters across history navigation", () => {
+it("restores the last session page and parameters across history navigation", async () => {
   const route: Route = { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialAgent: "codex" };
+  sessionDetailCache.set("s-4", { session: { id: "s-4", title: "Existing", agent: "codex" } } as never);
   render(<AppShell />);
-  act(() => sessionNavigation.navigate!(route));
-  fireEvent.click(screen.getByRole("button", { name: "项目" }));
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  await act(async () => { sessionNavigation.navigate!(route); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
-  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
 });
 
-it("remembers a background launch result without changing the current section", () => {
+it("remembers a background launch result without changing the current section", async () => {
   render(<AppShell />);
   const finishLaunch = sessionNavigation.navigate!;
-  fireEvent.click(screen.getByRole("button", { name: "Agent" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("sessions");
 });
 
-it("remembers keyboard resizing, clamps width and resets on double click", () => {
+it("remembers keyboard resizing, clamps width and resets on double click", async () => {
   const view = render(<AppShell />);
   const divider = screen.getByRole("separator");
   fireEvent.keyDown(divider, { key: "ArrowRight" });
@@ -188,13 +254,49 @@ it("resolves an ID-only destination before changing pages, and cancels a late re
   let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
   vi.mocked(api.getSessionDetail).mockImplementation(() => new Promise(done => { resolve = done; }));
   render(<AppShell />);
-  act(() => sessionNavigation.navigate!({ view: "session", sessionId: "pending" }));
+  await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "pending" }); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => resolve({ session: { id: "pending", title: "Ready", agent: "codex" } } as never));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toMatchObject({ view: "session", initialTitle: "Ready", initialAgent: "codex" });
-  act(() => sessionNavigation.navigate!({ view: "session", sessionId: "late" }));
-  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "late" }); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   await act(async () => resolve({ session: { id: "late", title: "Late", agent: "codex" } } as never));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
+});
+
+it("waits for full header data even when a destination already supplies its title", async () => {
+  let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
+  vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(done => { resolve = done; }));
+  render(<AppShell />);
+  await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "ready", initialTitle: "已知标题", initialAgent: "codex" }); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => resolve({ session: { id: "ready", title: "已知标题", agent: "codex" } } as never));
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("session");
+});
+
+it("retains the current page until code is ready and ignores a late destination after a newer choice", async () => {
+  let finish!: () => void;
+  modulePreparation.mockImplementation(route => route.view === "projects" ? new Promise<void>(done => { finish = done; }) : undefined);
+  render(<AppShell />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => finish());
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+});
+
+it("prepares back and forward destinations before hiding the current page", async () => {
+  render(<AppShell />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  let finish!: () => void;
+  modulePreparation.mockImplementation(() => new Promise<void>(done => { finish = done; }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
+  await act(async () => finish());
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  await act(async () => finish());
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });
 
@@ -204,8 +306,8 @@ it("keeps assistant project launches and terminals in the session section", asyn
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "new-session", projectId: "assistant-project" });
   await act(async () => { sessionNavigation.navigate!({ view: "terminal", terminalId: "assistant-terminal" }); });
   expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
-  fireEvent.click(screen.getByRole("button", { name: "项目" }));
-  fireEvent.click(screen.getByRole("button", { name: "会话" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "assistant-terminal" });
 });
 
@@ -215,18 +317,23 @@ it.each([
   { route: { view: "project", projectId: "deleted", initialTitle: "P" }, targets: { projectIds: ["deleted"] }, replacement: { view: "projects", scope: "archived" }, section: "项目" },
   { route: { view: "skill", resourceId: "skill1", projectId: "deleted", workspacePathId: "w1" }, targets: { projectIds: ["deleted"] }, replacement: { view: "skills" }, section: "技能" },
   { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialAgent: "codex" }, section: "会话" },
-] as const)("removes invalid $route.view routes from back/forward and section memory", ({ route, targets, replacement, section }) => {
+] as const)("removes invalid $route.view routes from back/forward and section memory", async ({ route, targets, replacement, section }) => {
+  if (route.view === "session") sessionDetailCache.set(route.sessionId, { session: { id: route.sessionId, title: route.initialTitle, agent: route.initialAgent } } as never);
+  if (route.view === "workstream") workstreamDetailCache.set(route.workstreamId, { ctx: { workstream: { title: route.initialTitle } } } as never);
+  if (route.view === "project") projectDetailCache.set(route.projectId, { project: { name: route.initialTitle } } as never);
+  if (route.view === "skill") skillDetailCache.set(route.resourceId, {} as never);
+  if (replacement.view === "session") sessionDetailCache.set(replacement.sessionId, { session: { id: replacement.sessionId, title: replacement.initialTitle, agent: replacement.initialAgent } } as never);
   render(<AppShell />);
-  act(() => pageNavigation.navigate!(route));
-  if (route.view === "session") act(() => pageNavigation.navigate!({ ...route, entry: "conversation" }));
+  await act(async () => { pageNavigation.navigate!(route); });
+  if (route.view === "session") await act(async () => { pageNavigation.navigate!({ ...route, entry: "conversation" }); });
   act(() => invalidateTargets({ ...targets, replacement }));
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
-  fireEvent.click(screen.getByRole("button", { name: "Agent" }));
-  fireEvent.click(screen.getByRole("button", { name: section }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: section })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
 });
 
@@ -234,20 +341,54 @@ it("prunes deleted targets while keeping an unrelated current page and rejects l
   let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
   vi.mocked(api.getSessionDetail).mockImplementation(() => new Promise(done => { resolve = done; }));
   render(<AppShell />);
-  act(() => pageNavigation.navigate!({ view: "session", sessionId: "pending-delete" }));
-  fireEvent.click(screen.getByRole("button", { name: "项目" }));
+  await act(async () => { pageNavigation.navigate!({ view: "session", sessionId: "pending-delete" }); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   act(() => invalidateTargets({ sessionIds: ["pending-delete"] }));
   await act(async () => resolve({ session: { id: "pending-delete", title: "Old", agent: "codex" } } as never));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });
 
-it("removes a replaced terminal from earlier history while retaining the new terminal", () => {
+it("removes a replaced terminal from earlier history while retaining the new terminal", async () => {
   render(<AppShell />);
-  act(() => pageNavigation.navigate!({ view: "terminal", terminalId: "old" }));
+  await act(async () => { pageNavigation.navigate!({ view: "terminal", terminalId: "old" }); });
   const replacement: Route = { view: "terminal", terminalId: "new" };
   act(() => { pageNavigation.navigate!(replacement); invalidateTargets({ terminalIds: ["old"], replacement }); });
-  fireEvent.click(screen.getByRole("button", { name: "返回上一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  fireEvent.click(screen.getByRole("button", { name: "前进到下一页" }));
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
+});
+
+it("keeps the old page visible with delayed progress until the first board list is ready", async () => {
+  let finish!: (rows: Awaited<ReturnType<typeof api.listProjectCards>>) => void;
+  vi.mocked(api.listProjectCards).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  render(<AppShell />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  expect(screen.queryByRole("status", { name: "正在打开页面" })).toBeNull();
+  await screen.findByRole("status", { name: "正在打开页面" });
+  await act(async () => { finish([]); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
+  expect(screen.queryByRole("status", { name: "正在打开页面" })).toBeNull();
+});
+
+it("clears pending feedback when an unopened destination is removed", async () => {
+  projectDetailCache.set("pending", { project: { id: "pending", name: "待打开项目" } } as never);
+  vi.mocked(api.getProjectContextState).mockImplementation(() => new Promise(() => {}));
+  render(<AppShell />);
+  await act(async () => { pageNavigation.navigate!({ view: "project", projectId: "pending" }); });
+  await screen.findByRole("status", { name: "正在打开页面" });
+  act(() => invalidateTargets({ projectIds: ["pending"] }));
+  expect(screen.queryByRole("status", { name: "正在打开页面" })).toBeNull();
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+});
+
+it("retains a usable page after a failed initial list read and supports a fresh navigation attempt", async () => {
+  vi.mocked(api.listProjectCards).mockRejectedValueOnce(new Error("无法读取项目"));
+  render(<AppShell />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
+  expect(screen.queryByRole("status", { name: "正在打开页面" })).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });

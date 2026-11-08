@@ -1,4 +1,4 @@
-import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { DetailPanelProvider } from "../../components/DetailLayout";
 import { DetailContent, DetailFields, DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
 import DialogActions from "../../components/DialogActions";
 import { removedTargets } from "../../app/removedTargets";
@@ -17,8 +17,9 @@ import {
   type WorkstreamContext as WorkstreamContextData,
 } from "../../types";
 import type { Route, WorkstreamEntry } from "../../app/routes";
+import { notifyDataChanged } from "../../app/routes";
 import CollaborationSummary from "../collaboration/CollaborationSummary";
-import WorkstreamSessions from "./WorkstreamSessions";
+import WorkstreamSessionPickerModal from "./WorkstreamSessionPickerModal";
 import TaskItems from "./TaskItems";
 import TaskSubpageTabs from "./TaskSubpageTabs";
 import CollaborationRoomView from "../collaboration/CollaborationRoomView";
@@ -26,6 +27,7 @@ import CollaborationRoomView from "../collaboration/CollaborationRoomView";
 /** Task organization. All background reads are pure. */
 import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
+import { collaborationRoomResource } from "../collaboration/collaborationResources";
 export { workstreamDetailCache, clearWorkstreamDetailCache };
 
 
@@ -54,6 +56,10 @@ export default function WorkstreamDetailView({
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
+  const collaboration = collaborationRoomResource.useValue(workstreamId);
+  const lockedSessionIds = collaboration?.run?.status === "active" || collaboration?.run?.status === "starting"
+    ? collaboration.members.map(member => member.session_id) : [];
   const [actionError, setActionError] = useState("");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -91,7 +97,7 @@ export default function WorkstreamDetailView({
 
   // Background refresh only reads task data.
   const refresh = useCallback(() => {
-    api.getWorkstreamContext(workstreamId).then((c) => {
+    return api.getWorkstreamContext(workstreamId).then((c) => {
       if (currentWorkstreamId.current !== workstreamId || removedTargets.workstreams.has(workstreamId)) return;
       setCtx(c);
       workstreamDetailCache.set(workstreamId, {
@@ -112,8 +118,8 @@ export default function WorkstreamDetailView({
       return (
         <div className="main task-detail" role="status">
           <PageHeader
-            title={initialTitle ?? ""}
-            actions={<TaskSubpageTabs workstreamId={workstreamId} entry={entry} initialTitle={initialTitle} navigate={navigate} />}
+            title={initialTitle ?? ""} icon={<Icon name="tasks" />}
+            navigation={<TaskSubpageTabs workstreamId={workstreamId} entry={entry} initialTitle={initialTitle} navigate={navigate} />}
           />
           {showSkeleton && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
@@ -126,7 +132,7 @@ export default function WorkstreamDetailView({
     }
     return (
       <div className="main narrow" role="status">
-        <PageHeader title={initialTitle ?? ""}>
+        <PageHeader title={initialTitle ?? ""} icon={<Icon name="tasks" />}>
           <p>{loadError}</p>
           <button className="btn" onClick={() => setRetry(value => value + 1)}>重试</button>
         </PageHeader>
@@ -220,23 +226,17 @@ export default function WorkstreamDetailView({
   const projectRows=ctx.projects;
 
   return (
-    <DetailPanelProvider key={entry === "collaboration" ? "collaboration" : "task"} kind={entry === "collaboration" ? "collaboration" : "task"}><div className="main detail-page task-detail">
+    <DetailPanelProvider kind={entry === "collaboration" ? "collaboration" : "task"}><div className="main detail-page task-detail">
       <PageHeader
-        title={
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere" }}>
-            <Icon name="tasks" />
-            <span>{workstream.title}</span>
-          </span>
-        }
-        actions={
-          <>
-            <TaskSubpageTabs
+        title={workstream.title} icon={<Icon name="tasks" />}
+        navigation={<TaskSubpageTabs
               workstreamId={workstream.id}
               entry={entry}
               initialTitle={workstream.title}
               navigate={navigate}
-            />
-            <span className="session-action-divider" aria-hidden="true" />
+            />}
+        actions={
+          <>
             <button className="btn ghost icon-button" title="编辑任务" aria-label="编辑任务"
               onClick={openEditor}>
               <Icon name="edit" />
@@ -279,16 +279,16 @@ export default function WorkstreamDetailView({
         )}
       </PageHeader>
 
-      {/* 协作室与详情共用标题栏：协作室自己读取房间状态，不占用详情的数据。 */}
-      {entry === "collaboration" ? (
+      {/* 详情与协作消息共用右栏及成员选择，只切换主内容。 */}
         <CollaborationRoomView
           taskId={workstream.id}
           taskTitle={workstream.title}
           sessions={sessions}
           archived={archived}
-        />
-      ) : (
-      <DetailLayout panel={<><DetailSection sectionId="properties" label="任务信息" title={<>
+          navigate={navigate}
+          showChat={entry === "collaboration"}
+          onManageSessions={archived || (!projectRows.length && !sessions.length) ? undefined : () => setSessionPickerOpen(true)}
+          detailsPanel={<><DetailSection sectionId="properties" label="任务信息" title={<>
               <Icon name="info" />
               <span>任务信息</span>
             </>}>
@@ -330,7 +330,8 @@ export default function WorkstreamDetailView({
                 onOpen={() => navigate({ view: "project", projectId: p.id, initialTitle: p.name ?? undefined })}
               />)}
             </DetailList>
-          </DetailSection></>}><DetailSection sectionId="description" label="任务描述" title={<>
+          </DetailSection></>}>
+          <DetailSection sectionId="description" label="任务描述" title={<>
                 <Icon name="tasks" />
                 <span>任务描述</span>
               </>}>
@@ -345,13 +346,16 @@ export default function WorkstreamDetailView({
           </DetailSection>
 <TaskItems key={workstream.id} taskId={workstream.id} />
 <CollaborationSummary key={`summary-${workstream.id}`} taskId={workstream.id} />
-<WorkstreamSessions
-            sessions={sessions}
-            navigate={navigate}
-            onNewSession={archived || projectRows.length === 0 ? undefined : () => navigate({ view: "new-session", workstreamId: workstream.id })}
-            allowActions={!archived && projectRows.length > 0}
-          /></DetailLayout>
-      )}
+        </CollaborationRoomView>
+
+      {sessionPickerOpen && <WorkstreamSessionPickerModal projectIds={projectRows.map(project => project.id)} linkedSessions={sessions} lockedIds={lockedSessionIds}
+        onClose={() => setSessionPickerOpen(false)} onConfirm={async changes => {
+          try { for (const change of changes) await api.setSessionTaskTracking(change.sessionId, workstream.id, change.tracked); }
+          finally {
+            await Promise.all([refresh(), collaborationRoomResource.refresh(workstream.id).catch(() => {})]);
+            notifyDataChanged([]);
+          }
+        }} />}
 
       {projectPickerOpen && (
         <WorkstreamProjectPickerModal

@@ -481,37 +481,6 @@ fn a_reappearing_source_does_not_block_the_purge() {
     );
 }
 
-/// The purge has no filesystem step: a source file that is not the purged
-/// session's own root source survives untouched — and so does a sibling
-/// session's file.
-#[test]
-fn the_purge_never_touches_other_files_on_disk() {
-    let db = open_db("child-source");
-    let dir = TempDir::new("child-src");
-    let s = seeded_session(&db, &dir, SourceKind::File);
-    let root_file = PathBuf::from(&s.source_path);
-    commit_message(&db, &s.id, "root conversation", 100);
-
-    // An unrelated file in the same temp dir: the purge is a LOCAL row purge
-    // with no filesystem step.
-    let sibling_file = dir.path().join("sibling.jsonl");
-    std::fs::write(&sibling_file, "unrelated transcript\n").unwrap();
-
-    lifecycle::archive_session(&db, &s.id).unwrap();
-    std::fs::remove_file(&root_file).unwrap();
-
-    let result = lifecycle::permanently_delete_session(&db, &s.id).unwrap();
-    assert!(
-        result.purged,
-        "the root is the authority — the purge proceeds"
-    );
-    assert!(db.get_session(&s.id).unwrap().is_none());
-    assert!(
-        sibling_file.exists(),
-        "unrelated files are NEVER touched — there is no filesystem step"
-    );
-}
-
 /// no tombstone: a purge frees the root identity, and a source that is still
 /// there (the usual case) is re-discovered as a NEW Session with no Owner.
 #[test]

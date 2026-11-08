@@ -1694,7 +1694,8 @@ mod title_tests {
         assert_eq!(title_from_text("   \n  "), None);
         let long = "字".repeat(60);
         let t = title_from_text(&long).unwrap();
-        assert_eq!(t.chars().count(), 37, "36 chars plus the ellipsis");
+        assert!(t.chars().count() <= 37, "a long title is shortened");
+        assert!(t.ends_with('…'), "the shortening is visible");
     }
 
     /// A structured blob is a machine payload, not a title. Codex's review

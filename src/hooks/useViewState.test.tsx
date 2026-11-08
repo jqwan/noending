@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useViewPreference, preferenceValues, useViewScroll, useViewState, viewState } from "./useViewState";
+import { booleanPreference, useViewPreference, preferenceValues, useViewScroll, useViewState, viewState } from "./useViewState";
 
 beforeEach(() => { viewState.clear(); localStorage.clear(); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -57,4 +57,28 @@ it("keeps preferences usable when reading or writing storage fails", () => {
   first.unmount();
   render(<Preferences />);
   screen.getByRole("button", { name: "list" });
+});
+
+it("switches preference scopes without remounting inputs or overwriting the other scope", () => {
+  function Scoped({ scope }: { scope: string }) {
+    const [open, setOpen] = useViewPreference(`panel.${scope}`, true, booleanPreference);
+    return <><input aria-label="保留草稿" /><button onClick={() => setOpen(!open)}>{open ? "收起" : "展开"}</button></>;
+  }
+  const view = render(<Scoped scope="task" />);
+  const draft = screen.getByRole("textbox", { name: "保留草稿" });
+  fireEvent.change(draft, { target: { value: "继续编辑" } });
+  fireEvent.click(screen.getByRole("button", { name: "收起" }));
+  draft.focus();
+  view.rerender(<Scoped scope="room" />);
+  expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
+  expect(document.activeElement).toBe(draft);
+  view.rerender(<Scoped scope="task" />);
+  expect(screen.getByRole("button", { name: "展开" })).toBeTruthy();
+  expect((draft as HTMLInputElement).value).toBe("继续编辑");
+  view.unmount(); viewState.clear();
+  const task = render(<Scoped scope="task" />);
+  expect(screen.getByRole("button", { name: "展开" })).toBeTruthy();
+  task.unmount(); viewState.clear();
+  render(<Scoped scope="room" />);
+  expect(screen.getByRole("button", { name: "收起" })).toBeTruthy();
 });

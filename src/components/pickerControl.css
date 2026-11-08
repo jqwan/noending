@@ -97,8 +97,8 @@
   color: var(--text-muted);
 }
 .picker-control .agent-icon {
-  width: 16px;
-  height: 16px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 .picker-control:hover .ui-icon,
 .picker-control:hover svg {

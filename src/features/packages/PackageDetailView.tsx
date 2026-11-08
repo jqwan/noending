@@ -6,7 +6,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
 import { Field, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import PageHeader from "../../layout/PageHeader";
@@ -46,8 +45,6 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
       return value !== null;
     } catch (e) {
       if (seq === request.current && alive.current) {
-        packageDetailCache.delete(packageId);
-        setDetail(null);
         setError(String(e));
       }
       return false;
@@ -95,7 +92,7 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
   const toggle = (enable: boolean) => entry && operate("toggle", () =>
     enable ? api.enablePackage(entry.id, entry.revision) : api.disablePackage(entry.id, entry.revision));
   return <DetailPanelProvider kind="package"><div className="main package-detail-page detail-page">
-    <PageHeader title={<><Icon name="puzzle" /><span>{entry?.name ?? initialTitle ?? "插件包"}</span></>} actions={<>
+    <PageHeader title={entry?.name ?? initialTitle ?? "插件包"} icon={<Icon name="puzzle" />} actions={<>
       {configurable && userScope && <button className={"btn ghost icon-button" + (userScope.state === "enabled" ? " is-on" : " is-off")}
         title={userScope.state === "enabled" ? "用户级停用" : "用户级启用"}
         aria-label={userScope.state === "enabled" ? "停用" : "启用"}
@@ -111,9 +108,7 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
             <Field label="Agent">
               {entry.agent
                 ? <button type="button" className="link" title={`打开 Agent：${AGENT_LABELS[entry.agent]}`}
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
                     onClick={() => navigate({ view: "agents", agent: entry.agent! })}>
-                    <AgentIcon agent={entry.agent} size={16} />
                     <span>{AGENT_LABELS[entry.agent]}</span>
                   </button>
                 : <span className="muted small">未安装到任何 Agent</span>}
@@ -127,22 +122,19 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
               </span>
             </Field>}
             {detail?.root && <Field label="安装位置" copyValue={detail.root} copyTitle="复制安装位置">
-              <button type="button" className="link mono path-text-with-icon"
+              <button type="button" className="link mono"
                 title={`${detail.root} · 点击在文件管理器中打开`}
                 onClick={() => openPath(detail.root!)}>
-                <Icon name="folder" />
                 <span>{detail.root}</span>
               </button>
             </Field>}
             {entry.scopes.map((scope, index) => <Field label="配置文件" key={index}
               copyValue={scope.config_exists ? scope.config_path : null} copyTitle="复制配置文件路径">
-              {scope.config_exists ? <button type="button" className="link mono path-text-with-icon"
+              {scope.config_exists ? <button type="button" className="link mono"
                 title={`${scope.config_path} · 启停状态来源，点击在文件管理器中打开`}
                 onClick={() => openPath(scope.config_path)}>
-                <Icon name="file" />
                 <span>{scope.config_path}</span>
               </button> : <span className="muted small" title="此作用域从未显式设置，配置文件尚未创建；首次启停时会自动创建">
-                <Icon name="file" />
                 <span>{scope.config_path}（尚未创建）</span>
               </span>}
             </Field>)}

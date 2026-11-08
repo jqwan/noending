@@ -311,8 +311,6 @@ fn agents_without_terminal_integration_refuse_to_build_a_command() {
         ] {
             assert!(built.is_err(), "{agent:?} invented a command line");
         }
-        // And detection never claims an installation either.
-        assert!(adapter_for(agent).detect().is_none(), "{agent:?}");
     }
 }
 

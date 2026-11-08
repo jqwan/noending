@@ -3,6 +3,13 @@ use super::{new_id, now, Db};
 use crate::error::{other, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailboxSender {
+    pub title: Option<String>,
+    pub agent: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxMessage {
@@ -10,6 +17,9 @@ pub struct MailboxMessage {
     pub recipient_session_id: String,
     /// None is the desktop user; CLI/MCP must always provide a valid Session.
     pub sender_session_id: Option<String>,
+    /// Desktop read projection; never persisted as a copy of Session metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<MailboxSender>,
     pub body: String,
     pub created_at: String,
     pub read_at: Option<String>,
@@ -29,6 +39,7 @@ fn row_at(r: &Row<'_>, offset: usize) -> rusqlite::Result<MailboxMessage> {
         id: r.get(offset)?,
         recipient_session_id: r.get(offset + 1)?,
         sender_session_id: r.get(offset + 2)?,
+        sender: None,
         body: r.get(offset + 3)?,
         created_at: r.get(offset + 4)?,
         read_at: r.get(offset + 5)?,
@@ -105,6 +116,26 @@ impl Db {
         cursor: Option<i64>,
         limit: usize,
     ) -> Result<MailboxPage> {
+        self.mailbox_list_ordered(session, state, cursor, limit, false)
+    }
+    /// Desktop cards start with the latest arrivals; Agent readers keep FIFO order.
+    pub fn mailbox_list_latest(
+        &self,
+        session: &str,
+        state: &str,
+        cursor: Option<i64>,
+        limit: usize,
+    ) -> Result<MailboxPage> {
+        self.mailbox_list_ordered(session, state, cursor, limit, true)
+    }
+    fn mailbox_list_ordered(
+        &self,
+        session: &str,
+        state: &str,
+        cursor: Option<i64>,
+        limit: usize,
+        latest_first: bool,
+    ) -> Result<MailboxPage> {
         if !matches!(state, "all" | "unread" | "read")
             || !(1..=100).contains(&limit)
             || cursor.is_some_and(|v| v < 0)
@@ -119,16 +150,51 @@ impl Db {
             [session],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let mut stmt=tx.prepare(&format!("SELECT seq,{} WHERE recipient_session_id=?1 AND seq>?2 AND (?3='all' OR (?3='unread' AND read_at IS NULL) OR (?3='read' AND read_at IS NOT NULL)) ORDER BY seq LIMIT ?4",SELECT.strip_prefix("SELECT ").unwrap()))?;
+        let (comparison, order, start) = if latest_first {
+            ("<", "DESC", i64::MAX)
+        } else {
+            (">", "ASC", 0)
+        };
+        let mut stmt=tx.prepare(&format!("SELECT seq,{} WHERE recipient_session_id=?1 AND seq{comparison}?2 AND (?3='all' OR (?3='unread' AND read_at IS NULL) OR (?3='read' AND read_at IS NOT NULL)) ORDER BY seq {order} LIMIT ?4",SELECT.strip_prefix("SELECT ").unwrap()))?;
         let rows = stmt
             .query_map(
-                params![session, cursor.unwrap_or(0), state, limit + 1],
+                params![session, cursor.unwrap_or(start), state, limit + 1],
                 |r| Ok((r.get::<_, i64>(0)?, row_at(r, 1)?)),
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let next_cursor = (rows.len() > limit).then(|| rows[limit - 1].0);
-        let items = rows.into_iter().take(limit).map(|(_, m)| m).collect();
+        let mut items: Vec<_> = rows.into_iter().take(limit).map(|(_, m)| m).collect();
         drop(stmt);
+        if latest_first {
+            let ids: BTreeSet<_> = items
+                .iter()
+                .filter_map(|m| m.sender_session_id.as_deref())
+                .collect();
+            if !ids.is_empty() {
+                let placeholders = vec!["?"; ids.len()].join(",");
+                let mut lookup = tx.prepare(&format!(
+                    "SELECT id,title,agent FROM sessions WHERE id IN ({placeholders})"
+                ))?;
+                let senders = lookup
+                    .query_map(rusqlite::params_from_iter(ids), |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            MailboxSender {
+                                title: r.get(1)?,
+                                agent: r.get(2)?,
+                            },
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+                for message in &mut items {
+                    message.sender = message
+                        .sender_session_id
+                        .as_ref()
+                        .and_then(|id| senders.get(id))
+                        .cloned();
+                }
+            }
+        }
         tx.commit()?;
         Ok(MailboxPage {
             items,

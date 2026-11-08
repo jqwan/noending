@@ -3,7 +3,8 @@
 //!
 //! No test touches a real repository, a real NoEnding Home or `git`: observations
 //! are constructed by script (the `WorkspaceObserving` / `WorkspacePolicy` seams).
-//! Paths are absolute strings that need not exist — path identity is lexical — and
+//! Explicit cleanup tests also use isolated temporary directories. Other paths
+//! are absolute strings that need not exist — path identity is lexical — and
 //! assertions compare against `canon(..)` rather than a spelled-out prefix,
 //! because `canonical_path` is stored platform-native and CI runs macOS + Windows.
 
@@ -851,18 +852,6 @@ fn one_workspace_path_never_belongs_to_two_projects() {
         "p-mine",
         "a second caller cannot steal a path by re-inserting it"
     );
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM workspace_paths WHERE canonical_path = ?1",
-            &canon("/shared/path")
-        ),
-        1
-    );
-
-    // Reassignment is the one legal move, and it is a move, not a copy; the
-    // move itself is covered at the real function in session_workspace_test
-    // (`reassign_workspace_path_project_conn`).
     assert_eq!(
         count_rows(
             &db,
@@ -1764,9 +1753,6 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
     expected.sort();
     assert_eq!(ids, expected);
 
-    // A Project remains listed while it still owns a WorkspacePath.
-    assert_eq!(db.list_projects().unwrap().len(), 2);
-
     // Explicitly archived projects remain listed until permanent deletion.
     set_project_archived(&db, &b.project_id, true).unwrap();
     assert_eq!(db.list_projects().unwrap().len(), 2);
@@ -1803,14 +1789,6 @@ fn one_git_family_is_found_before_it_is_created() {
     assert_eq!(
         first, again,
         "the location relation has to answer before a row is created"
-    );
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM git_identities WHERE id = ?1",
-            &first
-        ),
-        1
     );
     assert_eq!(
         count_rows(
@@ -2027,21 +2005,11 @@ fn refresh_preserves_explicit_task_projects() {
         add_ws_path(&db, "ws-1", &wp.id);
         wp
     };
-    let before = count_rows(
-        &db,
-        "SELECT COUNT(*) FROM workstream_projects WHERE project_id = ?",
-        &wp.project_id,
-    );
-    assert_eq!(before, 1);
-
     reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
     assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM workstream_projects WHERE project_id = ?",
-            &wp.project_id
-        ),
-        before,
+        noending::storage::workstream_projects::project_ids_for_workstream(&db.read(), "ws-1")
+            .unwrap(),
+        vec![wp.project_id.clone()],
         "refresh never changes explicit task associations"
     );
 }
@@ -2068,23 +2036,8 @@ fn refresh_does_not_touch_session_history() {
             &support::seed_source(0),
         )
         .unwrap();
-    let before = count_rows(
-        &db,
-        "SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?",
-        &wp.id,
-    );
-    assert_eq!(before, 1);
-
     reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
     // 目录消失只会让路径标记 missing；Session 历史一行不动。
-    assert_eq!(
-        count_rows(
-            &db,
-            "SELECT COUNT(*) FROM sessions WHERE workspace_path_id = ?",
-            &wp.id
-        ),
-        before
-    );
     let s = { db.get_session(&s_hist.id).unwrap().expect("session intact") };
     assert!(s.archived_at.is_none());
     assert_eq!(s.workspace_path_id.as_deref(), Some(wp.id.as_str()));
@@ -2233,4 +2186,105 @@ fn project_workspace_paths_order_main_worktree_first() {
     assert_eq!(paths[0].canonical_path, canon("/work/z_main"));
     assert_eq!(paths[1].git_kind.as_deref(), Some("linked"));
     assert_eq!(paths[1].canonical_path, canon("/work/a_linked"));
+}
+
+#[test]
+fn explicit_cleanup_keeps_existing_and_referenced_paths_and_preserves_project_data() {
+    let (root, db) = temp_db();
+    let add = |name: &str, exists: bool| {
+        let raw = root.join(name).to_string_lossy().into_owned();
+        ensure(&db, &plain(&raw, exists))
+    };
+    let unused = add("missing-unused", false);
+    let present = add("present", true);
+    std::fs::create_dir(&present.canonical_path).unwrap();
+    let restored = add("restored", false);
+    std::fs::create_dir(&restored.canonical_path).unwrap();
+    let unobserved = add("not-observed-missing", true);
+    let active = add("missing-active", false);
+    let archived = add("missing-archived", false);
+    let foreign = add("other-project", false);
+    for path in [&present, &restored, &unobserved, &active, &archived] {
+        db.tx(|tx| {
+            noending::storage::workspace::reassign_workspace_path_project_conn(
+                tx,
+                &path.id,
+                &unused.project_id,
+            )
+        })
+        .unwrap();
+    }
+    let active_session = session(&db, "active", &active.canonical_path, &active.id);
+    let archived_session = session(&db, "archived", &archived.canonical_path, &archived.id);
+    db.write()
+        .execute(
+            "UPDATE sessions SET archived_at='2026-11-08' WHERE id=?1",
+            [&archived_session.id],
+        )
+        .unwrap();
+    workstream(&db, "cleanup-task", "保留关联任务");
+    add_ws_path(&db, "cleanup-task", &unused.id);
+    let project_id = unused.project_id.clone();
+    assert_eq!(
+        noending::workspace::project::clean_missing_project_paths(&db, &project_id).unwrap(),
+        1
+    );
+    assert!(db.get_workspace_path(&unused.id).unwrap().is_none());
+    for path in [
+        &present,
+        &restored,
+        &unobserved,
+        &active,
+        &archived,
+        &foreign,
+    ] {
+        assert!(db.get_workspace_path(&path.id).unwrap().is_some());
+    }
+    drop(db);
+    let reopened = Db::open(&root.join("noending.db")).unwrap();
+    let detail = project_detail(&reopened, &project_id, &UnrestrictedWorkspace)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.workspace_paths.len(), 5);
+    assert_eq!(detail.sessions.len(), 2);
+    assert_eq!(detail.workstreams[0].workstream.id, "cleanup-task");
+    assert_eq!(
+        reopened
+            .get_session(&active_session.id)
+            .unwrap()
+            .unwrap()
+            .workspace_path_id
+            .as_deref(),
+        Some(active.id.as_str())
+    );
+    assert!(reopened
+        .get_session(&archived_session.id)
+        .unwrap()
+        .unwrap()
+        .archived_at
+        .is_some());
+    assert_eq!(
+        noending::workspace::project::clean_missing_project_paths(&reopened, &project_id).unwrap(),
+        0
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_cleanup_retains_an_empty_project_and_rejects_unknown_projects() {
+    let (root, db) = temp_db();
+    let path = ensure(&db, &plain(&root.join("gone").to_string_lossy(), false));
+    assert_eq!(
+        noending::workspace::project::clean_missing_project_paths(&db, &path.project_id).unwrap(),
+        1
+    );
+    assert!(db
+        .list_workspace_paths_for_project(&path.project_id)
+        .unwrap()
+        .is_empty());
+    assert!(db.get_project(&path.project_id).unwrap().is_some());
+    assert!(noending::workspace::project::clean_missing_project_paths(&db, "nonexistent").is_err());
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
 }

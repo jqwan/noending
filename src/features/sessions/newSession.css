@@ -96,7 +96,7 @@
   border: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  background: var(--bg-app);
+  background: var(--bg-surface);
   flex-wrap: wrap;
   transition: border-color var(--duration-normal) ease;
 }
@@ -236,15 +236,7 @@
 }
 .new-session-send:active:not(:disabled) { transform: scale(.95); }
 .new-session-send:disabled { opacity: .25; cursor: default; }
-.new-session-send svg {
-  width: 18px;
-  height: 18px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
+.new-session-send .ui-icon { width: var(--icon-size); height: var(--icon-size); }
 .new-session-hint { margin: 12px 0 0; text-align: center; font-size: var(--font-size-sm); color: var(--text-muted); }
 .new-session-hint[role="alert"] { color: var(--danger); }
 .new-session-note { margin: 12px 8px 0; font-size: var(--font-size-sm); color: var(--warning); }

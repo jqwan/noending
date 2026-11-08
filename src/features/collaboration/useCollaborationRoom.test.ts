@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
@@ -18,6 +19,7 @@ type MessagePage = Awaited<ReturnType<typeof api.collaborationRoomMessages>>;
 const range = (from: number, through: number) => Array.from({ length: through - from + 1 }, (_, i) => message(from + i));
 
 beforeEach(() => {
+  clearReadResources();
   vi.resetAllMocks();
   events.onChange = null;
   vi.mocked(listen).mockImplementation(async (_name, callback) => {
@@ -44,8 +46,31 @@ const message = (seq: number, patch: Partial<CollaborationMessage> = {}): Collab
   ...patch,
 });
 
-it("appends a newer page without duplicating or reordering", () => {
-  const merged = mergeMessages([message(1), message(2)], [message(2), message(3)]);
+it("reads room metadata without history in task details and catches up when entering chat", async () => {
+  vi.mocked(api.collaborationRoomMessages).mockResolvedValue({ items: [message(1)], next_cursor: null, latest_seq: 1 });
+  const view = renderHook(({ chat }) => useCollaborationRoom("task", chat), { initialProps: { chat: false } });
+  await waitFor(() => expect(view.result.current.roomLoading).toBe(false));
+  expect(view.result.current.room?.room?.id).toBe("room");
+  expect(api.collaborationRoomMessages).not.toHaveBeenCalled();
+  view.rerender({ chat: true });
+  await waitFor(() => expect(view.result.current.messages.map(m => m.seq)).toEqual([1]));
+  view.rerender({ chat: false });
+  vi.mocked(api.collaborationRoomMessages).mockClear();
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ ...room(), title: "外部更新" });
+  await act(async () => { notify(); });
+  await waitFor(() => expect(view.result.current.room?.title).toBe("外部更新"));
+  expect(api.collaborationRoomMessages).not.toHaveBeenCalled();
+  vi.mocked(api.collaborationRoomMessages).mockResolvedValue({ items: [message(1), message(2)], next_cursor: null, latest_seq: 2 });
+  view.rerender({ chat: true });
+  await waitFor(() => expect(view.result.current.messages.map(m => m.seq)).toEqual([1, 2]));
+});
+
+it("appends a newer page to the single shared sequence without duplicating or reordering", () => {
+  // 用户与成员的发言共用一条序列：合并只按 ID 去重、按 seq 排序。
+  const merged = mergeMessages(
+    [message(1, { sender_session_id: null }), message(2)],
+    [message(2, { sender_session_id: null }), message(3)],
+  );
   expect(merged.map(m => m.seq)).toEqual([1, 2, 3]);
 });
 
@@ -57,12 +82,6 @@ it("preserves known history when merging a page beyond a gap", () => {
 it("prepends an earlier page in sequence order", () => {
   const merged = mergeMessages([message(5), message(6)], [message(3), message(4)]);
   expect(merged.map(m => m.seq)).toEqual([3, 4, 5, 6]);
-});
-
-it("keeps own messages in the single shared sequence", () => {
-  // 自己的发言与成员发言共用一条房间序列，不分流成两个列表。
-  const merged = mergeMessages([message(1, { sender_session_id: null })], [message(2, { sender_session_id: null })]);
-  expect(merged.map(m => m.seq)).toEqual([1, 2]);
 });
 
 it("leaves an empty page alone instead of clearing what is already shown", () => {

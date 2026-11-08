@@ -28,14 +28,14 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
     .filter(s => !s.archived_at && resolveSessionContinueMode(s) === "terminal").map(s => s.id));
 
   return (
-    <DetailList label="会话列表">
+    <DetailList label="会话列表" compact>
       {sessions.length === 0 && <div className="detail-empty">{emptyText}</div>}
       {visibleSessions.map((s) => (
         <DetailListRow key={s.id}
           icon={<span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>}
           title={sessionDisplayTitle(s.title)}
           titleHint={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}
-          description={timeAgo(s.last_activity_at ?? s.started_at)}
+          meta={<span title={s.last_activity_at ?? s.started_at ?? undefined}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>}
           onOpen={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}
           actions={
               <SessionResumeButton

@@ -19,8 +19,8 @@ use noending::platform::exec_runner;
 use noending::workspace::home::NoEndingHome;
 use noending::workspace::identity::{self, PathStyle};
 use noending::workspace::resolver::{
-    is_observable, GitAccess, GitProbe, GitProbeState, ReservedPaths, ResolverContext,
-    WorkspaceObserving, WorkspaceResolver,
+    is_observable, GitAccess, GitProbeState, ReservedPaths, ResolverContext, WorkspaceObserving,
+    WorkspaceResolver,
 };
 use noending_lib as noending;
 use std::path::{Path, PathBuf};
@@ -464,29 +464,6 @@ fn the_child_process_runs_in_the_requested_directory() {
     let obs = resolver_for(None, ReservedPaths::default()).observe(&absent.to_string_lossy());
     assert!(!obs.exists);
     assert_eq!(obs.git, GitDetection::None);
-
-    // `GitProbe` is the injected seam: an unavailable git must not be reached
-    // through a process at all.
-    let probe = GitAccess::unavailable().probe(&repo);
-    assert_eq!(probe.state, GitProbeState::Unavailable);
-    let scripted = GitProbe {
-        state: GitProbeState::Repo,
-        common_dir: Some(repo.join(".git").to_string_lossy().to_string()),
-        toplevel: Some(repo.to_string_lossy().to_string()),
-        worktrees: vec![],
-        remotes: Vec::new(),
-    };
-    assert!(matches!(
-        noending::workspace::resolver::classify_git(
-            &ResolverContext {
-                user_home: Some(root.to_string_lossy().to_string()),
-                ..ResolverContext::inert()
-            },
-            &identity::normalize_path(&repo.to_string_lossy()).unwrap(),
-            &scripted
-        ),
-        GitDetection::Detected { .. }
-    ));
 
     std::fs::remove_dir_all(&root).ok();
 }

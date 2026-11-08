@@ -11,8 +11,10 @@
   display: flex;
   position: relative;
   height: 100%;
+  background: var(--bg-chrome);
 }
 .app.mac-titlebar { --titlebar-gutter: 211px; } /* 87 + 28*4 + 4*3 */
+.navigation-progress { position: absolute; top: var(--titlebar-height); inset-inline: 0; height: var(--space-2xs); background: var(--accent); z-index: 60; pointer-events: none; }
 .app.sidebar-collapsed { --titlebar-gutter: 168px; } /* 12 + 28*5 + 4*4 */
 .app.mac-titlebar.sidebar-collapsed { --titlebar-gutter: 243px; } /* 87 + 28*5 + 4*4 */
 .app.windows-titlebar { --window-controls-width: calc(var(--window-control-width) * 3); }
@@ -75,6 +77,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  padding-inline-end: var(--workspace-inset);
+  padding-bottom: var(--workspace-inset);
 }
 .app-content > .main { flex: 1; min-height: 0; }
 .session-content { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
@@ -85,30 +89,13 @@
   width: var(--rail-width);
   margin-top: var(--titlebar-height);
   padding: 10px 8px 12px;
-  border-right: 1px solid var(--border-subtle);
-  background: var(--bg-sidebar);
+  background: var(--bg-chrome);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: space-between;
 }
 .navigation-rail-items { display: flex; flex-direction: column; gap: var(--space-sm); }
-.rail-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.rail-button .ui-icon { width: 19px; height: 19px; }
-.rail-button:hover { color: var(--text-primary); background: var(--bg-hover); }
-.rail-button.active { color: var(--accent); background: var(--bg-active); }
 .main, .sidebar-scroll { overscroll-behavior: none; }
 /* z-index 必须高于页面吸顶标题行（.page-head 也是 6，且在 DOM 里更靠后）：
    侧栏收起时两者会落在同一段横向空间里，同值会让标题行的背景盖住这三个按钮。 */
@@ -118,31 +105,7 @@
   display: flex;
   gap: var(--space-xs);
 }
-.history-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.history-button:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
-.history-button:disabled { opacity: 0.3; cursor: default; }
-.history-icon {
-  width: 18px;
-  height: 18px;
-  display: block;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.25;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
+
 .titlebar-divider {
   position: absolute;
   top: 16px;
@@ -171,6 +134,9 @@
   /* 顶距自己留：.app 已经不给这 48px 了（见上）。用 margin 而不是 padding —— 侧栏背景
      才不会涂到标题栏那条里去（那条横跨全宽，应由 .app 的底色统一铺满）。 */
   margin-top: var(--titlebar-height);
+  margin-bottom: var(--workspace-inset);
+  border-start-start-radius: var(--radius-xl);
+  border-end-start-radius: var(--radius-xl);
   padding: 0;
   overflow: hidden;
 
@@ -186,7 +152,7 @@
 .sidebar.collapsed > * { display: none; }
 .mac-titlebar .sidebar.collapsed { padding-top: 0; padding-bottom: 0; }
 .app.without-session-sidebar .main { max-width: none; }
-.sidebar-top { flex: none; padding: 6px 8px 3px; }
+.sidebar-top { flex: none; padding: var(--space-sm) var(--space-sm) 3px; }
 .sidebar-top-btn {
   display: flex;
   align-items: center;
@@ -259,23 +225,39 @@
 }
 .sidebar .spacer { flex: none; min-height: 12px; }
 
+/* 看板筛选卡片的静态位置与吸顶位置共用页头间距。 */
+.board-toolbar {
+  position: sticky;
+  top: calc(var(--titlebar-height) + var(--head-gap));
+  z-index: 5;
+  margin-bottom: var(--space-lg);
+}
+.board-toolbar::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: calc(-1 * var(--head-gap) - 1px);
+  height: var(--head-gap);
+  z-index: -1;
+  background: var(--bg-canvas);
+}
+
 /* ---------- Main ---------- */
 .main {
   /* gutter 是给吸顶标题行用的：它要抵消同一份左右内距，才能铺满整行又和正文对齐。 */
-  --main-gutter: 32px;
+  --main-gutter: var(--space-lg);
   /* 页头与正文之间的间距，也是「吸顶的东西钉在哪」的唯一定义。看板的搜索/筛选区
      静态位置就在这段间距之后，sticky top 用同一个变量算「band 高 + 这段间距」，
-     于是钉住位置恒等于静态位置、它不会先跟着滚一截再固定；想看板把这段清零即可，
-     两处一起变，不会各写一个数字然后对不上。 */
-  --head-gap: 20px;
+     于是钉住位置恒等于静态位置、它不会先跟着滚一截再固定。
+     普通正文与详情页、侧栏统一从标题栏下方 8px 开始。 */
+  --head-gap: var(--space-sm);
+  background: var(--bg-canvas);
   flex: 1;
   overflow-y: auto;
-  padding: 0 var(--main-gutter) 48px;
+  padding: 0 var(--main-gutter) var(--space-2xl);
   max-width: 1280px;
+  border-end-end-radius: var(--radius-xl);
 }
-/* 看板页有紧贴页头的搜索/筛选区，不留这段间距（用户觉得 20px 太大）。归档模式下
-   没有这条工具栏，:has 不成立，间距自动回到 20px。 */
-.main:has(> .board-toolbar) { --head-gap: 0px; }
 /* 没有页头的页面（加载中 / 错误态 / Assistant）自己让出标题栏那条的高度，
    否则正文会顶到 y=0、压在红黄绿下面。有页头的页面由那条 band 占住这段。 */
 .main:not(:has(> .page-head)) { padding-top: var(--titlebar-height); }
@@ -294,16 +276,9 @@
   padding-bottom: 0;
   max-width: none;
 }
-/* 满宽页的标题行内距必须与普通 .main 的 gutter 字面一致（32，≤800 时 24）：
-   .fill 把 --main-gutter 清零让正文到边，标题行不能跟着归零——对话、终端与
-   概览页之间跳转时标题纹丝不动，满宽的是正文画布，对齐基准不变。 */
-.main.fill > .page-head { padding-left: 32px; padding-right: 32px; }
-@media (max-width: 800px) {
-  .main.fill > .page-head { padding-left: 24px; padding-right: 24px; }
-}
-
 /* 标题行=应用标题栏那一条：吸在 .main 顶部，页面滚动时内容从它下面穿过。
    左右用负 margin 抵消 .main 的内边距，背景才能盖住滚过去的正文。
+   标题栏内距统一为 16px，不随满宽画布的 gutter 清零。
    它的 z-index（6）盖住了 AppShell 的 .window-drag-region（4），所以它自己必须是拖动区：
    见 PageHeader 上的 data-tauri-drag-region="deep"。里面的按钮由 tauri 的脚本判定为
    可点元素而自动豁免，标题则靠自己的 ="false" 主动退出拖动区，不必再写 no-drag
@@ -313,7 +288,7 @@
   top: 0;
   z-index: 6;
   margin: 0 calc(-1 * var(--main-gutter)) var(--head-gap);
-  padding: 0 var(--main-gutter);
+  padding: 0 var(--space-lg);
   height: var(--titlebar-height);
   min-height: var(--titlebar-height);
   flex: none;
@@ -321,8 +296,27 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-lg);
-  background: var(--bg-app);
+  background: var(--bg-chrome);
 }
+/* 页头下缘只绘制圆角外侧的外框色，保持内容与滚动容器原有结构。 */
+.page-head::after,
+.app.sidebar-collapsed .page-head::before {
+  content: "";
+  position: absolute;
+  top: 100%;
+  width: var(--radius-xl);
+  height: var(--radius-xl);
+  pointer-events: none;
+}
+.page-head::after {
+  right: 0;
+  background: radial-gradient(circle at bottom left, transparent calc(var(--radius-xl) - .5px), var(--bg-chrome) var(--radius-xl));
+}
+.app.sidebar-collapsed .page-head::before {
+  left: 0;
+  background: radial-gradient(circle at bottom right, transparent calc(var(--radius-xl) - .5px), var(--bg-chrome) var(--radius-xl));
+}
+.app.sidebar-collapsed .main { border-end-start-radius: var(--radius-xl); }
 /* 侧栏收起后内容顶到最左，标题行必须让开历史按钮那一段，否则标题压在按钮下面。 */
 .app.without-session-sidebar .page-head { padding-left: calc(var(--titlebar-gutter) - var(--rail-width) + 16px); }
 /* All page headers, including full-width terminal pages, reserve the same
@@ -332,14 +326,21 @@
   .app.windows-titlebar .page-head { padding-right: calc(24px + var(--window-controls-width)); }
 }
 .page-head .page-title {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-sm);
   min-width: 0;
   margin: 0;
   font-size: var(--font-size-page);
-  line-height: 28px;
+  line-height: var(--control-height-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.page-title-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--icon-size); height: var(--icon-size); color: var(--text-secondary); }
+.page-title-icon > svg { width: var(--icon-size); height: var(--icon-size); }
+.page-title-text { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 动作区固定在右上角：标题再长也只挤压标题本身，按钮不掉行、不被挤下去。 */
 .page-head .actions {
   display: flex;
@@ -347,27 +348,33 @@
   align-items: center;
   gap: var(--space-sm);
 }
-/* 标题栏里的按钮统一成与左侧历史按钮同形：28×28 方形（button.btn 的 min-height
-   是 32px、icon-button 只改了宽度，不覆盖就会是 28×32 的长方形）。 */
-.page-head .actions button.icon-button,
-.page-head .actions .settings-seg button {
-  width: 28px;
-  height: 28px;
-  min-height: 28px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.detail-panel-control { display: inline-flex; align-items: center; flex: none; }
+.page-head .page-head-group { display: inline-flex; align-items: center; flex: none; gap: var(--space-xs); }
+.page-head .page-head-group:empty,
+.page-head .actions:not(:has(.page-head-group:not(:empty))),
+.page-head-trailing:not(:has(> .page-head-group:not(:empty))) { display: none; }
+.page-head-trailing { position: relative; display: flex; align-items: center; justify-content: flex-end; flex: 0 1 auto; min-width: max-content; gap: var(--space-sm); }
+.page-head-navigation:not(:empty) + .page-head-trailing { padding-inline-start: calc(var(--space-sm) + 1px); }
+.page-head-navigation:not(:empty) + .page-head-trailing::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  width: 1px;
+  height: var(--space-lg);
+  background: var(--border-subtle);
 }
-.page-head .actions .session-action-divider,
-.session-action-divider,
-.action-divider {
+/* 右侧操作区与右栏使用同一宽度；扣除标题栏右内距后，两条分隔线位置一致。
+   空间不足时允许操作区收缩，并为标题保留最小阅读空间。 */
+.page-head-panel-open .actions { max-width: calc(100% - var(--header-title-min-width) - var(--space-lg)); }
+.page-head-panel-open .page-head-trailing { width: calc(var(--detail-panel-width) - var(--space-lg)); }
+.page-head .page-head-trailing > .page-head-group:not(:empty) ~ .page-head-group:not(:empty)::before {
+  content: "";
   width: 1px;
   height: 16px;
   background: var(--border-subtle);
-  margin: 0 2px;
+  flex: none;
+  margin-inline-end: var(--space-xs);
 }
-
 .toolbar { display: flex; gap: var(--space-sm); align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
 .divider { border: 0; border-top: 1px solid var(--border-subtle); margin: 26px 0; }
 
@@ -397,12 +404,9 @@
   margin: 0 0 8px;
 }
 
-.sidebar-resizer { position: absolute; top: var(--titlebar-height); bottom: 0; left: calc(var(--rail-width) + var(--sidebar-width) - 3px); width: 6px; z-index: 8; cursor: col-resize; touch-action: none; }
-.sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: var(--accent-wash); }
+.panel-resizer { position: absolute; width: var(--panel-resizer-hit-width); cursor: col-resize; touch-action: none; }
+.sidebar-resizer { top: var(--titlebar-height); bottom: var(--workspace-inset); left: calc(var(--rail-width) + var(--sidebar-width) - (var(--panel-resizer-hit-width) + 1px) / 2); z-index: 8; }
 .nav-item { gap: var(--space-md); min-height: 34px; }
-@media (max-width: 1100px) {
-  .main { --main-gutter: 24px; padding-bottom: 40px; }
-}
 
 .truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 运行中终端的关闭按钮：悬浮整行才现身，平时不占视觉。 */
@@ -419,8 +423,8 @@
   transition: color var(--duration-normal) ease, transform var(--duration-normal) ease;
 }
 .sidebar-header-icon .ui-icon {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
   transition: transform var(--duration-normal) ease;
 }
 .sidebar-header-title {
@@ -514,8 +518,8 @@ button.sidebar-pinned-header,
   cursor: default;
 }
 .sidebar-collapse-all-btn .ui-icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
 }
 .sidebar-filter-wrapper {
   position: relative;
@@ -564,8 +568,8 @@ button.sidebar-pinned-header,
   color: var(--success);
 }
 .sidebar-filter-trigger .ui-icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
 }
 .sidebar-filter-menu {
   position: absolute;
@@ -626,8 +630,8 @@ button.sidebar-pinned-header,
   color: var(--text-primary);
 }
 .sidebar-group-arrow {
-  width: 10px !important;
-  height: 10px !important;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
   opacity: 0.6;
   margin-left: -2px;
   transition: transform var(--duration-normal) ease;
@@ -1018,7 +1022,7 @@ button.sidebar-pinned-header,
 /* Unified detail page layout (Agent, Project, Workstream, Session) */
 /* 详情页与终端共用可收起右栏；两侧各自滚动。 */
 .main.detail-page {
-  --main-gutter: 32px;
+  --main-gutter: var(--space-lg);
   --head-gap: 0px;
   display: flex;
   flex-direction: column;
@@ -1029,29 +1033,36 @@ button.sidebar-pinned-header,
   max-width: none;
 }
 .main.detail-page > .page-head { margin: 0; }
-.detail-workspace { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; container-type: inline-size; container-name: detail-workspace; }
-.detail-main { display: flex; flex: 1; flex-direction: column; gap: var(--space-lg); min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-2xl) var(--main-gutter, 32px); }
+.session-page-shell > .main { display: contents; }
+.detail-workspace { --section-padding: var(--space-lg); position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; container-type: inline-size; container-name: detail-workspace; }
+.detail-main { display: flex; flex: 1; flex-direction: column; gap: var(--space-md); min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-sm) var(--main-gutter, var(--space-lg)) var(--space-lg); background: var(--bg-canvas); }
 .detail-main > * { flex-shrink: 0; }
-.detail-panel { display: flex; flex: 0 0 360px; flex-direction: column; width: 360px; min-width: 0; min-height: 0; overflow: hidden; border-left: 1px solid var(--border-subtle); background: var(--bg-panel); }
+.detail-document { width: 100%; max-width: var(--document-max-width); margin-inline: auto; }
+/* 主区与右栏共用内容底板，卡片使用独立表面色。 */
+.detail-panel { position: relative; display: flex; flex: 0 0 var(--detail-panel-width); flex-direction: column; width: var(--detail-panel-width); min-width: 0; min-height: 0; overflow: visible; border-left: 1px solid var(--border-subtle); background: var(--bg-canvas); }
+.detail-panel-resizer { inset: 0 auto 0 calc((var(--panel-resizer-hit-width) + 1px) / -2); z-index: 1; }
 .detail-panel[hidden] { display: none; }
-.detail-panel-scroll { display: flex; flex: 1; flex-direction: column; gap: var(--space-lg); min-height: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-2xl) var(--space-lg); }
+.detail-panel-scroll { display: flex; flex: 1; flex-direction: column; gap: var(--space-md); min-height: 0; overflow: auto; overscroll-behavior: contain; padding: var(--space-sm) var(--space-lg) var(--space-lg); }
 .detail-panel-scroll > * { flex-shrink: 0; }
-.detail-panel-footer { flex: none; padding: var(--space-lg); border-top: 1px solid var(--border-subtle); background: var(--bg-app); max-height: 45%; overflow: auto; }
+.detail-panel-footer { flex: none; padding: var(--space-lg); border-top: 1px solid var(--border-subtle); background: var(--bg-surface); max-height: 45%; overflow: auto; }
 .detail-panel-footer:empty { display: none; }
 .detail-panel .detail-scroll { max-height: none; overflow: visible; padding-inline-end: 0; margin-inline-end: 0; scrollbar-gutter: auto; }
-.detail-main-terminal { padding: 0; gap: 0; overflow: hidden; }
+.detail-main-terminal,
+.detail-main-conversation,
+.detail-main-collaboration { padding: 0; gap: 0; overflow: hidden; }
+.detail-main-conversation,
+.detail-main-collaboration { position: relative; background: var(--bg-app); }
+.detail-main-terminal { background: var(--bg-app); }
 .detail-main-terminal > * { flex-shrink: 1; }
-.detail-main-collaboration { padding: var(--space-2xl) var(--space-lg); overflow: hidden; }
 .agent-detail-page .agents-content,
 .agent-detail-wrapper { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
 .agent-detail-page .agents-content { gap: 0; }
 @media (max-width: 900px) {
-  .detail-panel { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(360px, calc(100% - 24px)); box-shadow: var(--shadow-lg); }
+  .detail-panel { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(var(--detail-panel-width), calc(100% - 24px)); box-shadow: var(--shadow-lg); }
+  .detail-panel-resizer { display: none; }
 }
 /* 左侧导航占据宽度后，也按正文实际可用空间切换为抽屉。 */
 @container detail-workspace (max-width: 900px) {
-  .detail-panel { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(360px, calc(100% - 24px)); box-shadow: var(--shadow-lg); }
-}
-@media (max-width: 800px) {
-  .main.detail-page { --main-gutter: 24px; }
+  .detail-panel { position: absolute; z-index: 5; right: 0; top: 0; bottom: 0; width: min(var(--detail-panel-width), calc(100% - 24px)); box-shadow: var(--shadow-lg); }
+  .detail-panel-resizer { display: none; }
 }

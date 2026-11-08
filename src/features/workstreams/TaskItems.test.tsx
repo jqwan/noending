@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
@@ -7,6 +8,7 @@ import type { TaskItem } from "../../types";
 let stored: TaskItem[];
 const first = (): TaskItem => ({ id: "work-1", task_id: "task", title: "实现与验收", description: "保证已有数据完整", details: ["已复现问题"], completed: false, revision: 1, created_at: "2026-10-25T00:00:00Z", updated_at: "2026-10-25T00:00:00Z" });
 beforeEach(() => {
+  clearReadResources();
   stored = [];
   vi.spyOn(api, "listTaskItems").mockImplementation(async task => structuredClone(stored.filter(item => item.task_id === task)));
   vi.spyOn(api, "createTaskItem").mockImplementation(async (task, content) => {
@@ -26,6 +28,21 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it("keeps the previous items and count visible on return while refreshing, without leaking another task's items", async () => {
+  stored = [first()];
+  const firstPage = render(<TaskItems taskId="task" />);
+  await screen.findByRole("region", { name: "实现与验收" });
+  firstPage.unmount();
+  vi.mocked(api.listTaskItems).mockImplementation(() => new Promise(() => {}));
+  const page = render(<TaskItems taskId="task" />);
+  expect(screen.getByRole("region", { name: "实现与验收" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "任务事项（1）" })).toBeTruthy();
+  expect(screen.queryByText("读取任务事项…")).toBeNull();
+  page.rerender(<TaskItems taskId="another" />);
+  expect(screen.queryByRole("region", { name: "实现与验收" })).toBeNull();
+  expect(screen.queryByText("暂无任务事项")).toBeNull();
+});
 
 it("creates work, preserves progress across completion and reopening, and restores it on remount", async () => {
   const firstRender = render(<TaskItems taskId="task" />);

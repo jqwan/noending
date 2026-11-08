@@ -19,13 +19,13 @@ it("resizes once, keeps hidden dimensions, restores terminal focus, and serializ
   Object.defineProperties(container, {
     clientWidth: { get: () => visible ? 800 : 0 }, clientHeight: { get: () => visible ? 600 : 0 },
   });
-  const term = { cols: 100, rows: 30, textarea, element: container, focus: () => textarea.focus() };
+  const term = { cols: 100, rows: 30, textarea, element: container, focus: () => textarea.focus(), refresh: vi.fn(), clearTextureAtlas: vi.fn() };
   let desired = [100, 30];
   const fit = { fit: () => { [term.cols, term.rows] = desired; } };
   let complete!: () => void;
   const resize = vi.fn().mockImplementationOnce(() => new Promise<void>(r => { complete = r; }))
     .mockResolvedValue(undefined);
-  const stop = connectTerminalLayout(term, fit, container, resize, { cols: 80, rows: 24 });
+  const layout = connectTerminalLayout(term, fit, container, resize, { cols: 80, rows: 24 });
   const frame = () => frames.shift()!(0);
   frame();
   expect(document.activeElement).toBe(textarea);
@@ -42,7 +42,11 @@ it("resizes once, keeps hidden dimensions, restores terminal focus, and serializ
   window.dispatchEvent(new Event("blur")); textarea.blur();
   window.dispatchEvent(new Event("focus"));
   expect(document.activeElement).toBe(textarea);
-  stop();
+  layout.redraw(); frame();
+  expect(term.refresh).toHaveBeenCalledWith(0, 39);
+  expect(term.clearTextureAtlas).toHaveBeenCalledTimes(1);
+  expect(resize.mock.calls).toEqual([[100, 30], [120, 40]]);
+  layout.dispose();
   textarea.blur(); window.dispatchEvent(new Event("focus"));
   expect(document.activeElement).not.toBe(textarea);
 });

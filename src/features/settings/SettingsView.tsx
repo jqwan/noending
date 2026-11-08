@@ -7,6 +7,7 @@ import "./settings.css";
 
 import ContextSettings from "./ContextSettings";
 import PageHeader from "../../layout/PageHeader";
+import { workspaceSettingsResource } from "./settingsResources";
 import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
@@ -20,11 +21,8 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
 }) {
   return (
     <div className="main settings-page">
-      <PageHeader
-        title="设置"
-        sub="配置主题外观、摘要提取与本地存储数据。"
-      />
-      <div className="settings-pane" style={{ marginTop: 18 }}>
+      <PageHeader title="设置" icon={<Icon name="settings" />} />
+      <div className="settings-pane">
         <AppearanceSettings />
         <ContextSettings />
         <WorkspaceStorageSettings />
@@ -150,15 +148,15 @@ function CopyButton({ value, title = "复制路径" }: { value: string; title?: 
 }
 
 function WorkspaceStorageSettings() {
-  const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
+  const settings = workspaceSettingsResource.useValue("settings") ?? null;
   const [failed, setFailed] = useState(false);
   const [editing, setEditing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(() => {
     setRefreshing(true);
-    api.getWorkspaceSettings()
-      .then((s) => { setSettings(s); setFailed(false); })
+    workspaceSettingsResource.revalidate("settings")
+      .then(() => { setFailed(false); })
       .catch((e) => { console.error(e); setFailed(true); })
       .finally(() => setRefreshing(false));
   }, []);
@@ -320,7 +318,7 @@ function WorkspaceStorageSettings() {
         <ChangeHomeModal
           current={settings}
           onClose={() => setEditing(false)}
-          onSaved={(next) => { setSettings(next); setEditing(false); }}
+          onSaved={(next) => { workspaceSettingsResource.set("settings", next); setEditing(false); }}
         />
       )}
     </section>

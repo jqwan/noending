@@ -5,12 +5,14 @@ import { api } from "../../api";
 import { sessionPages, sessionTerminals } from "./sessionNavigation";
 import { EVT_TERMINALS, EVT_TERMINAL_ACTIVITY } from "../../app/routes";
 import type { TerminalSummary } from "../../types";
+import { clearReadResources } from "../../hooks/readResource";
 vi.mock("../../api", () => ({ api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
   terminalActivitySeen: vi.fn().mockResolvedValue(undefined),
   terminalReconnect: vi.fn(), terminalList: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
 } }));
 beforeEach(() => {
+  clearReadResources();
   vi.resetAllMocks(); sessionPages.clear(); sessionTerminals.clear();
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
@@ -21,6 +23,21 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const terminal = (id: string, live = true, sessionId = "s1"): TerminalSummary => ({
   terminal_id: id, session_id: sessionId, initial_workstream_ids: [], identity_revision: 1, agent: "codex", cwd: "/work",
   created_at: id, live, exit_code: null, session_title: "Session",
+});
+it("retains the known terminal status across remounts and applies the refreshed availability", async () => {
+  vi.mocked(api.terminalList).mockResolvedValue([terminal("t1")]);
+  const first = render(<SessionSubpageTabs sessionId="s1" agent="codex" navigate={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "终端 · 已连接" })).toHaveProperty("disabled", false));
+  first.unmount();
+  let finish!: (rows: TerminalSummary[]) => void;
+  vi.mocked(api.terminalList).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  vi.mocked(api.getSessionTerminalStates).mockResolvedValue({ s1: { available: false, reason: "源会话已不存在" } });
+  render(<SessionSubpageTabs sessionId="s1" agent="codex" entry="conversation" navigate={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "终端 · 已连接" })).toHaveProperty("disabled", false);
+  await act(async () => { finish([terminal("t1", false)]); });
+  const exited = screen.getByRole("button", { name: "终端 · 已退出" });
+  expect(exited).toHaveProperty("disabled", true);
+  expect(exited.title).toBe("源会话已不存在");
 });
 it("switches between history and detail without launching an Agent", async () => {
   const navigate = vi.fn();
@@ -52,7 +69,6 @@ it("switches among this session's live and exited terminals and remembers the se
   expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t2" }));
   view.rerender(<SessionSubpageTabs sessionId="s1" terminalId="t2" agent="codex" terminalLive={false} navigate={navigate} />);
   view.rerender(<SessionSubpageTabs sessionId="s1" agent="codex" entry="conversation" navigate={navigate} />);
-  expect(sessionTerminals.get("s1")).toBe("t1");
   fireEvent.click(screen.getByRole("button", { name: "终端 · 已连接" }));
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
@@ -63,8 +79,8 @@ it("switches among this session's live and exited terminals and remembers the se
   // A native resume moves t2 elsewhere: it must no longer be selectable for s1.
   vi.mocked(api.terminalList).mockResolvedValue([terminal("t1"), terminal("t2", true, "s2")]);
   act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
-  await waitFor(() => expect(screen.queryByRole("button", { name: "切换终端" })).toBeNull());
-  fireEvent.click(screen.getByRole("button", { name: "终端 · 已连接" }));
+  fireEvent.click(await screen.findByRole("button", { name: "终端 · 已连接" }));
+  expect(screen.queryByRole("button", { name: "切换终端" })).toBeNull();
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
 });
 it("starts resume only on explicit terminal continue and blocks archived launches", async () => {

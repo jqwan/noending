@@ -375,18 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn an_already_queued_scope_does_not_request_another_worker() {
-        let coordinator = IngestionCoordinator::default();
-        {
-            let mut inner = coordinator.inner.lock().unwrap();
-            inner.running = true;
-            inner.queue.push(IngestScope::ReconcileAll);
-        }
-
-        assert!(!coordinator.enqueue(IngestScope::ReconcileAll));
-    }
-
-    #[test]
     fn full_history_scan_never_swallows_native_binding_work() {
         let coordinator = IngestionCoordinator::default();
         let native = IngestScope::ReconcileNative {

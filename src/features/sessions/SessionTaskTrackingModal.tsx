@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import Icon from "../../components/Icon";
-import { EVT_SYNCED } from "../../app/routes";
+import { notifyDataChanged, EVT_SYNCED } from "../../app/routes";
 import type { SessionTracking, Workstream } from "../../types";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 
@@ -65,7 +65,7 @@ export default function SessionTaskTrackingModal({
       if (active.current) setError(String(reason));
     } finally {
       pending.current = false;
-      window.dispatchEvent(new Event(EVT_SYNCED));
+      notifyDataChanged([]);
       if (active.current) {
         setBusy(false);
       }
@@ -97,7 +97,7 @@ export default function SessionTaskTrackingModal({
         actions={
           <button
             type="button"
-            className="btn ghost icon-button small"
+            className="btn ghost icon-button"
             title="新建任务"
             aria-label="新建任务"
             disabled={busy || !data}

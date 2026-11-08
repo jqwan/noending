@@ -1,4 +1,4 @@
-import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import { DetailList, DetailListRow, DetailLoading, DetailSection } from "../../components/DetailSection";
 import "./packages.css";
 import Notice from "../../components/Notice";
 import { useCallback, useEffect, useState } from "react";
@@ -7,6 +7,7 @@ import Icon from "../../components/Icon";
 import { showToast } from "../../components/Toast";
 import { AGENT_LABELS, type Agent, type PackageEntry } from "../../types";
 import { entryState, packageDetailRoute } from "./packagePresentation";
+import { packageCatalogCache, setPackageCatalogCache } from "./packageDetailCache";
 
 /** Package list inside one Agent's detail page: the same direct user-level
  *  toggle as the board cards, click-through for everything else. */
@@ -14,11 +15,12 @@ export default function AgentPackagesSection({ agent, navigate }: {
   agent: Agent;
   navigate: (route: import("../../app/routes").Route) => void;
 }) {
-  const [packages, setPackages] = useState<PackageEntry[] | null>(null);
+  const [packages, setPackages] = useState<PackageEntry[] | null>(() => packageCatalogCache?.packages.filter(entry => entry.agent === agent) ?? null);
   const [error, setError] = useState("");
   const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const refresh = useCallback(() => api.listPackages().then(inventory => {
+    setPackageCatalogCache(inventory);
     setPackages(inventory.packages.filter(entry => entry.agent === agent));
   }).catch(e => setError(String(e))), [agent]);
 
@@ -57,7 +59,7 @@ export default function AgentPackagesSection({ agent, navigate }: {
 
 
     {packages === null ? (
-      <div className="muted small" style={{ padding: "8px 0" }} role="status">正在读取插件包…</div>
+      !error && <DetailLoading>正在读取插件包…</DetailLoading>
     ) : packages.length === 0 ? (
       <div className="muted small" style={{ padding: "8px 0" }}>
         {AGENT_LABELS[agent]} 未安装任何插件包。安装与导入请前往插件包看板。

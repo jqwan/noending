@@ -13,11 +13,12 @@ import { GitStateBadge, MissingBadge, PathError } from "../workstreams/Workspace
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
+import { showToast } from "../../components/Toast";
 import ProjectSummary from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import { clearWorkstreamCardsCache } from "../workstreams/useWorkstreamCards";
-import { EVT_SYNCED } from "../../app/routes";
+import { notifyDataChanged } from "../../app/routes";
 import { httpsRemoteUrl } from "./remoteUrl";
 import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject, isProjectAllPathsMissing } from "./projectKind";
 import {
@@ -50,6 +51,11 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   const [nameInput, setNameInput] = useState("");
   const [renameError, setRenameError] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
+  const [confirmCleanup, setConfirmCleanup] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const cleanupBusyRef = useRef(false);
+  const currentProjectId = useRef(projectId);
+  currentProjectId.current = projectId;
   const renameBusyRef = useRef(false);
   const seqRef = useRef(0);
 
@@ -79,6 +85,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   }, [projectId]);
 
   useEffect(refresh, [refresh]);
+  useEffect(() => setConfirmCleanup(false), [projectId]);
   useRefreshSignal(refresh);
 
   const detail = data;
@@ -98,6 +105,26 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       return a.canonical_path.localeCompare(b.canonical_path);
     });
   }, [detail]);
+  const unusedMissingPaths = detail?.workspace_paths.filter(path => !path.exists
+    && !detail.sessions.some(session => session.workspace_path_id === path.id)) ?? [];
+  const cleanup = async () => {
+    if (cleanupBusyRef.current) return;
+    cleanupBusyRef.current = true; setCleanupBusy(true);
+    try {
+      const count = await api.cleanMissingProjectPaths(projectId);
+      clearProjectCardsCache();
+      if (currentProjectId.current === projectId) {
+        setConfirmCleanup(false);
+        refresh();
+      }
+      notifyDataChanged(["projects"]);
+      showToast(`已清理 ${count} 个失效目录登记`);
+    } catch (error) {
+      showToast(`清理失败：${String(error)}`);
+    } finally {
+      cleanupBusyRef.current = false; setCleanupBusy(false);
+    }
+  };
 
   const commitRename = async () => {
     const next = nameInput.trim();
@@ -137,7 +164,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       return (
         <div className="main project-detail" role="status">
           <PageHeader
-            title={initialTitle ?? ""}
+            title={initialTitle ?? ""} icon={<Icon name="project" />}
           />
           {showSkeleton && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
@@ -151,7 +178,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
     return (
       <div className="main project-detail">
         <PageHeader
-          title={initialTitle ?? ""}
+          title={initialTitle ?? ""} icon={<Icon name="project" />}
         >
           {failure !== "" && <PathError text={failure} />}
           {gone && (
@@ -176,21 +203,16 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   return (
     <DetailPanelProvider kind="project"><div className="main project-detail detail-page">
       <PageHeader
-        title={
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere" }}>
-            <Icon name="project" />
-            <span>{project.name}</span>
-          </span>
-        }
+        title={project.name} icon={<Icon name="project" />}
         actions={
           <>
-          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
-            onChanged={() => { clearProjectCardsCache(); refresh(); }}
-            onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />
           <button className="btn ghost icon-button" title="重命名" aria-label="重命名"
             onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
             <Icon name="edit" />
           </button>
+          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
+            onChanged={() => { clearProjectCardsCache(); refresh(); }}
+            onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />
           </>
         }
       />
@@ -244,7 +266,10 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
 <DetailSection sectionId="workspace-paths" label="工作目录" className="project-workspace-paths" title={<>
               <Icon name="folder" />
               <span>工作目录（{sortedWorkspacePaths.length}）</span>
-            </>}>
+            </>} actions={unusedMissingPaths.length > 0 && <button type="button" className="btn ghost icon-button small"
+              title="清理失效目录" aria-label="清理失效目录" disabled={cleanupBusy} onClick={() => setConfirmCleanup(true)}>
+              <Icon name="trash" />
+            </button>}>
 
             {sortedWorkspacePaths.length === 0 && (
               <div className="detail-empty">
@@ -315,7 +340,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           onCreated={() => {
             clearProjectCardsCache();
             clearWorkstreamCardsCache();
-            window.dispatchEvent(new Event(EVT_SYNCED));
+            notifyDataChanged([]);
           }}
         />
       )}
@@ -338,6 +363,14 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           </DialogActions>
         </Modal>
       )}
+      {confirmCleanup && <Modal title="清理失效目录？" onClose={() => { if (!cleanupBusyRef.current) setConfirmCleanup(false); }}>
+        <p>清理 {unusedMissingPaths.length} 个缺失且没有会话引用的目录登记？</p>
+        <p className="small muted">仅移除 NoEnding 中的登记，不删除磁盘内容，项目本身保留。执行时会重新检查目录及会话引用。</p>
+        <DialogActions>
+          <button type="button" className="btn" disabled={cleanupBusy} onClick={() => setConfirmCleanup(false)}>取消</button>
+          <button type="button" className="btn danger" disabled={cleanupBusy} onClick={() => void cleanup()}>{cleanupBusy ? "清理中…" : "清理"}</button>
+        </DialogActions>
+      </Modal>}
     </div></DetailPanelProvider>
   );
 }

@@ -93,9 +93,12 @@ it("reports palette changes only to subscribed applications, until reset or disp
   expect(replies).toHaveLength(3);
 });
 
-it("uses the app's resolved surface, text and selection tokens", () => {
+it("uses the app background independently of content and card surfaces", () => {
   const root = document.documentElement;
   root.style.setProperty("--bg-app", "#fafafa");
+  root.style.setProperty("--bg-chrome", "#333333");
+  root.style.setProperty("--bg-canvas", "#eeeeee");
+  root.style.setProperty("--bg-surface", "#bbbbbb");
   root.style.setProperty("--text-primary", "#222222");
   root.style.setProperty("--accent-wash", "#ddddff");
   const theme = readTerminalTheme();

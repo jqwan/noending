@@ -1,4 +1,4 @@
-import { DetailContent, DetailSection } from "../../components/DetailSection";
+import { DetailContent, DetailLoading, DetailSection } from "../../components/DetailSection";
 import { useOperationState, refreshOperationStatus } from "../../hooks/useOperationState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
@@ -115,7 +115,8 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
 
 
       {view && view.summary ? <DetailContent label="项目摘要内容" className="md-body"><SummaryContent expansion={summaryExpansion}
-       >{view.summary ?? {items:[]}}</SummaryContent></DetailContent> : <p className="muted small" style={{ margin: 0 }}>{view ? "尚无项目摘要" : "正在读取摘要…"}</p>}
+       >{view.summary ?? {items:[]}}</SummaryContent></DetailContent> : view ? <p className="detail-empty">尚无项目摘要</p>
+       : !shownError && <DetailLoading>正在读取摘要…</DetailLoading>}
 
 
     </DetailSection>

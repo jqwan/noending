@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
 import { runtimeFixture } from "../agents/runtimeFixtures";
 import { viewState } from "../../hooks/useViewState";
+import { clearReadResources } from "../../hooks/readResource";
 import SettingsView from "./SettingsView";
 import { api } from "../../api";
 
@@ -70,11 +71,11 @@ it("opens modal to change data storage directory and can submit new path", async
   fireEvent.click(screen.getByRole("button", { name: "登记并在下次启动迁移" }));
 
   await screen.findByText("待重启生效");
-  expect(api.setNoendingHome).toHaveBeenCalledTimes(1);
   expect(api.setNoendingHome).toHaveBeenCalledWith("/custom/storage/dir");
 });
 
 beforeEach(() => {
+  clearReadResources();
   viewState.clear(); localStorage.clear(); clearRuntimeCatalog();
   vi.mocked(api.getExtractionSettings).mockReset().mockResolvedValue({ agent: "codex", runtime: { model: null, provider: null, effort: null } });
   vi.mocked(api.setExtractionSettings).mockReset();

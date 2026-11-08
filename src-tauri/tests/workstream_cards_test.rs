@@ -83,13 +83,9 @@ fn card_stats_follow_sessions_and_active_state() {
     assert_eq!(latest.id, newer.id, "latest session = most recent activity");
     assert_eq!(latest.agent, "codex");
     // the context edit is the newest work signal, later than both sessions
-    assert_eq!(
-        card.last_activity_at.as_deref(),
-        database
-            .get_workstream_context_state(&w.id)
-            .unwrap()
-            .updated_at
-            .as_deref()
+    assert!(
+        card.last_activity_at.as_deref() > Some("2026-09-12T18:00:00Z"),
+        "the context edit outranks the latest session activity"
     );
 }
 

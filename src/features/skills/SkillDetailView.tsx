@@ -1,5 +1,5 @@
 import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
-import { DetailContent, DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
 import DialogActions from "../../components/DialogActions";
 import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -83,8 +83,6 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
       return bundle !== null;
     } catch (e) {
       if (seq === request.current && alive.current) {
-        skillDetailCache.delete(resourceId);
-        setDetail(null);
         setError(String(e));
       }
       throw e;
@@ -143,7 +141,9 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
   const canConfigure = !!row && row.registered;
 
   return <DetailPanelProvider kind="skill"><div className="main skill-detail-page detail-page">
-    <PageHeader title={<><Icon name="skill" /><span>{row?.name ?? initialTitle ?? "技能"}</span></>} actions={<>
+    <PageHeader title={row?.name ?? initialTitle ?? "技能"} icon={<Icon name="skill" />} actions={<>
+      {!!detail?.content.trim() && <button type="button" className="btn ghost icon-button" aria-label="复制全文" title="复制全文"
+        onClick={() => void copyContent()}><Icon name="copy" /></button>}
       {row && <button className="btn ghost icon-button danger" aria-label="卸载 Skill" title="卸载 Skill" disabled={busy || loading} onClick={() => void openSkillUninstall()}><Icon name="trash" /></button>}
     </>} />
     {error && <Notice role="alert" >{error}</Notice>}
@@ -205,19 +205,10 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
                 />;
               })}
             </DetailList>}
-        </DetailSection>}</>}><DetailSection sectionId="content" label="技能详情" title={<><Icon name="file" />正文</>} actions={<>{!!detail?.content.trim() && (
-              <button
-                type="button"
-                className="btn small ghost"
-                onClick={() => void copyContent()}
-              >
-                复制全文
-              </button>
-            )}</>}>
-
+        </DetailSection>}</>}><article className="detail-document" aria-label="技能详情" tabIndex={0}>
           <SkillContent content={detail?.content ?? ""} />
           {row.error && <Notice>{row.error}</Notice>}
-        </DetailSection></DetailLayout>}
+        </article></DetailLayout>}
     {removing && row && <Modal title="卸载 Skill" onClose={closeRemove}>
       <>
         <p>将移除该 Skill 在用户级和所有项目中的全部加载入口。</p>
@@ -292,7 +283,7 @@ function SkillContent({ content }: { content: string }) {
   const cleanContent = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
 
   return (
-    <DetailContent label="技能正文" className="skill-markdown">
+    <div className="skill-markdown">
       {frontmatterPairs.length > 0 ? (
         <div className="inset-card compact skill-frontmatter-box">
           <dl className="skill-properties">
@@ -315,6 +306,6 @@ function SkillContent({ content }: { content: string }) {
           {cleanContent}
         </ReactMarkdown>
       )}
-    </DetailContent>
+    </div>
   );
 }

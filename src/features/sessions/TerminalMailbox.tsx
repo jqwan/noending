@@ -7,11 +7,13 @@ import { Modal } from "../../components/common";
 import Icon from "../../components/Icon";
 import { useViewState } from "../../hooks/useViewState";
 import { MailboxMessagePreview, useMailboxMessages } from "./MailboxMessages";
+import type { Route } from "../../app/routes";
 
-export default function TerminalMailbox({ terminalId, notification, error: loadError, apply, refresh, inputRef }: {
+export default function TerminalMailbox({ terminalId, notification, error: loadError, apply, refresh, inputRef, navigate }: {
   terminalId: string; notification: TerminalNotifications | null; error: string;
   apply: (n: TerminalNotifications) => void; refresh: () => Promise<void>;
   inputRef?: RefObject<HTMLTextAreaElement>;
+  navigate: (route: Route) => void;
 }) {
   const session = notification?.session_id ?? null;
   const { page, error: listError, refresh: refreshMessages, more } = useMailboxMessages(session, "unread");
@@ -68,25 +70,28 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
   const enabled = notification?.enabled ?? false;
   const mutable = !enabled && !notification?.writing;
   return <DetailSection sectionId="mailbox" label="信箱" className="terminal-mailbox" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.unread}）` : ""}</span></>} actions={<>
-        <button className="btn small" disabled={!session || busy} aria-pressed={enabled} onClick={() => {
+        <button className={`btn ghost icon-button small${enabled ? " is-on" : ""}`} disabled={!session || busy}
+          aria-label={enabled ? "关闭自动通知" : "开启自动通知"} title={enabled ? "关闭自动通知" : "开启自动通知"}
+          aria-pressed={enabled} onClick={() => {
           if (enabled) void run(() => toggle(false));
           else if (skipHint) void run(() => toggle(true));
           else setConfirm(true);
-        }}>{enabled ? "关闭自动通知" : "开启自动通知"}</button>
-        <button className="btn small ghost" disabled={!page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}>提醒查收</button>
+        }}><Icon name="bell" /></button>
+        <button className="btn ghost icon-button small" aria-label="提醒查收" title="提醒查收（立即插队）"
+          disabled={!page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}><Icon name="send" /></button>
       </>} status={<>
       {(error || loadError || listError || notification?.error) && <p role="alert" className="small warning">{error || loadError || listError || notification?.error}</p>}
     </>}>
 
-    {enabled && <p className="small muted">自动通知已开启；请通过信箱输入消息。操作终端授权或菜单前请关闭自动通知。</p>}
-    {!enabled && session && <p className="small muted">手动提醒会立即插队，请保持终端聊天输入框可用且没有草稿。</p>}
-    {!session && <p className="small muted">终端绑定会话后可使用信箱。</p>}
+    {enabled && <p className="small muted">自动通知已开启，终端只读。操作授权或菜单前请先关闭。</p>}
+    {!enabled && session && Boolean(page?.unread) && <p className="small muted">提醒会插队；请保持终端输入框就绪、无草稿。</p>}
+    {!session && <p className="small muted">绑定会话后可使用信箱。</p>}
     <div className="mailbox-unread-list" role="region" aria-label="未读消息列表" tabIndex={0}>
     {page?.items.map(m => <article className="mailbox-item" key={`${session}:${m.id}`} aria-label="未读消息">
       {editing?.message.id === m.id ? <div>
         <textarea aria-label="编辑信箱消息" value={editing.text} onChange={e => setEditing({ ...editing, text: e.target.value })} disabled={busy} />
         <div className="mailbox-actions"><button className="btn small" disabled={busy || !editing.text.trim()} onClick={() => void edit(editing.message, editing.text)}>保存</button><button className="btn small ghost" onClick={() => setEditing(null)}>取消</button></div>
-      </div> : <MailboxMessagePreview message={m} />}
+      </div> : <MailboxMessagePreview message={m} navigate={navigate} />}
       {mutable && <div className="mailbox-actions">
           <button className="btn ghost icon-button small" aria-label="编辑消息" disabled={busy} onClick={() => { setDeleting(null); setEditing({ message: m, text: m.body }); }}><Icon name="edit" /></button>
           {deleting === m.id ? <><button className="btn small danger" disabled={busy} onClick={() => void edit(m, null)}>确认永久删除</button><button className="btn small ghost" onClick={() => setDeleting(null)}>取消</button></>
@@ -103,7 +108,7 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     </form></DetailPanelFooter>
 
     {confirm && <Modal title="开启自动通知" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动通知</button></>}>
-      <p>请保持 Agent 聊天输入框可用且没有草稿，并退出授权或设置菜单。开启后终端输入由 NoEnding 管理，通过侧栏信箱发送消息。</p>
+      <p>请保持聊天输入框就绪、无草稿，并退出授权或设置菜单。开启后终端只读，请通过侧栏信箱发送消息。</p>
       <label><input type="checkbox" checked={skip} onChange={e => setSkip(e.target.checked)} />不再提示</label>
     </Modal>}
   </DetailSection>;

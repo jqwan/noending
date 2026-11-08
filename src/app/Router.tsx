@@ -1,48 +1,75 @@
-import { lazy, Suspense } from "react";
+import { createElement, Suspense, type ComponentType } from "react";
 import { workstreamDetailCache } from "../features/workstreams/workstreamDetailCache";
 import { sessionDetailCache } from "../features/sessions/sessionDetailCache";
 import { projectDetailCache } from "../features/projects/projectDetailCache";
 import type { Route } from "./routes";
+import { PageHeaderHost } from "../layout/PageHeader";
 
-const NewSessionView = lazy(() => import("../features/sessions/NewSessionView"));
-const WorkstreamsView = lazy(() => import("../features/workstreams/WorkstreamsView"));
-const WorkstreamDetailView = lazy(() => import("../features/workstreams/WorkstreamDetailView"));
-const SessionsView = lazy(() => import("../features/sessions/SessionsView"));
-const SessionDetailView = lazy(() => import("../features/sessions/SessionDetailView"));
-const SessionConversationView = lazy(() => import("../features/sessions/SessionConversationView"));
-const SessionTerminalView = lazy(() => import("../features/sessions/SessionTerminalView"));
-const ProjectsView = lazy(() => import("../features/projects/ProjectsView"));
-const ProjectDetail = lazy(() => import("../features/projects/ProjectDetail"));
-const SettingsView = lazy(() => import("../features/settings/SettingsView"));
-const AgentsView = lazy(() => import("../features/agents/AgentsView"));
-const SkillsView = lazy(() => import("../features/skills/SkillsView"));
-const SkillDetailView = lazy(() => import("../features/skills/SkillDetailView"));
-const PackagesView = lazy(() => import("../features/packages/PackagesView"));
-const PackageDetailView = lazy(() => import("../features/packages/PackageDetailView"));
+/** 渲染与预载共享同一份模块状态，预载完成后首帧可同步渲染。 */
+function deferredRoute<P extends object>(load: () => Promise<{ default: ComponentType<P> }>) {
+  let component: ComponentType<P> | null = null;
+  let pending: Promise<void> | null = null;
+  let failure: unknown;
+  const preload = (): Promise<void> | undefined => {
+    if (component) return;
+    if (!pending) {
+      failure = undefined;
+      pending = load().then(module => { component = module.default; }).catch(error => {
+        failure = error; throw error;
+      }).finally(() => { pending = null; });
+    }
+    return pending;
+  };
+  function View(props: P) {
+    if (component) return createElement(component, props);
+    if (failure) throw failure;
+    throw preload();
+  }
+  return { View, preload };
+}
 
+const modules = {
+  "new-session": deferredRoute(() => import("../features/sessions/NewSessionView")),
+  "workstreams": deferredRoute(() => import("../features/workstreams/WorkstreamsView")),
+  "workstream": deferredRoute(() => import("../features/workstreams/WorkstreamDetailView")),
+  "sessions": deferredRoute(() => import("../features/sessions/SessionsView")),
+  "session": deferredRoute(() => import("../features/sessions/SessionDetailView")),
+  "conversation": deferredRoute(() => import("../features/sessions/SessionConversationView")),
+  "terminal": deferredRoute(() => import("../features/sessions/SessionTerminalView")),
+  "projects": deferredRoute(() => import("../features/projects/ProjectsView")),
+  "project": deferredRoute(() => import("../features/projects/ProjectDetail")),
+  "settings": deferredRoute(() => import("../features/settings/SettingsView")),
+  "agents": deferredRoute(() => import("../features/agents/AgentsView")),
+  "skills": deferredRoute(() => import("../features/skills/SkillsView")),
+  "skill": deferredRoute(() => import("../features/skills/SkillDetailView")),
+  "packages": deferredRoute(() => import("../features/packages/PackagesView")),
+  "package": deferredRoute(() => import("../features/packages/PackageDetailView")),
+};
+
+const NewSessionView = modules["new-session"].View;
+const WorkstreamsView = modules["workstreams"].View;
+const WorkstreamDetailView = modules["workstream"].View;
+const SessionsView = modules["sessions"].View;
+const SessionDetailView = modules["session"].View;
+const SessionConversationView = modules["conversation"].View;
+const SessionTerminalView = modules["terminal"].View;
+const ProjectsView = modules["projects"].View;
+const ProjectDetail = modules["project"].View;
+const SettingsView = modules["settings"].View;
+const AgentsView = modules["agents"].View;
+const SkillsView = modules["skills"].View;
+const SkillDetailView = modules["skill"].View;
+const PackagesView = modules["packages"].View;
+const PackageDetailView = modules["package"].View;
+
+export function prepareRouteModule(route: Route) {
+  const key = route.view === "session" && route.entry === "conversation" ? "conversation" : route.view;
+  return modules[key].preload();
+}
 
 export function preloadCommonRoutes() {
-  const common = [
-    () => import("../features/sessions/SessionsView"),
-    () => import("../features/sessions/SessionConversationView"),
-    () => import("../features/sessions/SessionDetailView"),
-    () => import("../features/sessions/SessionTerminalView"),
-    () => import("../features/projects/ProjectsView"),
-    () => import("../features/workstreams/WorkstreamsView"),
-    () => import("../features/agents/AgentsView"),
-    () => import("../features/skills/SkillsView"),
-    () => import("../features/skills/SkillDetailView"),
-  ];
-  for (const load of common) {
-    try {
-      void load();
-    } catch {
-      // Ignore background preload failures
-    }
-  }
-  void import("../features/agents/agentsCache")
-    .then((m) => m.preloadAgentsCache())
-    .catch(() => {});
+  for (const module of Object.values(modules)) void module.preload()?.catch(() => {});
+  void import("../features/agents/agentsCache").then(m => m.preloadAgentsCache()).catch(() => {});
 }
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
@@ -51,11 +78,12 @@ export default function Router({ route, navigate, goBack, actionSeq }: {
   goBack: (fallback?: Route) => void;
   actionSeq: number;
 }) {
-  return (
+  const content = (
     <Suspense fallback={null}>
       {renderRoute(route, navigate, goBack, actionSeq)}
     </Suspense>
   );
+  return route.view === "session" || route.view === "terminal" ? <PageHeaderHost>{content}</PageHeaderHost> : content;
 }
 
 function renderRoute(

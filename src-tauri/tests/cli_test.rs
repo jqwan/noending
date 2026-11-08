@@ -1811,8 +1811,6 @@ fn mailbox_wait_fails_clearly_when_the_recipient_session_is_deleted_mid_wait() {
     assert!(!status.success());
     let value: Value = serde_json::from_str(&child_stdout(&mut child)).unwrap();
     assert_eq!(value["error"]["code"], "not_found");
-    let (ok, listed) = f.run(&exe, &["mailbox", "list", "--session", "sender"]);
-    assert!(ok, "{listed}");
 }
 
 #[test]

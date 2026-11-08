@@ -7,31 +7,23 @@ import type { Agent } from "../types";
  */
 export default function AgentIcon({
   agent,
-  size = 14,
+  size,
   className = "",
 }: {
   agent: Agent;
-  size?: number;
+  size?: 14 | 16 | 18;
   className?: string;
 }) {
   const commonProps = {
-    width: size,
-    height: size,
     className: `agent-icon ${className}`.trim(),
-    style: {
-      width: size,
-      height: size,
-      display: "inline-block",
-      verticalAlign: "middle",
-      flex: "none",
-    } as React.CSSProperties,
+    style: size ? { "--agent-icon-size": `${size}px` } as React.CSSProperties : undefined,
     "aria-hidden": true as const,
   };
 
   switch (agent) {
     case "antigravity":
       return (
-        <svg {...commonProps} viewBox="0 0 180 180" fill="none">
+        <svg {...commonProps} viewBox="6 6 168 168" fill="none">
           <defs>
             <linearGradient id="ag-icon-grad" x1="0%" y1="0%" x2="0%" y2="100%">
               <stop offset="0%" stopColor="#F3882E" />

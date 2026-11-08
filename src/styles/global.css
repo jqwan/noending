@@ -30,7 +30,7 @@ html, body, #root {
   font-size: var(--font-size-body);
   line-height: var(--line-height-body);
   color: var(--text-primary);
-  background: var(--bg-app);
+  background: var(--bg-chrome);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -45,7 +45,7 @@ html, body, #root {
 ::selection { background: var(--accent-wash); }
 
 h1 { font-size: var(--font-size-display); font-weight: var(--weight-semibold); letter-spacing: -0.01em; margin: 0 0 4px; }
-.page-sub { color: var(--text-muted); margin: 0 0 30px; font-size: var(--font-size-base); max-width: 72ch; }
+.page-sub { color: var(--text-muted); margin: 0 0 var(--space-md); font-size: var(--font-size-base); max-width: 72ch; }
 h2 { font-size: var(--font-size-section); font-weight: var(--weight-semibold); margin: 34px 0 10px; }
 h3 { font-size: var(--font-size-base); font-weight: var(--weight-semibold); margin: 16px 0 6px; }
 
@@ -64,7 +64,7 @@ button.btn {
   line-height: 1.4;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
-  background: var(--bg-app);
+  background: var(--bg-surface);
   color: var(--text-primary);
   padding: 6px 14px;
   min-height: var(--control-height);
@@ -76,15 +76,17 @@ button.btn {
   user-select: none;
   transition: border-color var(--duration-normal) ease, background var(--duration-normal) ease, opacity var(--duration-normal) ease, box-shadow var(--duration-normal) ease, transform var(--duration-fast) ease;
 }
-button.btn:hover:not(:disabled) { border-color: var(--border-default); background: var(--bg-panel); }
-button.btn:active:not(:disabled) { transform: scale(0.985); background: var(--bg-active); }
+/* 通用交互底色只用于普通按钮，实色语义按钮保留各自的底色与文字对比。 */
+button.btn:where(:not(.primary, .accent, .danger)):hover:not(:disabled) { border-color: var(--border-default); background: var(--bg-hover); }
+button.btn:active:not(:disabled) { transform: scale(0.985); }
+button.btn:where(:not(.primary, .accent, .danger)):active:not(:disabled) { background: var(--bg-active); }
 button.btn.primary { background: var(--text-primary); color: var(--bg-app); border-color: var(--text-primary); }
 button.btn.primary:hover:not(:disabled) { opacity: 0.9; background: var(--text-primary); }
 button.btn.accent { background: var(--accent); border-color: var(--accent); color: var(--on-solid); }
 button.btn.accent:hover:not(:disabled) { opacity: 0.9; }
 /* 破坏性确认（Session 删除）：与 primary 同形、不同色，只用在
    modal 内的最终确认键上——红底大面积出现会稀释它的警示价值。 */
-button.btn.danger { background: var(--danger); border-color: var(--danger); color: var(--on-solid); }
+button.btn.danger { background: var(--danger-solid); border-color: var(--danger-solid); color: var(--on-solid); }
 button.btn.danger:hover:not(:disabled) { opacity: 0.9; }
 button.btn.small { min-height: 28px; padding: 3px 10px; font-size: var(--font-size-sm); }
 button.btn.ghost { border-color: transparent; background: transparent; color: var(--text-secondary); }
@@ -108,7 +110,7 @@ input[type="text"], textarea:where(:not(.terminal-host .xterm-helper-textarea)),
   border-radius: var(--radius-md);
   padding: 6px 12px;
   width: 100%;
-  background: var(--bg-app);
+  background: var(--bg-panel);
   color: var(--text-primary);
   outline: none;
   min-height: var(--control-height);
@@ -152,7 +154,7 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   border-bottom-width: 2px;
   border-radius: var(--radius-xs);
   padding: 0 5px;
-  background: var(--bg-app);
+  background: var(--bg-surface);
   color: var(--text-muted);
 }
 
@@ -161,11 +163,11 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   border-radius: var(--radius-lg);
   padding: 14px 16px;
   margin-bottom: 0;
-  background: var(--bg-app);
+  background: var(--bg-surface);
 }
 .card.hairline { border: 1px solid var(--border-subtle); }
 .card.clickable { cursor: pointer; transition: background var(--duration-fast); }
-.card.clickable:hover { background: var(--bg-panel); }
+.card.clickable:hover { background: var(--bg-hover); }
 .inset-card { padding: var(--space-lg); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-panel); }
 .inset-card.compact { padding: var(--card-padding); }
 
@@ -179,7 +181,7 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   cursor: pointer;
 }
 .list-row:first-of-type { border-top: 0; }
-.list-row:hover { background: var(--bg-panel); }
+.list-row:hover { background: var(--bg-hover); }
 .list-row .grow { flex: 1; min-width: 0; }
 .list-row .title { font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row .meta {
@@ -210,7 +212,7 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   animation: backdrop-in 140ms ease-out;
 }
 .modal {
-  background: var(--bg-app); border-radius: var(--radius-lg); width: 640px; max-width: 92vw;
+  background: var(--bg-surface); border-radius: var(--radius-lg); width: 640px; max-width: 92vw;
   max-height: 84vh; overflow-y: auto; padding: var(--modal-padding-block) var(--modal-padding-inline);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-modal);
@@ -227,8 +229,16 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
 .modal { overscroll-behavior: contain; }
 /* 全文类弹窗（消息全文）：比消息列还宽才有意义——只是把内容搬到弹窗里、宽度反而更窄，就没必要开它。 */
 .modal.wide { width: min(920px, 92vw); }
-.modal-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-lg); position: sticky; top: calc(-1 * var(--modal-padding-block)); z-index: 1; background: var(--bg-app); padding: var(--space-lg) 0; margin-top: calc(-1 * var(--space-lg)); }
-.modal-header-actions { display: flex; align-items: center; gap: var(--space-icon); flex-shrink: 0; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-lg); position: sticky; top: calc(-1 * var(--modal-padding-block)); z-index: 1; background: var(--bg-surface); padding: var(--space-lg) 0; margin-top: calc(-1 * var(--space-lg)); }
+.modal-header-actions { display: flex; align-items: center; gap: var(--space-sm); flex-shrink: 0; }
+.modal-header-actions .btn.icon-button {
+  width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
+  padding: 0;
+  background: var(--bg-panel);
+}
+.modal-header-actions .btn.icon-button .ui-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); }
 .modal-header h2 { margin: 0; font-size: var(--font-size-heading); }
 .modal-actions {
   position: sticky;
@@ -242,7 +252,7 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   margin-bottom: calc(-1 * var(--space-md));
   padding: var(--space-md) 0;
   border-top: 1px solid var(--border-subtle);
-  background: var(--bg-app);
+  background: var(--bg-surface);
   z-index: 1;
 }
 @media (max-width: 600px) {
@@ -285,7 +295,8 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
   * { transition: none !important; animation: none !important; }
 }
 
-.ui-icon { width: var(--icon-size); height: var(--icon-size); flex: none; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
+.ui-icon { display: inline-block; vertical-align: middle; width: var(--icon-size-sm); height: var(--icon-size-sm); flex: none; fill: none; stroke: currentColor; stroke-width: var(--icon-stroke-width); stroke-linecap: round; stroke-linejoin: round; }
+.agent-icon { display: inline-block; width: var(--agent-icon-size, var(--icon-size-sm)); height: var(--agent-icon-size, var(--icon-size-sm)); vertical-align: middle; flex: none; }
 
 /* 插件包启停按钮：启用蓝色图标加淡蓝底、停用置灰无底色，靠色相加底色双重区分。
    颜色与底色要压过 button.btn.ghost（含其 hover 规则），所以选择器带全 .btn 链

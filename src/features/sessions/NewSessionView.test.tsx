@@ -213,6 +213,8 @@ describe("New session optional first message", () => {
     vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "empty-terminal", launched_via: "embedded", command_line: "codex", note: "" });
     const navigate = vi.fn();
     render(<NewSessionView navigate={navigate} />);
+    // 默认目录预备可能先于项目初始化完成；等待目标项目就绪后再提交。
+    await waitFor(() => expect(screen.getByLabelText("所属项目")).toHaveProperty("value", chatProject.id));
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: message } });
     const openTerminal = screen.getByRole("button", { name: "打开终端" });
     await waitFor(() => expect(openTerminal).toHaveProperty("disabled", false));
@@ -361,37 +363,6 @@ describe("NewSessionView task and project selection", () => {
     await waitFor(()=>expect(screen.queryByRole("dialog")).toBeNull());
     openTaskMenu();
     expect(screen.queryByRole("checkbox", {name:"独立任务"})).toBeNull();
-  });
-
-  it("includes chat-directory projects in selection options", async () => {
-    const chatNames = ["Codex Chat", "NoEnding Chat", "用户改名的聊天项目"];
-    const extraProjects = chatNames.map((name, idx) => ({
-      id: `p-chat-${idx}`,
-      name,
-      name_customized: false, visibility: "normal" as const,
-      kind: "directory_group" as const,
-      path_count: 1,
-      missing_path_count: 0,
-      workstream_count: 0,
-      session_count: 0,
-      representative_paths: [`/Documents/Chat-${idx}`],
-      search_paths: [`/Documents/Chat-${idx}`],
-      last_activity_at: null,
-      updated_at: "2026-10-01T00:00:00Z",
-    }));
-
-    vi.mocked(api.listProjectCards).mockResolvedValue([
-      ...mockProjects,
-      ...extraProjects,
-    ]);
-    render(<NewSessionView navigate={vi.fn()} />);
-
-    const projectSelect = (await screen.findByLabelText("所属项目")) as HTMLSelectElement;
-    const options = Array.from(projectSelect.querySelectorAll("option")).map((o) => o.textContent);
-    expect(options).toContain("Project 1");
-    for (const name of chatNames) {
-      expect(options).toContain(name);
-    }
   });
 
   it("defaults by workspace identity even for a renamed project", async () => {

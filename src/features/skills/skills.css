@@ -15,7 +15,7 @@
 .skill-project-option .badge { flex: none; }
 .skill-description { font-size: var(--font-size-base); color: var(--text-secondary); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .skill-path { display: block; font-size: var(--font-size-xs); color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; }
-.skill-source { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-sm); line-height: 1.7; padding: 14px; background: var(--bg-panel); border-radius: var(--radius-md); max-height: 65vh; overflow: auto; }
+.skill-source { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-sm); line-height: 1.7; padding: 14px; background: var(--bg-panel); border-radius: var(--radius-md); }
 .skill-form { display: flex; flex-direction: column; gap: var(--space-lg); }
 .skill-form label { display: flex; flex-direction: column; gap: var(--space-icon); font-size: var(--font-size-base); }
 .skill-form .skill-check { flex-direction: row; }
@@ -29,10 +29,6 @@
 .skill-markdown table { border-collapse: collapse; display: block; overflow-x: auto; }
 .skill-markdown th, .skill-markdown td { padding: 8px; border: 1px solid var(--border-subtle); }
 
-
-.skill-detail-page .page-title { display: flex; align-items: center; gap: var(--space-sm); }
-.skill-detail-page .page-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.skill-detail-page .page-title > .ui-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); color: var(--text-secondary); }
 
 .skill-frontmatter-box {
   margin-bottom: 16px;

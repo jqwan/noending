@@ -1,3 +1,5 @@
+import BoardLoading from "../../components/BoardLoading";
+import BoardToolbar from "../../components/BoardToolbar";
 import DialogActions from "../../components/DialogActions";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
@@ -265,11 +267,8 @@ export default function SessionsView({ navigate, scope }: {
   return (
     <div className="main board-page" ref={scrollRef}>
       <PageHeader
-        title="会话"
-        actions={
-          <>
-            {/* 两个归档范围共用同一套卡片和列表。 */}
-            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="会话列表范围">
+        title="会话" icon={<Icon name="chat" />}
+        navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="会话列表范围">
               <button
                 className={archivedMode ? "" : "on"}
                 aria-pressed={!archivedMode}
@@ -288,8 +287,8 @@ export default function SessionsView({ navigate, scope }: {
               >
                 <Icon name="archive" />
               </button>
-            </div>
-            <span className="session-action-divider" aria-hidden="true" />
+            </div>}
+        actions={<>
             {archivedMode ? (
               <button
                 className="btn ghost icon-button danger"
@@ -315,16 +314,7 @@ export default function SessionsView({ navigate, scope }: {
       />
 
       <>
-          <div className="board-toolbar">
-          <input
-            type="text"
-            className="ws-search"
-            aria-label="搜索会话"
-            placeholder="搜索会话…（标题、目录或完整 ID）"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-
+          <BoardToolbar searchLabel="搜索会话" placeholder="搜索会话…（标题、目录或完整 ID）" query={query} onQueryChange={setQuery}>
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
               <div className="ws-control">
@@ -410,32 +400,10 @@ export default function SessionsView({ navigate, scope }: {
             </div>
           </div>
 
-          </div>
+          </BoardToolbar>
 
           <ObjectSearchFeedback search={search} />
-          {sessions === null && !loadFailed && (
-            viewMode === "cards" ? (
-              <div className="board-grid" role="status" aria-busy="true">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="skeleton card"
-                    style={{ minHeight: 160, borderRadius: "var(--radius-lg)" }}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="session-list" aria-busy="true">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="skeleton"
-                    style={{ height: 68, borderRadius: "var(--radius-md)", marginBottom: 8 }}
-                  />
-                ))}
-              </div>
-            )
-          )}
+          <BoardLoading loading={sessions === null && !loadFailed} viewMode={viewMode} />
           {loadFailed && loadFailedState}
           {shown !== null && shown.length === 0 && (sessions?.length ?? 0) === 0 && !loadFailed && (
             <EmptyState

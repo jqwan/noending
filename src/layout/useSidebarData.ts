@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import { onEvent, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, EVT_SYNCED } from "../app/routes";
+import { createLiveReadResource } from "../hooks/liveReadResource";
+import { useSessionTerminals } from "../features/sessions/useSessionTerminals";
+import { affectsSidebar, EVT_TERMINALS, EVT_SYNCED } from "../app/routes";
 import { EVT_REMOVED, removedTargets, type RemovedTargets } from "../app/removedTargets";
 import { useViewPreference, preferenceValues, booleanPreference, booleanRecordPreference } from "../hooks/useViewState";
 import { useTerminalResumeStates } from "../features/sessions/useTerminalResumeStates";
@@ -62,12 +64,27 @@ export interface UseSidebarDataResult {
   toggleAllGroups: () => void;
 }
 
+const sidebarSessions = createLiveReadResource(() => api.listSessions(undefined, undefined, "all"), [
+  { name: EVT_TERMINALS },
+  { name: EVT_SYNCED, affects: event => affectsSidebar(event, "sessions") },
+]);
+const sidebarProjects = createLiveReadResource(() => api.listProjectCards(), [
+  { name: EVT_SYNCED, affects: event => affectsSidebar(event, "projects") },
+]);
+const emptySessions: SessionListItem[] = [];
+const emptyProjects: ProjectCardData[] = [];
+
 export function useSidebarData({ collapsed = false, hidden = false }: UseSidebarDataOptions = {}): UseSidebarDataResult {
   const statePrefix = "sidebar";
-  const [terminalsLoading, setTerminalsLoading] = useState(true);
-  const [terminals, setTerminals] = useState<TerminalSummary[]>([]);
-  const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [projects, setProjects] = useState<ProjectCardData[]>([]);
+  const enabled = !collapsed && !hidden;
+  const { terminals: terminalRows, loading: terminalsLoading } = useSessionTerminals(enabled);
+  const { value: sessionRows } = sidebarSessions.useValue(enabled);
+  const { value: projectRows } = sidebarProjects.useValue(enabled);
+  const [removedRevision, setRemovedRevision] = useState(0);
+  const terminals = useMemo(() => terminalRows.filter(t => !removedTargets.terminals.has(t.terminal_id)
+    && !removedTargets.sessions.has(t.session_id ?? "")), [terminalRows, removedRevision]);
+  const sessions = useMemo(() => (sessionRows ?? emptySessions).filter(s => !removedTargets.sessions.has(s.id)), [sessionRows, removedRevision]);
+  const projects = useMemo(() => (projectRows ?? emptyProjects).filter(p => !removedTargets.projects.has(p.id)), [projectRows, removedRevision]);
 
   const [groupBy, setGroupBy] = useViewPreference<SidebarGroupBy>(
     `${statePrefix}.recent.groupBy.v2`,
@@ -85,52 +102,6 @@ export function useSidebarData({ collapsed = false, hidden = false }: UseSidebar
   useEffect(() => {
     setExpandedGroupSessions({});
   }, [groupBy]);
-
-  const refreshSeq = useRef(0);
-
-  const refreshTerminals = useCallback(() => {
-    const seq = ++refreshSeq.current;
-    api
-      .terminalList()
-      .then((next) => {
-        if (seq === refreshSeq.current) {
-          setTerminals(
-            next.filter(
-              (t) =>
-                !removedTargets.terminals.has(t.terminal_id) &&
-                !removedTargets.sessions.has(t.session_id ?? ""),
-            ),
-          );
-          setTerminalsLoading(false);
-        }
-      })
-      .catch((error) => {
-        if (seq === refreshSeq.current) setTerminalsLoading(false);
-        console.error(error);
-      });
-  }, []);
-
-  const refreshSessions = useCallback(() => {
-    Promise.all([api.listSessions(undefined, undefined, "all"), api.listProjectCards()])
-      .then(([sList, prjList]) => {
-        setSessions(sList.filter((s) => !removedTargets.sessions.has(s.id)));
-        setProjects(prjList.filter((p) => !removedTargets.projects.has(p.id)));
-      })
-      .catch(console.error);
-  }, []);
-
-  useEffect(() => {
-    refreshTerminals();
-    return () => {
-      ++refreshSeq.current;
-    };
-  }, [refreshTerminals]);
-
-  useEffect(() => onEvent(EVT_TERMINALS, refreshTerminals), [refreshTerminals]);
-  useEffect(() => onEvent(EVT_TERMINAL_ACTIVITY, refreshTerminals), [refreshTerminals]);
-  useEffect(refreshSessions, [refreshSessions]);
-  useEffect(() => onEvent(EVT_TERMINALS, refreshSessions), [refreshSessions]);
-  useEffect(() => onEvent(EVT_SYNCED, refreshSessions), [refreshSessions]);
 
   const [filters, setFilters] = useViewPreference<SidebarFilterKey[]>(
     `${statePrefix}.recent.filters`,
@@ -174,15 +145,7 @@ export function useSidebarData({ collapsed = false, hidden = false }: UseSidebar
   useEffect(() => {
     const removed = (event: Event) => {
       const targets = (event as CustomEvent<RemovedTargets>).detail;
-      setSessions((rows) => rows.filter((s) => !removedTargets.sessions.has(s.id)));
-      setTerminals((rows) =>
-        rows.filter(
-          (t) =>
-            !removedTargets.terminals.has(t.terminal_id) &&
-            !removedTargets.sessions.has(t.session_id ?? ""),
-        ),
-      );
-      setProjects((rows) => rows.filter((p) => !removedTargets.projects.has(p.id)));
+      setRemovedRevision(value => value + 1);
       if (targets.sessionIds?.length || targets.terminalIds?.length) {
         setPinnedSessionIds((ids) => {
           const next = ids.filter(

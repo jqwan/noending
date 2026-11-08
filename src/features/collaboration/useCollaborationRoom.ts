@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
 import type { CollaborationMessage, CollaborationRoomView } from "../../types";
+import { collaborationRoomResource } from "./collaborationResources";
 
 /** 后端分页上限是 100；历史一次取满，界面不再做分页按钮。 */
 const PAGE = 100;
@@ -35,11 +36,20 @@ interface ChangedEvent {
 /**
  * 协作室读取：房间状态与消息分开刷新。
  *
- * 首屏取完整历史，后续向前补读到已保存的末尾；同一房间合并刷新请求，
+ * 聊天首屏取完整历史，任务详情只读房间状态；后续补读到已保存的末尾，同一房间合并请求，
  * member / room 类变更只重读房间，不动消息列表。
  */
-export function useCollaborationRoom(taskId: string) {
-  const [room, setRoom] = useState<CollaborationRoomView | null>(null);
+export function useCollaborationRoom(taskId: string, messagesEnabled = true) {
+  const readMessagesEnabled = useRef(messagesEnabled);
+  readMessagesEnabled.current = messagesEnabled;
+  const previousEnabled = useRef(messagesEnabled);
+  const room = collaborationRoomResource.useValue(taskId) ?? null;
+  const roomLoading = room === null;
+  const setRoom = useCallback((next: SetStateAction<CollaborationRoomView | null>) => {
+    const value = typeof next === "function" ? next(collaborationRoomResource.get(taskId) ?? null) : next;
+    if (value) collaborationRoomResource.set(taskId, value);
+    else collaborationRoomResource.clear(taskId);
+  }, [taskId]);
   const [messages, setMessages] = useState<CollaborationMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -55,9 +65,8 @@ export function useCollaborationRoom(taskId: string) {
   const refreshRoom = useCallback(async () => {
     const token = ++roomToken.current;
     try {
-      const next = await api.collaborationRoomGet(taskId);
+      const next = await collaborationRoomResource.refresh(taskId);
       if (roomToken.current === token) {
-        setRoom(next);
         setError("");
       }
       return next;
@@ -136,7 +145,7 @@ export function useCollaborationRoom(taskId: string) {
       const next = await refreshRoom();
       if (!active) return;
       const id = next?.room?.id;
-      if (id) await loadAll(id);
+      if (id && readMessagesEnabled.current) await loadAll(id);
       if (active) setLoading(false);
     })();
     return () => {
@@ -146,6 +155,17 @@ export function useCollaborationRoom(taskId: string) {
       messageRead.current = null;
     };
   }, [taskId, refreshRoom, loadAll]);
+
+  useEffect(() => {
+    const entering = messagesEnabled && !previousEnabled.current;
+    previousEnabled.current = messagesEnabled;
+    const id = collaborationRoomResource.get(taskId)?.room?.id;
+    if (!entering || !id) return;
+    let active = true;
+    if (!messagesRef.current.length) setLoading(true);
+    void loadLatest(id).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [messagesEnabled, taskId, loadLatest]);
 
   useEffect(() => {
     let active = true;
@@ -161,6 +181,7 @@ export function useCollaborationRoom(taskId: string) {
       void refreshRoom().then(next => {
         const id = next?.room?.id;
         if (!active || !id) return;
+        if (!readMessagesEnabled.current) return;
         if (current.current && current.current !== id) return;
         void loadLatest(id);
       });
@@ -170,5 +191,5 @@ export function useCollaborationRoom(taskId: string) {
     return () => { active = false; stops.forEach(stop => stop()); };
   }, [taskId, refreshRoom, loadLatest]);
 
-  return { room, messages, loading, error, refreshRoom, loadAll, loadLatest, setRoom };
+  return { room, roomLoading, messages, loading, error, refreshRoom, loadAll, loadLatest, setRoom };
 }

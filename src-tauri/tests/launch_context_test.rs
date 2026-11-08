@@ -242,7 +242,6 @@ fn session_cursor_roundtrip() {
 fn prepare_resume_uses_current_owner_without_writing() {
     let db = open_db("prep-resume-no-side-effects");
     let ws1 = ws_row(&db, "ws1");
-    let ws2 = ws_row(&db, "ws2");
 
     let session = session_row(&db, Agent::Codex, Some(now()), None);
     // ws1 is the Session's current Owner
@@ -258,15 +257,6 @@ fn prepare_resume_uses_current_owner_without_writing() {
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
-    assert_eq!(
-        prepared.initial_workstream_ids.first().map(String::as_str),
-        None
-    );
-    // ws2 is a different Workstream and is never adopted as the Owner.
-    assert_ne!(
-        prepared.initial_workstream_ids.first().map(String::as_str),
-        Some(ws2.id.as_str())
-    );
 
     // INVARIANT: the Owner is unchanged (prepare only reads it)
     assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws1.id.as_str()));

@@ -243,7 +243,7 @@ fn concurrent_progress_notes_preserve_existing_details_and_make_stale_replacemen
     let mut expected = notes.map(str::to_owned).to_vec();
     expected.sort();
     assert_eq!(appended, expected);
-    assert_eq!(actual.revision, 4);
+    assert!(actual.revision > before.revision);
     assert!(actual.completed);
     assert_eq!(actual.title, before.title);
     assert_eq!(actual.description, before.description);

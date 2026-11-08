@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import Router from "./Router";
+import Router, { prepareRouteModule } from "./Router";
 import type { Agent } from "../types";
 
 const { detail, conversation, terminal, skill } = vi.hoisted(() => ({
@@ -13,6 +13,7 @@ vi.mock("../features/sessions/SessionDetailView", () => ({ default: detail, sess
 vi.mock("../features/sessions/SessionConversationView", () => ({ default: conversation }));
 vi.mock("../features/sessions/SessionTerminalView", () => ({ default: terminal }));
 vi.mock("../features/skills/SkillDetailView", () => ({ default: skill }));
+vi.mock("../features/packages/PackageDetailView", () => ({ default: () => <div>已预载的插件包详情</div> }));
 vi.mock("../features/sessions/NewSessionView", () => ({
   default: ({ workstreamId, agent, projectId }: { workstreamId?: string; agent?: Agent; projectId?: string }) => (
     <div>
@@ -62,4 +63,11 @@ it("dispatches the skill detail route", async () => {
   const goBack = vi.fn();
   render(<Router route={{ view: "skill", resourceId: "skill1", initialTitle: "docs" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
   await waitFor(() => expect(skill).toHaveBeenCalled());
+});
+
+it("renders a prepared route on its first commit without an empty Suspense frame", async () => {
+  const route = { view: "package" as const, packageId: "package-1" };
+  await prepareRouteModule(route);
+  render(<Router route={route} navigate={vi.fn()} goBack={vi.fn()} actionSeq={0} />);
+  expect(screen.getByText("已预载的插件包详情")).toBeTruthy();
 });

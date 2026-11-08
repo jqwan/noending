@@ -56,6 +56,16 @@ export type Route =
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";
 
+/** 未声明范围的同步通知保守刷新；已知的界面修改可以排除无关侧栏读取。 */
+export type SidebarCollection = "sessions" | "projects";
+export function notifyDataChanged(sidebar: SidebarCollection[]) {
+  window.dispatchEvent(new CustomEvent(EVT_SYNCED, { detail: { sidebar } }));
+}
+export function affectsSidebar(event: Event, collection: SidebarCollection) {
+  const scopes = (event as CustomEvent<{ sidebar?: SidebarCollection[] }>).detail?.sidebar;
+  return !Array.isArray(scopes) || scopes.includes(collection);
+}
+
 /** 终端集合或状态变化（spawn / exit / bind / close）的全局刷新信号。后端 registry
  *  发 Tauri 事件 `terminals-changed`，AppShell 桥接成 window 事件。 */
 export const EVT_TERMINALS = "noending:terminals";

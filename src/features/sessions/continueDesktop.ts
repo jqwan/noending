@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { capsOf } from "./sessionFormats";
@@ -6,6 +6,7 @@ import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { invalidateTargets } from "../../app/removedTargets";
 import type { Agent, AgentStatusEntry, TerminalResumeState, TerminalSummary } from "../../types";
 import { EVT_TERMINALS, type Route } from "../../app/routes";
+import { agentStatusResource } from "../agents/agentsCache";
 
 /**
  * 「继续」的共享逻辑：按钮可用性（格式能力 + 桌面端在场）、终端优先入口、
@@ -113,20 +114,10 @@ export const continueSessionTerminalWithToast = openSessionTerminal;
 /** Agent 状态表（桌面端名字与在场是「继续」置灰判断的输入）。读不到时返回
  *  null——在场未知不当作缺席。 */
 export function useAgentStatus(enabled = true): Record<string, AgentStatusEntry> | null {
-  const [status, setStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
+  const status = agentStatusResource.useValue("agents");
   useEffect(() => {
     if (!enabled) return;
-    let live = true;
-    api.getAgentStatus()
-      .then((s) => {
-        if (live) setStatus(s);
-      })
-      .catch(() => {
-        // 状态读不到时按格式能力渲染。
-      });
-    return () => {
-      live = false;
-    };
+    void agentStatusResource.revalidate("agents").catch(() => {});
   }, [enabled]);
-  return status;
+  return status ?? null;
 }

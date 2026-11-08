@@ -23,10 +23,10 @@ it("uses the same searchable cards for both scopes with the correct toolbar acti
   screen.getByRole("button", { name: "普通任务" });
   rerender(<WorkstreamsView navigate={navigate} scope="archived" actionSeq={0} />);
   expect(screen.queryByRole("button", { name: "新建任务" })).toBeNull();
-  expect(document.querySelectorAll(".task-card")).toHaveLength(2);
+  expect(screen.getAllByRole("button", { name: /^归档[甲乙]$/ })).toHaveLength(2);
   fireEvent.change(screen.getByRole("textbox", { name: "搜索任务" }), { target: { value: "甲" } });
   await screen.findByRole("button", { name: "永久删除归档甲" });
-  expect(document.querySelectorAll(".task-card")).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "归档乙" })).toBeNull();
 });
 
 it("delete all covers archived tasks even when the board is filtered", async () => {

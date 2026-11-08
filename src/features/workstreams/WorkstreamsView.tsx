@@ -1,3 +1,5 @@
+import BoardLoading from "../../components/BoardLoading";
+import BoardToolbar from "../../components/BoardToolbar";
 import DialogActions from "../../components/DialogActions";
 import { useObjectMatches, ObjectSearchFeedback } from "../search/useObjectMatches";
 import { useViewState, useViewScroll, useViewPreference, preferenceValues } from "../../hooks/useViewState";
@@ -151,10 +153,8 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   return (
     <div className="main board-page" ref={scrollRef}>
       <PageHeader
-        title="任务"
-        actions={
-          <>
-            <div className="settings-seg icon-seg archive-scope" role="group" aria-label="任务列表范围">
+        title="任务" icon={<Icon name="tasks" />}
+        navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="任务列表范围">
               <button
                 className={archivedMode ? "" : "on"}
                 aria-pressed={!archivedMode}
@@ -173,8 +173,8 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               >
                 <Icon name="archive" />
               </button>
-            </div>
-            <span className="session-action-divider" aria-hidden="true" />
+            </div>}
+        actions={<>
             {archivedMode ? (
               <button
                 className="btn ghost icon-button danger"
@@ -200,16 +200,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
       />
 
       <>
-          <div className="board-toolbar">
-          <input
-            type="text"
-            className="ws-search"
-            aria-label="搜索任务"
-            placeholder="搜索任务…（标题）"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-
+          <BoardToolbar searchLabel="搜索任务" placeholder="搜索任务…（标题）" query={query} onQueryChange={setQuery}>
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
               <div className="ws-control">
@@ -274,25 +265,11 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
             </div>
           </div>
 
-          </div>
+          </BoardToolbar>
 
           {loadError && <div role="alert">读取任务失败 <button className="btn small" onClick={refresh}>重试</button></div>}
           <ObjectSearchFeedback search={search} />
-          {cards === null && !loadError && (
-            viewMode === "cards" ? (
-              <div className="ws-grid board-grid" role="status">
-                <div className="skeleton card" style={{ minHeight: 132 }} />
-                <div className="skeleton card" style={{ minHeight: 132 }} />
-                <div className="skeleton card" style={{ minHeight: 132 }} />
-              </div>
-            ) : (
-              <div className="task-list" aria-busy="true">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
-                ))}
-              </div>
-            )
-          )}
+          <BoardLoading loading={cards === null && !loadError} viewMode={viewMode} />
           {list !== null && list.length === 0 && (
             <EmptyState
               title={

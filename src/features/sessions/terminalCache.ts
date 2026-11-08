@@ -1,9 +1,10 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { createTerminalRenderer } from "./terminalPresentation";
-import type { TerminalNotifications } from "../../types";
+import type { TerminalNotifications, TerminalSnapshot } from "../../types";
 
 type LiveTerminal = {
+  snapshot: TerminalSnapshot;
   term: Terminal;
   fit: FitAddon;
   renderer: ReturnType<typeof createTerminalRenderer>;

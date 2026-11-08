@@ -1,3 +1,5 @@
+import BoardLoading from "../../components/BoardLoading";
+import BoardToolbar from "../../components/BoardToolbar";
 import EmptyState from "../../components/EmptyState";
 import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -12,8 +14,9 @@ import { displayScanWarning, skillDetailRoute, resourceLocations, under } from "
 import SkillSourceDialog from "./SkillSourceDialog";
 import SkillConfigDialog from "./SkillConfigDialog";
 import SkillRegisterDialog from "./SkillRegisterDialog";
-import { skillDetailCache, skillCatalogCache, setSkillCatalogCache } from "./skillDetailCache";
+import { skillDetailCache, skillCatalogCache, setSkillCatalogCache, skillProjectsCache, setSkillProjectsCache } from "./skillDetailCache";
 import "./skills.css";
+import { projectDetailCache } from "../projects/projectDetailCache";
 
 type SkillSort = "name" | "scope";
 type RegistrationFilter = "registered" | "unregistered";
@@ -29,8 +32,8 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
   const [query, setQuery] = useViewState(`${stateKey}.query`, "");
   const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("skills.viewMode", "cards", preferenceValues("cards", "list"));
   const [sort, setSort] = useViewPreference<SkillSort>("skills.sort", "name", preferenceValues("name", "scope"));
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [paths, setPaths] = useState<WorkspacePath[]>([]);
+  const [projects, setProjects] = useState<Project[]>(() => skillProjectsCache ?? []);
+  const [paths, setPaths] = useState<WorkspacePath[]>(() => projectDetailCache.get(filter)?.workspace_paths ?? []);
   const [inventory, setInventory] = useState<SkillInventory>(() => skillCatalogCache ?? EMPTY);
   const [loading, setLoading] = useState(() => !skillCatalogCache);
   const [error, setError] = useState("");
@@ -43,10 +46,10 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
     ? locations.filter(l => l.scope === "project" && paths.some(p => under(l.path, p.canonical_path)))
     : locations.filter(l => l.scope === "project");
 
-  useEffect(() => { let live = true; void api.listProjects().then(rows => { if (live) setProjects(rows); }).catch(e => { if (live) setError(String(e)); }); return () => { live = false; }; }, []);
+  useEffect(() => { let live = true; void api.listProjects().then(rows => { if (live) { setSkillProjectsCache(rows); setProjects(rows); } }).catch(e => { if (live) setError(String(e)); }); return () => { live = false; }; }, []);
   useEffect(() => {
     let live = true;
-    setPaths([]);
+    setPaths(projectDetailCache.get(projectFilter)?.workspace_paths ?? []);
     if (projectFilter) void api.getProjectDetail(projectFilter).then(detail => {
       if (live) setPaths(detail.workspace_paths);
     }).catch(e => { if (live) setError(String(e)); });
@@ -100,16 +103,14 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
   const scrollRef = useViewScroll(`${stateKey}.scroll`, !loading);
 
   return <div className="main board-page skills-page" ref={scrollRef}>
-    <PageHeader title="技能" actions={<>
-      <div className="settings-seg icon-seg" role="group" aria-label="技能托管状态">
+    <PageHeader title="技能" icon={<Icon name="skill" />} navigation={<div className="settings-seg icon-seg" role="group" aria-label="技能托管状态">
         <button className={registration === "registered" ? "on" : ""} aria-pressed={registration === "registered"} aria-label="已托管" title="已托管" onClick={() => setRegistration("registered")}><Icon name="skill" /></button>
         <button className={registration === "unregistered" ? "on" : ""} aria-pressed={registration === "unregistered"} aria-label="未托管" title="未托管" onClick={() => setRegistration("unregistered")}><Icon name="archive" /></button>
-      </div>
-      <span className="session-action-divider" aria-hidden="true" />
+      </div>}
+        actions={<>
       <button className="btn ghost icon-button" aria-label="托管 Skill 源" title="托管 Skill 源" disabled={loading} onClick={() => setAdding(true)}><Icon name="plus" /></button>
     </>} />
-    <div className="board-toolbar">
-      <input type="text" className="ws-search" aria-label="搜索技能" placeholder="搜索技能…（名称、说明或路径）" value={query} onChange={e => setQuery(e.target.value)} />
+    <BoardToolbar searchLabel="搜索技能" placeholder="搜索技能…（名称、说明或路径）" query={query} onQueryChange={setQuery}>
       <div className="toolbar ws-controls">
         <div className="ws-controls-group">
           <div className="ws-control"><span className="muted small">范围</span>
@@ -134,11 +135,12 @@ export default function SkillsView({ initialProjectId = "", navigate }: {
           </div>
         </div>
       </div>
-    </div>
+    </BoardToolbar>
     {error && <Notice role="alert" >{error}</Notice>}
+    <BoardLoading loading={loading && !error} viewMode={viewMode} />
     {inventory.warnings.length > 0 && <details className="skill-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{displayScanWarning(warning)}</p>)}</details>}
     <section className={viewMode === "cards" ? "ws-grid board-grid skill-cards" : "skill-list"} aria-label="技能">
-      {!loading && !visibleRows.length && <EmptyState title="没有匹配的技能。" />}
+      {!loading && !error && !visibleRows.length && <EmptyState title="没有匹配的技能。" />}
       {visibleRows.map(row => {
         const locations = resourceLocations(inventory, row);
         const userEntries = locations.filter(l => l.scope === "user");

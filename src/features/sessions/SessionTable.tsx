@@ -405,7 +405,7 @@ const SessionListRowItem = memo(function SessionListRowItem({
     >
       <button className="session-open" onClick={() => onOpen(s.id)}>
         <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
-          <AgentIcon agent={s.agent} size={15} />
+          <AgentIcon agent={s.agent} size={16} />
           <span>{sessionDisplayTitle(s.title)}</span>
         </span>
         <span className="session-list-meta">

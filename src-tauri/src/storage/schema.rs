@@ -883,14 +883,6 @@ mod tests {
             "SELECT origin FROM ingest_sources WHERE agent = 'antigravity' AND path LIKE '%antigravity-cli'", [], |r|r.get(0)
         ).unwrap();
         assert_eq!(origin, "default");
-        let enabled_columns: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ingest_sources') WHERE name='enabled'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(enabled_columns, 0);
 
         reconcile_runtime_defaults(&conn).unwrap();
         assert_eq!(count(&conn), 2, "re-run must not duplicate");

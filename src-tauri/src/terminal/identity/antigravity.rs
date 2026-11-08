@@ -39,7 +39,7 @@ pub(super) fn helper_arguments(source: &str) -> Option<Vec<String>> {
 }
 
 fn arguments(environment: &str, source: &str) -> Option<Vec<String>> {
-    if !matches!(source, "PreInvocation" | "Stop") {
+    if !matches!(source, "PreInvocation" | "Stop" | "PreToolUse") {
         return None;
     }
     let target: Target = serde_json::from_str(environment).ok()?;
@@ -54,10 +54,10 @@ fn arguments(environment: &str, source: &str) -> Option<Vec<String>> {
 }
 
 pub(super) fn response(source: &str) -> &'static str {
-    if source == "Stop" {
-        r#"{"decision":"stop"}"#
-    } else {
-        "{}"
+    match source {
+        "Stop" => r#"{"decision":"stop"}"#,
+        "PreToolUse" => r#"{"decision":"allow"}"#,
+        _ => "{}",
     }
 }
 
@@ -66,8 +66,17 @@ pub(super) fn hook_event(
     source: &str,
     store_root: &Path,
 ) -> Option<NativeIdentityEvent> {
-    if !matches!(source, "PreInvocation" | "Stop") {
+    if !matches!(source, "PreInvocation" | "Stop" | "PreToolUse") {
         return None;
+    }
+    if source == "PreToolUse" {
+        let tool = value
+            .get("toolCall")
+            .and_then(|t| t.get("name"))
+            .and_then(|n| n.as_str());
+        if tool != Some("ask_question") {
+            return None;
+        }
     }
     let native_id = value.get("conversationId")?.as_str()?;
     uuid::Uuid::parse_str(native_id).ok()?;
@@ -116,20 +125,25 @@ pub(super) fn hook_event(
                 turn_id: None,
                 starts_turn: true,
             }),
+            "PreToolUse" => Some(ActivitySignal {
+                state: ActivityState::Waiting,
+                turn_id: None,
+                starts_turn: false,
+            }),
             "Stop" => Some(ActivitySignal {
                 state: {
                     let fully_idle = value["fullyIdle"].as_bool().unwrap_or(true);
                     let reason = value["terminationReason"].as_str().unwrap_or_default();
-                    if !fully_idle {
-                        ActivityState::Working
+                    if reason.eq_ignore_ascii_case("USER_CANCELED") {
+                        ActivityState::Interrupted
                     } else if reason.eq_ignore_ascii_case("ERROR")
                         || reason.eq_ignore_ascii_case("MAX_INVOCATIONS")
                         || reason.eq_ignore_ascii_case("MAX_FORCED_INVOCATIONS")
                         || reason.eq_ignore_ascii_case("MAX_TOKEN_BUDGET_EXCEEDED")
                     {
                         ActivityState::Failed
-                    } else if reason.eq_ignore_ascii_case("USER_CANCELED") {
-                        ActivityState::Interrupted
+                    } else if !fully_idle {
+                        ActivityState::Working
                     } else if reason.eq_ignore_ascii_case("NO_TOOL_CALL")
                         || reason.eq_ignore_ascii_case("TERMINAL_STEP_TYPE")
                         || reason.eq_ignore_ascii_case("TERMINAL_CUSTOM_HOOK")
@@ -174,6 +188,12 @@ pub(super) fn install_plugin(store_root: &Path, executable: &Path) -> Result<()>
     }
     let hooks = serde_json::json!({ PLUGIN: {
         "PreInvocation": [{"type":"command", "command": command(executable, "PreInvocation"), "timeout":3}],
+        "PreToolUse": [
+            {
+                "matcher": "ask_question",
+                "hooks": [{"type":"command", "command": command(executable, "PreToolUse"), "timeout":3}]
+            }
+        ],
         "Stop": [{"type":"command", "command": command(executable, "Stop"), "timeout":3}]
     }});
     replace_owned(
@@ -302,6 +322,8 @@ mod tests {
             ("MAX_TOKEN_BUDGET_EXCEEDED", true, ActivityState::Failed),
             ("USER_CANCELED", true, ActivityState::Interrupted),
             ("user_canceled", true, ActivityState::Interrupted),
+            ("USER_CANCELED", false, ActivityState::Interrupted),
+            ("ERROR", false, ActivityState::Failed),
             ("UNKNOWN_REASON", true, ActivityState::Idle),
         ] {
             let mut value = input(&store.0, ROOT_A);
@@ -316,6 +338,19 @@ mod tests {
                 expected
             );
         }
+        let mut question = input(&store.0, ROOT_A);
+        question["toolCall"] = serde_json::json!({"name":"ask_question","args":{}});
+        assert_eq!(
+            hook_event(question, "PreToolUse", &store.0)
+                .unwrap()
+                .activity
+                .unwrap()
+                .state,
+            ActivityState::Waiting
+        );
+        let mut other_tool = input(&store.0, ROOT_A);
+        other_tool["toolCall"] = serde_json::json!({"name":"run_command","args":{}});
+        assert!(hook_event(other_tool, "PreToolUse", &store.0).is_none());
     }
 
     #[test]
@@ -488,6 +523,15 @@ mod tests {
                 worker.join().unwrap();
             }
         }
+        let mut question = input(&store.0, ROOT_A);
+        question["toolCall"] = serde_json::json!({"name":"ask_question","args":{}});
+        let args = arguments(&first.environment[0].1, "PreToolUse").unwrap();
+        let bytes = serde_json::to_vec(&question).unwrap();
+        run_hook_helper(args, bytes.as_slice()).unwrap();
+        let a = recv_a.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(a.source.as_deref(), Some("PreToolUse"));
+        assert_eq!(a.activity.unwrap().state, ActivityState::Waiting);
+
         assert!(recv_a.try_recv().is_err());
         assert!(recv_b.try_recv().is_err());
         let resource = first.bridge.resource_dir.clone();
@@ -531,6 +575,8 @@ mod tests {
         let hooks: serde_json::Value =
             serde_json::from_slice(&std::fs::read(plugin.join("hooks.json")).unwrap()).unwrap();
         assert!(hooks[PLUGIN]["PreInvocation"][0]["command"].is_string());
+        assert!(hooks[PLUGIN]["PreToolUse"][0]["matcher"].is_string());
+        assert!(hooks[PLUGIN]["PreToolUse"][0]["hooks"][0]["command"].is_string());
         assert!(hooks[PLUGIN]["Stop"][0]["command"].is_string());
         std::fs::remove_file(plugin.join(".noending-managed")).unwrap();
         let before = std::fs::read(plugin.join("hooks.json")).unwrap();
@@ -541,7 +587,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hooks_outside_noending_return_neutral_json_without_launching_the_app() {
-        for source in ["PreInvocation", "Stop"] {
+        for source in ["PreInvocation", "PreToolUse", "Stop"] {
             // A shell executable would fail if invoked with our helper flag.
             let result = std::process::Command::new("/bin/sh")
                 .args(["-c", &command(Path::new("/bin/sh"), source)])
@@ -552,6 +598,8 @@ mod tests {
             let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
             if source == "Stop" {
                 assert_eq!(output, serde_json::json!({"decision":"stop"}));
+            } else if source == "PreToolUse" {
+                assert_eq!(output, serde_json::json!({"decision":"allow"}));
             } else {
                 assert_eq!(output, serde_json::json!({}));
             }

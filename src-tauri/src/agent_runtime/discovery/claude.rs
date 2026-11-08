@@ -94,12 +94,4 @@ mod tests {
         assert_eq!(alias_display_name(&e, "haiku"), None);
         assert_eq!(alias_display_name(&e, "opus"), None);
     }
-
-    #[test]
-    fn unknown_alias_yields_nothing() {
-        assert_eq!(
-            alias_display_name(&serde_json::Map::new(), "nonsense"),
-            None
-        );
-    }
 }

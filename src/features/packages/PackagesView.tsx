@@ -1,3 +1,5 @@
+import BoardLoading from "../../components/BoardLoading";
+import BoardToolbar from "../../components/BoardToolbar";
 import EmptyState from "../../components/EmptyState";
 import DialogActions from "../../components/DialogActions";
 import Notice from "../../components/Notice";
@@ -156,16 +158,14 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
     : <Icon name="puzzle" />;
 
   return <div className="main board-page packages-page" ref={scrollRef}>
-    <PageHeader title="插件包" actions={<>
-      <div className="settings-seg icon-seg" role="group" aria-label="插件包管理状态">
+    <PageHeader title="插件包" icon={<Icon name="puzzle" />} navigation={<div className="settings-seg icon-seg" role="group" aria-label="插件包管理状态">
         <button className={tab === "managed" ? "on" : ""} aria-pressed={tab === "managed"} aria-label="可管理" title="可管理（可启停或可卸载）" onClick={() => setTab("managed")}><Icon name="puzzle" /></button>
         <button className={tab === "unmanaged" ? "on" : ""} aria-pressed={tab === "unmanaged"} aria-label="不可管理" title="不可管理（仅查看）" onClick={() => setTab("unmanaged")}><Icon name="archive" /></button>
-      </div>
-      <span className="session-action-divider" aria-hidden="true" />
+      </div>}
+        actions={<>
       <button className="btn ghost icon-button" aria-label="导入插件包" title="导入本地插件包目录" disabled={loading} onClick={() => setImporting(true)}><Icon name="plus" /></button>
     </>} />
-    <div className="board-toolbar">
-      <input type="text" className="ws-search" aria-label="搜索插件包" placeholder="搜索插件包…（名称、说明或市场）" value={query} onChange={e => setQuery(e.target.value)} />
+    <BoardToolbar searchLabel="搜索插件包" placeholder="搜索插件包…（名称、说明或市场）" query={query} onQueryChange={setQuery}>
       <div className="toolbar ws-controls">
         <div className="ws-controls-group">
           <div className="ws-control"><span className="muted small">Agent</span>
@@ -186,15 +186,16 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
           </div>
         </div>
       </div>
-    </div>
+    </BoardToolbar>
     {error && <Notice role="alert" >{error}</Notice>}
+    <BoardLoading loading={loading && !error} viewMode={viewMode} />
     {inventory.warnings.length > 0 && <details className="package-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</details>}
     {/* 列表与卡片是互斥结构：容器与条目都用视图专属 key，切换时整体卸载重挂，
         避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/Agent
         看板同一问题的既定修法）。 */}
     <section key={viewMode === "cards" ? "packages-cards" : "packages-list"}
       className={viewMode === "cards" ? "ws-grid board-grid package-cards" : "package-list"} aria-label="插件包">
-      {!loading && !visibleRows.length && <EmptyState title={tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"} />}
+      {!loading && !error && !visibleRows.length && <EmptyState title={tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"} />}
       {visibleRows.map(entry => viewMode === "cards" ? (
         <article key={`card-${entry.id}`} className="ws-card full package-card" tabIndex={0} role="button"
           onClick={() => openDetail(entry)}

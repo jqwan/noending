@@ -750,6 +750,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delta.messages.len(), 2);
+        assert_eq!(
+            (&delta.messages[0].role, &delta.messages[0].content),
+            (&delta.messages[1].role, &delta.messages[1].content),
+            "the optional model field must not change the parsed message"
+        );
     }
 
     /// F16: a `subagents/agent-*.jsonl` transcript is a CHILD member keyed by

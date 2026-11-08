@@ -223,6 +223,7 @@ pub fn run() {
             commands::project::list_project_workstreams,
             commands::project::rename_project,
             commands::project::add_project_path,
+            commands::project::clean_missing_project_paths,
             commands::project::archive_project,
             commands::project::restore_project,
             commands::project::delete_project_permanently,

@@ -3,12 +3,25 @@ import { afterEach, expect, it, vi } from "vitest";
 import { api } from "../api";
 import type { OperationStatus } from "../types";
 import { useOperationState } from "./useOperationState";
+import { clearReadResources } from "./readResource";
 vi.mock("../api", () => ({api:{getOperationStatus:vi.fn()}}));
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); clearReadResources(); vi.useRealTimers(); vi.clearAllMocks(); });
 function Control({kind,id}:{kind:"session"|"task"|"project";id:string}) {
   const state=useOperationState("summary",kind,id);
   return <button disabled={state.checking || state.busy}>{kind}:{id}</button>;
 }
+it("keeps a known idle button available while a new page checks the backend", async () => {
+  vi.mocked(api.getOperationStatus).mockResolvedValue([]);
+  const first = render(<Control kind="session" id="idle" />);
+  await waitFor(() => expect(screen.getByRole("button")).toHaveProperty("disabled", false));
+  first.unmount();
+  let finish!: (value: OperationStatus[]) => void;
+  vi.mocked(api.getOperationStatus).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  render(<Control kind="session" id="idle" />);
+  expect(screen.getByRole("button")).toHaveProperty("disabled", false);
+  await act(async () => { finish([{ id: "running", kind: "summary", state: "running", targets: [{ kind: "session", id: "idle" }], agent: null }]); });
+  expect(screen.getByRole("button")).toHaveProperty("disabled", true);
+});
 it("restores a summary operation from the backend after navigation and isolates unrelated targets",async () => {
   const kind = "session" as const;
   let operations:OperationStatus[]=[{id:"cli",kind:"summary",state:"running",targets:[{kind,id:"one"}],agent:null}];

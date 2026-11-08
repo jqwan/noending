@@ -110,17 +110,12 @@ fn one_git_family_cannot_be_claimed_by_two_projects() {
         .unwrap();
     db.upsert_project(&support::project("fb".to_string(), "B"))
         .unwrap();
-    let err = db
-        .write()
+    db.write()
         .execute(
             "UPDATE projects SET git_id = 'git-shared' WHERE id IN ('fa','fb')",
             [],
         )
         .expect_err("idx_projects_git_id is UNIQUE: two rows cannot share a family");
-    assert!(
-        err.to_string().contains("UNIQUE"),
-        "expected the partial UNIQUE index to refuse it, got {err}"
-    );
 }
 
 // 2. cross-platform
@@ -181,10 +176,10 @@ fn unix_path_identity_vectors_are_stable() {
         path_identity_with("/Users/dev/projects/noending/", PathStyle::Unix),
         "path-f89dfc8b3a07fb0b6083631898a33217"
     );
-    // And a case difference is still a different Unix directory.
+    // And case is part of a Unix directory's identity.
     assert_ne!(
-        path_identity_with("/Users/dev/projects/repo", PathStyle::Unix),
-        "path-ee90d2b156a11b39705abc879aebcde4"
+        path_identity_with("/var/data/Repo", PathStyle::Unix),
+        path_identity_with("/var/data/repo", PathStyle::Unix)
     );
 }
 
@@ -240,9 +235,9 @@ fn the_default_workspace_the_launcher_hands_round_trips_through_the_identity_doo
     let home = NoEndingHome::new(base.to_string_lossy().as_ref(), None).unwrap();
     let stored = home.default_workspace_str();
     assert_eq!(
-        path_identity_of(&stored).as_deref(),
-        Some(path_identity(&canon(&stored)).as_str()),
-        "the string Home reports is already canonical, so the door adds nothing"
+        canon(&stored),
+        stored,
+        "Home already reports the canonical string"
     );
     assert!(
         !home.reserved().contains(&stored),

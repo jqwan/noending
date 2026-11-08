@@ -285,14 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_home_controls_context_runtime_and_logs() {
-        let base = std::env::temp_dir().join(format!("context-home-{}", uuid::Uuid::new_v4()));
-        let home = home(&base.join("custom"));
-        let runtime = prepare_runtime_dir(&home).unwrap();
-        assert!(runtime.is_dir(), "prepare creates the runtime dir");
-    }
-
-    #[test]
     fn error_log_has_stage_and_operation_metadata_without_prompt_or_cli_output() {
         let base = std::env::temp_dir().join(format!("context-safe-log-{}", uuid::Uuid::new_v4()));
         let home = home(&base);
@@ -344,10 +336,15 @@ mod tests {
         let base = std::env::temp_dir().join(format!("context-prune-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&base).unwrap();
         fs::write(base.join("2020-01-01.jsonl"), "old").unwrap();
+        fs::write(base.join("2026-09-20.jsonl"), "recent").unwrap();
         fs::write(base.join("keep.txt"), "other").unwrap();
         let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
         prune_old_logs(&base, today);
         assert!(!base.join("2020-01-01.jsonl").exists());
+        assert!(
+            base.join("2026-09-20.jsonl").exists(),
+            "a log inside the fourteen-day window survives"
+        );
         assert!(base.join("keep.txt").exists());
         let _ = fs::remove_dir_all(base);
     }

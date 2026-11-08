@@ -1,5 +1,6 @@
+import { notifyDataChanged } from "../../app/routes";
 import { recentFirst } from "../../components/detailOrder";
-import { DetailContent, DetailSection } from "../../components/DetailSection";
+import { DetailContent, DetailLoading, DetailSection } from "../../components/DetailSection";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
@@ -7,13 +8,15 @@ import { useRefreshSignal } from "../../components/common";
 import type { SummaryDocument, SummaryItem, TaskItem } from "../../types";
 import SummaryContent, { SummaryControls, useSummaryExpansion } from "../sessions/SummaryContent";
 import TaskItemEditor, { type ItemEditorState } from "./TaskItemEditor";
+import { taskItemsResource } from "./taskResources";
 
 type Draft = { original: TaskItem | null; index: number | null; base: SummaryDocument; item: SummaryItem };
 const documentOf = (items: TaskItem[]): SummaryDocument => ({ items: items.map(({ id, title, description, details }) => ({ id, title, description, details })) });
 
 export default function TaskItems({ taskId }: { taskId: string }) {
-  const [items, setItems] = useState<TaskItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const snapshot = taskItemsResource.useValue(taskId);
+  const items = snapshot ?? [];
+  const loading = snapshot === undefined;
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,12 +27,9 @@ export default function TaskItems({ taskId }: { taskId: string }) {
   const refresh = useCallback(async () => {
     const request = ++generation.current;
     try {
-      const next = await api.listTaskItems(taskId);
-      if (active.current && request === generation.current) setItems(next);
+      await taskItemsResource.refresh(taskId);
     } catch (failure) {
       if (active.current && request === generation.current) setError(`读取任务事项失败：${String(failure)}`);
-    } finally {
-      if (active.current && request === generation.current) setLoading(false);
     }
   }, [taskId]);
   useEffect(() => {
@@ -48,7 +48,7 @@ export default function TaskItems({ taskId }: { taskId: string }) {
       if (!active.current) return;
       setDraft(null);
       await refresh();
-      window.dispatchEvent(new Event("noending:sync"));
+      notifyDataChanged([]);
     } catch (failure) {
       if (active.current) { setError(`操作失败：${String(failure)}。请核对最新事项后重试。`); void refresh(); }
     } finally { writing.current = false; if (active.current) setBusy(false); }
@@ -92,12 +92,12 @@ export default function TaskItems({ taskId }: { taskId: string }) {
     </>;
   };
   const ordered = recentFirst(items, item => item.updated_at).sort((a, b) => Number(a.completed) - Number(b.completed));
-  return <DetailSection sectionId="items" label="任务事项" title={<><Icon name="tasks" /><span>任务事项（{items.length}）</span></>} actions={({ expand }) => <><SummaryControls expansion={expansion} disabled={Boolean(draft)} /><button type="button" className="btn ghost icon-button small" aria-label="新增事项" title="新增事项" disabled={loading || busy || Boolean(draft)} onClick={() => { expand(); start(null); }}><Icon name="plus" /></button></>} status={<>
+  return <DetailSection sectionId="items" label="任务事项" title={<><Icon name="tasks" /><span>任务事项{!loading && `（${items.length}）`}</span></>} actions={({ expand }) => <><SummaryControls expansion={expansion} disabled={Boolean(draft)} /><button type="button" className="btn ghost icon-button small" aria-label="新增事项" title="新增事项" disabled={loading || busy || Boolean(draft)} onClick={() => { expand(); start(null); }}><Icon name="plus" /></button></>} status={<>
       {error && !draft && <div role="alert"><span>{error}</span><button type="button" className="btn ghost small" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重新读取</button></div>}
     </>}>
 
 
-    {loading ? <div className="small muted">读取任务事项…</div> : <>
+    {loading ? (!error && <DetailLoading>读取任务事项…</DetailLoading>) : <>
       <DetailContent label="任务事项内容" className="md-body"><SummaryContent
         expansion={expansion} actions={actions} editing={Boolean(draft)}
         renderEditor={item => draft?.original?.id === item.id ? editor : null}

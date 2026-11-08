@@ -82,6 +82,13 @@ pub fn set_tracking_conn(conn: &Connection, sid: &str, tid: &str, tracked: bool)
             params![sid, tid],
         )?
     } else {
+        let collaborating: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_rooms room JOIN collaboration_runs r ON r.room_id=room.id JOIN collaboration_run_members m ON m.run_id=r.id WHERE room.task_id=?2 AND m.session_id=?1 AND r.status IN ('starting','active'))",
+            params![sid, tid], |row| row.get(0),
+        )?;
+        if collaborating {
+            return Err(other("正在协作中的成员不能取消关联，请先停止协作"));
+        }
         conn.execute(
             "DELETE FROM session_workstreams WHERE session_id=?1 AND workstream_id=?2",
             params![sid, tid],

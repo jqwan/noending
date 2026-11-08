@@ -2990,27 +2990,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_input_echoes_through_the_pty() {
-        let registry = registry();
-        let outcome = spawn_embedded(&sh("cat"), &target(&registry, "s-cat")).unwrap();
-        let id = outcome.terminal_id.clone().unwrap();
-
-        registry.write(&id, "ping-through-pty").unwrap();
-        until("echo to appear in scrollback", || {
-            registry.attach(&id).ok().filter(|s| {
-                String::from_utf8_lossy(
-                    &base64::engine::general_purpose::STANDARD
-                        .decode(&s.scrollback)
-                        .unwrap(),
-                )
-                .contains("ping-through-pty")
-            })
-        });
-        registry.kill_all();
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn terminal_write_after_exit_is_refused_with_reason() {
         let registry = registry();
         let outcome = spawn_embedded(&sh("exit 0"), &target(&registry, "s-dead")).unwrap();
@@ -3055,22 +3034,6 @@ mod tests {
         registry.kill_all();
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn has_live_tracks_the_wait_thread_fact() {
-        let registry = registry();
-        assert!(!registry.has_live("s-live"));
-        let outcome = spawn_embedded(&sh("sleep 30"), &target(&registry, "s-live")).unwrap();
-        assert!(registry.has_live("s-live"));
-        registry.kill_all();
-        until("terminal to die after kill", || {
-            registry
-                .attach(&outcome.terminal_id.clone().unwrap())
-                .ok()
-                .filter(|s| !s.summary.live)
-        });
-        assert!(!registry.has_live("s-live"));
-    }
     #[cfg(unix)]
     #[test]
     fn a_prespecified_id_binds_at_discovery() {

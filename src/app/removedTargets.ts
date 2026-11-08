@@ -1,4 +1,4 @@
-import { EVT_SYNCED, EVT_TERMINALS, type Route } from "./routes";
+import { notifyDataChanged, EVT_TERMINALS, type Route } from "./routes";
 import { sessionPages, sessionTerminals } from "../features/sessions/sessionNavigation";
 import { disposeTerminal } from "../features/sessions/terminalCache";
 import { viewState } from "../hooks/useViewState";
@@ -54,6 +54,6 @@ export function invalidateTargets(targets: RemovedTargets) {
     if (prefixes.some(prefix => key.startsWith(prefix))) viewState.delete(key);
   }
   window.dispatchEvent(new CustomEvent<RemovedTargets>(EVT_REMOVED, { detail: targets }));
-  window.dispatchEvent(new CustomEvent(EVT_SYNCED));
+  notifyDataChanged(targets.sessionIds?.length || targets.projectIds?.length ? ["sessions", "projects"] : []);
   if (targets.terminalIds?.length) window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
 }

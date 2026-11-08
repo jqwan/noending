@@ -44,8 +44,8 @@
   color: var(--danger);
 }
 .workstream-project-chip-remove .ui-icon {
-  width: 10px;
-  height: 10px;
+  width: var(--icon-size-xs);
+  height: var(--icon-size-xs);
 }
 
 /* ---------- Workstream project multi-select popover ---------- */
@@ -55,7 +55,7 @@
   font-size: var(--font-size-base);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: var(--bg-app);
+  background: var(--bg-panel);
   color: var(--text-primary);
   margin-bottom: 4px;
   box-sizing: border-box;
@@ -180,7 +180,7 @@ button.btn.task-item-status.is-completed:hover:not(:disabled) { color: var(--suc
   padding: 3px 6px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: var(--bg-app);
+  background: var(--bg-panel);
   color: var(--text-secondary);
   font: inherit;
   font-size: var(--font-size-base);

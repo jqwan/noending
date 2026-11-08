@@ -33,6 +33,7 @@ import { connectTerminalKeyboard, isMacTerminal } from "./terminalKeyboard";
 import { terminalOptions, createTerminalRenderer, attachTerminalLayout } from "./terminalPresentation";
 import { connectTerminalLinks } from "./terminalLinks";
 import { subscribeTerminalStream, type TerminalStream } from "./terminalStream";
+import { sessionDetailCache } from "./sessionDetailCache";
 
 /**
  * 会话页的内嵌终端面板。路由保留 terminal_id 以访问尚未绑定的实例；PTY 与 scrollback 都归后端（terminal
@@ -75,8 +76,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   initialSessionId?: string;
   navigate: (r: Route) => void;
 }) {
-  const [state, setState] = useState<TerminalState>({ kind: "loading" });
+  const cachedTerminal = liveTerminals.get(terminalId);
+  const [state, setState] = useState<TerminalState>(() => cachedTerminal
+    ? { kind: "ready", snapshot: cachedTerminal.snapshot, exited: cachedTerminal.exited, stream: null }
+    : { kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const refreshTerminalRef = useRef<(() => void) | null>(null);
   const notificationInputRef = useRef<HTMLTextAreaElement>(null);
   const inputOwnership = useRef<{ terminalId: string; managed: boolean } | null>(null);
   const focusMailboxInput = useCallback(() => {
@@ -85,9 +90,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   }, []);
   // 路由种子只填首帧；任何权威快照/事件（包括 null）都会替换它。
   const [identity, setIdentity] = useState<BoundIdentity>({
-    revision: -1,
-    sessionId: initialSessionId ?? null,
-    title: initialTitle ?? null,
+    revision: cachedTerminal?.snapshot.identity_revision ?? -1,
+    sessionId: cachedTerminal ? cachedTerminal.snapshot.session_id : initialSessionId ?? null,
+    title: cachedTerminal ? cachedTerminal.snapshot.session_title : initialTitle ?? null,
   });
   const identityRef = useRef(identity);
   const boundSessionId = identity.sessionId;
@@ -97,7 +102,11 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const [closing, setClosing] = useState(false);
   const { notification, error: mailboxError, apply: applyNotification, refresh: refreshMailbox } = useMailbox(terminalId);
   const closingRef = useRef(false);
-  const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(() => {
+    const id = cachedTerminal?.snapshot.session_id ?? initialSessionId;
+    const session = id ? sessionDetailCache.get(id)?.session : undefined;
+    return session ? { id: id!, sourceKind: session.source_kind, archived: !!session.archived_at } : null;
+  });
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
@@ -112,9 +121,11 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       else if (update.session_id === current.sessionId) title = current.title;
     }
     const next = { revision: update.identity_revision, sessionId: update.session_id, title };
+    const live = liveTerminals.get(terminalId);
+    if (live) live.snapshot = { ...live.snapshot, identity_revision: next.revision, session_id: next.sessionId, session_title: next.title };
     identityRef.current = next;
     setIdentity(next);
-  }, []);
+  }, [terminalId]);
 
   const closeTerminal = async () => {
     if (closingRef.current || terminalBusy) return;
@@ -143,7 +154,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
-    setState({ kind: "loading" });
+    if (!liveTerminals.has(terminalId)) setState({ kind: "loading" });
     const identityReady = listen<TerminalBound>(EVENT_BOUND, (e) => {
       if (active && e.payload.terminal_id === terminalId) applyIdentity(e.payload);
     }).then(stop => {
@@ -169,7 +180,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       })
       .catch((error) => {
         stream?.dispose();
-        if (active) setState({ kind: "error", message: String(error) });
+        if (active) {
+          if (cached) showToast(`无法刷新终端状态：${String(error)}`);
+          else setState({ kind: "error", message: String(error) });
+        }
       });
     return () => {
       active = false;
@@ -190,6 +204,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         setSessionMeta({ id: sessionId, sourceKind: d.session.source_kind, archived: !!d.session.archived_at });
         if (current.title !== null) return;
         const next = { ...current, title: sessionDisplayTitle(d.session.title) };
+        const cached = liveTerminals.get(terminalId);
+        if (cached) cached.snapshot = { ...cached.snapshot, session_title: next.title };
         identityRef.current = next;
         setIdentity(next);
       })
@@ -197,7 +213,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     return () => {
       live = false;
     };
-  }, [identity.sessionId, identity.revision]);
+  }, [identity.sessionId, identity.revision, terminalId]);
 
   // xterm 生命周期：实例按 terminal_id 常驻（liveTerminals），本 effect 只做
   // 两件事——首次创建（open + 监听 + 回放一次 scrollback），或重挂（把存活的
@@ -266,6 +282,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       }, windows);
 
       entry = {
+        snapshot: { ...snapshot, session_title: identityRef.current.title },
         term,
         fit,
         renderer,
@@ -283,6 +300,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         }
       });
     } else {
+      entry.snapshot = { ...snapshot, identity_revision: identityRef.current.revision,
+        session_id: identityRef.current.sessionId, session_title: identityRef.current.title };
+      entry.exited ||= !snapshot.live;
       // 重挂：搬回节点，不回放、不新建。状态（含 detach 期间的输出与退出
       // 事实）都在实例里。
       if (entry.term.element) container.appendChild(entry.term.element);
@@ -305,9 +325,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     };
 
     if (isWindowsTerminal()) {
-      const stopLayout = connectTerminalLayout(live.term, live.fit, container,
+      const layout = connectTerminalLayout(live.term, live.fit, container,
         (cols, rows) => live.exited ? Promise.resolve() : api.terminalResize(id, cols, rows), snapshot);
-      return () => { live.onExit = null; live.onManagedFocus = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); stopLayout(); };
+      refreshTerminalRef.current = layout.redraw;
+      return () => { refreshTerminalRef.current = null; live.onExit = null; live.onManagedFocus = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); layout.dispose(); };
     }
 
     const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {
@@ -320,9 +341,11 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       });
     });
     live.renderer.onDimensionsChange = layout.refresh;
+    refreshTerminalRef.current = layout.redraw;
     layout.refresh();
 
     return () => {
+      refreshTerminalRef.current = null;
       live.onExit = null;
       live.onManagedFocus = null;
       live.renderer.onDimensionsChange = null;
@@ -361,24 +384,18 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   return (
     <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动通知开启，终端只读" : undefined}><div className="main fill detail-page">
       <PageHeader
-        title={
-          headerAgent ? (
-            <span className="session-title-with-icon" title={headerTitle}>
-              <AgentIcon agent={headerAgent} size={18} />
-              <span className="session-title-text">{headerTitle}</span>
-            </span>
-          ) : (
-            headerTitle
-          )
-        }
+        title={headerTitle} icon={headerAgent ? <AgentIcon agent={headerAgent} size={18} /> : <Icon name="terminal" />}
+        navigation={<SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
+              agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived}
+              terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />}
         actions={
           <>
-            <SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
-              agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived}
-              terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
 
+            <button className="btn ghost icon-button" aria-label="刷新终端" title="刷新终端显示"
+              disabled={closing || terminalBusy || state.kind !== "ready"}
+              onClick={() => refreshTerminalRef.current?.()}><Icon name="refresh" /></button>
             <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
               title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || terminalBusy || state.kind === "loading"}
               onClick={() => void closeTerminal()}><Icon name="close" /></button>
@@ -412,7 +429,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           <DetailLayout mainClassName="detail-main-terminal" label="终端详情栏" panel={<>
               <SessionTaskTracking key={boundSessionId} sessionId={boundSessionId} navigate={navigate} />
               <TerminalMailbox key={notification?.session_id ?? terminalId} terminalId={terminalId} notification={notification} error={mailboxError}
-                apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} />
+                apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} navigate={navigate} />
             </>}><div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} /></DetailLayout>
         </>
       )}

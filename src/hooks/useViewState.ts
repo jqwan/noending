@@ -30,17 +30,22 @@ export function writeViewPreference<T>(key: string, value: T) {
 }
 
 function useStateValue<T>(key: string, initial: T, validate?: Validator<T>) {
-  const [value, setValue] = useState<T>(() => validate ? readViewPreference(key, initial, validate)
-    : viewState.has(key) ? viewState.get(key) as T : initial);
+  const read = () => validate ? readViewPreference(key, initial, validate)
+    : viewState.has(key) ? viewState.get(key) as T : initial;
+  const [state, setState] = useState(() => ({ key, value: read() }));
+  // 偏好范围改变时在提交前切换状态，避免重建页面或串写旧值。
+  const value = state.key === key ? state.value : read();
+  if (state.key !== key) setState({ key, value });
   const persistent = Boolean(validate);
   useEffect(() => {
     if (!persistent) return;
     writeViewPreference(key, value);
   }, [key, value, persistent]);
-  const update = (next: SetStateAction<T>) => setValue(current => {
-    const value = typeof next === "function" ? (next as (v: T) => T)(current) : next;
+  const update = (next: SetStateAction<T>) => setState(current => {
+    const previous = current.key === key ? current.value : read();
+    const value = typeof next === "function" ? (next as (v: T) => T)(previous) : next;
     viewState.set(key, value);
-    return value;
+    return { key, value };
   });
   return [value, update] as const;
 }

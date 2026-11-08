@@ -1,13 +1,15 @@
 import { invalidateTargets, removedTargets } from "../app/removedTargets";
+import { clearReadResources } from "../hooks/readResource";
 // Sidebar contract: grouped sessions, retained terminals and exact native identity.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "./Sidebar";
+import SessionSubpageTabs from "../features/sessions/SessionSubpageTabs";
 import { api } from "../api";
 import { viewState } from "../hooks/useViewState";
 import { sessionPages, sessionTerminals, rememberSessionPage } from "../features/sessions/sessionNavigation";
-import { EVT_TERMINALS, EVT_SYNCED, EVT_TERMINAL_ACTIVITY } from "../app/routes";
+import { notifyDataChanged, EVT_TERMINALS, EVT_SYNCED, EVT_TERMINAL_ACTIVITY } from "../app/routes";
 import type { Route } from "../app/routes";
 import type { TerminalSummary, Session, ProjectCardData } from "../types";
 
@@ -23,6 +25,7 @@ vi.mock("../api", () => ({
 }));
 
 beforeEach(() => {
+  clearReadResources();
   Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
   vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
@@ -251,8 +254,8 @@ describe("Sidebar unified sessions", () => {
     renderSidebar();
     await waitFor(() => expect(api.terminalList).toHaveBeenCalledTimes(1));
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
-    await screen.findByText("会话 B");
     await act(async () => { resolveOld([terminal({ session_id: "a", session_title: "旧会话 A", identity_revision: 1 })]); });
+    expect(await screen.findByText("会话 B")).toBeTruthy();
     expect(screen.queryByText("旧会话 A")).toBeNull();
   });
 });
@@ -1147,4 +1150,69 @@ it("keeps an old pinned conversation available beyond 500 summaries without chec
   expect(screen.queryByText("历史会话 400")).toBeNull();
   await waitFor(() => expect(new Set(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]))
     .toEqual(new Set(["many-0", "many-596", "many-597", "many-598", "many-599", "many-600"])));
+});
+
+
+describe("Sidebar 事件读取", () => {
+  const settleBurst = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 130)); });
+
+  it("shares terminal reads with page tabs and merges a burst into one IPC request", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session()]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1" })]);
+    render(<><Sidebar route={{ view: "new-session" }} navigate={vi.fn()} />
+      <SessionSubpageTabs sessionId="s-1" agent="codex" navigate={vi.fn()} /></>);
+    await screen.findByRole("button", { name: "终端 · 已连接" });
+    expect(api.terminalList).toHaveBeenCalledTimes(1);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s-1", live: false })]);
+    act(() => {
+      window.dispatchEvent(new Event(EVT_TERMINAL_ACTIVITY));
+      window.dispatchEvent(new Event(EVT_TERMINALS));
+      window.dispatchEvent(new Event(EVT_TERMINAL_ACTIVITY));
+    });
+    await screen.findByRole("button", { name: "终端 · 已退出" });
+    expect(screen.getByRole("button", { name: "终端 · 已退出：修复侧栏问题" })).toBeTruthy();
+    expect(api.terminalList).toHaveBeenCalledTimes(2);
+    expect(api.listProjectCards).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers hidden reads, catches up on reveal, and keeps deleted rows out of late snapshots", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session()]);
+    const view = render(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} />);
+    await screen.findByText("修复侧栏问题");
+    view.rerender(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} collapsed />);
+    vi.mocked(api.listSessions).mockResolvedValue([session(), session({ id: "new", title: "隐藏期间的新会话" })]);
+    act(() => { window.dispatchEvent(new Event(EVT_SYNCED)); window.dispatchEvent(new Event(EVT_TERMINALS)); });
+    await settleBurst();
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+    expect(api.listProjectCards).toHaveBeenCalledTimes(1);
+    expect(api.terminalList).toHaveBeenCalledTimes(1);
+    act(() => invalidateTargets({ sessionIds: ["s-1"] }));
+    view.rerender(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} />);
+    expect(screen.queryByText("修复侧栏问题")).toBeNull();
+    expect(await screen.findByText("隐藏期间的新会话")).toBeTruthy();
+    expect(screen.queryByText("修复侧栏问题")).toBeNull();
+    expect(api.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("scopes known mutations and still refreshes all metadata for unscoped notifications", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([session()]);
+    vi.mocked(api.listProjectCards).mockResolvedValue([projectCard()]);
+    renderSidebar();
+    await screen.findByText("项目A");
+    vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "项目B" })]);
+    vi.mocked(api.listSessions).mockResolvedValue([session({ title: "更新后的会话" })]);
+    act(() => { notifyDataChanged([]); invalidateTargets({ workstreamIds: ["removed-task"] }); });
+    await settleBurst();
+    expect(screen.getByText("项目A")).toBeTruthy();
+    expect(screen.getByText("修复侧栏问题")).toBeTruthy();
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+    expect(api.listProjectCards).toHaveBeenCalledTimes(1);
+    act(() => notifyDataChanged(["projects"]));
+    expect(await screen.findByText("项目B")).toBeTruthy();
+    expect(screen.getByText("修复侧栏问题")).toBeTruthy();
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+    act(() => window.dispatchEvent(new Event(EVT_SYNCED)));
+    expect(await screen.findByText("更新后的会话")).toBeTruthy();
+    expect(api.listProjectCards).toHaveBeenCalledTimes(3);
+  });
 });

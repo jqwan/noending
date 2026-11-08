@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { removedTargets } from "../../app/removedTargets";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -163,6 +164,7 @@ vi.mock("../../components/Toast", () => ({ showToast: toastMock }));
 let restoreUserAgent: () => void;
 const reconnected = { terminal_id: "t-new", launched_via: "embedded", command_line: "codex resume", note: "", };
 beforeEach(() => {
+  clearReadResources();
   localStorage.clear();
   Object.values(removedTargets).forEach(ids => ids.clear());
   const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
@@ -234,6 +236,31 @@ function renderView(navigate?: ReturnType<typeof vi.fn>) {
   );
 }
 
+it("refreshes the current terminal display without restarting or sending input", async () => {
+  const pending = deferred<TerminalSnapshot>();
+  vi.mocked(api.terminalAttach).mockReturnValue(pending.promise);
+  renderView();
+  expect((screen.getByRole("button", { name: "刷新终端" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => { pending.resolve(snapshot({ scrollback: btoa("saved output") })); });
+  await waitFor(() => expect(FakeResizeObserver.observed).toHaveLength(1));
+  const terminal = FakeTerminal.last!;
+  const { target, notify } = FakeResizeObserver.observed[0];
+  Object.defineProperties(target, { clientWidth: { value: 800 }, clientHeight: { value: 600 } });
+  act(notify);
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  const repaint = vi.spyOn(terminal, "refresh");
+  const clearTexture = vi.spyOn(terminal, "clearTextureAtlas");
+  fireEvent.click(screen.getByRole("button", { name: "刷新终端" }));
+  await waitFor(() => expect(repaint).toHaveBeenCalledWith(0, 23));
+  expect(clearTexture).toHaveBeenCalled();
+  expect(FakeTerminal.last).toBe(terminal);
+  expect(terminal.written).toEqual([Uint8Array.from("saved output", char => char.charCodeAt(0))]);
+  expect(terminal.disposed).toBe(false);
+  expect(api.terminalInput).not.toHaveBeenCalled();
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
+  expect(api.terminalClose).not.toHaveBeenCalled();
+});
+
 it("preserves PTY dimensions while hidden and resizes again when shown", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   renderView();
@@ -271,6 +298,26 @@ it("updates a detached cached terminal's theme without restarting or replaying i
   expect(terminal.written).toHaveLength(1);
   expect(terminal.disposed).toBe(false);
   expect(api.terminalInput).not.toHaveBeenCalled();
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
+});
+
+it("keeps a cached terminal visible and its controls available while checking a fresh attachment", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ session_title: null }));
+  const first = render(<SessionTerminalView terminalId="t-1" initialSessionId="s1" initialTitle="保留终端" navigate={vi.fn()} />);
+  await screen.findByLabelText("终端 · 已连接");
+  const terminal = FakeTerminal.last!;
+  first.unmount();
+  const pending = deferred<TerminalSnapshot>();
+  vi.mocked(api.terminalAttach).mockReturnValue(pending.promise);
+  renderView();
+  expect(screen.getByRole("heading", { name: "保留终端" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "刷新终端" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "关闭终端" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "终端 · 已连接" })).toBeTruthy();
+  expect(FakeTerminal.last).toBe(terminal);
+  await act(async () => { pending.resolve(snapshot({ session_title: "保留终端", live: false })); });
+  await screen.findByLabelText("终端 · 已退出");
+  expect(screen.getByRole("button", { name: "移除终端" })).toBeTruthy();
   expect(api.terminalReconnect).not.toHaveBeenCalled();
 });
 

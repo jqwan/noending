@@ -155,3 +155,88 @@ fn pagination_and_new_message_frontiers_do_not_confuse_edits_or_reused_counts_wi
     let page = db.mailbox_list("b", "all", None, 1).unwrap();
     assert_eq!((page.total, page.unread), (2, 1));
 }
+
+#[test]
+fn desktop_mailbox_pages_start_with_latest_arrivals_and_keep_agent_fifo_reads() {
+    let f = Fixture::new();
+    let db = f.db();
+    let oldest = db.mailbox_send("b", None, "oldest").unwrap();
+    let middle = db.mailbox_send("b", None, "middle").unwrap();
+    let latest = db.mailbox_send("b", None, "latest").unwrap();
+    db.mailbox_send("a", Some("b"), "other inbox").unwrap();
+    // Same-time arrivals retain a deterministic order across page boundaries.
+    db.write().execute("UPDATE mailbox_messages SET created_at='2026-11-08T12:00:00Z' WHERE recipient_session_id='b'", []).unwrap();
+    db.mailbox_mark("b", &middle.id, middle.revision, true)
+        .unwrap();
+    let first = db.mailbox_list_latest("b", "all", None, 1).unwrap();
+    assert_eq!(first.items[0].id, latest.id);
+    assert_eq!((first.total, first.unread), (3, 2));
+    let newest = db.mailbox_send("b", None, "new arrival").unwrap();
+    db.mailbox_delete("b", &latest.id, latest.revision).unwrap();
+    let second = db
+        .mailbox_list_latest("b", "all", first.next_cursor, 1)
+        .unwrap();
+    assert_eq!(second.items[0].id, middle.id);
+    let third = db
+        .mailbox_list_latest("b", "all", second.next_cursor, 1)
+        .unwrap();
+    assert_eq!(third.items[0].id, oldest.id);
+    assert!(third.next_cursor.is_none());
+    let unread = db.mailbox_list_latest("b", "unread", None, 50).unwrap();
+    assert_eq!(
+        unread
+            .items
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![newest.id.as_str(), oldest.id.as_str()]
+    );
+    let read = db.mailbox_list_latest("b", "read", None, 50).unwrap();
+    assert_eq!(read.items[0].id, middle.id);
+    let agent = db.mailbox_list("b", "all", None, 50).unwrap();
+    assert_eq!(
+        agent
+            .items
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![oldest.id.as_str(), middle.id.as_str(), newest.id.as_str()]
+    );
+}
+
+#[test]
+fn desktop_sender_metadata_tracks_session_changes_without_changing_message_provenance() {
+    let f = Fixture::new();
+    let db = f.db();
+    db.write()
+        .execute("UPDATE sessions SET title='协作助手' WHERE id='a'", [])
+        .unwrap();
+    let mail = db.mailbox_send("b", Some("a"), "progress").unwrap();
+    let user = db.mailbox_send("b", None, "user message").unwrap();
+    let page = db.mailbox_list_latest("b", "all", None, 50).unwrap();
+    assert_eq!(page.items[0].id, user.id);
+    assert!(page.items[0].sender.is_none());
+    let sender = page.items[1].sender.as_ref().unwrap();
+    assert_eq!(sender.title.as_deref(), Some("协作助手"));
+    assert_eq!(sender.agent, "codex");
+    assert!(db.mailbox_list("b", "all", None, 50).unwrap().items[0]
+        .sender
+        .is_none());
+    db.write()
+        .execute("UPDATE sessions SET title='新的名称' WHERE id='a'", [])
+        .unwrap();
+    let page = db.mailbox_list_latest("b", "unread", None, 50).unwrap();
+    assert_eq!(
+        page.items[1].sender.as_ref().unwrap().title.as_deref(),
+        Some("新的名称")
+    );
+    db.write()
+        .execute("DELETE FROM sessions WHERE id='a'", [])
+        .unwrap();
+    let page = db.mailbox_list_latest("b", "all", None, 50).unwrap();
+    let retained = &page.items[1];
+    assert_eq!(retained.id, mail.id);
+    assert_eq!(retained.sender_session_id.as_deref(), Some("a"));
+    assert!(retained.sender.is_none());
+    assert_eq!(retained.body, "progress");
+}

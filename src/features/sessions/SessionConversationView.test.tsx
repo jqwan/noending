@@ -1,6 +1,10 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionConversationView from "./SessionConversationView";
+import SessionDetailView from "./SessionDetailView";
+import { sessionDetailCache, sessionContextCache } from "./sessionDetailCache";
+import { viewState } from "../../hooks/useViewState";
 import { api } from "../../api";
 import type {
   Session,
@@ -21,6 +25,9 @@ vi.mock("../../api", () => ({
     terminalList: vi.fn().mockResolvedValue([]),
     getAgentStatus: vi.fn().mockResolvedValue({}),
     getSessionDetail: vi.fn(),
+    getSessionContext: vi.fn(),
+    mailboxList: vi.fn(),
+    setSessionTaskTracking: vi.fn(),
     getSessionMessages: vi.fn(),
     getSessionTurnIntermediates: vi.fn(),
     getSessionUserMessageMarks: vi.fn(),
@@ -28,15 +35,22 @@ vi.mock("../../api", () => ({
 }));
 
 beforeEach(() => {
+  clearReadResources();
   vi.resetAllMocks();
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.getAgentStatus).mockResolvedValue({});
+  vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "me", fields: null, revision: 0, ingest_generation: 0,
+    processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false,
+    freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false } });
+  vi.mocked(api.mailboxList).mockResolvedValue({ items: [], total: 0, unread: 0, next_cursor: null });
+  viewState.clear(); localStorage.clear(); sessionDetailCache.clear(); sessionContextCache.clear();
 });
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  viewState.clear(); localStorage.clear(); sessionDetailCache.clear(); sessionContextCache.clear();
 });
 
 function session(id: string): Session {
@@ -120,6 +134,45 @@ async function renderConversation(marks: SessionMessageMark[] = []) {
   await act(async () => { view = render(<SessionConversationView sessionId="me" navigate={vi.fn()} />); });
   return view.container;
 }
+
+it("shares sidebar visibility and width with the session detail page while retaining the reader's messages", async () => {
+  vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("me")));
+  const first = render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
+  await screen.findByRole("button", { name: "收起详情栏" });
+  fireEvent.keyDown(screen.getByRole("separator", { name: "详情栏宽度" }), { key: "End" });
+  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
+  first.unmount(); viewState.clear();
+
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({ messages: [message(1, "user", "正在阅读的历史消息")], total: 1, tail_ordinal: 1 }));
+  await renderConversation();
+  expect(screen.getByText("正在阅读的历史消息")).toBeTruthy();
+  expect(screen.queryByRole("complementary", { name: "详情栏" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
+  expect(screen.getByRole("separator", { name: "详情栏宽度" }).getAttribute("aria-valuenow")).toBe("480");
+  expect(screen.getByRole("region", { name: "会话信息" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "跟踪任务（0）" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
+  expect(screen.getByText("正在阅读的历史消息")).toBeTruthy();
+});
+
+it("refreshes tracked tasks without replacing the loaded message window or moving its reading position", async () => {
+  let current = { ...detail(session("me")), tracked_workstreams: [{ id: "task", title: "正在跟踪的任务", description: "",
+    visibility: "normal" as const, created_at: "2026-11-07T00:00:00Z", updated_at: "2026-11-07T00:00:00Z" }] };
+  vi.mocked(api.getSessionDetail).mockImplementation(async () => current);
+  vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue([]);
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({ messages: [message(1, "user", "已加载的历史消息")], total: 1, tail_ordinal: 1 }));
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(<SessionConversationView sessionId="me" navigate={vi.fn()} />); });
+  const scroller = sizeScroller(view.container, 2000, 400, 800);
+  fireEvent.scroll(scroller);
+  vi.mocked(api.getSessionMessages).mockResolvedValue(page({ messages: [message(2, "user", "刷新后的最新一页")], total: 2, tail_ordinal: 2 }));
+  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => { current = { ...current, tracked_workstreams: [] }; return current.session; });
+  fireEvent.click(screen.getByRole("button", { name: "取消跟踪：正在跟踪的任务" }));
+  await screen.findByRole("heading", { name: "跟踪任务（0）" });
+  expect(screen.getByText("已加载的历史消息")).toBeTruthy();
+  expect(screen.queryByText("刷新后的最新一页")).toBeNull();
+  expect(scroller.scrollTop).toBe(800);
+});
 
 /** 给滚动列装上 jsdom 不会算的几何量，才能分别命中「向上/向下加载」的判定。 */
 function sizeScroller(container: HTMLElement, scrollHeight: number, clientHeight: number, scrollTop: number) {

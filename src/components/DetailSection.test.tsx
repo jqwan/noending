@@ -2,7 +2,7 @@ import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { viewState } from "../hooks/useViewState";
-import { DetailPanelProvider } from "./DetailLayout";
+import { DetailLayout, DetailPanelProvider } from "./DetailLayout";
 import { DetailSection } from "./DetailSection";
 import SummaryContent, { SummaryControls, useSummaryExpansion } from "../features/sessions/SummaryContent";
 
@@ -56,7 +56,10 @@ it("restores preferences for the same page and card types across objects and res
   expect(screen.getByText("乙的摘要")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "摘要" }));
   second.unmount();
-  render(<Page kind="project" object="丙" />);
+  const collaboration = render(<Page kind="collaboration" object="丙" />);
+  expect(screen.getByRole("button", { name: "摘要" }).getAttribute("aria-expanded")).toBe("true");
+  collaboration.unmount();
+  render(<Page kind="project" object="丁" />);
   expect(screen.getByRole("button", { name: "摘要" }).getAttribute("aria-expanded")).toBe("true");
 });
 
@@ -85,3 +88,30 @@ it("reveals the card when expanding details but leaves a collapsed card closed w
   fireEvent.click(screen.getByRole("button", { name: "摘要" }));
   expect(screen.queryByRole("list")).toBeNull();
 });
+
+
+it.each([["task", "collaboration", "project"], ["session", "terminal", "task"]])(
+  "shares %s right-hand card preferences with %s while preserving independent main sections and other page groups",
+  (firstKind, siblingKind, otherKind) => {
+    function SharedPage({ kind }: { kind: string }) {
+      return <DetailPanelProvider kind={kind}><DetailLayout panel={
+        <DetailSection sectionId="summary" label="右栏信息" title="右栏信息"><input aria-label="右栏内容" defaultValue="保留的内容" /></DetailSection>
+      }><DetailSection sectionId="summary" label="主区摘要" title="主区摘要"><p>主区正文</p></DetailSection></DetailLayout></DetailPanelProvider>;
+    }
+    const first = render(<SharedPage kind={firstKind} />);
+    fireEvent.click(screen.getByRole("button", { name: "右栏信息" }));
+    fireEvent.click(screen.getByRole("button", { name: "主区摘要" }));
+    first.rerender(<SharedPage kind={siblingKind} />);
+    expect(screen.getByRole("button", { name: "右栏信息" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: "主区摘要" }).getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "右栏信息" }));
+    expect((screen.getByRole("textbox", { name: "右栏内容" }) as HTMLInputElement).value).toBe("保留的内容");
+    fireEvent.click(screen.getByRole("button", { name: "右栏信息" }));
+    first.unmount(); viewState.clear();
+    const second = render(<SharedPage kind={firstKind} />);
+    expect(screen.getByRole("button", { name: "右栏信息" }).getAttribute("aria-expanded")).toBe("false");
+    second.unmount();
+    render(<SharedPage kind={otherKind} />);
+    expect(screen.getByRole("textbox", { name: "右栏内容" })).toBeTruthy();
+  },
+);

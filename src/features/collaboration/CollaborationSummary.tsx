@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import type { WorkstreamContextView } from "../../types";
-import { DetailContent, DetailSection } from "../../components/DetailSection";
+import { DetailContent, DetailLoading, DetailSection } from "../../components/DetailSection";
 import Icon from "../../components/Icon";
 import { copyToClipboard, contextUpdateErrorCopyText, contextUpdateErrorDetails, timeAgo, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import { refreshOperationStatus, useOperationState } from "../../hooks/useOperationState";
 import SummaryContent, { summaryMarkdown, SummaryControls, useSummaryExpansion } from "../sessions/SummaryContent";
+import { taskSummaryResource } from "../workstreams/taskResources";
 
-/** 任务详情与协作室复用一份摘要；阅读和折叠不改变成员的消息阅读位置。 */
-export default function CollaborationSummary({ taskId, latestSeq = 0, initiallyCollapsed = false }: {
-  taskId: string; latestSeq?: number; initiallyCollapsed?: boolean;
-}) {
-  const [view, setView] = useState<WorkstreamContextView | null>(null);
+/** 任务详情展示协作摘要，阅读和折叠不改变成员的消息阅读位置。 */
+export default function CollaborationSummary({ taskId }: { taskId: string }) {
+  const view = taskSummaryResource.useValue(taskId);
   const [busy, setBusy] = useState<"update" | "regenerate" | null>(null);
   const [error, setError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const live = useRef(true), request = useRef(0), busyRef = useRef(false);
@@ -21,11 +19,9 @@ export default function CollaborationSummary({ taskId, latestSeq = 0, initiallyC
   useEffect(() => { live.current = true; return () => { live.current = false; request.current++; }; }, [taskId]);
   const refresh = useCallback(() => {
     const seq = ++request.current;
-    api.getWorkstreamContextState(taskId).then(next => {
-      if (live.current && seq === request.current) { setView(next); }
-    }).catch(e => { if (live.current && seq === request.current) setError(contextUpdateErrorDetails(e)); });
+    taskSummaryResource.refresh(taskId).catch(e => { if (live.current && seq === request.current) setError(contextUpdateErrorDetails(e)); });
   }, [taskId]);
-  useEffect(refresh, [refresh, latestSeq]);
+  useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
   const update = async (regenerate: boolean) => {
     if (busyRef.current || operation.busy || operation.checking) return;
@@ -51,14 +47,15 @@ export default function CollaborationSummary({ taskId, latestSeq = 0, initiallyC
         <Icon name="refresh" className={busy === "regenerate" ? "spinning" : ""} /></button>
       {view?.pending && <button type="button" className="btn primary icon-button small" title="更新摘要" aria-label="更新摘要" disabled={disabled} onClick={() => void update(false)}>
         <Icon name="spark" className={busy === "update" || operation.busy ? "spinning" : ""} /></button>}
-    </>} defaultExpanded={!initiallyCollapsed} status={<>
+    </>} status={<>
       {view?.pending_messages ? <p className="muted small" role="status">有 {view.pending_messages} 条协作消息待整理</p> : null}
       {error && <div role="alert"><p>{error.message}</p><button type="button" className="btn small ghost" onClick={() => { setError(null); refresh(); }}>重试读取</button><button type="button" className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(error)); }}>复制错误详情</button></div>}
     </>}>
 
 
       {view?.summary ? <DetailContent label="协作摘要内容" className="md-body"><SummaryContent expansion={expansion}>{view.summary}</SummaryContent></DetailContent>
-        : <p className="detail-empty">{view ? "尚无协作摘要；有协作消息后可提取。" : "正在读取摘要…"}</p>}
+        : view ? <p className="detail-empty">尚无协作摘要；有协作消息后可提取。</p>
+        : !error && <DetailLoading>正在读取摘要…</DetailLoading>}
       {view?.updated_at && <p className="muted small" title={view.updated_at}>更新于 {timeAgo(view.updated_at)}</p>}
 
   </DetailSection>;

@@ -9,10 +9,14 @@ import Router, { preloadCommonRoutes } from "./Router";
 import { rememberSessionPage } from "../features/sessions/sessionNavigation";
 import CommandPalette from "../components/CommandPalette";
 import ErrorBoundary from "../components/ErrorBoundary";
-import { prepareNavigationTitle } from "./navigationTitle";
+import { prepareNavigation } from "./navigation";
+import { clearReadResources } from "../hooks/readResource";
 import { useAutoHideScrollbars } from "../hooks/useAutoHideScrollbars";
+import { useLoadingDelay } from "../hooks/useLoadingDelay";
 import ToastHost, { showToast } from "../components/Toast";
 import Icon from "../components/Icon";
+import PanelToggle from "../components/PanelToggle";
+import PanelResizer from "../components/PanelResizer";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
 import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, type Route } from "./routes";
 import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
@@ -64,17 +68,19 @@ function sameRoute(a: Route, b: Route): boolean {
 
 /**
  * AppShell：只负责骨架 —— Sidebar、RouterOutlet、
- * CommandPalette、全局事件与 Toast。ID-only 导航先准备标题，业务数据仍由页面加载。
+ * CommandPalette、全局事件与 Toast。导航先准备代码和首屏数据，页面保留后台刷新能力。
  */
 export default function AppShell() {
   useAutoHideScrollbars();
   const [, startTransition] = useTransition();
+  const [preparing, setPreparing] = useState(false);
+  const showNavigationProgress = useLoadingDelay(preparing);
   const [navigation, setNavigation] = useState<NavigationState>({
     entries: [{ view: "new-session" }],
     index: 0,
   });
 
-  // 在后台空闲时预热常用路由分块，确保点击切换时零等待且无 Suspense 闪烁
+  // 空闲时预热路由；未预热的目标由公共导航等待模块就绪。
   useEffect(() => {
     if (typeof window !== "undefined" && "requestIdleCallback" in window) {
       const id = (window as unknown as { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number })
@@ -102,6 +108,7 @@ export default function AppShell() {
   const [actionSeq, setActionSeq] = useState(0);
   const seqRef = useRef(0);
   const navigationRequest = useRef(0);
+  const pendingDestination = useRef<Route | null>(null);
   useEffect(() => () => { ++navigationRequest.current; }, []);
   const route = navigation.entries[navigation.index];
   const sessionSection = isSessionRoute(route);
@@ -139,13 +146,31 @@ export default function AppShell() {
     };
   }, []);
 
-  const navigate = useCallback((target: Route) => {
+  const prepareDestination = useCallback((target: Route, commit: (route: Route) => void) => {
     if (isRemovedRoute(target)) return;
     const request = ++navigationRequest.current;
-    const commit = (r: Route) => {
-      if (request !== navigationRequest.current || isRemovedRoute(r)) return;
+    pendingDestination.current = target;
+    const ready = (route: Route) => {
+      if (request === navigationRequest.current) {
+        setPreparing(false);
+        pendingDestination.current = null;
+        if (!isRemovedRoute(route)) commit(route);
+      }
+    };
+    const fail = (error: unknown) => {
+      if (request === navigationRequest.current) { setPreparing(false); pendingDestination.current = null; showToast(`无法打开：${String(error)}`); }
+    };
+    try {
+      const prepared = prepareNavigation(normalizeRoute(target));
+      if (prepared instanceof Promise) { setPreparing(true); void prepared.then(ready).catch(fail); }
+      else ready(prepared);
+    } catch (error) { fail(error); }
+  }, []);
+
+  const navigate = useCallback((target: Route) => {
+    prepareDestination(target, r => {
       startTransition(() => {
-        setNavigation((current) => {
+        setNavigation(current => {
           const entries = current.entries.slice(0, current.index + 1);
           const currentRoute = entries[entries.length - 1];
           if (sameRoute(currentRoute, r)) {
@@ -158,14 +183,8 @@ export default function AppShell() {
         });
         if ("action" in r && r.action) setActionSeq(++seqRef.current);
       });
-    };
-    const prepared = prepareNavigationTitle(normalizeRoute(target));
-    if (prepared instanceof Promise) {
-      void prepared.then(commit).catch(error => {
-        if (request === navigationRequest.current) showToast(`无法打开：${String(error)}`);
-      });
-    } else commit(prepared);
-  }, []);
+    });
+  }, [prepareDestination, startTransition]);
 
   // An async launch can finish after switching sections. Remember its result
   // for the session section without pulling the user away from another page.
@@ -178,6 +197,10 @@ export default function AppShell() {
   useEffect(() => {
     const removed = (event: Event) => {
       const targets = (event as CustomEvent<RemovedTargets>).detail;
+      if (pendingDestination.current && isRemovedRoute(pendingDestination.current)) {
+        ++navigationRequest.current; pendingDestination.current = null; setPreparing(false);
+      }
+      clearReadResources([...(targets.sessionIds ?? []), ...(targets.workstreamIds ?? []), ...(targets.projectIds ?? [])]);
       for (const id of targets.sessionIds ?? []) {
         sessionDetailCache.delete(id);
         sessionContextCache.delete(id);
@@ -207,30 +230,28 @@ export default function AppShell() {
   }, []);
 
   const goBack = useCallback((fallback?: Route) => {
-    ++navigationRequest.current;
-    startTransition(() => {
-      setNavigation((current) => {
-        if (current.index === 0) {
-          return fallback ? { entries: [fallback], index: 0 } : current;
-        }
-        const entries = current.entries.slice();
-        entries[current.index - 1] = withoutAction(entries[current.index - 1]);
-        return { entries, index: current.index - 1 };
-      });
-    });
-  }, [startTransition]);
+    const index = navigation.index - 1;
+    const target = index < 0 ? fallback : withoutAction(navigation.entries[index]);
+    if (!target) { ++navigationRequest.current; pendingDestination.current = null; setPreparing(false); return; }
+    prepareDestination(target, ready => startTransition(() => setNavigation(current => {
+      if (current !== navigation) return current;
+      if (index < 0) return { entries: [ready], index: 0 };
+      const entries = current.entries.slice();
+      entries[index] = ready;
+      return { entries, index };
+    })));
+  }, [navigation, prepareDestination, startTransition]);
 
   const goForward = useCallback(() => {
-    ++navigationRequest.current;
-    startTransition(() => {
-      setNavigation((current) => {
-        if (current.index >= current.entries.length - 1) return current;
-        const entries = current.entries.slice();
-        entries[current.index + 1] = withoutAction(entries[current.index + 1]);
-        return { entries, index: current.index + 1 };
-      });
-    });
-  }, [startTransition]);
+    const index = navigation.index + 1;
+    if (index >= navigation.entries.length) { ++navigationRequest.current; pendingDestination.current = null; setPreparing(false); return; }
+    prepareDestination(withoutAction(navigation.entries[index]), ready => startTransition(() => setNavigation(current => {
+      if (current !== navigation) return current;
+      const entries = current.entries.slice();
+      entries[index] = ready;
+      return { entries, index };
+    })));
+  }, [navigation, prepareDestination, startTransition]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -289,6 +310,7 @@ export default function AppShell() {
 
   return (
     <div style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties} className={`app${isMac ? " mac-titlebar" : ""}${isWindows ? " windows-titlebar" : ""}${sidebarCollapsed ? " sidebar-collapsed without-session-sidebar" : ""}`}>
+      {showNavigationProgress && preparing && <div className="navigation-progress" role="status" aria-label="正在打开页面" />}
       <header className="app-titlebar">
         {(isMac || isWindows) && <div className="window-drag-region" data-tauri-drag-region />}
         <div className="history-controls" aria-label="页面导航">
@@ -299,9 +321,7 @@ export default function AppShell() {
             disabled={navigation.index === 0}
             onClick={() => goBack()}
           >
-            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-              <path d="M14 9H4m5-5L4 9l5 5" />
-            </svg>
+            <Icon name="arrowLeft" />
           </button>
           <button
             className="history-button"
@@ -310,9 +330,7 @@ export default function AppShell() {
             disabled={navigation.index >= navigation.entries.length - 1}
             onClick={goForward}
           >
-            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-              <path d="M4 9h10M9 4l5 5-5 5" />
-            </svg>
+            <Icon name="arrowRight" />
           </button>
           <button
             className="history-button"
@@ -322,17 +340,8 @@ export default function AppShell() {
           >
             <Icon name="search" />
           </button>
-          <button
-            className="history-button"
-            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-            onClick={() => setSidebarCollapsed((value) => !value)}
-          >
-            <svg className="history-icon" viewBox="0 0 18 18" aria-hidden="true">
-              <rect x="3" y="4" width="12" height="10" rx="2.5" />
-              <path d="M7 4v10" />
-            </svg>
-          </button>
+          <PanelToggle side="left" open={!sidebarCollapsed} label="侧边栏"
+            controls="session-sidebar" onToggle={() => setSidebarCollapsed(value => !value)} />
           {sidebarCollapsed && (
             <button
               className="history-button"
@@ -353,27 +362,8 @@ export default function AppShell() {
         navigate={navigate}
         collapsed={sidebarCollapsed}
       />
-      {!sidebarCollapsed && <div
-        className="sidebar-resizer" role="separator" tabIndex={0}
-        aria-label="侧边栏宽度" aria-orientation="vertical"
-        aria-valuemin={200} aria-valuemax={360} aria-valuenow={sidebarWidth}
-        onDoubleClick={() => resizeSidebar(248)}
-        onKeyDown={(e) => {
-          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
-          e.preventDefault();
-          resizeSidebar(e.key === "Home" ? 200 : e.key === "End" ? 360 : sidebarWidth + (e.key === "ArrowRight" ? 8 : -8));
-        }}
-        onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); }}
-        onPointerMove={(e) => {
-          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-            const sidebar = e.currentTarget.parentElement!.querySelector(".sidebar")!;
-            resizeSidebar(e.clientX - sidebar.getBoundingClientRect().left);
-          }
-        }}
-        onPointerUp={(e) => {
-          if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-        }}
-      />}
+      {!sidebarCollapsed && <PanelResizer side="left" label="侧边栏宽度" controls="session-sidebar" value={sidebarWidth}
+        min={200} max={360} defaultValue={248} onResize={resizeSidebar} className="sidebar-resizer" />}
       <div className="app-content">
         {/* 兜底只包内容区：页面（含它自己的弹窗）渲染抛错时侧栏与标题栏还在，
             用户能直接切走；resetKey 让路由一换就复位。 */}

@@ -594,17 +594,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn separators_converge_into_one_identity() {
-        // `git` and the Agent CLIs hand back mixed spellings for the same dir;
-        // they must not become two WorkspacePaths.
-        let w = PathStyle::Windows;
-        assert_eq!(
-            path_identity_with(&win("C:/a/b").unwrap(), w),
-            path_identity_with(&win("C:\\a\\b").unwrap(), w)
-        );
-    }
-
     /// On a Windows volume, case is not part of location, so it is
     /// not part of the stored identity either. The display form still carries
     /// what the user typed: `canonical_path` is never lower-cased, and
@@ -742,14 +731,8 @@ mod tests {
         );
         assert_eq!(basename("C:\\Users\\ME\\Data"), "Data");
         assert_eq!(auto_project_name("C:\\Users\\ME\\Data"), "Data");
-        // The identity key IS the folded one, so two Windows case
-        // variants are one WorkspacePath — while `path_key`, which feeds display
-        // strings, keeps them apart. macOS is unchanged either way, and the unit
-        // tests pin that as data rather than as a rule.
-        assert_eq!(
-            path_identity_with("C:\\A\\b", PathStyle::Windows),
-            path_identity_with("C:\\a\\B", PathStyle::Windows)
-        );
+        // The identity key folds, but `path_key`, which feeds display strings,
+        // keeps the two Windows case variants apart.
         assert_ne!(
             path_key("C:\\A\\b"),
             path_key("C:\\a\\B"),

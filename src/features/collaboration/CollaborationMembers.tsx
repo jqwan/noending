@@ -2,6 +2,7 @@ import Icon from "../../components/Icon";
 import { timeAgo } from "../../components/common";
 import type { CollaborationRoomView, SessionListItem } from "../../types";
 import { WAKE_LABEL, memberStatus } from "./collaborationState";
+import type { Route } from "../../app/routes";
 
 function memberName(sessionId: string, sessions: SessionListItem[]): string {
   const local = sessions.find(s => s.id === sessionId);
@@ -32,6 +33,7 @@ export default function CollaborationMembers({
   onWake,
   onCopyPrompt,
   disabled = false,
+  navigate,
 }: {
   room: CollaborationRoomView;
   sessions: SessionListItem[];
@@ -40,6 +42,7 @@ export default function CollaborationMembers({
   onWake: (sessionId: string) => void;
   onCopyPrompt: (sessionId: string) => void;
   disabled?: boolean;
+  navigate: (route: Route) => void;
 }) {
   const coordinator = room.room?.coordinator_session_id ?? null;
   if (!room.members.length) {
@@ -65,7 +68,8 @@ export default function CollaborationMembers({
               <span className="collab-member-wake muted" role="img" aria-label={WAKE_LABEL[member.wake_method]} title={WAKE_LABEL[member.wake_method]}>
                 <Icon name={member.wake_method} />
               </span>
-              <span className="collab-member-name truncate" title={name}>{name}</span>
+              <button type="button" className="link collab-member-name truncate" title={name}
+                onClick={() => navigate({ view: "session", sessionId: member.session_id, initialTitle: name, initialAgent: sessions.find(session => session.id === member.session_id)?.agent })}>{name}</button>
               {coordinator === member.session_id && <span className="collab-member-coordinator" role="img" aria-label="负责人" title="负责人"><Icon name="spark" /></span>}
               <div className="collab-member-actions">
                 {canWake && (

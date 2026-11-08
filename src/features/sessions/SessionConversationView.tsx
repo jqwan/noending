@@ -11,6 +11,9 @@ import {
 import Icon from "../../components/Icon";
 import AgentIcon from "../../components/AgentIcon";
 import PageHeader from "../../layout/PageHeader";
+import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
+import { useRefreshSignal } from "../../components/common";
+import SessionDetailPanel from "./SessionDetailPanel";
 import { api } from "../../api";
 import "./sessions.css";
 import { showToast } from "../../components/Toast";
@@ -25,6 +28,7 @@ import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 import type {
   Agent,
   Session,
+  SessionDetail,
   SessionMessageMark,
   SessionMessageWindow,
   SessionTurnSummary,
@@ -164,6 +168,9 @@ export default function SessionConversationView({
   const [session, setSession] = useState<Session | null>(
     () => (initialTitle ? null : sessionDetailCache.get(sessionId)?.session ?? null),
   );
+  const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
+  const detailRequest = useRef(0);
+  const appliedDetailRequest = useRef(0);
   const [messages, setMessages] = useState<SessionWindowMessage[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [marks, setMarks] = useState<SessionMessageMark[]>([]);
@@ -277,6 +284,7 @@ export default function SessionConversationView({
 
   useEffect(() => {
     let live = true;
+    const request = ++detailRequest.current;
     setFailed(false);
     setLoaded(false);
     void Promise.all([
@@ -286,8 +294,12 @@ export default function SessionConversationView({
     ])
       .then(([detail, page, markList]) => {
         if (!live || removedTargets.sessions.has(sessionId)) return;
-        sessionDetailCache.set(sessionId, detail);
-        setSession(detail.session);
+        if (request >= appliedDetailRequest.current) {
+          appliedDetailRequest.current = request;
+          sessionDetailCache.set(sessionId, detail);
+          setSession(detail.session);
+          setDetail(detail);
+        }
         setMarks(markList);
         applyTail(page);
       })
@@ -295,8 +307,20 @@ export default function SessionConversationView({
         console.error(error);
         if (live) setFailed(true);
       });
-    return () => { live = false; };
+    return () => { live = false; ++detailRequest.current; };
   }, [sessionId, applyTail, reloadSeq]);
+  // 跟踪任务等元数据刷新不重载消息，保留分页窗口与阅读位置。
+  const refreshDetails = useCallback(() => {
+    const request = ++detailRequest.current;
+    void api.getSessionDetail(sessionId).then(next => {
+      if (request !== detailRequest.current || removedTargets.sessions.has(sessionId)) return;
+      appliedDetailRequest.current = request;
+      sessionDetailCache.set(sessionId, next);
+      setDetail(next);
+      setSession(next.session);
+    }).catch(error => { console.error(error); });
+  }, [sessionId]);
+  useRefreshSignal(refreshDetails);
   // 头部动作簇（回收/同步）完成后的就地刷新：重走一遍打开即取。
   const reload = useCallback(() => setReloadSeq((n) => n + 1), []);
 
@@ -488,6 +512,15 @@ export default function SessionConversationView({
     setAtLatest(atLatestNow());
   }, [expansions, atLatestNow, messages.length]);
 
+  // 右栏展开或调宽会改变消息换行，重新判断是否仍在最新处。
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || messages.length === 0 || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setAtLatest(atLatestNow()));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [atLatestNow, messages.length]);
+
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) return;
@@ -518,21 +551,12 @@ export default function SessionConversationView({
     ? (rawTitle === UNTITLED_SESSION ? "未命名会话" : rawTitle)
     : "";
 
-  const headerTitle = currentAgent ? (
-    <span className="session-title-with-icon" title={displayTitle}>
-      <AgentIcon agent={currentAgent ?? null} size={18} />
-      <span className="session-title-text">{displayTitle}</span>
-    </span>
-  ) : (
-    displayTitle
-  );
-
   if (failed) {
     return (
       <div className="main narrow" role="status">
         <PageHeader
-          title={headerTitle}
-          actions={<SessionSubpageTabs sessionId={sessionId} title={displayTitle} agent={currentAgent ?? undefined} entry="conversation" navigate={navigate} />}
+          title={displayTitle} icon={currentAgent ? <AgentIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
+          navigation={<SessionSubpageTabs sessionId={sessionId} title={displayTitle} agent={currentAgent ?? undefined} entry="conversation" navigate={navigate} />}
         />
         <div className="empty">
           读不到这个会话的消息。
@@ -543,12 +567,10 @@ export default function SessionConversationView({
   }
 
   return (
-    <div className="main fill">
+    <DetailPanelProvider kind="session"><div className="main fill detail-page">
       <PageHeader
-        title={headerTitle}
-        actions={(
-          <span className="row" style={{ gap: 8 }}>
-            <SessionSubpageTabs
+        title={displayTitle} icon={currentAgent ? <AgentIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
+        navigation={<SessionSubpageTabs
               sessionId={sessionId}
               title={displayTitle}
               entry="conversation"
@@ -556,7 +578,9 @@ export default function SessionConversationView({
               sourceKind={cachedDetail?.session.source_kind}
               archived={!!cachedDetail?.session.archived_at}
               navigate={navigate}
-            />
+            />}
+        actions={(
+          <>
             {currentAgent && (
               <SessionHeaderActions
                 sessionId={sessionId}
@@ -567,10 +591,13 @@ export default function SessionConversationView({
                 onChanged={reload}
               />
             )}
-          </span>
+          </>
         )}
       />
 
+      <DetailLayout mainClassName="detail-main-conversation" panel={detail?.session.id === sessionId
+        ? <SessionDetailPanel key={sessionId} detail={detail} navigate={navigate} />
+        : <p className="detail-empty" role="status">正在读取会话信息…</p>}>
       <div className="conversation-body">
         <div className="conversation-scroll" ref={scrollRef} onScroll={onScroll}>
           {cursor !== null && remaining > 0 && (
@@ -631,7 +658,8 @@ export default function SessionConversationView({
           <Icon name="arrowDown" />
         </button>
       )}
-    </div>
+      </DetailLayout>
+    </div></DetailPanelProvider>
   );
 }
 

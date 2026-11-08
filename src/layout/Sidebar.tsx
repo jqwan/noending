@@ -60,7 +60,7 @@ export default function Sidebar({
   const collapseKey = (groupId: string) => `${groupBy}:${groupId}`;
 
   return (
-    <aside className={`sidebar${collapsed ? " collapsed" : ""}`} hidden={collapsed || hidden} aria-label="会话侧边栏">
+    <aside id="session-sidebar" className={`sidebar${collapsed ? " collapsed" : ""}`} hidden={collapsed || hidden} aria-label="会话侧边栏">
       <div className="sidebar-top">
         <button
           type="button"

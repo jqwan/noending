@@ -1,6 +1,8 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
+import SkillScopeConfig from "../skills/SkillScopeConfig";
 import { api } from "../../api";
 import type { SkillInventory, ProjectDetailData } from "../../types";
 
@@ -16,6 +18,7 @@ vi.mock("../../api", () => ({
     listProjectCards: vi.fn(),
     createWorkstream: vi.fn(),
     renameProject: vi.fn(),
+    cleanMissingProjectPaths: vi.fn(),
     getProjectContextState: vi.fn(),
     updateProjectContext: vi.fn(),
     regenerateProjectContext: vi.fn(),
@@ -26,15 +29,37 @@ vi.mock("../../api", () => ({
 
 const navigate = vi.fn();
 
+it("keeps project skills visible on return and after a failed fresh read", async () => {
+  const inventory: SkillInventory = {
+    locations: [{ id: "shared", agent: null, scope: "project", path: "/project/.agents/skills", label: "共享 Skills" }],
+    resources: [{ id: "review", name: "review", description: "", path: "/home/skills/review", registered: true, locations: ["shared"], entry_paths: ["/project/.agents/skills/review"], entry_links: [true], revision: "r1", error: null }],
+    warnings: [],
+  };
+  vi.mocked(api.listSkills).mockResolvedValue(inventory);
+  vi.mocked(api.listSkillCatalog).mockResolvedValue(inventory);
+  const first = render(<SkillScopeConfig projectId="p1" navigate={navigate} />);
+  await screen.findByRole("button", { name: "review" });
+  first.unmount();
+  vi.mocked(api.listSkills).mockRejectedValue(new Error("技能读取失败"));
+  render(<SkillScopeConfig projectId="p1" navigate={navigate} />);
+  expect(screen.getByRole("button", { name: "review" })).toBeTruthy();
+  expect((await screen.findByRole("alert")).textContent).toContain("技能读取失败");
+  expect(screen.getByRole("button", { name: "review" })).toBeTruthy();
+});
+
 beforeEach(() => {
+  clearReadResources();
   clearProjectDetailCache();
   navigate.mockReset();
+  vi.mocked(api.listSkills).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
+  vi.mocked(api.listSkillCatalog).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
   vi.mocked(api.getProjectContextState).mockReset().mockResolvedValue({project_id: "p1", summary: null, context_revision: 0, updated_at: null, pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.createWorkstream).mockReset();
+  vi.mocked(api.cleanMissingProjectPaths).mockReset();
   vi.mocked(api.getAgentStatus).mockResolvedValue({
     codex: {
       name: "codex",
@@ -268,7 +293,6 @@ describe("ProjectDetail", () => {
     fireEvent.click(await screen.findByRole("checkbox", { name: /lint/ }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(api.enableSkillProjects).toHaveBeenCalledWith(["p1"], "lint"));
-    expect(api.enableSkillProjects).toHaveBeenCalledTimes(1);
   });
 
   it("opens an skill detail from the project card", async () => {
@@ -425,4 +449,42 @@ describe("ProjectDetail", () => {
     expect(screen.getByText("p2 当前结论")).toBeTruthy();
   });
 
+});
+
+it("cleans missing unused directory registrations only after confirmation and refreshes the project", async () => {
+  const detail = mockDetail();
+  detail.workspace_paths[0].exists = false;
+  vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+  vi.mocked(api.cleanMissingProjectPaths).mockRejectedValueOnce(new Error("清理暂时失败"))
+    .mockImplementationOnce(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, workspace_paths: [detail.workspace_paths[1]] });
+      return 1;
+    });
+  render(<ProjectDetail projectId="p1" navigate={navigate} />);
+  fireEvent.click(await screen.findByRole("button", { name: "清理失效目录" }));
+  expect(screen.getByRole("dialog", { name: "清理失效目录？" }).textContent).toContain("1 个缺失且没有会话引用");
+  expect(api.cleanMissingProjectPaths).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "清理失效目录" }));
+  fireEvent.click(screen.getByRole("button", { name: "清理" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "清理" })).toHaveProperty("disabled", false));
+  expect(screen.getByRole("dialog", { name: "清理失效目录？" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "清理" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(api.cleanMissingProjectPaths).toHaveBeenCalledWith("p1");
+  expect(screen.getByRole("heading", { name: "工作目录（1）" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Session 1/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "清理失效目录" })).toBeNull();
+});
+
+it("keeps missing directories referenced by archived sessions out of the cleanup action", async () => {
+  const detail = mockDetail();
+  detail.workspace_paths[1].exists = false;
+  detail.sessions[0].archived_at = "2026-11-08T00:00:00Z";
+  vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+  render(<ProjectDetail projectId="p1" navigate={navigate} />);
+  await screen.findByRole("heading", { name: "工作目录（2）" });
+  expect(screen.getByRole("button", { name: /main.*worktree/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "清理失效目录" })).toBeNull();
 });

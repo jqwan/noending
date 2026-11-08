@@ -80,6 +80,8 @@ export const api = {
   },
   addProjectPath: (path: string) =>
     invoke<AddProjectPathResult>("add_project_path", { path }),
+  cleanMissingProjectPaths: (projectId: string) =>
+    invoke<number>("clean_missing_project_paths", { projectId }),
 
   getWorkspaceSettings: () => invoke<WorkspaceSettings>("get_workspace_settings"),
   /** Open the active Home's Context extraction diagnostics folder. */
@@ -275,6 +277,7 @@ export const api = {
     invoke<void>("terminal_input", { terminalId, data, binary, inputRevision }),
   terminalNotifications: (terminalId: string) => invoke<import("./types").TerminalNotifications>("terminal_notifications", { terminalId }),
   terminalAutoNotifications: (terminalId: string, identityRevision: number, enabled: boolean) => invoke<import("./types").TerminalNotifications>("terminal_auto_notifications", { terminalId, identityRevision, enabled }),
+  /** 界面按最新消息优先分页；CLI/MCP 的查收顺序独立保留。 */
   mailboxList: (session: string, filter = "unread", cursor: number | null = null, limit = 50) => invoke<import("./types").MailboxPage>("mailbox_list", { session, filter, cursor, limit }),
   mailboxSend: (session: string, body: string) => invoke<import("./types").MailboxMessage>("mailbox_send", { session, body }),
   mailboxEdit: (terminalId: string, identityRevision: number, messageId: string, revision: number, body: string | null) => invoke<import("./types").MailboxMessage | null>("mailbox_edit", { terminalId, identityRevision, messageId, revision, body }),

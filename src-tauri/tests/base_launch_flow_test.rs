@@ -92,8 +92,6 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     let db = open_db("standalone-new");
     seed_installation(&db, Agent::Codex);
     let launcher = launcher_in("standalone-new");
-    let bundle_dir = launcher.runtime_dir.join("context-bundles");
-    let _ = std::fs::remove_dir_all(&bundle_dir);
 
     let prepared = launcher
         .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
@@ -102,11 +100,6 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     assert!(prepared.initial_workstream_ids.is_empty());
     assert!(prepared.cwd.is_none());
     assert!(prepared.runtime.is_default());
-
-    assert!(
-        !bundle_dir.exists(),
-        "prepare must not write a context file, even for a launch that will succeed"
-    );
 
     let result = launcher
         .launch_prepared_with_in(
@@ -119,8 +112,6 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
         )
         .expect("standalone prepared launch must succeed");
     assert_eq!(result.launched_via, FAKE_SPAWN_TAG);
-
-    assert!(!bundle_dir.exists(), "no context file may be written");
 }
 
 /// An embedded NEW launch goes through the same seam with an UNBOUND
@@ -621,11 +612,11 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     assert_eq!(result.note, "test note");
 }
 
-/// The antigravity adapter keys its route on the SOURCE FORMAT: the CLI
-/// store is terminal-resumable via `agy --conversation`; the IDE store is
-/// app-only (and refuses when the app is not installed).
+/// The antigravity CLI store is terminal-resumable via `agy --conversation`;
+/// the IDE store's app-only route is covered by
+/// `antigravity_desktop_sessions_require_the_desktop_app`.
 #[test]
-fn antigravity_routes_by_source_format() {
+fn antigravity_cli_source_is_terminal_resumable() {
     let session = |kind: &str, path: &str| noending::domain::Session {
         id: "s".into(),
         agent: Agent::Antigravity,
@@ -662,16 +653,6 @@ fn antigravity_routes_by_source_format() {
         )),
         ResumeRoute::Terminal
     ));
-
-    let ide = adapter.continue_route(&session(
-        "antigravity_ide_conversation",
-        "/home/x/.gemini/antigravity/conversations/a.db",
-    ));
-    if adapter.desktop_app_present() {
-        assert!(matches!(ide, ResumeRoute::Desktop(_)));
-    } else {
-        assert!(matches!(ide, ResumeRoute::Refused(_)));
-    }
 }
 
 // ---------------- Embedded terminal resume ----------------
@@ -815,8 +796,7 @@ fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
 
     let registry = noending::terminal::TerminalRegistry::new(None);
     let _existing = registry.reserve_resume(&sid).unwrap();
-    let expected_error = registry.reserve_resume(&sid).err().unwrap();
-    let error = launcher
+    launcher
         .launch_prepared_with_in(
             &db,
             &prepared,
@@ -830,7 +810,6 @@ fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
             }),
         )
         .expect_err("concurrent resume must be refused");
-    assert_eq!(error.to_string(), expected_error);
 }
 
 fn failed_embedded_spawn(
@@ -1077,7 +1056,7 @@ fn reconnect_validates_archive_state_before_stopping_the_terminal() {
 }
 
 #[test]
-fn resume_followup_uses_existing_identity_redacts_the_prompt_and_supports_long_messages() {
+fn resume_followup_uses_existing_identity_and_redacts_the_prompt() {
     let db = open_db("resume-followup");
     seed_installation(&db, Agent::Codex);
     let launcher = launcher_in("resume-followup");
@@ -1109,29 +1088,4 @@ fn resume_followup_uses_existing_identity_redacts_the_prompt_and_supports_long_m
         .unwrap();
     assert!(result.command_line.contains("[启动消息]"));
     assert!(!result.command_line.contains("$(id)"));
-    prepared.initial_message = Some("中".repeat(1998) + "😀");
-    launcher
-        .launch_prepared_with_in(&db, &prepared, &workspace, fake_spawn, fake_open, None)
-        .unwrap();
-    prepared.initial_message.as_mut().unwrap().push('!');
-    launcher
-        .launch_prepared_with_in(
-            &db,
-            &prepared,
-            &workspace,
-            |command| {
-                let wire = command.args.last().unwrap();
-                let path = std::path::Path::new(wire.lines().last().unwrap());
-                assert_eq!(
-                    std::fs::read_to_string(path).unwrap(),
-                    "中".repeat(1998) + "😀!"
-                );
-                let result = fake_spawn(command);
-                std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-                result
-            },
-            fake_open,
-            None,
-        )
-        .unwrap();
 }

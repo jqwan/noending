@@ -1,4 +1,4 @@
-import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
+import { DetailList, DetailListRow, DetailLoading, DetailSection } from "../../components/DetailSection";
 import Notice from "../../components/Notice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
@@ -10,8 +10,15 @@ import { SKILL_AGENTS } from "./skillAgents";
 import { skillDetailRoute, locationSupportsAgent } from "./skillPresentation";
 import ProjectSkillDialog from "./ProjectSkillDialog";
 import "./skills.css";
+import { createReadResource } from "../../hooks/readResource";
 
 const EMPTY: SkillInventory = { resources: [], locations: [], warnings: [] };
+const skillScopeResource = createReadResource(async projectId => {
+  const [inventory, userInventory, catalog] = await Promise.all([
+    api.listSkills({ project_id: projectId }), api.listSkills({}), api.listSkillCatalog(),
+  ]);
+  return { inventory, userInventory, catalog };
+});
 
 type ScopedEntry = { path: string; link: boolean; location: SkillLocation };
 
@@ -32,34 +39,24 @@ function inside(path: string, root: string) {
 export default function SkillScopeConfig({ projectId, workspacePaths = [], navigate }: {
   projectId: string; workspacePaths?: string[]; navigate: (route: Route) => void;
 }) {
-  const [inventory, setInventory] = useState<SkillInventory>(EMPTY);
-  const [catalog, setCatalog] = useState<SkillInventory>(EMPTY);
-  const [userInventory, setUserInventory] = useState<SkillInventory | null>(null);
-  const [loading, setLoading] = useState(true);
+  const snapshot = skillScopeResource.useValue(projectId);
+  const inventory = snapshot?.inventory ?? EMPTY;
+  const catalog = snapshot?.catalog ?? EMPTY;
+  const userInventory = snapshot?.userInventory ?? null;
+  const loading = snapshot === undefined;
   const [busy, setBusy] = useState("");
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
   const request = useRef(0);
   const alive = useRef(true);
 
-  const load = useCallback(async (silent = false) => {
+  const load = useCallback(async () => {
     const seq = ++request.current;
-    if (!silent) setLoading(true);
     setError("");
     try {
-      const [scopeInventory, user, all] = await Promise.all([
-        api.listSkills({ project_id: projectId }),
-        api.listSkills({}),
-        api.listSkillCatalog(),
-      ]);
-      if (seq !== request.current || !alive.current) return;
-      setInventory(scopeInventory);
-      setUserInventory(user);
-      setCatalog(all);
+      await skillScopeResource.refresh(projectId);
     } catch (e) {
-      if (seq === request.current && alive.current) { setInventory(EMPTY); setUserInventory(null); setCatalog(EMPTY); setError(String(e)); }
-    } finally {
-      if (seq === request.current && alive.current && !silent) setLoading(false);
+      if (seq === request.current && alive.current) setError(String(e));
     }
   }, [projectId]);
 
@@ -82,7 +79,7 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
     try {
       const result = enable ? await api.enableSkillProjects([projectId], row.id) : await api.disableSkillProjects([projectId], row.id);
       showToast(result.message);
-      await load(true);
+      await load();
     } catch (e) {
       if (alive.current) setError(String(e));
     } finally {
@@ -92,7 +89,7 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
 
   return <DetailSection sectionId="skills" label="技能" title={<>
         <Icon name="skill" />
-        <span>技能（{visibleRows.length}）</span>
+        <span>技能{!loading && `（${visibleRows.length}）`}</span>
       </>} actions={<><button type="button" className="btn ghost icon-button small" title="配置技能" aria-label="配置技能" disabled={loading} onClick={() => setAdding(true)}>
         <Icon name="sliders" />
       </button></>} status={<>
@@ -100,7 +97,7 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
     </>}>
 
 
-    {loading ? <p className="small muted" role="status">正在读取技能配置…</p>
+    {loading ? (!error && <DetailLoading>正在读取技能配置…</DetailLoading>)
       : !visibleRows.length ? <p className="small muted">当前项目还没有启用的技能。</p>
       : <DetailList label="技能列表">
         {visibleRows.map(row => {
@@ -127,6 +124,6 @@ export default function SkillScopeConfig({ projectId, workspacePaths = [], navig
     {adding && <ProjectSkillDialog projectId={projectId} resources={rows.filter(row => row.registered)}
       enabledIds={enabledIds(projectEntries)} userEffectiveIds={enabledIds(userEntries)}
       physicalIds={rows.filter(row => projectEntries(row).some(entry => !entry.link)).map(row => row.id)}
-      onClose={() => setAdding(false)} onDone={async () => { await load(true); setAdding(false); }} />}
+      onClose={() => setAdding(false)} onDone={async () => { await load(); setAdding(false); }} />}
   </DetailSection>;
 }

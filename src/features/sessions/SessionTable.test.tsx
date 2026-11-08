@@ -14,7 +14,6 @@ vi.mock("../../api", () => ({
 beforeEach(() => { viewState.clear(); vi.mocked(api.getSessionTerminalStates).mockClear(); });
 afterEach(() => {
   cleanup();
-  localStorage.removeItem("noending.continue_mode");
 });
 async function renderCards(element: Parameters<typeof render>[0]) {
   let view!: ReturnType<typeof render>;
@@ -68,13 +67,12 @@ it("shows tracked workstream count statistic on cards and full title in list vie
 });
 
 
-it("prefers terminal capability regardless of old preferences, and uses desktop for desktop-only formats", async () => {
+it("uses terminal for CLI-capable formats and desktop for desktop-only formats", async () => {
   const onTerminalResume = vi.fn();
-  localStorage.setItem("noending.continue_mode", "desktop");
   const onResume = vi.fn();
   const { rerender } = await renderCards(
     <SessionCards
-      sessions={[session]}
+      sessions={[{ ...session, id: "claude-1", agent: "claude_code" } as unknown as Session]}
       workstreamTitleById={new Map()}
       projectNameById={new Map()}
       onOpen={() => {}}
@@ -83,37 +81,17 @@ it("prefers terminal capability regardless of old preferences, and uses desktop 
       onTerminalResume={onTerminalResume}
     />
   );
-  // A previously saved desktop preference does not hide the terminal route.
-  const terminalBtn = screen.getByLabelText("在终端中继续修复布局");
-  fireEvent.click(terminalBtn);
-  expect(onTerminalResume).toHaveBeenCalledWith(session);
-
-  // Terminal-only formats follow the same rule.
-  localStorage.setItem("noending.continue_mode", "desktop");
-  const claudeSession = { ...session, id: "claude-1", agent: "claude_code" } as unknown as Session;
-  await act(async () => rerender(
-    <SessionCards
-      sessions={[claudeSession]}
-      workstreamTitleById={new Map()}
-      projectNameById={new Map()}
-      onOpen={() => {}}
-      onResume={() => {}}
-      onArchive={() => {}}
-      onTerminalResume={onTerminalResume}
-    />
-  ));
   expect(screen.getByLabelText("在终端中继续修复布局")).toBeTruthy();
+
   const desktopSession = { ...session, id: "desktop", agent: "workbuddy" } as unknown as Session;
   await act(async () => rerender(<SessionCards sessions={[desktopSession]} workstreamTitleById={new Map()} projectNameById={new Map()}
     onOpen={() => {}} onResume={onResume} onArchive={() => {}} onTerminalResume={onTerminalResume} />));
   fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续修复布局" }));
   expect(onResume).toHaveBeenCalledWith("desktop");
   expect(screen.queryByRole("button", { name: "在终端中继续修复布局" })).toBeNull();
-  localStorage.removeItem("noending.continue_mode");
 });
 
 it("disables archived session continuation in both card and list terminal modes", async () => {
-  localStorage.setItem("noending.continue_mode", "terminal");
   const resume = vi.fn();
   const terminalResume = vi.fn();
   const archived = { ...session, archived_at: "2026-10-08T00:00:00Z" };
@@ -133,7 +111,6 @@ it("disables archived session continuation in both card and list terminal modes"
   assertBlocked();
   rerender(<SessionCards {...props} viewMode="list" />);
   assertBlocked();
-  localStorage.removeItem("noending.continue_mode");
 });
 
 it("separates Agent activity from the terminal continue action and keeps exited terminals reconnectable", async () => {

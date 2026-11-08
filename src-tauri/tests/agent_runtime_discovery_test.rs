@@ -71,11 +71,13 @@ fn real_agents_answer_discovery_or_warn() {
 /// `unavailable` instead of probing (and must not panic doing it).
 #[test]
 fn agents_without_terminal_integration_report_an_unavailable_catalog() {
+    let mut checked = 0;
     for agent in Agent::all()
         .iter()
         .copied()
         .filter(|a| !noending::adapters::adapter_for(*a).has_terminal_cli())
     {
+        checked += 1;
         let d = noending::agent_runtime::discover_runtime_options(agent);
         assert_eq!(d.model_source, "unavailable", "{agent:?}");
         assert!(d.models.is_empty(), "{agent:?}");
@@ -94,4 +96,5 @@ fn agents_without_terminal_integration_report_an_unavailable_catalog() {
             noending::agent_runtime::RuntimeFieldCapability::Unsupported
         );
     }
+    assert!(checked > 0, "every adapter must be classified");
 }

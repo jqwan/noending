@@ -3,12 +3,15 @@
    [data-theme="dark"] can re-skin the whole app by overriding variables. */
 
 :root {
-  /* surfaces */
+  /* 背景分层：窗口外框 / 聊天与终端画布 / 会话侧栏 / 内容底板 / 卡片与弹层 / 内嵌区域。 */
+  --bg-chrome: #f0f0f2;
   --bg-app: #ffffff;
-  --bg-sidebar: #f5f5f3;
-  --bg-panel: #f5f5f3;
-  --bg-hover: #ececea;
-  --bg-active: #e6e6e3;
+  --bg-sidebar: #f5f5f7;
+  --bg-canvas: #fafafb;
+  --bg-surface: #ffffff;
+  --bg-panel: #f1f1f4;
+  --bg-hover: #e9e9ee;
+  --bg-active: #e1e1e8;
 
   /* text */
   --text-primary: #111111;
@@ -16,8 +19,8 @@
   --text-muted: #8a8a86;
 
   /* borders */
-  --border-subtle: #e4e4e1;
-  --border-default: #c9c9c5;
+  --border-subtle: #e3e3e8;
+  --border-default: #c7c7ce;
 
   /* accents — used sparingly, interactive states only */
   --accent: #4c6fff;
@@ -29,6 +32,7 @@
   --warning: #b26a00;
   --warning-wash: #fdf3e7;
   --danger: #c0392b;
+  --danger-solid: #c0392b;
   --success-wash: #edf6ef;
   --danger-wash: #fbeeea;
   --on-solid: #ffffff;
@@ -51,9 +55,11 @@
   --control-height: 32px;
   --control-height-sm: 28px;
   --control-height-xs: 24px;
+  --rail-button-size: 36px;
   --icon-size: 18px;
   --icon-size-sm: 16px;
   --icon-size-xs: 14px;
+  --icon-stroke-width: 1.25;
 
   --space-2xs: 2px;
   --space-xs: 4px;
@@ -68,6 +74,7 @@
   --section-padding: 18px 20px;
   --detail-list-max-height: min(320px, 45vh);
   --detail-content-max-height: min(480px, 60vh);
+  --document-max-width: 880px;
   --card-padding: 12px 14px;
   --modal-padding-block: 24px;
   --modal-padding-inline: 28px;
@@ -85,10 +92,16 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-pill: 999px;
   --sidebar-width: 248px;
   --window-control-width: 46px;
   --window-close-hover: #c42b1c;
+  --header-title-min-width: 96px;
+  --workspace-inset: 4px;
+  --panel-resizer-hit-width: 10px;
+  --panel-resizer-line-width: 2px;
+  --panel-resizer-active-width: 3px;
 
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.06);
@@ -101,18 +114,21 @@
 }
 
 [data-theme="dark"] {
+  --bg-chrome: #1e1e20;
   --bg-app: #141413;
-  --bg-sidebar: #191918;
-  --bg-panel: #1e1e1c;
-  --bg-hover: #262625;
-  --bg-active: #2d2d2b;
+  --bg-sidebar: #141416;
+  --bg-canvas: #0f0f12;
+  --bg-surface: #1c1c1f;
+  --bg-panel: #242428;
+  --bg-hover: #29292e;
+  --bg-active: #313137;
 
   --text-primary: #ececea;
   --text-secondary: #b5b5b0;
   --text-muted: #8a8a86;
 
-  --border-subtle: #2b2b29;
-  --border-default: #454542;
+  --border-subtle: #29292e;
+  --border-default: #45454d;
 
   --accent: #7d92ff;
   --accent-wash: #242c4e;
@@ -136,18 +152,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg-chrome: #1e1e20;
     --bg-app: #141413;
-    --bg-sidebar: #191918;
-    --bg-panel: #1e1e1c;
-    --bg-hover: #262625;
-    --bg-active: #2d2d2b;
+    --bg-sidebar: #141416;
+    --bg-canvas: #0f0f12;
+    --bg-surface: #1c1c1f;
+    --bg-panel: #242428;
+    --bg-hover: #29292e;
+    --bg-active: #313137;
 
     --text-primary: #ececea;
     --text-secondary: #b5b5b0;
     --text-muted: #8a8a86;
 
-    --border-subtle: #2b2b29;
-    --border-default: #454542;
+    --border-subtle: #29292e;
+    --border-default: #45454d;
 
     --accent: #7d92ff;
     --accent-wash: #242c4e;

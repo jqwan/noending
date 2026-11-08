@@ -1,3 +1,4 @@
+import BoardToolbar from "../../components/BoardToolbar";
 import { DetailPanelProvider } from "../../components/DetailLayout";
 import { DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
 import CompactPath from "../../components/CompactPath";
@@ -153,7 +154,7 @@ export default function AgentsView({
   const [latestActivities, setLatestActivities] = useState<Partial<Record<Agent, string>>>(() => agentsCache.latestActivities ?? {});
   const [sort, setSort] = useViewPreference<AgentSortKey>("agents.sort", "recent", preferenceValues("recent", "name", "sessions"));
   const scrollRef = useViewScroll("agents.scroll", agentStatus !== null);
-  const showSkeleton = useLoadingDelay(agentStatus === null, 80);
+  const showSkeleton = useLoadingDelay(agentStatus === null);
 
   const clearMessages = () => setError("");
 
@@ -404,12 +405,7 @@ export default function AgentsView({
     return (
       <DetailPanelProvider kind="agent"><div className="main agents-page agent-detail-page detail-page">
         <PageHeader
-          title={
-            <span className="session-title-with-icon" title={AGENT_LABELS[initialAgent]}>
-              <AgentIcon agent={initialAgent} size={18} />
-              <span className="session-title-text">{AGENT_LABELS[initialAgent]}</span>
-            </span>
-          }
+          title={AGENT_LABELS[initialAgent]} icon={<AgentIcon agent={initialAgent} size={18} />}
           actions={
             <>
             <button
@@ -542,10 +538,8 @@ export default function AgentsView({
   return (
     <div className="main board-page agents-page" ref={scrollRef}>
       <PageHeader
-        title="Agent"
-        actions={
-          <>
-            <div className="settings-seg icon-seg" role="group" aria-label="Agent 运行界面">
+        title="Agent" icon={<Icon name="agent" />}
+        navigation={<div className="settings-seg icon-seg" role="group" aria-label="Agent 运行界面">
               <button
                 className={surface === "tui" ? "on" : ""}
                 aria-pressed={surface === "tui"}
@@ -564,8 +558,8 @@ export default function AgentsView({
               >
                 <Icon name="desktop" />
               </button>
-            </div>
-            <span className="session-action-divider" aria-hidden="true" />
+            </div>}
+        actions={<>
             <button
               className="btn ghost icon-button"
               disabled={running || sources.length === 0}
@@ -580,16 +574,7 @@ export default function AgentsView({
       />
 
       {/* 顶部工具栏与筛选，使用 board-toolbar 固定吸顶 */}
-      <div className="board-toolbar agents-board-toolbar">
-        <input
-          type="text"
-          className="ws-search"
-          aria-label="搜索 Agent"
-          placeholder="搜索 Agent…"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-
+      <BoardToolbar searchLabel="搜索 Agent" placeholder="搜索 Agent…" query={searchQuery} onQueryChange={setSearchQuery} className="agents-board-toolbar">
         <div className="toolbar ws-controls">
           <div className="ws-controls-group">
             <div className="ws-control">
@@ -678,7 +663,7 @@ export default function AgentsView({
             )}
           </div>
         )}
-      </div>
+      </BoardToolbar>
 
       <div className="agents-content">
         {error && (
@@ -731,7 +716,7 @@ export default function AgentsView({
                 >
                   <header className="ws-card-head">
                     <h3 className="ws-card-title" title={AGENT_LABELS[agent]}>
-                      <AgentIcon agent={agent} size={20} />
+                      <AgentIcon agent={agent} size={18} />
                       <span className="truncate">{AGENT_LABELS[agent]}</span>
                     </h3>
                     <div className="ws-card-side">

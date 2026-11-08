@@ -106,7 +106,7 @@ describe("Projects Board", () => {
     expect(api.matchObjects).toHaveBeenLastCalledWith("project", "worktrees/noending-ui", ["p-1", "p-2"]);
   });
 
-  it.each(["卡片视图", "列表视图"])("distinguishes partial and total directory loss and filters missing projects in %s", async (view) => {
+  it.each(["卡片视图", "列表视图"])("warns only for total directory loss while filtering all missing projects in %s", async (view) => {
     vi.mocked(api.listProjectCards).mockResolvedValue([
       card({ id: "p-1", name: "Healthy", missing_path_count: 0 }),
       card({ id: "p-2", name: "Broken", missing_path_count: 1 }),
@@ -118,7 +118,7 @@ describe("Projects Board", () => {
     fireEvent.click(screen.getByRole("button", { name: view }));
 
     expect(within(screen.getByText("Healthy").closest("article")!).queryByText(/目录缺失/)).toBeNull();
-    expect(within(screen.getByText("Broken").closest("article")!).getByText("部分目录缺失")).toBeTruthy();
+    expect(within(screen.getByText("Broken").closest("article")!).queryByText(/目录缺失/)).toBeNull();
     expect(within(screen.getByText("Unavailable").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
     expect(within(screen.getByText("Missing Single Directory").closest("article")!).getByText("全部目录缺失")).toBeTruthy();
 

@@ -1,3 +1,4 @@
+import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionDetailView, { sessionDetailCache, sessionContextCache } from "./SessionDetailView";
@@ -56,6 +57,7 @@ vi.mock("../../api", () => ({
 
 const originalClipboard = navigator.clipboard;
 beforeEach(() => {
+  clearReadResources();
   vi.resetAllMocks();
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));

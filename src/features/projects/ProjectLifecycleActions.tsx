@@ -1,7 +1,7 @@
 import DialogActions from "../../components/DialogActions";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import { EVT_SYNCED } from "../../app/routes";
+import { notifyDataChanged } from "../../app/routes";
 import Icon from "../../components/Icon";
 import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
@@ -59,7 +59,7 @@ export default function ProjectLifecycleActions({ project, onChanged, onDeleted,
         if (remove && onDeleted) onDeleted();
         else onChanged();
       }
-      window.dispatchEvent(new Event(EVT_SYNCED));
+      notifyDataChanged(["projects"]);
       showToast(remove ? "项目已永久删除" : archived ? "项目已恢复" : "项目已归档");
     } catch (e) {
       showToast(`操作失败：${String(e)}`);

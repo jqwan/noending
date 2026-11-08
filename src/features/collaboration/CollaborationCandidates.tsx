@@ -3,7 +3,11 @@ import { api } from "../../api";
 import Icon from "../../components/Icon";
 import type { CollaborationCandidate, CollaborationStartedMember, SessionListItem } from "../../types";
 import { WAKE_LABEL, defaultWakeMethod } from "./collaborationState";
-import CollaborationCoordinator from "./CollaborationCoordinator";
+import { collaborationCandidatesResource } from "./collaborationResources";
+import { DetailLoading } from "../../components/DetailSection";
+import type { Route } from "../../app/routes";
+import AgentIcon from "../../components/AgentIcon";
+import SessionMiniList from "../sessions/SessionMiniList";
 
 const PAGE = 20;
 
@@ -27,6 +31,7 @@ export default function CollaborationCandidates({
   coordinator,
   onChange,
   disabled = false,
+  navigate,
 }: {
   taskId: string;
   sessions: SessionListItem[];
@@ -34,37 +39,39 @@ export default function CollaborationCandidates({
   coordinator: string | null;
   onChange: (next: { selected: CollaborationStartedMember[]; coordinator: string | null }) => void;
   disabled?: boolean;
+  navigate: (route: Route) => void;
 }) {
-  const [items, setItems] = useState<CollaborationCandidate[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const page = collaborationCandidatesResource.useValue(taskId);
+  const items = page?.items ?? [];
+  const cursor = page?.next_cursor ?? null;
+  const loading = page === undefined;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const token = useRef(0);
+  const sessionKey = JSON.stringify(sessions.map(session => session.id).sort());
 
   const load = useCallback(async (next: string | null, append: boolean) => {
     const current = ++token.current;
     setBusy(true);
     try {
-      const page = await api.collaborationCandidates(taskId, next, PAGE);
+      const page = append ? await api.collaborationCandidates(taskId, next, PAGE) : await collaborationCandidatesResource.refresh(taskId);
       if (token.current !== current) return;
-      setItems(old => (append ? [...old, ...page.items.filter(c => !old.some(o => o.session_id === c.session_id))] : page.items));
-      setCursor(page.next_cursor);
+      if (append) {
+        const old = collaborationCandidatesResource.get(taskId)?.items ?? [];
+        collaborationCandidatesResource.set(taskId, { ...page, items: [...old, ...page.items.filter(c => !old.some(o => o.session_id === c.session_id))] });
+      }
       setError("");
     } catch (e) {
       if (token.current === current) setError(String(e));
     } finally {
-      if (token.current === current) { setBusy(false); setLoading(false); }
+      if (token.current === current) setBusy(false);
     }
   }, [taskId]);
 
   useEffect(() => {
-    setItems([]);
-    setCursor(null);
-    setLoading(true);
     void load(null, false);
     return () => { token.current += 1; };
-  }, [load]);
+  }, [load, sessionKey]);
 
   const toggle = (candidate: CollaborationCandidate, checked: boolean) => {
     if (candidate.unavailable_reason) return;
@@ -89,12 +96,14 @@ export default function CollaborationCandidates({
   return (
     <div className="collab-candidates">
       <p className="small muted" style={{ margin: 0 }}>
-        选择至少 2 个会话参与协作。
+        勾选参与本次协作的会话（至少 2 个）。
       </p>
 
-      {loading ? (
-        <p className="small muted" style={{ margin: 0 }}>正在读取候选会话…</p>
-      ) : items.length === 0 ? (
+      {loading ? <>
+        {!error && <DetailLoading>正在读取候选会话…</DetailLoading>}
+        {sessions.length > 0 && <SessionMiniList sessions={sessions} emptyText="" navigate={navigate} />}
+      </> : (
+      items.length === 0 ? (
         <p className="small muted" style={{ margin: 0 }}>这项任务还没有可参与的会话。</p>
       ) : (
         <ul className="collab-candidate-list">
@@ -103,7 +112,7 @@ export default function CollaborationCandidates({
             const blocked = candidate.unavailable_reason ?? (candidate.wake_modes.length === 0 ? "该会话没有可用的唤醒方式" : null);
             return (
               <li key={candidate.session_id} className={`collab-candidate${blocked ? " blocked" : ""}`}>
-                <label className="collab-candidate-main">
+                <div className="collab-candidate-main">
                   <input
                     type="checkbox"
                     checked={!!chosenMember}
@@ -111,24 +120,24 @@ export default function CollaborationCandidates({
                     aria-label={candidateName(candidate, sessions)}
                     onChange={e => toggle(candidate, e.target.checked)}
                   />
-                  <span className="collab-candidate-name truncate">{candidateName(candidate, sessions)}</span>
+                  {candidate.agent && <AgentIcon agent={candidate.agent} />}
+                  <button type="button" className="link collab-candidate-name truncate" title={candidateName(candidate, sessions)}
+                    onClick={() => navigate({ view: "session", sessionId: candidate.session_id, initialTitle: candidateName(candidate, sessions), initialAgent: candidate.agent ?? undefined })}>{candidateName(candidate, sessions)}</button>
                   {blocked && <span className="badge muted small" title={blocked}>{blocked}</span>}
-                </label>
-                {chosenMember && (
-                  <div className="collab-candidate-wake" role="group" aria-label={`${candidateName(candidate, sessions)} 的唤醒方式`}>
-                    {candidate.wake_modes.map(mode => (
-                      <button key={mode} type="button" className="btn ghost icon-button small"
-                        aria-label={WAKE_LABEL[mode]} title={WAKE_LABEL[mode]} aria-pressed={chosenMember.wake_method === mode}
-                        disabled={disabled || candidate.wake_modes.length === 1}
-                        onClick={() => setWake(candidate.session_id, mode)}><Icon name={mode} /></button>
-                    ))}
-                  </div>
-                )}
+                </div>
+                <div className="collab-candidate-wake" role="group" aria-label={`${candidateName(candidate, sessions)} 的唤醒方式`} aria-hidden={!chosenMember}>
+                  {candidate.wake_modes.map(mode => (
+                    <button key={mode} type="button" className="btn ghost icon-button small"
+                      aria-label={WAKE_LABEL[mode]} title={WAKE_LABEL[mode]} aria-pressed={chosenMember?.wake_method === mode}
+                      disabled={!chosenMember || disabled || candidate.wake_modes.length === 1}
+                      onClick={() => setWake(candidate.session_id, mode)}><Icon name={mode} /></button>
+                  ))}
+                </div>
               </li>
             );
           })}
         </ul>
-      )}
+      ))}
 
       {cursor && (
         <button type="button" className="btn small ghost" disabled={busy || disabled} onClick={() => void load(cursor, true)}>
@@ -136,22 +145,11 @@ export default function CollaborationCandidates({
         </button>
       )}
 
-      <CollaborationCoordinator value={coordinator} disabled={disabled}
-        members={selected.map(member => {
-          const candidate = items.find(c => c.session_id === member.session_id);
-          return { id: member.session_id, title: candidate ? candidateName(candidate, sessions) : sessions.find(s => s.id === member.session_id)?.title ?? member.session_id.slice(0, 8) };
-        })}
-        onChange={id => onChange({ selected, coordinator: id })} />
-
       {chosen > 0 && chosen < 2 && (
         <p className="small warning" role="status">还需要再选 1 个会话才能开启协作。</p>
       )}
       {error && <p role="alert" className="small warning">{error}</p>}
-      {chosen >= 2 && (
-        <p className="small muted" style={{ margin: 0 }}>
-          <Icon name="check" /> 已选 {chosen} 个成员。
-        </p>
-      )}
+
     </div>
   );
 }
