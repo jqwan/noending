@@ -150,9 +150,12 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
 /// `agy` CLI keeps its own store beside the IDE's —
 /// `~/.gemini/antigravity-cli`, identical conversation schema, its own
 /// sibling `conversation_summaries.db` — so both directories are default
-/// ingest sources and one enable covers both surfaces.
+/// ingest sources and one enable covers both surfaces. Qoder's CN and
+/// international builds are the same story for the same transcript format:
+/// `~/.qoder` sits beside `~/.qoder-cn`.
 fn agent_extra_ingest_dirs(agent: Agent) -> Vec<PathBuf> {
     match agent {
+        Agent::Qoder => vec![[".qoder"].iter().collect()],
         Agent::Antigravity => vec![[".gemini", "antigravity-cli"].iter().collect()],
         _ => vec![],
     }
@@ -203,14 +206,29 @@ pub fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(crate::workspace::identity::expand_tilde(path))
 }
 
+/// The plain native spelling of a path supplied by an external store.
+///
+/// Windows agents may persist NT's verbatim spelling (`\\?\C:\…`,
+/// `\\?\UNC\server\share\…`). Identity, display and Win32 shell handoffs all
+/// use the plain spelling; normalizing at the boundary keeps one file from
+/// acquiring two different strings.
+pub fn normalize_external_path(path: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(normalized) = crate::workspace::normalize_path(&path.to_string_lossy()) {
+        return PathBuf::from(normalized);
+    }
+    path.to_path_buf()
+}
+
 /// Ask the desktop shell to show a directory in the platform's file manager.
 pub fn open_directory(path: &std::path::Path) -> crate::error::Result<()> {
+    let path = normalize_external_path(path);
     #[cfg(target_os = "macos")]
-    let opener = directory_opener(path, DirectoryPlatform::MacOs);
+    let opener = directory_opener(&path, DirectoryPlatform::MacOs);
     #[cfg(target_os = "windows")]
-    let opener = directory_opener(path, DirectoryPlatform::Windows);
+    let opener = directory_opener(&path, DirectoryPlatform::Windows);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let opener = directory_opener(path, DirectoryPlatform::Other);
+    let opener = directory_opener(&path, DirectoryPlatform::Other);
 
     run_file_manager(opener)
 }
@@ -218,7 +236,8 @@ pub fn open_directory(path: &std::path::Path) -> crate::error::Result<()> {
 /// Reveal a source transcript in the file manager. Linux file managers do not
 /// share a portable select-file interface, so open its containing directory.
 pub fn reveal_file(path: &std::path::Path) -> crate::error::Result<()> {
-    let metadata = std::fs::metadata(path).map_err(|e| {
+    let path = normalize_external_path(path);
+    let metadata = std::fs::metadata(&path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             crate::error::other("源会话文件已不存在")
         } else {
@@ -229,11 +248,11 @@ pub fn reveal_file(path: &std::path::Path) -> crate::error::Result<()> {
         return Err(crate::error::other("源会话路径不是文件"));
     }
     #[cfg(target_os = "macos")]
-    let opener = file_revealer(path, DirectoryPlatform::MacOs);
+    let opener = file_revealer(&path, DirectoryPlatform::MacOs);
     #[cfg(target_os = "windows")]
-    let opener = file_revealer(path, DirectoryPlatform::Windows);
+    let opener = file_revealer(&path, DirectoryPlatform::Windows);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let opener = file_revealer(path, DirectoryPlatform::Other);
+    let opener = file_revealer(&path, DirectoryPlatform::Other);
     run_file_manager(opener)
 }
 
@@ -392,9 +411,10 @@ pub fn resolve_app_support_dir() -> Option<PathBuf> {
 ///
 /// This is for reading another vendor's store as a title sidecar,
 /// and it is a *lookup*, not a dependency: a wrong or missing path yields no
-/// titles rather than an error. Verified on macOS: `com.qodercn.app.stable`
-/// holds Qoder's `main.sqlite`; the Windows spelling follows Electron's own
-/// `app.getPath('userData')` rule (inferred).
+/// titles rather than an error. Qoder CN keeps `main.sqlite` under
+/// `com.qodercn.app.stable`; the international build uses
+/// `com.qoder.app.stable` (verified on Windows). The spelling follows
+/// Electron's own `app.getPath('userData')` rule on each platform.
 pub fn resolve_external_app_support(bundle_id: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     let base = dirs::data_dir();
@@ -497,6 +517,21 @@ mod tests {
         assert!(!windows.wait_for_exit);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_paths_normalize_to_the_plain_shell_spelling() {
+        assert_eq!(
+            normalize_external_path(&PathBuf::from(r"\\?\C:\Users\Ada\session.jsonl")),
+            PathBuf::from(r"C:\Users\Ada\session.jsonl")
+        );
+        assert_eq!(
+            normalize_external_path(&PathBuf::from(r"\\?\UNC\server\share\session.jsonl")),
+            PathBuf::from(r"\\server\share\session.jsonl")
+        );
+        let plain = PathBuf::from(r"C:\Users\Ada\session.jsonl");
+        assert_eq!(normalize_external_path(&plain), plain);
+    }
+
     #[test]
     fn file_revealers_select_files_or_open_their_directory() {
         let unix_path = PathBuf::from("/Users/Ada/No Ending/session.v2.jsonl.zstd");
@@ -583,7 +618,6 @@ mod tests {
 
     /// Antigravity seeds BOTH official surfaces as default ingest sources:
     /// the IDE store and the `agy` CLI store, siblings under the same home.
-    /// Agents without a second surface keep exactly one root.
     #[test]
     fn antigravity_ingest_roots_cover_the_ide_and_cli_stores() {
         let roots = agent_ingest_roots(Agent::Antigravity);
@@ -596,8 +630,15 @@ mod tests {
             roots.iter().any(|r| r.ends_with(".gemini/antigravity-cli")),
             "{roots:?}"
         );
+    }
 
-        let single = agent_ingest_roots(Agent::Qoder);
-        assert_eq!(single.len(), 1, "{single:?}");
+    /// Qoder's CN and international builds keep the same transcript format in
+    /// two sibling data roots, so both are seeded as default sources.
+    #[test]
+    fn qoder_ingest_roots_cover_the_cn_and_international_stores() {
+        let roots = agent_ingest_roots(Agent::Qoder);
+        assert_eq!(roots.len(), 2, "{roots:?}");
+        assert!(roots.iter().any(|r| r.ends_with(".qoder-cn")), "{roots:?}");
+        assert!(roots.iter().any(|r| r.ends_with(".qoder")), "{roots:?}");
     }
 }

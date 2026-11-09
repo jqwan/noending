@@ -610,9 +610,11 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn session_source_path(&self, session: &Session) -> PathBuf {
         let path = Path::new(&session.source_path);
-        history::active_paths(&history::roots_for(path))
+        let active = history::active_paths(&history::roots_for(path))
             .remove(&session.root_agent_session_id)
-            .unwrap_or_else(|| resolve_rollout(path))
+            .unwrap_or_else(|| resolve_rollout(path));
+        // Codex persists the current rollout in its Windows verbatim spelling.
+        crate::platform::paths::normalize_external_path(&active)
     }
 
     fn inspect_session_source(&self, session: &Session) -> Result<SourceAvailability> {
@@ -1003,6 +1005,36 @@ mod rollout_tests {
             fact_generation: 0,
             latest_message_seq: 0,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_index_verbatim_spelling_is_not_surfaced_as_the_source_path() {
+        let dir = temp_dir("verbatim-source");
+        let home = dir.join(".codex");
+        let sessions = home.join("sessions").join("2026").join("10").join("14");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join(format!("rollout-2026-10-14T01-52-55-{SESSION_ID}.jsonl"));
+        std::fs::write(
+            &path,
+            [meta_line(), message_line(1, "user", "hi")].join("\n"),
+        )
+        .unwrap();
+
+        let conn = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+        conn.execute_batch("CREATE TABLE threads (id TEXT, rollout_path TEXT);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path) VALUES (?1, ?2)",
+            rusqlite::params![SESSION_ID, format!(r"\\?\{}", path.display())],
+        )
+        .unwrap();
+        drop(conn);
+
+        let resolved = CodexAdapter.session_source_path(&root_session(&path));
+        assert_eq!(resolved, path);
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

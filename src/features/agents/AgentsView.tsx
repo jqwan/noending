@@ -54,7 +54,7 @@ const SESSION_FORMATS: SessionFormat[] = [
   { id: "claude_code", label: "Claude Code 会话", agent: "claude_code", defaultPath: "~/.claude/projects", methods: ["terminal"] },
   { id: "pi", label: "Pi 会话", agent: "pi", defaultPath: "~/.pi/agent/sessions", methods: ["terminal"] },
   { id: "dsh", label: "DSH 会话", agent: "dsh", defaultPath: "~/.dsh", methods: ["desktop"] },
-  { id: "qoder", label: "Qoder 会话", agent: "qoder", defaultPath: "~/.qoder-cn", methods: ["desktop"] },
+  { id: "qoder", label: "Qoder 会话（CN / 国际版）", agent: "qoder", defaultPath: "~/.qoder-cn", methods: ["desktop"] },
   { id: "workbuddy", label: "WorkBuddy 会话", agent: "workbuddy", defaultPath: "~/.workbuddy", methods: ["desktop"] },
   { id: "zcode", label: "ZCode 会话", agent: "zcode", defaultPath: "~/.zcode", methods: ["desktop"] },
   { id: "antigravity_desktop", label: "Desktop 格式", agent: "antigravity", defaultPath: "~/.gemini/antigravity", methods: ["desktop"] },

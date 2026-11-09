@@ -1,4 +1,6 @@
-//! Qoder CN Adapter: `~/.qoder-cn/projects/<encoded-cwd>/<session>.jsonl`.
+//! Qoder Adapter (CN + international):
+//! `~/.qoder-cn/projects/<encoded-cwd>/<session>.jsonl` and
+//! `~/.qoder/projects/<encoded-cwd>/<session>.jsonl`.
 //!
 //! Qoder's transcript is **Claude Code's format plus Qoder-only lines**
 //! (`workspace-directories`, `runtime-config`, `worktree-state`, `active-leaf`,
@@ -20,7 +22,8 @@
 //! **One fact comes from a second store.** The transcript carries no title, so
 //! discovery reads the app's own `chat_sessions` for it — read-only, looked up
 //! by the session id the transcript reports, and silent when that store is
-//! absent. Nothing else is taken from there.
+//! absent. Nothing else is taken from there. The CN and international builds
+//! share this schema under their own bundle ids, so both stores are consulted.
 
 use std::path::{Path, PathBuf};
 
@@ -36,10 +39,16 @@ use crate::error::{other, Result};
 
 pub struct QoderAdapter;
 
-/// Qoder's bundle id, i.e. the name of the folder it keeps its app data in.
-const QODER_BUNDLE: &str = "com.qodercn.app.stable";
-/// The app database inside that folder; `chat_sessions` is the table we read.
+/// The bundle ids Qoder keeps its app data in: CN and international.
+const QODER_CN_BUNDLE: &str = "com.qodercn.app.stable";
+const QODER_INTL_BUNDLE: &str = "com.qoder.app.stable";
+/// The app database inside either folder; `chat_sessions` is the table we read.
 const QODER_DB: &str = "main.sqlite";
+/// Desktop surfaces: macOS bundle name and registered URI scheme.
+const QODER_CN_APP: &str = "Qoder CN";
+const QODER_INTL_APP: &str = "Qoder";
+const QODER_CN_SCHEME: &str = "qoder-cn";
+const QODER_INTL_SCHEME: &str = "qoder";
 
 /// The titles Qoder itself shows, read from the app's own database.
 ///
@@ -47,51 +56,59 @@ const QODER_DB: &str = "main.sqlite";
 /// this one fact. `chat_sessions.session_id` is the id the transcript carries,
 /// so the join is exact; `title` is the model's short name for the session —
 /// except when `extra_json.titleSource` says otherwise.
-struct SessionTitles(Option<Connection>);
+struct SessionTitles(Vec<Connection>);
 
 impl SessionTitles {
-    /// `None` when the store is absent, locked, or shaped differently — a
-    /// missing title source must cost nothing but the title.
+    /// No connection when either store is absent, locked, or shaped
+    /// differently — a missing title source must cost nothing but the title.
     fn open() -> Self {
-        let path = crate::platform::paths::resolve_external_app_support(QODER_BUNDLE)
-            .map(|dir| dir.join(QODER_DB));
-        Self::open_at(path.as_deref())
+        Self::open_at([QODER_CN_BUNDLE, QODER_INTL_BUNDLE].map(|bundle| {
+            crate::platform::paths::resolve_external_app_support(bundle)
+                .map(|dir| dir.join(QODER_DB))
+        }))
     }
 
-    /// Split from [`Self::open`] so a fixture database can be read without the
-    /// app's own folder existing.
-    fn open_at(path: Option<&Path>) -> Self {
-        let conn = path.and_then(|path| {
-            Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .ok()
-        });
-        Self(conn)
+    /// Split from [`Self::open`] so fixture databases can be read without the
+    /// app's own folders existing.
+    fn open_at(paths: impl IntoIterator<Item = Option<PathBuf>>) -> Self {
+        Self(
+            paths
+                .into_iter()
+                .flatten()
+                .filter_map(|path| {
+                    Connection::open_with_flags(
+                        path,
+                        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .ok()
+                })
+                .collect(),
+        )
     }
 
     fn title_for(&self, session_id: &str) -> Option<String> {
-        let mut stmt = self
-            .0
-            .as_ref()?
-            .prepare("SELECT title, extra_json FROM chat_sessions WHERE session_id = ?1")
-            .ok()?;
-        let (title, extra): (String, Option<String>) = stmt
-            .query_row([session_id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .ok()?;
-        let source = extra
-            .as_deref()
-            .and_then(|e| serde_json::from_str::<Value>(e).ok())
-            .and_then(|v| {
-                v.get("titleSource")
-                    .and_then(|s| s.as_str())
-                    .map(str::to_string)
-            });
-        is_resolved_title(source.as_deref())
-            .then_some(title)
-            .filter(|t| !t.trim().is_empty())
+        self.0.iter().find_map(|conn| title_in(conn, session_id))
     }
+}
+
+fn title_in(conn: &Connection, session_id: &str) -> Option<String> {
+    let mut stmt = conn
+        .prepare("SELECT title, extra_json FROM chat_sessions WHERE session_id = ?1")
+        .ok()?;
+    let (title, extra): (String, Option<String>) = stmt
+        .query_row([session_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .ok()?;
+    let source = extra
+        .as_deref()
+        .and_then(|e| serde_json::from_str::<Value>(e).ok())
+        .and_then(|v| {
+            v.get("titleSource")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        });
+    is_resolved_title(source.as_deref())
+        .then_some(title)
+        .filter(|t| !t.trim().is_empty())
 }
 
 /// Whether Qoder's `title` is a name it settled on.
@@ -301,6 +318,65 @@ impl QoderAdapter {
     }
 }
 
+/// Which installed edition a session's source belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QoderSurface {
+    Cn,
+    International,
+}
+
+impl QoderSurface {
+    fn app_name(self) -> &'static str {
+        match self {
+            Self::Cn => QODER_CN_APP,
+            Self::International => QODER_INTL_APP,
+        }
+    }
+
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Cn => QODER_CN_SCHEME,
+            Self::International => QODER_INTL_SCHEME,
+        }
+    }
+}
+
+fn cn_app_present() -> bool {
+    crate::platform::desktop::app_present(QODER_CN_APP, QODER_CN_SCHEME)
+}
+
+fn intl_app_present() -> bool {
+    crate::platform::desktop::app_present(QODER_INTL_APP, QODER_INTL_SCHEME)
+}
+
+/// Pick the edition matching the session's data root. A custom source outside
+/// both roots falls back to whichever app is installed, preferring the
+/// international build when both are present.
+fn desktop_surface(
+    source_path: &str,
+    cn_present: bool,
+    intl_present: bool,
+) -> Option<QoderSurface> {
+    let normalized = source_path.replace('\\', "/");
+    let mut cn_source = false;
+    let mut intl_source = false;
+    for segment in normalized.split('/') {
+        cn_source |= segment == ".qoder-cn";
+        intl_source |= segment == ".qoder";
+    }
+    if cn_source {
+        return cn_present.then_some(QoderSurface::Cn);
+    }
+    if intl_source {
+        return intl_present.then_some(QoderSurface::International);
+    }
+    if intl_present {
+        Some(QoderSurface::International)
+    } else {
+        cn_present.then_some(QoderSurface::Cn)
+    }
+}
+
 impl crate::adapters::AgentAdapter for QoderAdapter {
     fn agent(&self) -> Agent {
         Agent::Qoder
@@ -413,20 +489,36 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
         Err(other("Qoder 没有可启动的 CLI，无法一次性执行"))
     }
 
-    /// The registered scheme `qoder-cn://` carries no session route (its
-    /// deep links only cover reference/issue, settings, invite), so Continue
-    /// can only activate the app. App absent → refuse (there is no CLI).
+    /// Neither registered scheme (`qoder://`, `qoder-cn://`) carries a session
+    /// route — their deep links only cover reference/issue, settings, invite —
+    /// so Continue can only activate the matching app. App absent → refuse
+    /// (there is no CLI).
     fn desktop_app_name(&self) -> Option<&'static str> {
-        Some("Qoder CN")
+        Some(if intl_app_present() {
+            QODER_INTL_APP
+        } else {
+            QODER_CN_APP
+        })
     }
 
-    fn continue_route(&self, _session: &Session) -> ResumeRoute {
-        if !self.desktop_app_present() {
-            return ResumeRoute::Refused("未找到 Qoder 桌面应用，无法继续该会话".into());
-        }
+    fn desktop_app_present(&self) -> bool {
+        cn_app_present() || intl_app_present()
+    }
+
+    fn continue_route(&self, session: &Session) -> ResumeRoute {
+        let Some(surface) =
+            desktop_surface(&session.source_path, cn_app_present(), intl_app_present())
+        else {
+            return ResumeRoute::Refused(
+                "未找到与来源匹配的 Qoder 桌面应用，无法继续该会话".into(),
+            );
+        };
         ResumeRoute::Desktop(DesktopResume {
-            uri: "qoder-cn://".into(),
-            note: "将打开 Qoder 桌面应用（应用内不定位到该会话）".into(),
+            uri: format!("{}://", surface.scheme()),
+            note: format!(
+                "将打开 {} 桌面应用（应用内不定位到该会话）",
+                surface.app_name()
+            ),
         })
     }
 }
@@ -669,5 +761,76 @@ mod tests {
             roles,
             vec![SessionMessageRole::User, SessionMessageRole::Assistant]
         );
+    }
+
+    /// Both editions expose the same `chat_sessions` shape; a provisional
+    /// title in one store must not mask a settled one in the other.
+    #[test]
+    fn both_editions_contribute_titles_and_provisional_ones_are_skipped() {
+        fn title_db(path: &Path, session_id: &str, title: &str, source: &str) {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE chat_sessions (session_id TEXT, title TEXT, extra_json TEXT);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_sessions (session_id, title, extra_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    session_id,
+                    title,
+                    serde_json::json!({ "titleSource": source }).to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let dir = unique_dir("titles");
+        let cn = dir.join("cn.sqlite");
+        let intl = dir.join("intl.sqlite");
+        title_db(&cn, "s-cn", "CN 标题", "ai");
+        title_db(&intl, "s-intl", "国际版标题", "ai");
+        let titles = SessionTitles::open_at([Some(cn), Some(intl)]);
+        assert_eq!(titles.title_for("s-cn").as_deref(), Some("CN 标题"));
+        assert_eq!(titles.title_for("s-intl").as_deref(), Some("国际版标题"));
+
+        let provisional = dir.join("provisional.sqlite");
+        title_db(&provisional, "s-shared", "临时标题", "provisional");
+        let settled = dir.join("settled.sqlite");
+        title_db(&settled, "s-shared", "稳定标题", "ai");
+        let titles = SessionTitles::open_at([Some(provisional), Some(settled)]);
+        assert_eq!(titles.title_for("s-shared").as_deref(), Some("稳定标题"));
+    }
+
+    #[test]
+    fn a_missing_title_store_costs_only_the_title() {
+        let dir = unique_dir("titles-missing");
+        let titles = SessionTitles::open_at([Some(dir.join("missing.sqlite")), None]);
+        assert_eq!(titles.title_for("s-main"), None);
+    }
+
+    /// The Continue target follows the edition that wrote the transcript.
+    /// Opening the other edition is not a substitute for a missing match;
+    /// custom copies with no edition marker use whatever app is installed.
+    #[test]
+    fn continue_surface_follows_the_session_source_edition() {
+        let cn = r"C:\Users\me\.qoder-cn\projects\p\s.jsonl";
+        let intl = "/Users/me/.qoder/projects/p/s.jsonl";
+        assert_eq!(desktop_surface(cn, true, true), Some(QoderSurface::Cn));
+        assert_eq!(
+            desktop_surface(intl, true, true),
+            Some(QoderSurface::International)
+        );
+        assert_eq!(desktop_surface(cn, false, true), None);
+        assert_eq!(desktop_surface(intl, true, false), None);
+
+        let custom = r"C:\archive\qoder-sessions\s.jsonl";
+        assert_eq!(desktop_surface(custom, true, false), Some(QoderSurface::Cn));
+        assert_eq!(
+            desktop_surface(custom, false, true),
+            Some(QoderSurface::International)
+        );
+        assert_eq!(desktop_surface(custom, false, false), None);
+        assert_eq!(QoderSurface::Cn.scheme(), "qoder-cn");
+        assert_eq!(QoderSurface::International.scheme(), "qoder");
     }
 }
