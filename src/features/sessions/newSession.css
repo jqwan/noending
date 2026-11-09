@@ -8,7 +8,7 @@
 }
 .main.new-session-page > .page-head {
   flex: none;
-  min-height: var(--titlebar-height);
+  min-height: var(--page-head-height);
 }
 .new-session-content {
   width: min(960px, 100%);

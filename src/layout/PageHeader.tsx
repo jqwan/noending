@@ -32,12 +32,12 @@ export function PageHeaderHost({ children }: { children: ReactNode }) {
 
 /**
  * 标题图标、导航切换、业务操作与右栏开关使用独立槽位，间距和分隔由公共样式统一管理。
- * 页头：标题行（标题 + 动作区）被 CSS 吸进应用标题栏那条 48px band（`layout.css`
+ * 页头：标题行（标题 + 动作区）位于内容卡片顶部的 48px 页头行（`layout.css`
  * 的 `.page-head`），其后依次是返回链接、副标题、children。顺序不能倒，否则吸顶落不进去。
  *
- * `data-tauri-drag-region="deep"` 是拖动窗口的关键：这条 band 的 z-index 盖住了 AppShell
- * 里那条 `.window-drag-region`。取 `deep` 而非裸值——裸值只认"正好点在这个元素上"，
- * 标题与按钮之间的空隙都会落空。子元素里的 button 会被 Tauri 判为可点元素、自动不拖。
+ * `data-tauri-drag-region="deep"` 让页头空白处也能拖动窗口：取 `deep` 而非裸值——
+ * 裸值只认"正好点在这个元素上"，标题与按钮之间的空隙都会落空。子元素里的 button 会被
+ * Tauri 判为可点元素、自动不拖。
  *
  * 标题自身反过来标 `="false"` 把它从拖动区里摘出去：标题是内容不是窗口边框，
  * 按一下不该把整个窗口带走（也顺带去掉双击标题最大化）。tauri 的 drag.js 沿
@@ -62,7 +62,8 @@ export default function PageHeader(props: HeaderProps) {
 }
 
 function HeaderBar({ title, icon, navigation, actions, panel }: HeaderProps & { panel: ReturnType<typeof useDetailPanel> }) {
-  const alignPanel = Boolean(navigation && panel?.open);
+  // 右栏打开时，操作区按右栏宽度切分；没有子页导航的详情页同样适用。
+  const alignPanel = Boolean(panel?.open);
   return (
     <>
       <div className={`page-head${alignPanel ? " page-head-panel-open" : ""}`} data-tauri-drag-region="deep"

@@ -73,81 +73,79 @@ export default function Sidebar({
           <span className="sidebar-header-title">新建</span>
         </button>
       </div>
-      <div className="sidebar-scroll">
-        {pinnedSessions.length > 0 && (
-          <div className="sidebar-pinned-section">
-            <button
-              type="button"
-              className={`sidebar-recent-group-header sidebar-pinned-header ${pinnedCollapsed ? "collapsed" : ""}`}
-              onClick={() => setPinnedCollapsed((prev) => !prev)}
-              aria-expanded={!pinnedCollapsed}
-              title={`置顶（${pinnedSessions.length}）`}
-            >
-              <span className="sidebar-header-icon pinned-group-icon">
-                <Icon name="pin" />
-              </span>
-              <span className="sidebar-header-title truncate">置顶</span>
-              <span className="sidebar-recent-count">{pinnedSessions.length}</span>
-            </button>
-            {!pinnedCollapsed && (
-              <div className="sidebar-recent-group-items">
-                {pinnedSessions.map((s) => (
-                  <SidebarSessionRow
-                    key={`pinned:${s.id}`}
-                    session={s}
-                    resumeState={resumeStates[s.sessionId ?? ""]}
-                    route={route}
-                    navigate={navigate}
-                    agentStatus={agentStatus}
-                    loading={terminalsLoading}
-                    isPinned={true}
-                    onTogglePin={() => togglePin(s.id, s.sessionId)}
-                    showIcon={showSessionIcons}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="nav-section sidebar-section-header">
-          <SidebarGroupMenu groupBy={groupBy} onSelectGroupBy={setGroupBy} />
-
-          <div className="sidebar-header-actions">
-            <button
-              type="button"
-              className={`sidebar-filter-trigger sidebar-running-filter${runningOnly ? " active" : ""}`}
-              onClick={() => setRunningOnly((prev) => !prev)}
-              aria-label="仅显示运行中会话"
-              aria-pressed={runningOnly}
-              title={runningOnly ? "关闭运行中筛选（不影响置顶区）" : "仅显示有运行中终端的会话（不影响置顶区）"}
-            >
-              <Icon name="terminal" />
-            </button>
-
-            <button
-              type="button"
-              className="sidebar-collapse-all-btn"
-              onClick={toggleAllGroups}
-              disabled={groupBy === "none" || sessionGroups.length === 0}
-              aria-label={allGroupsCollapsed ? "展开全部" : "收起全部"}
-              title={groupBy === "none" ? "未分组" : allGroupsCollapsed ? "展开全部" : "收起全部"}
-            >
-              <Icon name={allGroupsCollapsed ? "expandAll" : "collapseAll"} />
-            </button>
-
-            <SidebarFilterMenu
-              filters={filters}
-              onToggleFilter={toggleFilter}
-              onClearFilters={clearFilters}
-              sortBy={sortBy}
-              onSelectSortBy={setSortBy}
-              showSessionIcons={showSessionIcons}
-              onToggleShowSessionIcons={() => setShowSessionIcons((prev) => !prev)}
-            />
-          </div>
+      {pinnedSessions.length > 0 && (
+        <div className="sidebar-pinned-section">
+          <button
+            type="button"
+            className={`sidebar-recent-group-header sidebar-pinned-header ${pinnedCollapsed ? "collapsed" : ""}`}
+            onClick={() => setPinnedCollapsed((prev) => !prev)}
+            aria-expanded={!pinnedCollapsed}
+            title={`置顶（${pinnedSessions.length}）`}
+          >
+            <span className="sidebar-header-icon pinned-group-icon">
+              <Icon name="pin" />
+            </span>
+            <span className="sidebar-header-title truncate">置顶</span>
+            <span className="sidebar-recent-count">{pinnedSessions.length}</span>
+          </button>
+          {!pinnedCollapsed && (
+            <div className="sidebar-recent-group-items">
+              {pinnedSessions.map((s) => (
+                <SidebarSessionRow
+                  key={`pinned:${s.id}`}
+                  session={s}
+                  resumeState={resumeStates[s.sessionId ?? ""]}
+                  route={route}
+                  navigate={navigate}
+                  agentStatus={agentStatus}
+                  loading={terminalsLoading}
+                  isPinned={true}
+                  onTogglePin={() => togglePin(s.id, s.sessionId)}
+                  showIcon={showSessionIcons}
+                />
+              ))}
+            </div>
+          )}
         </div>
+      )}
+      <div className="nav-section sidebar-section-header">
+        <SidebarGroupMenu groupBy={groupBy} onSelectGroupBy={setGroupBy} />
 
+        <div className="sidebar-header-actions">
+          <button
+            type="button"
+            className={`sidebar-filter-trigger sidebar-running-filter${runningOnly ? " active" : ""}`}
+            onClick={() => setRunningOnly((prev) => !prev)}
+            aria-label="仅显示运行中会话"
+            aria-pressed={runningOnly}
+            title={runningOnly ? "关闭运行中筛选（不影响置顶区）" : "仅显示有运行中终端的会话（不影响置顶区）"}
+          >
+            <Icon name="terminal" />
+          </button>
+
+          <button
+            type="button"
+            className="sidebar-collapse-all-btn"
+            onClick={toggleAllGroups}
+            disabled={groupBy === "none" || sessionGroups.length === 0}
+            aria-label={allGroupsCollapsed ? "展开全部" : "收起全部"}
+            title={groupBy === "none" ? "未分组" : allGroupsCollapsed ? "展开全部" : "收起全部"}
+          >
+            <Icon name={allGroupsCollapsed ? "expandAll" : "collapseAll"} />
+          </button>
+
+          <SidebarFilterMenu
+            filters={filters}
+            onToggleFilter={toggleFilter}
+            onClearFilters={clearFilters}
+            sortBy={sortBy}
+            onSelectSortBy={setSortBy}
+            showSessionIcons={showSessionIcons}
+            onToggleShowSessionIcons={() => setShowSessionIcons((prev) => !prev)}
+          />
+        </div>
+      </div>
+      <div className="sidebar-scroll">
         {sessionGroups.length === 0 ? (
           <div className="sidebar-recent-empty">
             {runningOnly ? "暂无运行中会话" : filters.length > 0 ? "无匹配会话" : pinnedSessions.length > 0 ? "暂无未置顶会话" : "暂无会话"}

@@ -353,7 +353,6 @@ export default function AppShell() {
             </button>
           )}
         </div>
-        <div className="titlebar-divider" aria-hidden="true" />
       </header>
       {isWindows && <WindowsWindowControls />}
       <NavigationRail route={route} navigate={navigate} />
