@@ -151,7 +151,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   const scrollRef = useViewScroll("workstreams.scroll", cards !== null);
 
   return (
-    <div className="main board-page" ref={scrollRef}>
+    <div className="main board-page">
       <PageHeader
         title="任务" icon={<Icon name="tasks" />}
         navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="任务列表范围">
@@ -199,7 +199,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         }
       />
 
-      <>
+      <div className="board-scroll" ref={scrollRef}>
           <BoardToolbar searchLabel="搜索任务" placeholder="搜索任务…（标题）" query={query} onQueryChange={setQuery}>
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
@@ -355,7 +355,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
               })}
             </div>
           )}
-      </>
+      </div>
 
       {purgeTarget && (
         <Modal title="永久删除这项任务？" onClose={() => { if (!taskActionId) setPurgeTarget(null); }}>

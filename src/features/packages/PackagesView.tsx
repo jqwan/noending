@@ -157,7 +157,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
     ? <span role="img" aria-label={AGENT_LABELS[entry.agent]} title={AGENT_LABELS[entry.agent]}><AgentIcon agent={entry.agent} size={16} /></span>
     : <Icon name="puzzle" />;
 
-  return <div className="main board-page packages-page" ref={scrollRef}>
+  return <div className="main board-page packages-page">
     <PageHeader title="插件包" icon={<Icon name="puzzle" />} navigation={<div className="settings-seg icon-seg" role="group" aria-label="插件包管理状态">
         <button className={tab === "managed" ? "on" : ""} aria-pressed={tab === "managed"} aria-label="可管理" title="可管理（可启停或可卸载）" onClick={() => setTab("managed")}><Icon name="puzzle" /></button>
         <button className={tab === "unmanaged" ? "on" : ""} aria-pressed={tab === "unmanaged"} aria-label="不可管理" title="不可管理（仅查看）" onClick={() => setTab("unmanaged")}><Icon name="archive" /></button>
@@ -165,59 +165,87 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
         actions={<>
       <button className="btn ghost icon-button" aria-label="导入插件包" title="导入本地插件包目录" disabled={loading} onClick={() => setImporting(true)}><Icon name="plus" /></button>
     </>} />
-    <BoardToolbar searchLabel="搜索插件包" placeholder="搜索插件包…（名称、说明或市场）" query={query} onQueryChange={setQuery}>
-      <div className="toolbar ws-controls">
-        <div className="ws-controls-group">
-          <div className="ws-control"><span className="muted small">Agent</span>
-            <CustomSelect value={agentFilter} onChange={setAgentFilter} ariaLabel="筛选 Agent" options={[
-              { value: "", label: "全部 Agent" },
-              ...agents.map(agent => ({ value: agent, label: AGENT_LABELS[agent] })),
-            ]} />
+    <div className="board-scroll" ref={scrollRef}>
+      <BoardToolbar searchLabel="搜索插件包" placeholder="搜索插件包…（名称、说明或市场）" query={query} onQueryChange={setQuery}>
+        <div className="toolbar ws-controls">
+          <div className="ws-controls-group">
+            <div className="ws-control"><span className="muted small">Agent</span>
+              <CustomSelect value={agentFilter} onChange={setAgentFilter} ariaLabel="筛选 Agent" options={[
+                { value: "", label: "全部 Agent" },
+                ...agents.map(agent => ({ value: agent, label: AGENT_LABELS[agent] })),
+              ]} />
+            </div>
+            {(query || agentFilter) && <button className="btn small ghost" onClick={() => { setQuery(""); setAgentFilter(""); }}>清除筛选</button>}
           </div>
-          {(query || agentFilter) && <button className="btn small ghost" onClick={() => { setQuery(""); setAgentFilter(""); }}>清除筛选</button>}
+          <div className="ws-controls-meta">
+            <span className="muted small">{query || agentFilter
+              ? `显示 ${rows.length} / 共 ${categoryRows.length} 项`
+              : `共 ${rows.length} 项`}</span>
+            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+              <button className={viewMode === "cards" ? "on" : ""} aria-pressed={viewMode === "cards"} aria-label="卡片视图" title="卡片视图" onClick={() => setViewMode("cards")}><Icon name="grid" /></button>
+              <button className={viewMode === "list" ? "on" : ""} aria-pressed={viewMode === "list"} aria-label="列表视图" title="列表视图" onClick={() => setViewMode("list")}><Icon name="list" /></button>
+            </div>
+          </div>
         </div>
-        <div className="ws-controls-meta">
-          <span className="muted small">{query || agentFilter
-            ? `显示 ${rows.length} / 共 ${categoryRows.length} 项`
-            : `共 ${rows.length} 项`}</span>
-          <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-            <button className={viewMode === "cards" ? "on" : ""} aria-pressed={viewMode === "cards"} aria-label="卡片视图" title="卡片视图" onClick={() => setViewMode("cards")}><Icon name="grid" /></button>
-            <button className={viewMode === "list" ? "on" : ""} aria-pressed={viewMode === "list"} aria-label="列表视图" title="列表视图" onClick={() => setViewMode("list")}><Icon name="list" /></button>
-          </div>
-        </div>
-      </div>
-    </BoardToolbar>
-    {error && <Notice role="alert" >{error}</Notice>}
-    <BoardLoading loading={loading && !error} viewMode={viewMode} />
-    {inventory.warnings.length > 0 && <details className="package-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</details>}
-    {/* 列表与卡片是互斥结构：容器与条目都用视图专属 key，切换时整体卸载重挂，
-        避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/Agent
-        看板同一问题的既定修法）。 */}
-    <section key={viewMode === "cards" ? "packages-cards" : "packages-list"}
-      className={viewMode === "cards" ? "ws-grid board-grid package-cards" : "package-list"} aria-label="插件包">
-      {!loading && !error && !visibleRows.length && <EmptyState title={tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"} />}
-      {visibleRows.map(entry => viewMode === "cards" ? (
-        <article key={`card-${entry.id}`} className="ws-card full package-card" tabIndex={0} role="button"
-          onClick={() => openDetail(entry)}
-          onPointerEnter={() => prefetch(entry)}
-          onKeyDown={e => {
-            if (e.target !== e.currentTarget) return;
-            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(entry); }
-          }}>
-          <header className="ws-card-head">
-            <h3 className="ws-card-title" title={entry.name}>
-              {titleIcon(entry)}
-              <span className="truncate">{entry.name}</span>
-            </h3>
-            <div className="ws-card-side">{stateBadge(entry)}</div>
-          </header>
-          <div className="ws-card-body">
-            {entry.version && <div className="package-card-version" title={entry.version}><span className="package-version-text">v{shortVersion(entry.version)}</span></div>}
-            {entry.description && <p className="ws-card-desc" title={entry.description}>{entry.description}</p>}
-          </div>
-          <footer className="ws-card-meta">
-            <span className="muted small package-card-meta" title={cardMetaTitle(entry)}>{cardMeta(entry)}</span>
-            {(configurable(entry) || entry.capabilities.uninstall) && <div className="ws-card-actions" onClick={e => e.stopPropagation()}>
+      </BoardToolbar>
+      {error && <Notice role="alert" >{error}</Notice>}
+      <BoardLoading loading={loading && !error} viewMode={viewMode} />
+      {inventory.warnings.length > 0 && <details className="package-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</details>}
+      {/* 列表与卡片是互斥结构：容器与条目都用视图专属 key，切换时整体卸载重挂，
+          避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/Agent
+          看板同一问题的既定修法）。 */}
+      <section key={viewMode === "cards" ? "packages-cards" : "packages-list"}
+        className={viewMode === "cards" ? "ws-grid board-grid package-cards" : "package-list"} aria-label="插件包">
+        {!loading && !error && !visibleRows.length && <EmptyState title={tab === "managed" ? "没有可管理的插件包。" : "没有不可管理的插件包。"} />}
+        {visibleRows.map(entry => viewMode === "cards" ? (
+          <article key={`card-${entry.id}`} className="ws-card full package-card" tabIndex={0} role="button"
+            onClick={() => openDetail(entry)}
+            onPointerEnter={() => prefetch(entry)}
+            onKeyDown={e => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(entry); }
+            }}>
+            <header className="ws-card-head">
+              <h3 className="ws-card-title" title={entry.name}>
+                {titleIcon(entry)}
+                <span className="truncate">{entry.name}</span>
+              </h3>
+              <div className="ws-card-side">{stateBadge(entry)}</div>
+            </header>
+            <div className="ws-card-body">
+              {entry.version && <div className="package-card-version" title={entry.version}><span className="package-version-text">v{shortVersion(entry.version)}</span></div>}
+              {entry.description && <p className="ws-card-desc" title={entry.description}>{entry.description}</p>}
+            </div>
+            <footer className="ws-card-meta">
+              <span className="muted small package-card-meta" title={cardMetaTitle(entry)}>{cardMeta(entry)}</span>
+              {(configurable(entry) || entry.capabilities.uninstall) && <div className="ws-card-actions" onClick={e => e.stopPropagation()}>
+                {entry.capabilities.uninstall && <button type="button" className="btn small ghost icon-button danger"
+                  aria-label="卸载插件包" title="卸载插件包"
+                  disabled={uninstallBusy}
+                  onClick={() => setUninstalling(entry)}><Icon name="trash" /></button>}
+                {configurable(entry) && <button type="button" className={"btn small ghost icon-button" + (entryState(entry) === "enabled" ? " is-on" : " is-off")}
+                  aria-label={entryState(entry) === "enabled" ? "停用" : "启用"}
+                  title={entryState(entry) === "enabled" ? "用户级停用" : "用户级启用"}
+                  disabled={togglingId === entry.id}
+                  onClick={() => void togglePackage(entry)}><Icon name="power" /></button>}
+              </div>}
+            </footer>
+          </article>
+        ) : (
+          <article key={`list-${entry.id}`} className="package-list-row">
+            <button type="button" className="package-open" onClick={() => openDetail(entry)} onPointerEnter={() => prefetch(entry)}>
+              <div className="package-list-title" title={entry.name}>
+                {titleIcon(entry)}
+                <span>{entry.name}</span>
+                {entry.version && <span className="package-version-text package-version" title={entry.version}>v{shortVersion(entry.version)}</span>}
+                {stateBadge(entry)}
+              </div>
+              <div className="package-list-meta">
+                <span>{cardMeta(entry)}</span>
+                {entry.description && <span className="package-list-desc" title={entry.description}>{entry.description}</span>}
+              </div>
+            </button>
+            {(configurable(entry) || entry.capabilities.uninstall) && <div className="package-list-actions">
               {entry.capabilities.uninstall && <button type="button" className="btn small ghost icon-button danger"
                 aria-label="卸载插件包" title="卸载插件包"
                 disabled={uninstallBusy}
@@ -228,36 +256,10 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
                 disabled={togglingId === entry.id}
                 onClick={() => void togglePackage(entry)}><Icon name="power" /></button>}
             </div>}
-          </footer>
-        </article>
-      ) : (
-        <article key={`list-${entry.id}`} className="package-list-row">
-          <button type="button" className="package-open" onClick={() => openDetail(entry)} onPointerEnter={() => prefetch(entry)}>
-            <div className="package-list-title" title={entry.name}>
-              {titleIcon(entry)}
-              <span>{entry.name}</span>
-              {entry.version && <span className="package-version-text package-version" title={entry.version}>v{shortVersion(entry.version)}</span>}
-              {stateBadge(entry)}
-            </div>
-            <div className="package-list-meta">
-              <span>{cardMeta(entry)}</span>
-              {entry.description && <span className="package-list-desc" title={entry.description}>{entry.description}</span>}
-            </div>
-          </button>
-          {(configurable(entry) || entry.capabilities.uninstall) && <div className="package-list-actions">
-            {entry.capabilities.uninstall && <button type="button" className="btn small ghost icon-button danger"
-              aria-label="卸载插件包" title="卸载插件包"
-              disabled={uninstallBusy}
-              onClick={() => setUninstalling(entry)}><Icon name="trash" /></button>}
-            {configurable(entry) && <button type="button" className={"btn small ghost icon-button" + (entryState(entry) === "enabled" ? " is-on" : " is-off")}
-              aria-label={entryState(entry) === "enabled" ? "停用" : "启用"}
-              title={entryState(entry) === "enabled" ? "用户级停用" : "用户级启用"}
-              disabled={togglingId === entry.id}
-              onClick={() => void togglePackage(entry)}><Icon name="power" /></button>}
-          </div>}
-        </article>
-      ))}
-    </section>
+          </article>
+        ))}
+      </section>
+    </div>
     {uninstalling && <Modal title="卸载插件包" onClose={() => { if (!uninstallBusy) setUninstalling(null); }}>
       <p>将通过 {uninstalling.agent ? AGENT_LABELS[uninstalling.agent] : "该 Agent"} 的原生命令卸载「{uninstalling.name}」。</p>
       <p className="small muted">注册表中的安装条目随卸载一起消失，作用域内的启停配置不再生效；已有终端需要重新加载。源目录不受影响。</p>

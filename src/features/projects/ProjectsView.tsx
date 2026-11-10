@@ -162,7 +162,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
   const scrollRef = useViewScroll("projects.scroll", cards !== null);
 
   return (
-    <div className="main board-page" ref={scrollRef}>
+    <div className="main board-page">
       <PageHeader
         title="项目" icon={<Icon name="project" />}
         navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="项目列表范围">
@@ -184,182 +184,184 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
         }
       />
 
-      <BoardToolbar searchLabel="搜索项目" placeholder="搜索项目…（名称或工作目录）" query={query} onQueryChange={setQuery}>
-      <div className="toolbar ws-controls">
-        <div className="ws-controls-group">
-          <div className="ws-control">
-            <span className="muted small">筛选</span>
-            <CustomSelect
-              value={filter}
-              onChange={(val) => setFilter(val as FilterKey)}
-              ariaLabel="筛选"
-              options={[
-                { value: "all", label: "全部" },
-                { value: "ok", label: "正常" },
-                { value: "missing", label: "有目录缺失" },
-              ]}
-            />
-          </div>
-          <div className="ws-control">
-            <span className="muted small">项目类型</span>
-            <CustomSelect
-              value={effectiveKindFilter}
-              onChange={(val) => setKindFilter(val as ProjectKindFilter)}
-              ariaLabel="项目类型"
-              options={[
-                { value: "all", label: "全部类型" },
-                ...Object.entries(projectKindLabels).map(([kind, label]) => ({
-                  value: kind,
-                  label,
-                })),
-              ]}
-            />
-          </div>
-          <div className="ws-control">
-            <span className="muted small">排序</span>
-            <CustomSelect
-              value={sort}
-              onChange={(val) => setSort(val as SortKey)}
-              ariaLabel="排序"
-              options={[
-                { value: "recent", label: "最近活动" },
-                { value: "name", label: "名称" },
-                { value: "paths", label: "目录数" },
-              ]}
-            />
-          </div>
-          {(query || filter !== "all" || effectiveKindFilter !== "all") && (
-            <button
-              className="btn small ghost"
-              onClick={() => {
-                setQuery("");
-                setFilter("all");
-                setKindFilter("all");
-              }}
-            >
-              清除筛选
-            </button>
-          )}
-        </div>
-
-        <div className="ws-controls-meta">
-          {list !== null && (
-            <span className="muted small">
-              {(query || filter !== "all" || effectiveKindFilter !== "all")
-                ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 项`
-                : `共 ${list.length} 项`}
-            </span>
-          )}
-          <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-            <button
-              className={viewMode === "cards" ? "on" : ""}
-              aria-pressed={viewMode === "cards"}
-              aria-label="卡片视图"
-              title="卡片视图"
-              onClick={() => setViewMode("cards")}
-            >
-              <Icon name="grid" />
-            </button>
-            <button
-              className={viewMode === "list" ? "on" : ""}
-              aria-pressed={viewMode === "list"}
-              aria-label="列表视图"
-              title="列表视图"
-              onClick={() => setViewMode("list")}
-            >
-              <Icon name="list" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      </BoardToolbar>
-
-      <ObjectSearchFeedback search={search} />
-      <BoardLoading loading={cards === null && !listError} viewMode={viewMode} />
-      {listError !== "" && (
-        <div className="card hairline" style={{ padding: 14 }}>
-          <div className="small" style={{ color: "var(--danger)" }}>{listError}</div>
-          <button className="btn small" style={{ marginTop: 8 }} onClick={refresh}>重试</button>
-        </div>
-      )}
-      {list !== null && list.length === 0 && cards !== null && cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
-        <EmptyState
-          title="没有匹配的项目"
-          hint="换个关键词，或把筛选切回「全部」。"
-        />
-      )}
-      {cards !== null && !cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
-        <EmptyState
-          title={archivedMode ? "没有已归档项目" : "还没有项目"}
-          hint={archivedMode ? "归档的项目会显示在这里。" : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
-        />
-      )}
-
-      {viewMode === "cards" ? (
-        <div className="ws-grid board-grid">
-          {list?.map((c) => (
-            <ProjectCard
-              key={c.id}
-              card={c}
-              navigate={navigate}
-              onChanged={refresh}
-              onRequestDelete={setDeleteTarget}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="project-list">
-          {list?.map((c) => (
-            <article className="project-list-row" key={`list-${c.id}`}>
+      <div className="board-scroll" ref={scrollRef}>
+        <BoardToolbar searchLabel="搜索项目" placeholder="搜索项目…（名称或工作目录）" query={query} onQueryChange={setQuery}>
+        <div className="toolbar ws-controls">
+          <div className="ws-controls-group">
+            <div className="ws-control">
+              <span className="muted small">筛选</span>
+              <CustomSelect
+                value={filter}
+                onChange={(val) => setFilter(val as FilterKey)}
+                ariaLabel="筛选"
+                options={[
+                  { value: "all", label: "全部" },
+                  { value: "ok", label: "正常" },
+                  { value: "missing", label: "有目录缺失" },
+                ]}
+              />
+            </div>
+            <div className="ws-control">
+              <span className="muted small">项目类型</span>
+              <CustomSelect
+                value={effectiveKindFilter}
+                onChange={(val) => setKindFilter(val as ProjectKindFilter)}
+                ariaLabel="项目类型"
+                options={[
+                  { value: "all", label: "全部类型" },
+                  ...Object.entries(projectKindLabels).map(([kind, label]) => ({
+                    value: kind,
+                    label,
+                  })),
+                ]}
+              />
+            </div>
+            <div className="ws-control">
+              <span className="muted small">排序</span>
+              <CustomSelect
+                value={sort}
+                onChange={(val) => setSort(val as SortKey)}
+                ariaLabel="排序"
+                options={[
+                  { value: "recent", label: "最近活动" },
+                  { value: "name", label: "名称" },
+                  { value: "paths", label: "目录数" },
+                ]}
+              />
+            </div>
+            {(query || filter !== "all" || effectiveKindFilter !== "all") && (
               <button
-                type="button"
-                className="project-open"
-                onClick={() => navigate({ view: "project", projectId: c.id, initialTitle: c.name })}
+                className="btn small ghost"
+                onClick={() => {
+                  setQuery("");
+                  setFilter("all");
+                  setKindFilter("all");
+                }}
               >
-                <div className="project-list-title" title={c.name}>
-                  <Icon name="project" />
-                  <span>{c.name}</span>
-                  {c.missing_path_count > 0 && isProjectAllPathsMissing(c) && (
-                    <span className="badge warn">全部目录缺失</span>
-                  )}
-                </div>
-                <div className="project-list-meta">
-                  <span>{c.path_count} 目录</span>
-                  <span>{c.workstream_count} 任务</span>
-                  <span>{c.session_count} 会话</span>
-                  <span title={c.last_activity_at ?? c.updated_at ?? undefined}>{timeAgo(c.last_activity_at ?? c.updated_at)}</span>
-                </div>
-                {c.representative_paths.length > 0 && (
-                  <div className="project-list-path mono" title={c.representative_paths[0]}>
-                    <Icon name="folder" />
-                    <span>{c.representative_paths[0]}</span>
-                    {c.path_count > 1 && (
-                      <span className="muted" style={{ marginLeft: 6 }}>
-                        另有 {c.path_count - 1} 个目录
-                      </span>
+                清除筛选
+              </button>
+            )}
+          </div>
+
+          <div className="ws-controls-meta">
+            {list !== null && (
+              <span className="muted small">
+                {(query || filter !== "all" || effectiveKindFilter !== "all")
+                  ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 项`
+                  : `共 ${list.length} 项`}
+              </span>
+            )}
+            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+              <button
+                className={viewMode === "cards" ? "on" : ""}
+                aria-pressed={viewMode === "cards"}
+                aria-label="卡片视图"
+                title="卡片视图"
+                onClick={() => setViewMode("cards")}
+              >
+                <Icon name="grid" />
+              </button>
+              <button
+                className={viewMode === "list" ? "on" : ""}
+                aria-pressed={viewMode === "list"}
+                aria-label="列表视图"
+                title="列表视图"
+                onClick={() => setViewMode("list")}
+              >
+                <Icon name="list" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        </BoardToolbar>
+
+        <ObjectSearchFeedback search={search} />
+        <BoardLoading loading={cards === null && !listError} viewMode={viewMode} />
+        {listError !== "" && (
+          <div className="card hairline" style={{ padding: 14 }}>
+            <div className="small" style={{ color: "var(--danger)" }}>{listError}</div>
+            <button className="btn small" style={{ marginTop: 8 }} onClick={refresh}>重试</button>
+          </div>
+        )}
+        {list !== null && list.length === 0 && cards !== null && cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
+          <EmptyState
+            title="没有匹配的项目"
+            hint="换个关键词，或把筛选切回「全部」。"
+          />
+        )}
+        {cards !== null && !cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
+          <EmptyState
+            title={archivedMode ? "没有已归档项目" : "还没有项目"}
+            hint={archivedMode ? "归档的项目会显示在这里。" : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
+          />
+        )}
+
+        {viewMode === "cards" ? (
+          <div className="ws-grid board-grid">
+            {list?.map((c) => (
+              <ProjectCard
+                key={c.id}
+                card={c}
+                navigate={navigate}
+                onChanged={refresh}
+                onRequestDelete={setDeleteTarget}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="project-list">
+            {list?.map((c) => (
+              <article className="project-list-row" key={`list-${c.id}`}>
+                <button
+                  type="button"
+                  className="project-open"
+                  onClick={() => navigate({ view: "project", projectId: c.id, initialTitle: c.name })}
+                >
+                  <div className="project-list-title" title={c.name}>
+                    <Icon name="project" />
+                    <span>{c.name}</span>
+                    {c.missing_path_count > 0 && isProjectAllPathsMissing(c) && (
+                      <span className="badge warn">全部目录缺失</span>
                     )}
                   </div>
-                )}
-              </button>
-              <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
-                <ProjectLifecycleActions project={c} onChanged={refresh} onRequestDelete={setDeleteTarget} />
-                {(c.purpose === "assistant" || !isDirectoryGroupProject(c)) && (
-                  <button
-                    type="button"
-                    className="btn small ghost icon-button"
-                    aria-label="新建会话"
-                    title="新建会话"
-                    onClick={() => navigate(isProjectAllPathsMissing(c) ? { view: "new-session" } : { view: "new-session", projectId: c.id })}
-                  >
-                    <Icon name="plus" />
-                  </button>
-                )}
-              </div>
-            </article>
-          ))}
-        </div>
-      )}
+                  <div className="project-list-meta">
+                    <span>{c.path_count} 目录</span>
+                    <span>{c.workstream_count} 任务</span>
+                    <span>{c.session_count} 会话</span>
+                    <span title={c.last_activity_at ?? c.updated_at ?? undefined}>{timeAgo(c.last_activity_at ?? c.updated_at)}</span>
+                  </div>
+                  {c.representative_paths.length > 0 && (
+                    <div className="project-list-path mono" title={c.representative_paths[0]}>
+                      <Icon name="folder" />
+                      <span>{c.representative_paths[0]}</span>
+                      {c.path_count > 1 && (
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          另有 {c.path_count - 1} 个目录
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </button>
+                <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
+                  <ProjectLifecycleActions project={c} onChanged={refresh} onRequestDelete={setDeleteTarget} />
+                  {(c.purpose === "assistant" || !isDirectoryGroupProject(c)) && (
+                    <button
+                      type="button"
+                      className="btn small ghost icon-button"
+                      aria-label="新建会话"
+                      title="新建会话"
+                      onClick={() => navigate(isProjectAllPathsMissing(c) ? { view: "new-session" } : { view: "new-session", projectId: c.id })}
+                    >
+                      <Icon name="plus" />
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
       {deleteTarget && (
         <ProjectDeleteModal
           names={[deleteTarget.name]}

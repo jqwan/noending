@@ -536,7 +536,7 @@ export default function AgentsView({
   }
 
   return (
-    <div className="main board-page agents-page" ref={scrollRef}>
+    <div className="main board-page agents-page">
       <PageHeader
         title="Agent" icon={<Icon name="agent" />}
         navigation={<div className="settings-seg icon-seg" role="group" aria-label="Agent 运行界面">
@@ -573,208 +573,301 @@ export default function AgentsView({
         }
       />
 
-      {/* 顶部工具栏与筛选，使用 board-toolbar 固定吸顶 */}
-      <BoardToolbar searchLabel="搜索 Agent" placeholder="搜索 Agent…" query={searchQuery} onQueryChange={setSearchQuery} className="agents-board-toolbar">
-        <div className="toolbar ws-controls">
-          <div className="ws-controls-group">
-            <div className="ws-control">
-              <span className="muted small">状态</span>
-              <CustomSelect
-                value={readinessFilter}
-                onChange={(val) => setReadinessFilter(val as ReadinessFilter)}
-                ariaLabel="状态"
-                options={[
-                  { value: "all", label: "全部" },
-                  { value: "ready", label: "已就绪" },
-                  { value: "unready", label: "未就绪" },
-                ]}
-              />
-            </div>
-
-            <div className="ws-control">
-              <span className="muted small">排序</span>
-              <CustomSelect
-                value={sort}
-                onChange={(val) => setSort(val as AgentSortKey)}
-                ariaLabel="排序"
-                options={[
-                  { value: "recent", label: "最近活动" },
-                  { value: "name", label: "名称" },
-                  { value: "sessions", label: "会话数" },
-                ]}
-              />
-            </div>
-
-            {(searchQuery.trim() || readinessFilter !== "all") && (
-              <button
-                className="btn small ghost"
-                onClick={() => {
-                  setSearchQuery("");
-                  setReadinessFilter("all");
-                }}
-              >
-                清除筛选
-              </button>
-            )}
-          </div>
-
-          <div className="ws-controls-meta">
-            <span className="muted small">
-              {(searchQuery.trim() || readinessFilter !== "all")
-                ? `显示 ${visibleAgents.length} / 共 ${surfaceCandidates.length} 项`
-                : `共 ${surfaceCandidates.length} 项`}
-            </span>
-            <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
-              <button
-                className={viewMode === "cards" ? "on" : ""}
-                aria-pressed={viewMode === "cards"}
-                aria-label="卡片视图"
-                title="卡片视图"
-                onClick={() => setViewMode("cards")}
-              >
-                <Icon name="grid" />
-              </button>
-              <button
-                className={viewMode === "list" ? "on" : ""}
-                aria-pressed={viewMode === "list"}
-                aria-label="列表视图"
-                title="列表视图"
-                onClick={() => setViewMode("list")}
-              >
-                <Icon name="list" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {(status || running) && (
-          <div className="muted small agents-sync-status-strip" style={{ overflowWrap: "anywhere" }}>
-            {running || !status?.finished_at ? (
-              <>
-                最近一次同步：{status ? scopeLabel(status.scope, sources) : "刷新单个会话"} · 正在同步中
-                {status?.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
-              </>
-            ) : (
-              <>
-                最近一次同步：{scopeLabel(status.scope, sources)} · 同步发现 {status.discovered} 条记录 · 写入 {status.messages} 条新消息
-                {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
-                {status.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
-              </>
-            )}
-          </div>
-        )}
-      </BoardToolbar>
-
-      <div className="agents-content">
-        {error && (
-          <div className="badge warn" style={{ marginBottom: 14, overflowWrap: "anywhere", display: "block", padding: "8px 12px" }}>
-            {error}
-          </div>
-        )}
-
-        {/* Agent 展示 */}
-        {agentStatus === null ? (
-          showSkeleton ? (
-            viewMode === "cards" ? (
-              <div className="ws-grid board-grid" key="agents-skeleton-cards" role="status" aria-busy="true">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="skeleton card" style={{ minHeight: 132 }} />
-                ))}
+      <div className="board-scroll" ref={scrollRef}>
+        {/* 顶部工具栏与筛选，使用 board-toolbar 固定吸顶 */}
+        <BoardToolbar searchLabel="搜索 Agent" placeholder="搜索 Agent…" query={searchQuery} onQueryChange={setSearchQuery} className="agents-board-toolbar">
+          <div className="toolbar ws-controls">
+            <div className="ws-controls-group">
+              <div className="ws-control">
+                <span className="muted small">状态</span>
+                <CustomSelect
+                  value={readinessFilter}
+                  onChange={(val) => setReadinessFilter(val as ReadinessFilter)}
+                  ariaLabel="状态"
+                  options={[
+                    { value: "all", label: "全部" },
+                    { value: "ready", label: "已就绪" },
+                    { value: "unready", label: "未就绪" },
+                  ]}
+                />
               </div>
-            ) : (
-              <div className="agent-list" key="agents-skeleton-list" aria-busy="true">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
-                ))}
-              </div>
-            )
-          ) : null
-        ) : viewMode === "cards" ? (
-          <div className="ws-grid board-grid" key="agents-cards">
-            {visibleAgents.map((agent) => {
-              const entry = agentStatus?.[agent];
-              const agentSources = sources.filter((s) => s.agent === agent);
-              const hasCli = Boolean(entry?.terminal_cli);
-              const hasDesktop = Boolean(entry?.desktop_app);
 
-              return (
-                <article
-                  key={`card-${agent}`}
-                  id={`agent-card-${agent}`}
-                  className="ws-card full agent-card"
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
-                  onClick={() => navigate({ view: "agents", agent })}
-                  onKeyDown={(e) => {
-                    if (e.target !== e.currentTarget) return;
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      navigate({ view: "agents", agent });
-                    }
+              <div className="ws-control">
+                <span className="muted small">排序</span>
+                <CustomSelect
+                  value={sort}
+                  onChange={(val) => setSort(val as AgentSortKey)}
+                  ariaLabel="排序"
+                  options={[
+                    { value: "recent", label: "最近活动" },
+                    { value: "name", label: "名称" },
+                    { value: "sessions", label: "会话数" },
+                  ]}
+                />
+              </div>
+
+              {(searchQuery.trim() || readinessFilter !== "all") && (
+                <button
+                  className="btn small ghost"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setReadinessFilter("all");
                   }}
                 >
-                  <header className="ws-card-head">
-                    <h3 className="ws-card-title" title={AGENT_LABELS[agent]}>
-                      <AgentIcon agent={agent} size={18} />
-                      <span className="truncate">{AGENT_LABELS[agent]}</span>
-                    </h3>
-                    <div className="ws-card-side">
-                      {hasCli && (
-                        <span
-                          className={`badge ${entry?.detected ? "accent" : ""}`}
-                          title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
-                        >
-                          TUI
-                        </span>
-                      )}
-                      {hasDesktop && (
-                        <span
-                          className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
-                          title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
-                        >
-                          桌面端
-                        </span>
-                      )}
-                      {!hasCli && !hasDesktop && (
-                        <span className="badge" title="仅同步历史会话">
-                          仅同步
-                        </span>
-                      )}
-                    </div>
-                  </header>
+                  清除筛选
+                </button>
+              )}
+            </div>
 
-                  <div className="ws-card-body agent-card-body">
-                    <div className="agent-card-status-line">
-                      <Icon name="terminal" />
-                      <span className="small truncate" title={formatCliStatus(agent, entry)}>
-                        {formatCliStatus(agent, entry)}
-                      </span>
-                    </div>
-                    <div className="agent-card-status-line muted">
-                      <Icon name="desktop" />
-                      <span className="small truncate" title={hasDesktop ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）` : "未配置桌面应用"}>
-                        {hasDesktop
-                          ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）`
-                          : "未配置桌面应用"}
-                      </span>
-                    </div>
-                    <div className="board-stats">
-                      <span title="会话">
-                        <Icon name="chat" />
-                        {sessionCounts[agent] ?? 0}<span>会话</span>
-                        <span className="sr-only">{sessionCounts[agent] ?? 0} 个会话</span>
-                      </span>
-                    </div>
-                  </div>
+            <div className="ws-controls-meta">
+              <span className="muted small">
+                {(searchQuery.trim() || readinessFilter !== "all")
+                  ? `显示 ${visibleAgents.length} / 共 ${surfaceCandidates.length} 项`
+                  : `共 ${surfaceCandidates.length} 项`}
+              </span>
+              <div className="settings-seg icon-seg" role="group" aria-label="展示方式">
+                <button
+                  className={viewMode === "cards" ? "on" : ""}
+                  aria-pressed={viewMode === "cards"}
+                  aria-label="卡片视图"
+                  title="卡片视图"
+                  onClick={() => setViewMode("cards")}
+                >
+                  <Icon name="grid" />
+                </button>
+                <button
+                  className={viewMode === "list" ? "on" : ""}
+                  aria-pressed={viewMode === "list"}
+                  aria-label="列表视图"
+                  title="列表视图"
+                  onClick={() => setViewMode("list")}
+                >
+                  <Icon name="list" />
+                </button>
+              </div>
+            </div>
+          </div>
 
-                  <footer className="ws-card-meta agent-card-footer">
-                    <span className="muted small">
-                      {agentSources.length === 0
-                        ? "未配置来源目录"
-                        : `${agentSources.length} 个来源目录`}
-                    </span>
-                    <div className="ws-card-actions agent-card-actions" onClick={(e) => e.stopPropagation()}>
+          {(status || running) && (
+            <div className="muted small agents-sync-status-strip" style={{ overflowWrap: "anywhere" }}>
+              {running || !status?.finished_at ? (
+                <>
+                  最近一次同步：{status ? scopeLabel(status.scope, sources) : "刷新单个会话"} · 正在同步中
+                  {status?.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+                </>
+              ) : (
+                <>
+                  最近一次同步：{scopeLabel(status.scope, sources)} · 同步发现 {status.discovered} 条记录 · 写入 {status.messages} 条新消息
+                  {status.finished_at ? <span> · {timeAgo(status.finished_at)}</span> : null}
+                  {status.error && <span style={{ color: "var(--warning)", marginLeft: 6 }}>（{status.error}）</span>}
+                </>
+              )}
+            </div>
+          )}
+        </BoardToolbar>
+
+        <div className="agents-content">
+          {error && (
+            <div className="badge warn" style={{ marginBottom: 14, overflowWrap: "anywhere", display: "block", padding: "8px 12px" }}>
+              {error}
+            </div>
+          )}
+
+          {/* Agent 展示 */}
+          {agentStatus === null ? (
+            showSkeleton ? (
+              viewMode === "cards" ? (
+                <div className="ws-grid board-grid" key="agents-skeleton-cards" role="status" aria-busy="true">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="skeleton card" style={{ minHeight: 132 }} />
+                  ))}
+                </div>
+              ) : (
+                <div className="agent-list" key="agents-skeleton-list" aria-busy="true">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="skeleton" style={{ height: 64, borderRadius: "var(--radius-md)", marginBottom: 8 }} />
+                  ))}
+                </div>
+              )
+            ) : null
+          ) : viewMode === "cards" ? (
+            <div className="ws-grid board-grid" key="agents-cards">
+              {visibleAgents.map((agent) => {
+                const entry = agentStatus?.[agent];
+                const agentSources = sources.filter((s) => s.agent === agent);
+                const hasCli = Boolean(entry?.terminal_cli);
+                const hasDesktop = Boolean(entry?.desktop_app);
+
+                return (
+                  <article
+                    key={`card-${agent}`}
+                    id={`agent-card-${agent}`}
+                    className="ws-card full agent-card"
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
+                    onClick={() => navigate({ view: "agents", agent })}
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        navigate({ view: "agents", agent });
+                      }
+                    }}
+                  >
+                    <header className="ws-card-head">
+                      <h3 className="ws-card-title" title={AGENT_LABELS[agent]}>
+                        <AgentIcon agent={agent} size={18} />
+                        <span className="truncate">{AGENT_LABELS[agent]}</span>
+                      </h3>
+                      <div className="ws-card-side">
+                        {hasCli && (
+                          <span
+                            className={`badge ${entry?.detected ? "accent" : ""}`}
+                            title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
+                          >
+                            TUI
+                          </span>
+                        )}
+                        {hasDesktop && (
+                          <span
+                            className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
+                            title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
+                          >
+                            桌面端
+                          </span>
+                        )}
+                        {!hasCli && !hasDesktop && (
+                          <span className="badge" title="仅同步历史会话">
+                            仅同步
+                          </span>
+                        )}
+                      </div>
+                    </header>
+
+                    <div className="ws-card-body agent-card-body">
+                      <div className="agent-card-status-line">
+                        <Icon name="terminal" />
+                        <span className="small truncate" title={formatCliStatus(agent, entry)}>
+                          {formatCliStatus(agent, entry)}
+                        </span>
+                      </div>
+                      <div className="agent-card-status-line muted">
+                        <Icon name="desktop" />
+                        <span className="small truncate" title={hasDesktop ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）` : "未配置桌面应用"}>
+                          {hasDesktop
+                            ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）`
+                            : "未配置桌面应用"}
+                        </span>
+                      </div>
+                      <div className="board-stats">
+                        <span title="会话">
+                          <Icon name="chat" />
+                          {sessionCounts[agent] ?? 0}<span>会话</span>
+                          <span className="sr-only">{sessionCounts[agent] ?? 0} 个会话</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <footer className="ws-card-meta agent-card-footer">
+                      <span className="muted small">
+                        {agentSources.length === 0
+                          ? "未配置来源目录"
+                          : `${agentSources.length} 个来源目录`}
+                      </span>
+                      <div className="ws-card-actions agent-card-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="btn small ghost icon-button"
+                          disabled={running}
+                          onClick={() => void handleScanAgent(agent)}
+                          aria-label={`增量同步 ${AGENT_LABELS[agent]}`}
+                          title={`增量同步 ${AGENT_LABELS[agent]}`}
+                        >
+                          <Icon name="refresh" />
+                        </button>
+                        {hasCli && entry?.detected && (
+                          <button
+                            type="button"
+                            className="btn small ghost icon-button"
+                            onClick={() => navigate({ view: "new-session", agent })}
+                            aria-label={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                            title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                          >
+                            <Icon name="plus" />
+                          </button>
+                        )}
+                      </div>
+                    </footer>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="agent-list" key="agents-list">
+              {visibleAgents.map((agent) => {
+                const entry = agentStatus?.[agent];
+                const agentSources = sources.filter((s) => s.agent === agent);
+                const hasCli = Boolean(entry?.terminal_cli);
+                const hasDesktop = Boolean(entry?.desktop_app);
+
+                return (
+                  <article
+                    key={`list-${agent}`}
+                    id={`agent-card-${agent}`}
+                    className="agent-list-row agent-card"
+                    aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
+                  >
+                    <button
+                      type="button"
+                      className="agent-open"
+                      aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
+                      onClick={() => navigate({ view: "agents", agent })}
+                    >
+                      <span className="agent-list-title" title={AGENT_LABELS[agent]}>
+                        <AgentIcon agent={agent} size={16} />
+                        <span>{AGENT_LABELS[agent]}</span>
+                        {hasCli && (
+                          <span
+                            className={`badge ${entry?.detected ? "accent" : ""}`}
+                            title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
+                          >
+                            TUI
+                          </span>
+                        )}
+                        {hasDesktop && (
+                          <span
+                            className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
+                            title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
+                          >
+                            桌面端
+                          </span>
+                        )}
+                        {!hasCli && !hasDesktop && (
+                          <span className="badge" title="仅同步历史会话">
+                            仅同步
+                          </span>
+                        )}
+                      </span>
+                      <span className="agent-list-meta">
+                        <span>{formatCliStatus(agent, entry)}</span>
+                        <span>·</span>
+                        <span>
+                          {hasDesktop
+                            ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）`
+                            : "未配置桌面应用"}
+                        </span>
+                        <span>·</span>
+                        <span>{sessionCounts[agent] ?? 0} 个会话</span>
+                        <span>·</span>
+                        <span>
+                          {agentSources.length === 0
+                            ? "未配置来源目录"
+                            : `${agentSources.length} 个来源目录`}
+                        </span>
+                      </span>
+                    </button>
+                    <div className="agent-list-actions" onClick={(e) => e.stopPropagation()}>
                       <button
                         type="button"
                         className="btn small ghost icon-button"
@@ -797,110 +890,19 @@ export default function AgentsView({
                         </button>
                       )}
                     </div>
-                  </footer>
-                </article>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="agent-list" key="agents-list">
-            {visibleAgents.map((agent) => {
-              const entry = agentStatus?.[agent];
-              const agentSources = sources.filter((s) => s.agent === agent);
-              const hasCli = Boolean(entry?.terminal_cli);
-              const hasDesktop = Boolean(entry?.desktop_app);
+                  </article>
+                );
+              })}
+            </div>
+          )}
 
-              return (
-                <article
-                  key={`list-${agent}`}
-                  id={`agent-card-${agent}`}
-                  className="agent-list-row agent-card"
-                  aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
-                >
-                  <button
-                    type="button"
-                    className="agent-open"
-                    aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
-                    onClick={() => navigate({ view: "agents", agent })}
-                  >
-                    <span className="agent-list-title" title={AGENT_LABELS[agent]}>
-                      <AgentIcon agent={agent} size={16} />
-                      <span>{AGENT_LABELS[agent]}</span>
-                      {hasCli && (
-                        <span
-                          className={`badge ${entry?.detected ? "accent" : ""}`}
-                          title={entry?.detected ? "TUI 已就绪" : "未检测到 TUI"}
-                        >
-                          TUI
-                        </span>
-                      )}
-                      {hasDesktop && (
-                        <span
-                          className={`badge ${entry?.desktop_app_present ? "accent" : ""}`}
-                          title={entry?.desktop_app_present ? `已检测到 ${entry?.desktop_app ?? "桌面应用"}` : "未检测到桌面应用"}
-                        >
-                          桌面端
-                        </span>
-                      )}
-                      {!hasCli && !hasDesktop && (
-                        <span className="badge" title="仅同步历史会话">
-                          仅同步
-                        </span>
-                      )}
-                    </span>
-                    <span className="agent-list-meta">
-                      <span>{formatCliStatus(agent, entry)}</span>
-                      <span>·</span>
-                      <span>
-                        {hasDesktop
-                          ? `${entry?.desktop_app}（${entry?.desktop_app_present ? "已检测到" : "未检测到"}）`
-                          : "未配置桌面应用"}
-                      </span>
-                      <span>·</span>
-                      <span>{sessionCounts[agent] ?? 0} 个会话</span>
-                      <span>·</span>
-                      <span>
-                        {agentSources.length === 0
-                          ? "未配置来源目录"
-                          : `${agentSources.length} 个来源目录`}
-                      </span>
-                    </span>
-                  </button>
-                  <div className="agent-list-actions" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="btn small ghost icon-button"
-                      disabled={running}
-                      onClick={() => void handleScanAgent(agent)}
-                      aria-label={`增量同步 ${AGENT_LABELS[agent]}`}
-                      title={`增量同步 ${AGENT_LABELS[agent]}`}
-                    >
-                      <Icon name="refresh" />
-                    </button>
-                    {hasCli && entry?.detected && (
-                      <button
-                        type="button"
-                        className="btn small ghost icon-button"
-                        onClick={() => navigate({ view: "new-session", agent })}
-                        aria-label={`使用 ${AGENT_LABELS[agent]} 新建会话`}
-                        title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
-                      >
-                        <Icon name="plus" />
-                      </button>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-
-        <ObjectSearchFeedback search={search} />
-        {agentStatus !== null && visibleAgents.length === 0 && !search.pending && !search.error && (
-          <div className="card muted small" style={{ textAlign: "center", padding: "36px 20px" }}>
-            {searchQuery.trim() ? `未找到匹配「${searchQuery}」的 Agent。` : "未找到匹配的 Agent。"}
-          </div>
-        )}
+          <ObjectSearchFeedback search={search} />
+          {agentStatus !== null && visibleAgents.length === 0 && !search.pending && !search.error && (
+            <div className="card muted small" style={{ textAlign: "center", padding: "36px 20px" }}>
+              {searchQuery.trim() ? `未找到匹配「${searchQuery}」的 Agent。` : "未找到匹配的 Agent。"}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 全量同步确认 Modal */}

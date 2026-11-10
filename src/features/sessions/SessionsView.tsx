@@ -265,7 +265,7 @@ export default function SessionsView({ navigate, scope }: {
   const scrollRef = useViewScroll(`${statePrefix}.scroll`, sessions !== null);
 
   return (
-    <div className="main board-page" ref={scrollRef}>
+    <div className="main board-page">
       <PageHeader
         title="会话" icon={<Icon name="chat" />}
         navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="会话列表范围">
@@ -313,7 +313,7 @@ export default function SessionsView({ navigate, scope }: {
         }
       />
 
-      <>
+      <div className="board-scroll" ref={scrollRef}>
           <BoardToolbar searchLabel="搜索会话" placeholder="搜索会话…（标题、目录或完整 ID）" query={query} onQueryChange={setQuery}>
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
@@ -443,7 +443,7 @@ export default function SessionsView({ navigate, scope }: {
               navigate={navigate}
             />
           )}
-      </>
+      </div>
 
       {archiveTarget && (
         <Modal

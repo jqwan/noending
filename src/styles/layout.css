@@ -211,21 +211,12 @@
 }
 .sidebar .spacer { flex: none; min-height: 12px; }
 
-/* 看板筛选卡片钉在页头下沿：位置 = 页头高 + 间距。 */
+/* 看板筛选卡片钉在滚动区顶部：页头已在滚动区之外，滚动条不再经过标题栏。 */
 .board-toolbar {
   position: sticky;
-  top: calc(var(--page-head-height) + var(--head-gap));
+  top: 0;
   z-index: 5;
   margin-bottom: var(--space-lg);
-}
-.board-toolbar::before {
-  content: "";
-  position: absolute;
-  inset-inline: 0;
-  top: calc(-1 * var(--head-gap) - 1px);
-  height: var(--head-gap);
-  z-index: -1;
-  background: var(--bg-canvas);
 }
 
 /* ---------- Main ---------- */
@@ -260,6 +251,21 @@
   overflow: hidden;
   padding-bottom: 0;
   max-width: none;
+}
+/* 看板页：页头固定在滚动区上方，滚动条与正文一起从页头下沿开始。 */
+.main.board-page {
+  --main-gutter: 0px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.board-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-lg) var(--space-2xl);
 }
 /* 页头位于内容卡片顶部：标题与页面操作不再占用应用标题栏。
    吸在滚动容器顶部，页面滚动时内容从它下面穿过；
