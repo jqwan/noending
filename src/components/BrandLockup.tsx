@@ -10,6 +10,8 @@ const VIEW_H = 124;
  */
 export default function BrandLockup({ cap = 20 }: { cap?: number }) {
   const scale = cap / CAP_UNITS;
+  // Vite 内联的 SVG data URI 含单引号；未加引号的 url() 会让整条 mask 失效。
+  const mask = `url("${lockupUrl}")`;
   return (
     <span
       role="img"
@@ -18,8 +20,8 @@ export default function BrandLockup({ cap = 20 }: { cap?: number }) {
       style={{
         width: VIEW_W * scale,
         height: VIEW_H * scale,
-        maskImage: `url(${lockupUrl})`,
-        WebkitMaskImage: `url(${lockupUrl})`,
+        maskImage: mask,
+        WebkitMaskImage: mask,
       }}
     />
   );
