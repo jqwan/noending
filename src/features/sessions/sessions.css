@@ -139,6 +139,9 @@
 .terminal-host {
   flex: 1;
   min-width: 0;
+  /* flex 子项的 min-height:auto 会以 xterm 画布高度为下限：窗口变矮时宿主
+     无法收缩，ResizeObserver 不再触发，多余的终端行被裁在可视区下方。 */
+  min-height: 0;
   background: var(--bg-app);
 }
 /* IME preedit expands from xterm's cursor near the right edge. Prevent its
