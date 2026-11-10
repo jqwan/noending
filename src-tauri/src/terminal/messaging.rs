@@ -19,14 +19,17 @@ pub(super) fn submit_key(
             .ok_or_else(|| error("agent_settings_unavailable", "无法定位 Antigravity 配置"))?
             .join("settings.json");
         match std::fs::read(&path) {
-            Ok(bytes) => Some(serde_json::from_slice::<serde_json::Value>(&bytes).map_err(
-                |_| {
-                    error(
-                        "agent_settings_unavailable",
-                        "无法读取 Antigravity 排队设置",
-                    )
-                },
-            )?),
+            Ok(bytes) => {
+                let payload = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+                Some(
+                    serde_json::from_slice::<serde_json::Value>(payload).map_err(|_| {
+                        error(
+                            "agent_settings_unavailable",
+                            "无法读取 Antigravity 排队设置",
+                        )
+                    })?,
+                )
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => {
                 return Err(error(

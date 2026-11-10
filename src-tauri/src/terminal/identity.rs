@@ -755,7 +755,10 @@ fn run_hook_helper(args: Vec<String>, input: impl Read) -> Result<()> {
     if bytes.len() as u64 > MAX_HOOK_INPUT_BYTES {
         return Err(other("native hook input exceeds size limit"));
     }
-    let value = serde_json::from_slice(&bytes)?;
+    // Windows PowerShell 5.1's native pipe operator (| & exe) prepends a
+    // UTF-8 BOM to child stdin. Strip it so serde_json parses cleanly.
+    let payload = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+    let value = serde_json::from_slice(payload)?;
     let event = if args[3] == "antigravity" {
         antigravity::hook_event(value, &args[4], Path::new(&args[5]))
     } else {
@@ -1269,6 +1272,54 @@ console.log(JSON.stringify({args,status:result.status,output:result.stdout,error
         assert!(!serde_json::to_string(&received.event)
             .unwrap()
             .contains("private-answer"));
+    }
+
+    #[test]
+    fn helper_accepts_utf8_bom_prefixed_payload() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        let event = read_envelope(&mut socket).unwrap();
+                        socket.write_all(b"ok\n").unwrap();
+                        return Some(event);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("hook listener failed: {error}"),
+                }
+            }
+        });
+        let mut input = b"\xef\xbb\xbf".to_vec();
+        input.extend_from_slice(
+            &serde_json::to_vec(&serde_json::json!({
+                "hook_event_name":"Stop", "session_id":"native", "turn_id":"turn",
+                "last_assistant_message":"hello"
+            }))
+            .unwrap(),
+        );
+        let result = run_hook_helper(
+            vec![
+                address.to_string(),
+                "token".into(),
+                "terminal".into(),
+                "codex".into(),
+            ],
+            input.as_slice(),
+        );
+        let received = worker.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        let received = received.expect("notification with BOM must reach the terminal");
+        assert_eq!(received.terminal_id, "terminal");
+        assert_eq!(received.event.native_id, "native");
     }
 
     /// Node is a prerequisite (also used by the app frontend and installed in CI).
