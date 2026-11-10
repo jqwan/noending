@@ -689,6 +689,13 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   cursor: not-allowed;
   transform: none;
 }
+/* 分段控件是切换型控件：按下只换底色。页头组原本借用图标按钮的 scale，
+   在分数 DPI 下会被看成横向位移，而工具栏内的同名控件没有该反馈。 */
+.settings-seg button:active:not(:disabled),
+.page-head .actions .settings-seg > button:active:not(:disabled) {
+  background: var(--bg-active);
+  transform: none;
+}
 
 /* 所有看板共用的列表行和内容入口，不依赖会话页样式加载。 */
 
