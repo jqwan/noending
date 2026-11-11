@@ -12,8 +12,10 @@ import SessionTaskTracking from "./SessionTaskTracking";
 import TerminalMailbox from "./TerminalMailbox";
 import { useMailbox, isTerminalReply } from "./useMailbox";
 import { DesktopContinueButton } from "./SessionHeaderActions";
+import { openSessionTerminal } from "./continueDesktop";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
-import { copyToClipboard } from "../../components/common";
+import { copyToClipboard, Modal } from "../../components/common";
+import DialogActions from "../../components/DialogActions";
 import AgentIcon from "../../components/AgentIcon";
 import Icon from "../../components/Icon";
 import { api } from "../../api";
@@ -81,7 +83,6 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     ? { kind: "ready", snapshot: cachedTerminal.snapshot, exited: cachedTerminal.exited, stream: null }
     : { kind: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const refreshTerminalRef = useRef<(() => void) | null>(null);
   const notificationInputRef = useRef<HTMLTextAreaElement>(null);
   const inputOwnership = useRef<{ terminalId: string; managed: boolean } | null>(null);
   const focusMailboxInput = useCallback(() => {
@@ -99,7 +100,8 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const boundTitle = identity.title;
   const [connectionAttempt, setConnectionAttempt] = useState(0);
   const [terminalBusy, setTerminalBusy] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const [operation, setOperation] = useState<"close" | "restart" | "continue" | null>(null);
+  const [restartConfirmation, setRestartConfirmation] = useState<number | null>(null);
   const { notification, error: mailboxError, apply: applyNotification, refresh: refreshMailbox } = useMailbox(terminalId);
   // Show the known mailbox while its permissions are refreshed. An older
   // notification response must not re-enable actions after a terminal rebind.
@@ -107,7 +109,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     (notification.identity_revision === identity.revision && notification.session_id === boundSessionId))
     ? notification : null;
   const mailboxSessionId = mailboxNotification ? mailboxNotification.session_id : boundSessionId;
-  const closingRef = useRef(false);
+  const operationPending = useRef(false);
   const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(() => {
     const id = cachedTerminal?.snapshot.session_id ?? initialSessionId;
     const session = id ? sessionDetailCache.get(id)?.session : undefined;
@@ -134,9 +136,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   }, [terminalId]);
 
   const closeTerminal = async () => {
-    if (closingRef.current || terminalBusy) return;
-    closingRef.current = true;
-    setClosing(true);
+    if (operationPending.current || terminalBusy) return;
+    operationPending.current = true;
+    setOperation("close");
     try {
       const closed = await api.terminalClose(terminalId);
       let remaining: import("../../types").TerminalSummary[] = [];
@@ -149,11 +151,10 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       if (mountedRef.current) navigate(destination);
       invalidateTargets({ terminalIds: [terminalId], replacement: destination });
     } catch (e) { if (mountedRef.current) showToast(`关闭失败：${String(e)}`); }
-    finally { closingRef.current = false; if (mountedRef.current) setClosing(false); }
+    finally { operationPending.current = false; if (mountedRef.current) setOperation(null); }
   };
 
-  /** 进入即用：按 terminalId 直接 attach——终端在新会话发送或「先跳后启」
-   *  启动时就已存在，本视图从不负责 spawn。 */
+  // 连接失败时重试挂载原终端。
   const bootstrap = () => setConnectionAttempt((attempt) => attempt + 1);
 
   // 身份、输出与退出都先完成订阅，再读快照。输出按字节位置去掉快照重叠。
@@ -285,7 +286,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         api.terminalInput(id, data, binary, liveNow.inputRevision ?? 0).catch(() => {
           // 已退出的终端拒绝输入：横幅已说明，不再打扰。
         });
-      }, windows);
+      });
 
       entry = {
         snapshot: { ...snapshot, session_title: identityRef.current.title },
@@ -333,8 +334,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
     if (isWindowsTerminal()) {
       const layout = connectTerminalLayout(live.term, live.fit, container,
         (cols, rows) => live.exited ? Promise.resolve() : api.terminalResize(id, cols, rows), snapshot);
-      refreshTerminalRef.current = layout.redraw;
-      return () => { refreshTerminalRef.current = null; live.onExit = null; live.onManagedFocus = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); layout.dispose(); };
+      return () => { live.onExit = null; live.onManagedFocus = null; live.term.element?.dispatchEvent(new Event("terminal-view-detached")); layout.dispose(); };
     }
 
     const layout = attachTerminalLayout(live.term, live.fit, container, (cols, rows) => {
@@ -347,11 +347,9 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       });
     });
     live.renderer.onDimensionsChange = layout.refresh;
-    refreshTerminalRef.current = layout.redraw;
     layout.refresh();
 
     return () => {
-      refreshTerminalRef.current = null;
       live.onExit = null;
       live.onManagedFocus = null;
       live.renderer.onDimensionsChange = null;
@@ -386,6 +384,28 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const headerTitle = boundTitle ?? (boundSessionId ? "" : "新会话");
   const headerAgent = snapshot?.agent ?? initialAgent ?? null;
   const meta = sessionMeta?.id === boundSessionId ? sessionMeta : null;
+  const busy = operation !== null || terminalBusy;
+  const recoveryUnavailable = state.kind !== "ready" ? "终端未连接"
+    : !boundSessionId || identity.revision < 0 ? "终端尚未绑定会话"
+    : meta?.archived ? "已归档的会话不能继续，请先取消归档" : null;
+  const recoveryLabel = operation === "restart" ? "正在重启 Agent" : operation === "continue" ? "正在继续会话"
+    : exited ? "继续会话" : "重启 Agent";
+  const recoverTerminal = async (mode: "restart" | "continue") => {
+    if (operationPending.current || terminalBusy || recoveryUnavailable || !boundSessionId || !headerAgent) return;
+    if (mode === "restart" && restartConfirmation !== identityRef.current.revision) return;
+    if (identityRef.current.sessionId !== boundSessionId) return;
+    operationPending.current = true;
+    setRestartConfirmation(null);
+    setOperation(mode);
+    try {
+      await openSessionTerminal({ id: boundSessionId, title: boundTitle, agent: headerAgent },
+        route => { if (mountedRef.current) navigate(route); },
+        mode === "restart" ? terminalId : undefined, mode);
+    } finally {
+      operationPending.current = false;
+      if (mountedRef.current) setOperation(null);
+    }
+  };
 
   return (
     <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动通知开启，终端只读" : undefined}><div className="main fill detail-page">
@@ -393,21 +413,33 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         title={headerTitle} icon={headerAgent ? <AgentIcon agent={headerAgent} size={18} /> : <Icon name="terminal" />}
         navigation={<SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
               agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived}
-              terminalBusy={closing} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />}
+              terminalBusy={operation !== null} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />}
         actions={
           <>
             {boundSessionId && headerAgent && <DesktopContinueButton sessionId={boundSessionId} agent={headerAgent}
               sourceKind={meta?.sourceKind} archived={meta?.archived ?? false} />}
 
-            <button className="btn ghost icon-button" aria-label="刷新终端" title="刷新终端显示"
-              disabled={closing || terminalBusy || state.kind !== "ready"}
-              onClick={() => refreshTerminalRef.current?.()}><Icon name="refresh" /></button>
+            <button type="button" className="btn ghost icon-button" aria-label={recoveryLabel} title={recoveryUnavailable ?? recoveryLabel}
+              aria-busy={operation === "restart" || operation === "continue"} disabled={busy || !!recoveryUnavailable}
+              onClick={() => exited ? void recoverTerminal("continue") : setRestartConfirmation(identity.revision)}>
+              <Icon name={exited && operation === null ? "play" : "refresh"} />
+            </button>
             <button className="btn ghost icon-button" aria-label={exited ? "移除终端" : "关闭终端"}
-              title={exited ? "移除终端" : "关闭当前终端"} disabled={closing || terminalBusy || state.kind === "loading"}
+              title={exited ? "移除终端" : "关闭当前终端"} disabled={busy || state.kind === "loading"}
               onClick={() => void closeTerminal()}><Icon name="close" /></button>
           </>
         }
       />
+
+      {restartConfirmation === identity.revision && !recoveryUnavailable && (
+        <Modal title="重启 Agent" onClose={() => setRestartConfirmation(null)}>
+          <p>将停止此会话的所有终端，再重新启动 Agent 继续原会话。正在执行的操作会中断，终端里未发送的草稿可能丢失。</p>
+          <DialogActions>
+            <button type="button" className="btn" onClick={() => setRestartConfirmation(null)}>取消</button>
+            <button type="button" className="btn danger" disabled={busy} onClick={() => void recoverTerminal("restart")}>重启 Agent</button>
+          </DialogActions>
+        </Modal>
+      )}
 
       {state.kind === "loading" && <div className="empty">正在连接内嵌终端…</div>}
       {state.kind === "error" && (

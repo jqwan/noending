@@ -19,7 +19,7 @@ it("resizes once, keeps hidden dimensions, restores terminal focus, and serializ
   Object.defineProperties(container, {
     clientWidth: { get: () => visible ? 800 : 0 }, clientHeight: { get: () => visible ? 600 : 0 },
   });
-  const term = { cols: 100, rows: 30, textarea, element: container, focus: () => textarea.focus(), refresh: vi.fn(), clearTextureAtlas: vi.fn() };
+  const term = { cols: 100, rows: 30, textarea, element: container, focus: () => textarea.focus() };
   let desired = [100, 30];
   const fit = { fit: () => { [term.cols, term.rows] = desired; } };
   let complete!: () => void;
@@ -42,10 +42,6 @@ it("resizes once, keeps hidden dimensions, restores terminal focus, and serializ
   window.dispatchEvent(new Event("blur")); textarea.blur();
   window.dispatchEvent(new Event("focus"));
   expect(document.activeElement).toBe(textarea);
-  layout.redraw(); frame();
-  expect(term.refresh).toHaveBeenCalledWith(0, 39);
-  expect(term.clearTextureAtlas).toHaveBeenCalledTimes(1);
-  expect(resize.mock.calls).toEqual([[100, 30], [120, 40]]);
   layout.dispose();
   textarea.blur(); window.dispatchEvent(new Event("focus"));
   expect(document.activeElement).not.toBe(textarea);

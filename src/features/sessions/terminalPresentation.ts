@@ -68,14 +68,12 @@ export function attachTerminalLayout(
   let frame: number | undefined;
   let first = true;
   let repaint = true;
-  let resetTexture = false;
   const refresh = () => {
     if (disposed || frame !== undefined) return;
     frame = requestAnimationFrame(() => {
       frame = undefined;
       if (disposed || !container.isConnected || container.clientWidth <= 0 || container.clientHeight <= 0) return;
       try {
-        if (resetTexture) { term.clearTextureAtlas(); resetTexture = false; }
         const { cols, rows } = term;
         fit.fit();
         if (term.cols > 0 && term.rows > 0) resize(term.cols, term.rows);
@@ -110,11 +108,6 @@ export function attachTerminalLayout(
   void document.fonts?.ready.then(refresh);
   return {
     refresh,
-    redraw() {
-      repaint = true;
-      resetTexture = true;
-      refresh();
-    },
     dispose() {
       disposed = true;
       if (frame !== undefined) cancelAnimationFrame(frame);

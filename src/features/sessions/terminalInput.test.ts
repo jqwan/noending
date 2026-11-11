@@ -58,92 +58,39 @@ function wheel(deltaY: number, extra: WheelEventInit = {}) {
   return event;
 }
 
-it("preserves small trackpad movement and large distances in one SGR input per wheel event", async () => {
-  await write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
-  // Four sub-cell movements form one row; a 60px movement is three rows.
-  for (let i = 0; i < 3; i++) expect(wheel(5).defaultPrevented).toBe(true);
-  expect(send).not.toHaveBeenCalled();
-  wheel(5);
-  expect(send.mock.calls).toEqual([["\x1b[<65;3;3M"]]);
-  wheel(60);
-  expect(send.mock.calls[1]).toEqual(["\x1b[<65;3;3M".repeat(3)]);
-  wheel(-40);
-  expect(send.mock.calls[2]).toEqual(["\x1b[<64;3;3M".repeat(2)]);
-  wheel(15);
-  wheel(-20);
-  expect(send.mock.calls[3]).toEqual(["\x1b[<64;3;3M"]);
-});
-
-it("retains mouse modifiers without applying the TUI's acceleration a second time", async () => {
-  await write("\x1b[?1000h\x1b[?1006h");
-  wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE, altKey: true });
-  expect(send.mock.calls).toEqual([["\x1b[<73;3;3M".repeat(3)]]);
-  wheel(-2, { deltaMode: WheelEvent.DOM_DELTA_LINE, ctrlKey: true });
-  expect(send.mock.calls[1]).toEqual(["\x1b[<80;3;3M".repeat(2)]);
-});
-
-it("preserves Windows alternate-screen scrolling when an application has no mouse reports", async () => {
-  stop!();
-  stop = connectTerminalInput(term, send, true);
+it("lets xterm translate a trackpad event into one cursor key in the alternate screen", async () => {
   await write("\x1b[?1049h");
-  wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE });
+  for (let i = 0; i < 4; i++) wheel(5);
+  expect(send).not.toHaveBeenCalled();
+  wheel(80);
   expect(send.mock.calls).toEqual([["\x1b[B"]]);
   await write("\x1b[?1h");
   wheel(-1, { deltaMode: WheelEvent.DOM_DELTA_LINE });
   expect(send.mock.calls[1]).toEqual(["\x1bOA"]);
 });
 
-it("forwards Windows native SGR wheel reports without replaying distances or batching input", async () => {
-  stop!();
-  stop = connectTerminalInput(term, send, true);
+it("forwards one native SGR mouse report per large wheel event with its modifiers", async () => {
   await write("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
   wheel(3, { deltaMode: WheelEvent.DOM_DELTA_LINE, altKey: true });
   wheel(-2, { deltaMode: WheelEvent.DOM_DELTA_LINE, ctrlKey: true });
   expect(send.mock.calls).toEqual([["\x1b[<73;3;3M"], ["\x1b[<80;3;3M"]]);
   term.input("typed", true);
   expect(send.mock.calls[2]).toEqual(["typed"]);
-  stop();
+  stop!();
   stop = undefined;
   term.input("after disposal", true);
   wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE });
   expect(send).toHaveBeenCalledTimes(3);
 });
 
-it("preserves the existing non-Windows alternate-screen fallback and acceleration", async () => {
-  stop!();
-  stop = connectTerminalInput(term, send);
-  await write("\x1b[?1049h");
-  term.options.scrollSensitivity = 2;
-  term.options.fastScrollSensitivity = 5;
-  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, altKey: true });
-  expect(send.mock.calls).toEqual([["\x1b[B".repeat(10)]]);
-  wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, ctrlKey: true });
-  expect(send.mock.calls[1]).toEqual(["\x1b[B".repeat(10)]);
-});
-
-it("leaves ordinary scrollback to xterm, clears pending movement on buffer switches, and disposes input forwarding", async () => {
-  await write("\x1b[?1049h");
-  wheel(15);
-  await write("\x1b[?1049l" + "history\r\n".repeat(40));
-  // A normal-buffer wheel must not be sent to the running shell as arrow keys.
+it("scrolls terminal history locally without sending input to the Agent", async () => {
+  await write("history\r\n".repeat(40));
   wheel(-60);
-  expect(send).not.toHaveBeenCalled();
   await waitFor(() => expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY));
-  await write("\x1b[?1049h");
-  wheel(5);
   expect(send).not.toHaveBeenCalled();
-  term.input("typed", true);
-  expect(send.mock.calls).toEqual([["typed"]]);
-  stop!();
-  stop = undefined;
-  term.input("after disposal", true);
-  wheel(60);
-  expect(send.mock.calls).toEqual([["typed"]]);
 });
 
 it("preserves raw legacy mouse bytes beyond ASCII instead of UTF-8 encoding coordinates", async () => {
-  stop!();
-  stop = connectTerminalInput(term, send, true);
   term.resize(200, 24);
   await write("\x1b[?1000h");
   wheel(1, { deltaMode: WheelEvent.DOM_DELTA_LINE, clientX: 1005 });

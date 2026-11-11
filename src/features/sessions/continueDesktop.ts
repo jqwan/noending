@@ -69,19 +69,21 @@ export function terminalForContinue(sessionId: string, terminals: TerminalSummar
   return preferredTerminal(sessionId, terminals.filter(t => t.live)) ?? preferredTerminal(sessionId, terminals);
 }
 
-/** Shared explicit continue: prefer a live instance, reconnect an exited one,
- * otherwise launch. An explicit terminal ID acts only on that instance. */
+/** Shared continue and confirmed restart. Restart requires a verified terminal ID. */
 export async function continueSessionTerminal(
   session: { id: string; title?: string | null; agent: Agent; archived_at?: string | null },
   navigate: (r: Route) => void,
   terminalId?: string,
+  mode: "continue" | "restart" = "continue",
 ): Promise<void> {
   // Recheck identity/liveness: a sidebar snapshot must never reconnect a
   // terminal that the Agent has since switched to another native session.
   const rows = (await api.terminalList()).filter(t => t.session_id === session.id);
-  const existing = terminalId ? rows.find(t => t.terminal_id === terminalId) : terminalForContinue(session.id, rows);
-  if (terminalId && !existing) throw new Error("终端已关闭或已切换会话，请重试");
-  if (existing?.live) {
+  const existing = terminalId || mode === "restart"
+    ? rows.find(t => t.terminal_id === terminalId)
+    : terminalForContinue(session.id, rows);
+  if ((terminalId || mode === "restart") && !existing) throw new Error("终端已关闭或已切换会话，请重试");
+  if (existing?.live && mode === "continue") {
     navigate({ ...terminalDestination(existing), initialTitle: session.title ?? existing.session_title ?? undefined });
     return;
   }
@@ -101,10 +103,11 @@ export async function openSessionTerminal(
   session: { id: string; title?: string | null; agent: Agent; archived_at?: string | null },
   navigate: (r: Route) => void,
   terminalId?: string,
+  mode: "continue" | "restart" = "continue",
 ): Promise<void> {
   if (openingSessions.has(session.id)) return;
   openingSessions.add(session.id);
-  try { await continueSessionTerminal(session, navigate, terminalId); }
+  try { await continueSessionTerminal(session, navigate, terminalId, mode); }
   catch (e) { showToast(`终端不可用：${String(e)}`); }
   finally { openingSessions.delete(session.id); }
 }

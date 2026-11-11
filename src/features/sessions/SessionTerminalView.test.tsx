@@ -1,6 +1,6 @@
 import { clearReadResources } from "../../hooks/readResource";
 import { removedTargets } from "../../app/removedTargets";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionTerminalView, { resetLiveTerminalsForTests } from "./SessionTerminalView";
 import { disposeTerminal, liveTerminals } from "./terminalCache";
@@ -237,29 +237,37 @@ function renderView(navigate?: ReturnType<typeof vi.fn>) {
   );
 }
 
-it("refreshes the current terminal display without restarting or sending input", async () => {
+it("restarts a running Agent in the same session only after confirmation", async () => {
   const pending = deferred<TerminalSnapshot>();
+  const navigate = vi.fn();
   vi.mocked(api.terminalAttach).mockReturnValue(pending.promise);
-  renderView();
-  expect((screen.getByRole("button", { name: "刷新终端" }) as HTMLButtonElement).disabled).toBe(true);
-  await act(async () => { pending.resolve(snapshot({ scrollback: btoa("saved output") })); });
-  await waitFor(() => expect(FakeResizeObserver.observed).toHaveLength(1));
-  const terminal = FakeTerminal.last!;
-  const { target, notify } = FakeResizeObserver.observed[0];
-  Object.defineProperties(target, { clientWidth: { value: 800 }, clientHeight: { value: 600 } });
-  act(notify);
-  await new Promise(resolve => requestAnimationFrame(resolve));
-  const repaint = vi.spyOn(terminal, "refresh");
-  const clearTexture = vi.spyOn(terminal, "clearTextureAtlas");
-  fireEvent.click(screen.getByRole("button", { name: "刷新终端" }));
-  await waitFor(() => expect(repaint).toHaveBeenCalledWith(0, 23));
-  expect(clearTexture).toHaveBeenCalled();
-  expect(FakeTerminal.last).toBe(terminal);
-  expect(terminal.written).toEqual([Uint8Array.from("saved output", char => char.charCodeAt(0))]);
-  expect(terminal.disposed).toBe(false);
-  expect(api.terminalInput).not.toHaveBeenCalled();
+  renderView(navigate);
+  const restart = screen.getByRole("button", { name: "重启 Agent" });
+  expect(restart).toHaveProperty("disabled", true);
+  await act(async () => { pending.resolve(snapshot({})); });
+
+  fireEvent.click(restart);
+  const dialog = screen.getByRole("dialog", { name: "重启 Agent" });
+  expect(within(dialog).getByText(/未发送的草稿可能丢失/)).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
   expect(api.terminalReconnect).not.toHaveBeenCalled();
-  expect(api.terminalClose).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).toBeNull();
+
+  fireEvent.click(restart);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "重启 Agent" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "t-new", initialSessionId: "s1" })));
+  expect(api.terminalReconnect).toHaveBeenCalledWith("t-1", "s1");
+});
+
+it("dismisses restart confirmation when the Agent switches native sessions", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  renderView();
+  await screen.findByLabelText("终端 · 已连接");
+  fireEvent.click(screen.getByRole("button", { name: "重启 Agent" }));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  await act(async () => pushIdentity("s2", 2));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
 });
 
 it("preserves PTY dimensions while hidden and resizes again when shown", async () => {
@@ -312,7 +320,7 @@ it("keeps a cached terminal visible and its controls available while checking a 
   vi.mocked(api.terminalAttach).mockReturnValue(pending.promise);
   renderView();
   expect(screen.getByRole("heading", { name: "保留终端" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "刷新终端" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "重启 Agent" })).toHaveProperty("disabled", false);
   expect(screen.getByRole("button", { name: "关闭终端" })).toHaveProperty("disabled", false);
   expect(screen.getByRole("button", { name: "终端 · 已连接" })).toBeTruthy();
   expect(FakeTerminal.last).toBe(terminal);
@@ -425,7 +433,7 @@ it("retains an exited terminal across page changes until manual removal disposes
   expect(eventHandlers.has("terminal-exit://t-1")).toBe(false);
 });
 
-it("handles reconnect lifecycle: prevents double clicks, recovers on failure, and navigates on success", async () => {
+it("continues an exited session directly from the toolbar and allows retry after failure", async () => {
   const pending = deferred<Awaited<ReturnType<typeof api.terminalReconnect>>>();
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ live: false }));
   vi.mocked(api.terminalList).mockResolvedValue([snapshot({ live: false })]);
@@ -436,8 +444,8 @@ it("handles reconnect lifecycle: prevents double clicks, recovers on failure, an
   const old = FakeTerminal.last!;
 
   // 1. Initial click enters busy state and prevents double clicks
-  fireEvent.click(screen.getByRole("button", { name: "终端 · 已退出" }));
-  const busy = screen.getByRole("button", { name: "终端 · 正在连接" }) as HTMLButtonElement;
+  fireEvent.click(screen.getByRole("button", { name: "继续会话" }));
+  const busy = screen.getByRole("button", { name: "正在继续会话" }) as HTMLButtonElement;
   expect(busy.getAttribute("aria-busy")).toBe("true");
   expect(busy.disabled).toBe(true);
   fireEvent.click(busy);
@@ -451,10 +459,21 @@ it("handles reconnect lifecycle: prevents double clicks, recovers on failure, an
   expect(old.disposed).toBe(false);
 
   // 3. Retry succeeds and navigates
-  const retryBtn = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
+  const retryBtn = screen.getByRole("button", { name: "继续会话" }) as HTMLButtonElement;
   expect(retryBtn.disabled).toBe(false);
   fireEvent.click(retryBtn);
   await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-new", initialSessionId: "s1", initialAgent: "codex" })));
+});
+
+it("uses a running terminal of the same session when continuing from an exited one", async () => {
+  const exited = snapshot({ live: false });
+  vi.mocked(api.terminalAttach).mockResolvedValue(exited);
+  vi.mocked(api.terminalList).mockResolvedValue([exited, snapshot({ terminal_id: "t-running" })]);
+  const navigate = vi.fn();
+  renderView(navigate);
+  fireEvent.click(await screen.findByRole("button", { name: "继续会话" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "t-running" })));
+  expect(api.terminalReconnect).not.toHaveBeenCalled();
 });
 
 it("disables reconnect until the terminal has a verified Session", async () => {
@@ -462,12 +481,15 @@ it("disables reconnect until the terminal has a verified Session", async () => {
   renderView();
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
   const reconnect = screen.getByRole("button", { name: "终端 · 已退出" }) as HTMLButtonElement;
+  const recovery = screen.getByRole("button", { name: "继续会话" });
   expect(reconnect.disabled).toBe(true);
+  expect(recovery).toHaveProperty("disabled", true);
   fireEvent.click(reconnect);
   expect(api.terminalReconnect).not.toHaveBeenCalled();
   vi.mocked(api.terminalList).mockResolvedValue([snapshot({ session_id: "session-b", live: false, identity_revision: 2 })]);
   await act(async () => pushIdentity("session-b", 2));
   await waitFor(() => expect(reconnect.disabled).toBe(false));
+  expect(recovery).toHaveProperty("disabled", false);
 });
 
 it("does not navigate away from another page if reconnection finishes after unmount", async () => {
