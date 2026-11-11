@@ -11,13 +11,14 @@ import ProjectsView from "../features/projects/ProjectsView";
 import WorkstreamDetailView from "../features/workstreams/WorkstreamDetailView";
 import SettingsView from "../features/settings/SettingsView";
 import PackagesView from "../features/packages/PackagesView";
+import TerminalMailbox from "../features/sessions/TerminalMailbox";
 import { setPackageCatalogCache } from "../features/packages/packageDetailCache";
 
 vi.mock("./Router", () => ({ prepareRouteModule: vi.fn() }));
 vi.mock("../api", () => ({ api: {
   listProjectCards: vi.fn(), getDefaultAgent: vi.fn(), getWorkstreamContext: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(),
   collaborationRoomGet: vi.fn(), collaborationCandidates: vi.fn(), getOperationStatus: vi.fn(), getExtractionSettings: vi.fn(), getWorkspaceSettings: vi.fn(),
-  listPackages: vi.fn(),
+  listPackages: vi.fn(), mailboxList: vi.fn(), mailboxNotificationHint: vi.fn(),
 } }));
 const pending = () => new Promise<never>(() => {});
 const task = { id: "task", title: "统一首屏加载", description: "目标：稳定首屏。\n现状：已接入公共导航。", visibility: "normal" as const, created_at: "2026-11-08", updated_at: "2026-11-08" };
@@ -97,4 +98,16 @@ it("renders prepared settings immediately and retains their controls during reva
   expect(screen.getByRole("button", { name: "更改位置…" })).toBeTruthy();
   expect(screen.getByRole("button", { name: /停用后台提取/ })).toBeTruthy();
   expect(screen.queryByText("正在读取存储配置…")).toBeNull();
+});
+
+it("prepares the unread count before opening a bound terminal", async () => {
+  vi.mocked(api.mailboxList).mockResolvedValue({ items: [], total: 0, unread: 0, next_cursor: null });
+  vi.mocked(api.mailboxNotificationHint).mockResolvedValue(false);
+  await prepareNavigation({ view: "terminal", terminalId: "t", initialSessionId: "s" });
+  vi.mocked(api.mailboxList).mockImplementation(pending);
+  await act(async () => {
+    render(<TerminalMailbox terminalId="t" sessionId="s" notification={null} error="" apply={vi.fn()} refresh={vi.fn()} navigate={vi.fn()} />);
+  });
+  expect(screen.getByRole("heading", { name: "信箱（0）" })).toBeTruthy();
+  expect(screen.getByText("暂无未读消息")).toBeTruthy();
 });

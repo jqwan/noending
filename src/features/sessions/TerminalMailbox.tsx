@@ -1,5 +1,5 @@
 import { DetailPanelFooter } from "../../components/DetailLayout";
-import { DetailSection } from "../../components/DetailSection";
+import { DetailLoading, DetailSection } from "../../components/DetailSection";
 import { useEffect, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 import { api } from "../../api";
 import type { MailboxMessage, TerminalNotifications } from "../../types";
@@ -9,13 +9,13 @@ import { useViewState } from "../../hooks/useViewState";
 import { MailboxMessagePreview, useMailboxMessages } from "./MailboxMessages";
 import type { Route } from "../../app/routes";
 
-export default function TerminalMailbox({ terminalId, notification, error: loadError, apply, refresh, inputRef, navigate }: {
-  terminalId: string; notification: TerminalNotifications | null; error: string;
+export default function TerminalMailbox({ terminalId, sessionId: session, notification, error: loadError, apply, refresh, inputRef, navigate }: {
+  terminalId: string; sessionId: string | null; notification: TerminalNotifications | null; error: string;
   apply: (n: TerminalNotifications) => void; refresh: () => Promise<void>;
   inputRef?: RefObject<HTMLTextAreaElement>;
   navigate: (route: Route) => void;
 }) {
-  const session = notification?.session_id ?? null;
+  const confirmedSession = notification?.session_id === session ? session : null;
   const { page, error: listError, refresh: refreshMessages, more } = useMailboxMessages(session, "unread");
   const [draft, setDraft] = useViewState(`mailbox.${session ?? terminalId}.draft`, "");
   const [editing, setEditing] = useState<{ message: MailboxMessage; text: string } | null>(null);
@@ -53,7 +53,7 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith("image/"));
     if (!files.length) return;
     event.preventDefault();
-    if (pending.current || !session) return;
+    if (pending.current || !confirmedSession) return;
     const input = event.currentTarget, start = input.selectionStart, end = input.selectionEnd;
     void run(async () => {
       const paths: string[] = [];
@@ -68,9 +68,9 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     });
   };
   const enabled = notification?.enabled ?? false;
-  const mutable = !enabled && !notification?.writing;
+  const mutable = !!confirmedSession && !enabled && !notification?.writing;
   return <DetailSection sectionId="mailbox" label="信箱" className="terminal-mailbox" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.unread}）` : ""}</span></>} actions={<>
-        <button className={`btn ghost icon-button small${enabled ? " is-on" : ""}`} disabled={!session || busy}
+        <button className={`btn ghost icon-button small${enabled ? " is-on" : ""}`} disabled={!confirmedSession || busy}
           aria-label={enabled ? "关闭自动通知" : "开启自动通知"} title={enabled ? "关闭自动通知" : "开启自动通知"}
           aria-pressed={enabled} onClick={() => {
           if (enabled) void run(() => toggle(false));
@@ -78,14 +78,15 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
           else setConfirm(true);
         }}><Icon name="bell" /></button>
         <button className="btn ghost icon-button small" aria-label="提醒查收" title="提醒查收（立即插队）"
-          disabled={!page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}><Icon name="send" /></button>
+          disabled={!confirmedSession || !page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}><Icon name="send" /></button>
       </>} status={<>
       {(error || loadError || listError || notification?.error) && <p role="alert" className="small warning">{error || loadError || listError || notification?.error}</p>}
     </>}>
 
     {enabled && <p className="small muted">自动通知已开启，终端只读。操作授权或菜单前请先关闭。</p>}
-    {!enabled && session && Boolean(page?.unread) && <p className="small muted">提醒会插队；请保持终端输入框就绪、无草稿。</p>}
-    {!session && <p className="small muted">绑定会话后可使用信箱。</p>}
+    {!enabled && confirmedSession && Boolean(page?.unread) && <p className="small muted">提醒会插队；请保持终端输入框就绪、无草稿。</p>}
+    {!session && notification && <p className="small muted">绑定会话后可使用信箱。</p>}
+    {((!session && !notification && !loadError) || (session && !page && !listError)) && <DetailLoading>正在读取信箱…</DetailLoading>}
     <div className="mailbox-unread-list" role="region" aria-label="未读消息列表" tabIndex={0}>
     {page?.items.map(m => <article className="mailbox-item" key={`${session}:${m.id}`} aria-label="未读消息">
       {editing?.message.id === m.id ? <div>
@@ -101,10 +102,10 @@ export default function TerminalMailbox({ terminalId, notification, error: loadE
     {page?.items.length === 0 && <p className="small muted">暂无未读消息</p>}
     {page?.next_cursor != null && <button className="btn small" onClick={() => void more()}>加载更多</button>}
     </div>
-    <DetailPanelFooter><form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!session || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(session, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
+    <DetailPanelFooter><form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!confirmedSession || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(confirmedSession, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
       <label htmlFor={`mailbox-input-${terminalId}`} className="small">发送消息</label>
-      <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!session || busy} rows={4} onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径" />
-      <button className="btn small primary" type="submit" disabled={!session || busy || !draft.trim()}>发送到信箱</button>
+      <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!confirmedSession || busy} rows={4} onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径" />
+      <button className="btn small primary" type="submit" disabled={!confirmedSession || busy || !draft.trim()}>发送到信箱</button>
     </form></DetailPanelFooter>
 
     {confirm && <Modal title="开启自动通知" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动通知</button></>}>

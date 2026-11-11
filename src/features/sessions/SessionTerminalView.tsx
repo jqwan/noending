@@ -101,6 +101,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [closing, setClosing] = useState(false);
   const { notification, error: mailboxError, apply: applyNotification, refresh: refreshMailbox } = useMailbox(terminalId);
+  // Show the known mailbox while its permissions are refreshed. An older
+  // notification response must not re-enable actions after a terminal rebind.
+  const mailboxNotification = notification && (notification.identity_revision > identity.revision ||
+    (notification.identity_revision === identity.revision && notification.session_id === boundSessionId))
+    ? notification : null;
+  const mailboxSessionId = mailboxNotification ? mailboxNotification.session_id : boundSessionId;
   const closingRef = useRef(false);
   const [sessionMeta, setSessionMeta] = useState<{ id: string; sourceKind: string; archived: boolean } | null>(() => {
     const id = cachedTerminal?.snapshot.session_id ?? initialSessionId;
@@ -428,7 +434,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
           )}
           <DetailLayout mainClassName="detail-main-terminal" label="终端详情栏" panel={<>
               <SessionTaskTracking key={boundSessionId} sessionId={boundSessionId} navigate={navigate} />
-              <TerminalMailbox key={notification?.session_id ?? terminalId} terminalId={terminalId} notification={notification} error={mailboxError}
+              <TerminalMailbox key={`mailbox:${mailboxSessionId ?? terminalId}`} terminalId={terminalId} sessionId={mailboxSessionId} notification={mailboxNotification} error={mailboxError}
                 apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} navigate={navigate} />
             </>}><div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} /></DetailLayout>
         </>

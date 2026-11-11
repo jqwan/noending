@@ -17,6 +17,7 @@ import { projectSummaryCache } from "../features/projects/projectSummaryCache";
 import { taskItemsResource, taskSummaryResource } from "../features/workstreams/taskResources";
 import { prepareCollaborationMembers } from "../features/collaboration/collaborationResources";
 import { mailboxes } from "../features/sessions/mailboxResources";
+import { liveTerminals } from "../features/sessions/terminalCache";
 import { extractionSettingsResource, workspaceSettingsResource } from "../features/settings/settingsResources";
 import { viewState } from "../hooks/useViewState";
 import { prepareOperationStatus } from "../hooks/useOperationState";
@@ -109,6 +110,11 @@ export function prepareSupportingData(route: Route): Promise<void> | undefined {
       if (!isRemovedRoute(route)) sessionContextCache.set(route.sessionId, context);
     }));
     add(mailboxes.all.ensure(route.sessionId));
+  }
+  if (route.view === "terminal") {
+    const snapshot = liveTerminals.get(route.terminalId)?.snapshot;
+    const sessionId = snapshot ? snapshot.session_id : route.initialSessionId;
+    if (sessionId) add(mailboxes.unread.ensure(sessionId));
   }
   if (route.view === "workstream") {
     add(prepareCollaborationMembers(route.workstreamId));

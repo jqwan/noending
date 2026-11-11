@@ -20,7 +20,7 @@ vi.mock("../../components/common", async importOriginal => ({ ...await importOri
 const message: MailboxMessage = { notify_immediately: false, id: "mail-1", recipient_session_id: "self", sender_session_id: "other", sender: { title: "发件会话", agent: "codex" }, body: "external instructions", created_at: "2026-10-24T01:00:00Z", read_at: null, revision: 1 };
 const notification: TerminalNotifications = { terminal_id: "t", session_id: "self", enabled: false, writing: false, input_revision: 1, identity_revision: 2, revision: 1, error: null };
 const navigate = vi.fn();
-function mount(n = notification) { return render(<TerminalMailbox navigate={navigate} terminalId="t" notification={n} error="" apply={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} />); }
+function mount(n = notification) { return render(<TerminalMailbox navigate={navigate} terminalId="t" sessionId={n.session_id} notification={n} error="" apply={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} />); }
 beforeEach(() => {
   clearReadResources();
   vi.resetAllMocks(); handlers.clear(); viewState.clear();
@@ -119,7 +119,7 @@ it("offers manual unread reminders when auto notifications are off but hides edi
   expect(screen.getByRole("button", { name: "提醒查收" }).title).toContain("立即插队");
   fireEvent.click(screen.getByRole("button", { name: "提醒查收" }));
   await waitFor(() => expect(api.mailboxRemind).toHaveBeenCalledWith("t"));
-  view.rerender(<TerminalMailbox navigate={navigate} terminalId="t" notification={{ ...notification, enabled: true }} error="" apply={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} />);
+  view.rerender(<TerminalMailbox navigate={navigate} terminalId="t" sessionId="self" notification={{ ...notification, enabled: true }} error="" apply={vi.fn()} refresh={vi.fn().mockResolvedValue(undefined)} />);
   expect(screen.getByRole("button", { name: "关闭自动通知" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getByText(/自动通知已开启，终端只读/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "编辑消息" })).toBeNull(); expect(screen.queryByRole("button", { name: "删除消息" })).toBeNull();

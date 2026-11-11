@@ -7,7 +7,7 @@ import { disposeTerminal, liveTerminals } from "./terminalCache";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 import { sessionPages, sessionTerminals } from "./sessionNavigation";
-import type { TerminalBound, TerminalOutput, TerminalSnapshot } from "../../types";
+import type { TerminalBound, TerminalNotifications, TerminalOutput, TerminalSnapshot } from "../../types";
 import { listen } from "@tauri-apps/api/event";
 
 // 终端子页的交互面全部在后端；这里覆盖进入即用的状态机：
@@ -170,7 +170,8 @@ beforeEach(() => {
   const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
   restoreUserAgent = () => userAgent.mockRestore();
   sessionPages.clear(); sessionTerminals.clear(); viewState.clear();
-  vi.mocked(api.terminalNotifications).mockReset().mockImplementation(async terminalId => ({ terminal_id: terminalId, session_id: "s", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 1, enabled: false, writing:false, error:null }));
+  vi.mocked(api.terminalNotifications).mockReset().mockImplementation(async terminalId => ({ terminal_id: terminalId, session_id: "s1", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 1, enabled: false, writing:false, error:null }));
+  vi.mocked(api.mailboxList).mockReset().mockResolvedValue({ items: [], total: 0, unread: 0, next_cursor: null });
   vi.mocked(listen).mockReset().mockImplementation((event, handler) => {
     eventHandlers.set(event, handler as (e: unknown) => void);
     return Promise.resolve(() => {
@@ -1057,4 +1058,43 @@ it("preserves an unsent sidebar draft when its Session gets a replacement termin
   first.unmount();
   render(<SessionTerminalView terminalId="t-new" navigate={vi.fn()} />);
   await waitFor(()=>expect(screen.getByRole("textbox",{name:"发送消息"})).toHaveProperty("value","keep my unsent draft"));
+});
+
+it("keeps the unread mailbox and its focus when returning before notification state arrives", async () => {
+  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
+  vi.mocked(api.mailboxList).mockResolvedValue({
+    items: [{ id: "mail-1", recipient_session_id: "s1", sender_session_id: null, body: "待处理消息", created_at: "2026-11-11T00:00:00Z", read_at: null, revision: 1, notify_immediately: false }],
+    total: 1, unread: 1, next_cursor: null,
+  });
+  const first = renderView();
+  await screen.findByRole("button", { name: "查看消息：待处理消息" });
+  first.unmount();
+
+  const confirmed = await api.terminalNotifications("t-1");
+  const pending = deferred<TerminalNotifications>();
+  vi.mocked(api.terminalNotifications).mockReturnValue(pending.promise);
+  vi.mocked(api.mailboxList).mockImplementation(() => new Promise(() => {}));
+  renderView();
+
+  expect(screen.getByRole("button", { name: "查看消息：待处理消息" })).toBeTruthy();
+  expect(screen.queryByText("绑定会话后可使用信箱。")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "提醒查收" })).toHaveProperty("disabled", true);
+  const title = screen.getByRole("button", { name: "信箱（1）" });
+  title.focus();
+
+  await act(async () => { pending.resolve(confirmed); });
+  expect(document.activeElement).toBe(title);
+  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "提醒查收" })).toHaveProperty("disabled", false);
+
+  // A real unbind clears the old mailbox immediately and waits for confirmation.
+  pushIdentity(null, 2);
+  expect(screen.queryByRole("button", { name: "查看消息：待处理消息" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", true);
+  const unbound = deferred<TerminalNotifications>();
+  vi.mocked(api.terminalNotifications).mockReturnValue(unbound.promise);
+  act(() => eventHandlers.get("terminal-notifications-changed")?.({ payload: null }));
+  await act(async () => { unbound.resolve({ ...confirmed, session_id: null, identity_revision: 2, revision: 1 }); });
+  expect(screen.getByText("绑定会话后可使用信箱。")).toBeTruthy();
 });
