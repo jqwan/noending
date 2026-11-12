@@ -1094,16 +1094,10 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     let view = c.ok("room_show", json!({"room":room}));
     assert_eq!(view["run"]["status"], "starting");
     assert_eq!(view["members"].as_array().unwrap().len(), 2);
-    let prompts: Vec<&str> = view["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| m["join_prompt"].as_str().unwrap_or_default())
-        .collect();
-    assert!(
-        prompts[0].contains("coord") && prompts[1].contains("peer"),
-        "each member prompt carries its own session coordinates: {view}"
-    );
+    let inbox = c.ok("mailbox_list", json!({"session":"peer","state":"unread"}));
+    let invitation = inbox["items"][0]["body"].as_str().unwrap();
+    assert_eq!(inbox["items"][0]["recipient_session_id"], "peer");
+    assert!(invitation.contains(&run));
 
     let page = c.ok("room_messages", json!({"room":room,"run":run}));
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
@@ -1147,14 +1141,6 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
     let last = page["items"].as_array().unwrap().last().unwrap();
     assert_eq!(last["kind"], "stop");
     assert_eq!(last["sender_session_id"], "coord");
-    assert!(
-        view["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|m| m["join_prompt"].is_null()),
-        "a stopped run offers nothing to join: {view}"
-    );
 
     let closed = c.call(
         "room_send",
@@ -1281,11 +1267,6 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
         .unwrap();
     assert_eq!(member["phase"], "processing");
     assert_eq!(member["connection_state"], "connected");
-    let prompt = member["join_prompt"].as_str().unwrap_or_default();
-    assert!(
-        prompt.contains(&run) && prompt.contains("不要因此提交宿主最终回复"),
-        "the member entry carries the backend prompt for this run: {member}"
-    );
 
     // No wait request is active: the MCP participation still renews during
     // model work, and the heartbeat must leave its processing phase intact.

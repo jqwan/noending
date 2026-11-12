@@ -652,22 +652,27 @@ pub fn terminal_for_session(
     Ok(terminal.for_session(&session_id))
 }
 
-pub(crate) fn launch_mailbox_terminal(
+pub(crate) fn wake_mailbox_terminal(
     app: &AppHandle,
     session: &str,
-    message: &str,
-) -> Result<String> {
+    require_unread: bool,
+) -> Result<()> {
     let state = app.state::<AppState>();
     let terminal = app.state::<crate::terminal::TerminalRegistry>();
+    if terminal.for_session(session).is_some() {
+        return Ok(());
+    }
+    let unread = state.db.mailbox_unread(session)?;
+    if unread == 0 && require_unread {
+        return Ok(());
+    }
     let launcher = launcher_for(app);
     let workspace = launch_workspace(app);
-    if let Some(live) = terminal.for_session(session) {
-        return Ok(live.terminal_id);
-    }
     let mut prepared = launcher.prepare_resume_in(&state.db, session, &workspace)?;
     prepared.desktop_open = None;
     prepared.embedded = true;
-    prepared.initial_message = Some(message.to_owned());
+    prepared.initial_message =
+        (unread > 0).then(|| crate::terminal::notifications::UNREAD_REMINDER.to_owned());
     let embedded = crate::launcher::EmbeddedSpawn {
         registry: &terminal,
         reconnect: None,
@@ -676,6 +681,7 @@ pub(crate) fn launch_mailbox_terminal(
     launcher
         .launch_prepared_in(&state.db, &prepared, &workspace, Some(&embedded))?
         .terminal_id
+        .map(|_| ())
         .ok_or_else(|| other("未获得会话终端"))
 }
 
@@ -1173,6 +1179,7 @@ pub fn mailbox_list(
         .db
         .mailbox_list_latest(&session, &filter, cursor, limit)
 }
+
 #[tauri::command]
 pub fn mailbox_send(
     app: AppHandle,

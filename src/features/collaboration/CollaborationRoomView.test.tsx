@@ -1,5 +1,6 @@
 import { clearReadResources } from "../../hooks/readResource";
 import { DetailPanelProvider } from "../../components/DetailLayout";
+import { copyToClipboard } from "../../components/common";
 import PageHeader from "../../layout/PageHeader";
 import { viewState } from "../../hooks/useViewState";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -18,6 +19,10 @@ import type {
 
 const { handlers } = vi.hoisted(() => ({ handlers: new Map<string, Set<(event: { payload: unknown }) => void>>() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("../../components/common", async importOriginal => ({
+  ...await importOriginal<typeof import("../../components/common")>(),
+  copyToClipboard: vi.fn(),
+}));
 vi.mock("../../api", () => ({ api: {
   getOperationStatus: vi.fn(),
   collaborationRoomGet: vi.fn(),
@@ -54,7 +59,7 @@ const member = (patch: Partial<CollaborationMemberState> & { session_id: string 
   wake_method: "terminal", wake_status: "opened", connection_state: "connected", phase: "listening",
   phase_since: null,
   last_heartbeat_at: ago(5), last_read_at: ago(60), last_read_seq: 1,
-  awaiting_since: null, join_prompt: null, unread_count: 0, error: null, ...patch,
+  awaiting_since: null, unread_count: 0, error: null, ...patch,
 });
 
 const roomConfig = {
@@ -467,23 +472,27 @@ it("marks a listening member unresponsive while leaving a processing member alon
   expect(processing.queryByText("暂未响应")).toBeNull();
 });
 
-it("retries opening one failed member without restarting the run for everyone", async () => {
+it.each([
+  { wakeStatus: "pending", label: "等待加入", action: "打开会话", error: null },
+  { wakeStatus: "failed", label: "唤醒失败", action: "重试打开", error: "应用未响应" },
+] as const)("opens one $wakeStatus member without restarting the run", async ({ wakeStatus, label, action, error }) => {
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
     ...activeRun,
     members: [
       member({ session_id: "s1" }),
-      member({ session_id: "s2", wake_status: "failed", connection_state: "pending", phase: null, error: "应用未响应" }),
+      member({ session_id: "s2", wake_status: wakeStatus, connection_state: "pending", phase: null, error }),
     ],
   });
   vi.mocked(api.collaborationMemberWake).mockResolvedValue(member({ session_id: "s2" }));
   mount();
-  await screen.findByText("唤醒失败");
-  fireEvent.click(screen.getByRole("button", { name: "重试打开" }));
+  const retried = within(await screen.findByRole("listitem", { name: "前端会话" }));
+  expect(retried.getByText(label)).toBeTruthy();
+  if (error) expect(retried.getByText(error)).toBeTruthy();
+  fireEvent.click(retried.getByRole("button", { name: action }));
 
-  await waitFor(() => expect(screen.queryByText("唤醒失败")).toBeNull());
-  const retried = within(screen.getByRole("listitem", { name: "前端会话" }));
-  expect(retried.getByText("等待消息")).toBeTruthy();
-  expect(screen.queryByText("应用未响应")).toBeNull();
+  await retried.findByText("等待消息");
+  expect(retried.queryByText(label)).toBeNull();
+  if (error) expect(retried.queryByText(error)).toBeNull();
   // 只重试这一个成员，不重新开启整次协作。
   expect(api.collaborationRoomStart).not.toHaveBeenCalled();
   expect(api.collaborationMemberWake).toHaveBeenCalledWith("room-1", "run-1", "s2", expect.any(String));
@@ -529,8 +538,6 @@ it("shows processing time after joining and expires the connection without anoth
   expect(terminal.getByText("处理中")).toBeTruthy();
   expect(terminal.getByLabelText("已处理 1分钟")).toBeTruthy();
   expect(screen.queryByText("上次打开失败")).toBeNull();
-  expect(terminal.getByRole("button", { name: "复制加入提示" })).toBeTruthy();
-  expect(within(screen.getByRole("listitem", { name: "前端会话" })).getByRole("button", { name: "复制加入提示" })).toBeTruthy();
 
   await act(async () => { vi.advanceTimersByTime(40_000); });
   expect(terminal.getByText("连接中断")).toBeTruthy();
@@ -554,29 +561,14 @@ it("keeps the chat surface and composer mounted while loading, without a room su
   expect(screen.queryByRole("heading", { name: /协作摘要/ })).toBeNull();
 });
 
-it("copies the join prompt the backend supplied instead of building one", async () => {
-  const backendPrompt = "后端模板：房间 room-1 运行 run-1，用技能 join 后 wait，再 ack。";
-  vi.mocked(api.collaborationRoomGet).mockResolvedValue({
-    ...activeRun,
-    members: [
-      member({ session_id: "s1", join_prompt: backendPrompt }),
-      member({ session_id: "s2", join_prompt: null }),
-    ],
-  });
-  const writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+it("copies the selected member's labeled NoEnding session ID", async () => {
+  vi.mocked(api.collaborationRoomGet).mockResolvedValue(activeRun);
+  vi.mocked(copyToClipboard).mockResolvedValue(true);
   mount();
 
-  const withPrompt = within(await screen.findByRole("listitem", { name: "后端会话" }));
-  fireEvent.click(withPrompt.getByRole("button", { name: "复制加入提示" }));
-  // 复制到的必须是后端那段，不是前端按 task/room/run 拼出来的自比内容。
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith(backendPrompt));
-
-  // 没有提示的成员不复制伪内容。
-  const withoutPrompt = within(screen.getByRole("listitem", { name: "前端会话" }));
-  fireEvent.click(withoutPrompt.getByRole("button", { name: "复制加入提示" }));
-  await Promise.resolve();
-  expect(writeText).toHaveBeenCalledTimes(1);
+  const row = within(await screen.findByRole("listitem", { name: "前端会话" }));
+  fireEvent.click(row.getByRole("button", { name: "复制会话 ID" }));
+  expect(copyToClipboard).toHaveBeenCalledWith("NoEnding ID：s2");
 });
 
 it("drops unlinked stopped members and their coordinator before the next start", async () => {

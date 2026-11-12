@@ -34,6 +34,8 @@ pub struct MailboxPage {
     pub next_cursor: Option<i64>,
 }
 const SELECT: &str = "SELECT id,recipient_session_id,sender_session_id,body,created_at,read_at,revision,notify_immediately FROM mailbox_messages";
+// Desktop invites are kept in the mailbox without notifying an embedded terminal.
+pub(crate) const DESKTOP_COLLABORATION_INVITE_PREFIX: &str = "collaboration-invite:desktop:";
 fn row_at(r: &Row<'_>, offset: usize) -> rusqlite::Result<MailboxMessage> {
     Ok(MailboxMessage {
         id: r.get(offset)?,
@@ -69,6 +71,21 @@ fn message(c: &Connection, session: &str, id: &str) -> Result<MailboxMessage> {
     .optional()?
     .ok_or_else(|| other("信箱消息不存在"))
 }
+pub(super) fn insert_message(
+    c: &Connection,
+    id: &str,
+    session: &str,
+    sender: Option<&str>,
+    body: &str,
+    notify_immediately: bool,
+) -> Result<()> {
+    c.execute(
+        "INSERT INTO mailbox_messages(id,recipient_session_id,sender_session_id,body,created_at,notify_immediately) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![id, session, sender, body, now(), notify_immediately],
+    )?;
+    Ok(())
+}
+
 impl Db {
     pub fn mailbox_send(
         &self,
@@ -101,7 +118,7 @@ impl Db {
             require_session(&tx, sender)?;
         }
         let id = new_id();
-        tx.execute("INSERT INTO mailbox_messages(id,recipient_session_id,sender_session_id,body,created_at,notify_immediately) VALUES(?1,?2,?3,?4,?5,?6)",params![id,session,sender,body,now(),notify_immediately])?;
+        insert_message(&tx, &id, session, sender, body, notify_immediately)?;
         let result = message(&tx, session, &id)?;
         tx.commit()?;
         Ok(result)

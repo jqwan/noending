@@ -819,8 +819,6 @@ export interface CollaborationMemberState {
   last_read_seq: number | null;
   /** 最早一条未查收的他人消息时间；null = 没有待查收。必填：缺字段等于契约没实现。 */
   awaiting_since: string | null;
-  /** 后端生成的加入提示，活动运行才有；前端只复制这段，不自己拼。 */
-  join_prompt: string | null;
   unread_count: number;
   error: string | null;
 }

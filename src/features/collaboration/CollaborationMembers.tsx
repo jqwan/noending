@@ -1,5 +1,6 @@
 import Icon from "../../components/Icon";
-import { timeAgo } from "../../components/common";
+import { copyToClipboard, timeAgo } from "../../components/common";
+import { showToast } from "../../components/Toast";
 import type { CollaborationRoomView, SessionListItem } from "../../types";
 import { WAKE_LABEL, memberStatus } from "./collaborationState";
 import type { Route } from "../../app/routes";
@@ -7,6 +8,10 @@ import type { Route } from "../../app/routes";
 function memberName(sessionId: string, sessions: SessionListItem[]): string {
   const local = sessions.find(s => s.id === sessionId);
   return local?.title || sessionId.slice(0, 8);
+}
+
+async function copySessionId(sessionId: string) {
+  showToast(await copyToClipboard(`NoEnding ID：${sessionId}`) ? "已复制会话 ID" : "复制失败");
 }
 
 function elapsed(since: string | null, now: number): string | null {
@@ -31,7 +36,6 @@ export default function CollaborationMembers({
   now,
   busySessionId,
   onWake,
-  onCopyPrompt,
   disabled = false,
   navigate,
 }: {
@@ -40,7 +44,6 @@ export default function CollaborationMembers({
   now: number;
   busySessionId: string | null;
   onWake: (sessionId: string) => void;
-  onCopyPrompt: (sessionId: string) => void;
   disabled?: boolean;
   navigate: (route: Route) => void;
 }) {
@@ -57,11 +60,9 @@ export default function CollaborationMembers({
         const processingTime = status.tone === "processing" ? elapsed(member.phase_since, now) : null;
         const retry = status.tone === "failed";
         const canWake = retry || status.tone === "disconnected" || status.tone === "left"
-          || (member.wake_status === "pending" && member.wake_method === "desktop");
+          || (status.tone === "waiting" && member.wake_status === "pending");
         const readLabel = `${member.last_read_at ? `最近查收 ${timeAgo(member.last_read_at)}` : "尚未查收"}${member.last_read_seq != null ? ` · 到 #${member.last_read_seq}` : ""}`;
         const statusHint = `${status.label}${member.last_heartbeat_at ? `\n最近心跳 ${timeAgo(member.last_heartbeat_at)}` : ""}`;
-        const copyHint = member.connection_state === "pending" && member.wake_method === "terminal" && member.wake_status === "opened"
-          ? "复制加入提示，发送给现有终端中的会话" : "复制加入提示";
         return (
           <li key={member.session_id} className="collab-member" aria-label={name}>
             <div className="collab-member-head">
@@ -80,8 +81,8 @@ export default function CollaborationMembers({
                     <Icon name={retry ? "refresh" : "play"} />
                   </button>
                 )}
-                <button type="button" className="btn ghost icon-button small" aria-label="复制加入提示" title={copyHint}
-                  onClick={() => onCopyPrompt(member.session_id)}><Icon name="copy" /></button>
+                <button type="button" className="btn ghost icon-button small" aria-label="复制会话 ID" title="复制会话 ID"
+                  onClick={() => void copySessionId(member.session_id)}><Icon name="copy" /></button>
               </div>
             </div>
             <div className="collab-member-meta small muted">

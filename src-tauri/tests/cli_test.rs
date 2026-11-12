@@ -1976,12 +1976,17 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     assert_eq!(view["data"]["members"].as_array().unwrap().len(), 2);
     assert_eq!(view["data"]["members"][0]["session_id"], "coord");
     assert_eq!(view["data"]["members"][0]["wake_method"], "desktop");
-    let prompt = view["data"]["members"][0]["join_prompt"]
+    let (ok, inbox) = f.run(
+        exe,
+        &["mailbox", "list", "--session", "coord", "--state", "unread"],
+    );
+    assert!(ok, "{inbox}");
+    let prompt = inbox["data"]["items"][0]["body"]
         .as_str()
         .unwrap_or_default();
     assert!(
-        prompt.contains(&run) && prompt.contains("不要因此提交宿主最终回复"),
-        "an active run carries the shared prompt the desktop copies: {view}"
+        prompt.contains(&run) && prompt.contains("noending 技能的协作参考"),
+        "the invitation can be read in the member's mailbox: {inbox}"
     );
 
     let (ok, page) = f.run(exe, &["room", "messages", &room, "--run", &run]);
@@ -2072,13 +2077,6 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
     );
     assert!(ok, "{stopped}");
     assert_eq!(stopped["data"]["run"]["status"], "stopped");
-    let (ok, after) = f.run(exe, &["room", "show", &room]);
-    assert!(ok, "{after}");
-    assert_eq!(
-        after["data"]["members"][0]["join_prompt"],
-        serde_json::Value::Null,
-        "a stopped run offers nothing to join: {after}"
-    );
     let (ok, page) = f.run(exe, &["room", "messages", &room]);
     assert!(ok, "{page}");
     let last = page["data"]["items"].as_array().unwrap().last().unwrap();

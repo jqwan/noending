@@ -5,7 +5,7 @@ use super::{with_db, AppState};
 use crate::cli::CliError;
 use crate::error::Result;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const EVENT: &str = "collaboration-changed";
 
@@ -108,23 +108,21 @@ pub fn collaboration_room_start(
     })?;
     let room_id = started.room.id;
     let run_id = started.run.id;
-    // Transaction-external wake side effects, one idempotent attempt per
-    // member: a failure is recorded on that member alone and retried via
-    // collaboration_member_wake; nobody else is re-launched for it. Replaying
-    // the start request hits the same per-member ledger keys and re-launches
-    // nothing.
-    for member in started.members {
+    if !started.appended.is_empty() {
+        let _ = app.emit("mailbox-changed", ());
+        app.state::<crate::terminal::TerminalRegistry>()
+            .kick_notifications("");
+    }
+    // The mailbox handles terminal invitations. Opening a desktop app is a
+    // separate, idempotent action for members who selected that route.
+    for member in started
+        .members
+        .into_iter()
+        .filter(|member| member.wake_method == crate::storage::collaboration::WAKE_DESKTOP)
+    {
         let session_id = member.session_id;
         let derived = format!("{request_id}:{session_id}");
-        let _ = wake_with_ledger(
-            &app,
-            &state,
-            &task_id,
-            &room_id,
-            &run_id,
-            &session_id,
-            &derived,
-        );
+        let _ = wake_with_ledger(&app, &state, &room_id, &run_id, &session_id, &derived);
     }
     emit_changed(&app, &task_id, &room_id, &run_id, "run");
     with_db(&state, |db| {
@@ -278,23 +276,12 @@ fn external_changes(
     Ok(events)
 }
 
-/// Wake one member by its recorded method. Terminal members resume in the
-/// embedded terminal with the shared join prompt (live terminals are reused);
-/// desktop members get their app opened and the user notifies them. Opening
-/// an app or a terminal never fakes a join.
-fn wake_one(
-    app: &AppHandle,
-    state: &AppState,
-    task_id: &str,
-    room_id: &str,
-    run_id: &str,
-    session_id: &str,
-    wake_method: &str,
-) -> Result<()> {
-    let hint = crate::collaboration::join_prompt(task_id, room_id, run_id, session_id);
+/// Open the member's selected app. For terminals this is the user's manual
+/// action. Automatic wake and reminders run through mailbox arrivals.
+fn wake_one(app: &AppHandle, state: &AppState, session_id: &str, wake_method: &str) -> Result<()> {
     match wake_method {
         crate::storage::collaboration::WAKE_TERMINAL => {
-            crate::commands::launch_mailbox_terminal(app, session_id, &hint)?;
+            crate::commands::wake_mailbox_terminal(app, session_id, false)?;
         }
         crate::storage::collaboration::WAKE_DESKTOP => {
             let route = with_db(state, |db| {
@@ -324,17 +311,16 @@ fn wake_one(
 /// One member's wake. The ledger row is claimed atomically BEFORE the side
 /// effect, so concurrent equal requests cannot both launch and a replay of a
 /// different operation is rejected by kind/fingerprint. A determinate failure
-/// settles as a completed MemberState (failed + error). Its request stays
-/// recorded: replay only confirms that attempt; an explicit retry uses a new id.
+/// is saved on the member. A replay keeps that outcome, and an explicit
+/// retry uses a new request ID.
 fn wake_with_ledger(
     app: &AppHandle,
     state: &AppState,
-    task_id: &str,
     room_id: &str,
     run_id: &str,
     session_id: &str,
     request_id: &str,
-) -> Result<Value> {
+) -> Result<()> {
     let wake_method = with_db(state, |db| {
         db.collaboration_run_members(run_id)?
             .into_iter()
@@ -346,39 +332,15 @@ fn wake_with_ledger(
         db.collaboration_claim_wake(request_id, room_id, run_id, session_id)
     })?;
     if !claimed {
-        // Replay (same operation) or a transmission-interrupted attempt:
-        // answer with the current recorded state, never a second launch.
-        return member_state(state, task_id, session_id);
+        return Ok(());
     }
-    let attempt = wake_one(
-        app,
-        state,
-        task_id,
-        room_id,
-        run_id,
-        session_id,
-        &wake_method,
-    );
-    match &attempt {
-        Ok(()) => {
-            with_db(state, |db| {
-                db.collaboration_set_wake_status(run_id, session_id, "opened", None, request_id)
-            })?;
-        }
-        Err(error) => {
-            let message = error.to_string();
-            with_db(state, |db| {
-                db.collaboration_set_wake_status(
-                    run_id,
-                    session_id,
-                    "failed",
-                    Some(&message),
-                    request_id,
-                )
-            })?;
-        }
-    }
-    member_state(state, task_id, session_id)
+    let error = wake_one(app, state, session_id, &wake_method)
+        .err()
+        .map(|error| error.to_string());
+    let status = if error.is_some() { "failed" } else { "opened" };
+    with_db(state, |db| {
+        db.collaboration_set_wake_status(run_id, session_id, status, error.as_deref(), request_id)
+    })
 }
 
 fn member_state(state: &AppState, task_id: &str, session_id: &str) -> Result<Value> {
@@ -414,15 +376,8 @@ pub fn collaboration_member_wake(
             .map(|room| room.task_id)
             .ok_or_else(|| crate::error::other("协作室不存在"))
     })?;
-    let member = wake_with_ledger(
-        &app,
-        &state,
-        &task_id,
-        &room_id,
-        &run_id,
-        &session_id,
-        &request_id,
-    )?;
+    wake_with_ledger(&app, &state, &room_id, &run_id, &session_id, &request_id)?;
+    let member = member_state(&state, &task_id, &session_id)?;
     emit_changed(&app, &task_id, &room_id, &run_id, "member");
     Ok(member)
 }

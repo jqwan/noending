@@ -2,8 +2,7 @@ import { DetailLayout } from "../../components/DetailLayout";
 import { DetailFields } from "../../components/DetailSection";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../../api";
-import { copyToClipboard, timeAgo, Field } from "../../components/common";
-import { showToast } from "../../components/Toast";
+import { timeAgo, Field } from "../../components/common";
 import type {
   CollaborationMemberState,
   CollaborationStartedMember,
@@ -250,13 +249,6 @@ export default function CollaborationRoomView({
     }
   };
 
-  /** 加入提示由后端随成员状态给出；没有活动运行或没有提示时不复制伪内容。 */
-  const copyPrompt = async (sessionId: string) => {
-    const text = room?.members.find(m => m.session_id === sessionId)?.join_prompt ?? null;
-    if (!text) { showToast("该成员暂无加入提示"); return; }
-    showToast(await copyToClipboard(text) ? "已复制加入提示" : "复制失败");
-  };
-
   const feedback = ((actionError || unconfirmed || error) && <div className="collab-chat-feedback">
           {actionError && <p role="alert" className="small warning">{actionError}</p>}
           {unconfirmed && (
@@ -281,7 +273,6 @@ export default function CollaborationRoomView({
                 busySessionId={waking}
                 disabled={busy}
                 onWake={sessionId => void wake(sessionId)}
-                onCopyPrompt={sessionId => void copyPrompt(sessionId)}
                 navigate={navigate}
               />
               {sessions.some(session => !room!.members.some(member => member.session_id === session.id)) && <div>

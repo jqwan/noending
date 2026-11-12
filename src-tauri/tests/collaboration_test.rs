@@ -46,7 +46,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn start_validates_membership_and_persists_notice_and_first_message_atomically() {
+fn start_validates_membership_and_commits_room_messages_and_invitations_together() {
     let f = Fixture::new();
     let db = f.db();
     // Fewer than two members.
@@ -101,15 +101,16 @@ fn start_validates_membership_and_persists_notice_and_first_message_atomically()
         )
         .is_err());
 
+    // A failed first message rolls back the new run and its invitations.
+    let members = Fixture::members("a", "b");
+    let failed = db.collaboration_start("t", &members, None, None, Some(" "), "r1");
+    assert!(failed.is_err());
+    assert!(db.collaboration_room_by_task("t").unwrap().is_none());
+    assert_eq!(db.mailbox_unread("a").unwrap(), 0);
+    assert_eq!(db.mailbox_unread("b").unwrap(), 0);
+
     let outcome = db
-        .collaboration_start(
-            "t",
-            &Fixture::members("a", "b"),
-            Some("a"),
-            None,
-            Some("先按方案开始"),
-            "r1",
-        )
+        .collaboration_start("t", &members, Some("a"), None, Some("先按方案开始"), "r1")
         .unwrap();
     assert_eq!(outcome.run.status, "starting");
     assert_eq!(outcome.room.revision, 1);
@@ -119,6 +120,19 @@ fn start_validates_membership_and_persists_notice_and_first_message_atomically()
     assert!(outcome.appended[0].sender_session_id.is_none());
     assert_eq!(outcome.appended[1].kind, "text");
     assert_eq!(outcome.appended[1].body, "先按方案开始");
+    let coordinates = format!(
+        "[NoEnding 协作室] 任务 t｜房间 {}｜运行 {}",
+        outcome.room.id, outcome.run.id
+    );
+    for session in ["a", "b"] {
+        let page = db.mailbox_list(session, "unread", None, 20).unwrap();
+        assert_eq!(page.items.len(), 1);
+        let invitation = &page.items[0];
+        assert!(invitation.sender_session_id.is_none());
+        assert_eq!(invitation.body.lines().next(), Some(coordinates.as_str()));
+    }
+    assert_eq!(db.mailbox_unread("c").unwrap(), 0);
+    assert_eq!(db.mailbox_unread("x").unwrap(), 0);
 
     // The room exists exactly once per task and the run is its current one.
     let (room, run) = db.collaboration_room_by_task("t").unwrap().unwrap();
@@ -209,6 +223,9 @@ fn repeated_start_request_returns_the_existing_run_without_appending() {
             .id,
         newer.run.id
     );
+    assert_eq!(db.mailbox_unread("a").unwrap(), 2);
+    assert_eq!(db.mailbox_unread("b").unwrap(), 1);
+    assert_eq!(db.mailbox_unread("c").unwrap(), 1);
 }
 
 #[test]

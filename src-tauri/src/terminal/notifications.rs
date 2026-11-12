@@ -2,7 +2,7 @@
 use super::{activity::ActivityState, messaging, TerminalRegistry};
 use crate::{
     error::{other, Result},
-    storage::Db,
+    storage::{mailbox::DESKTOP_COLLABORATION_INVITE_PREFIX, Db},
 };
 use serde::Serialize;
 use std::{collections::HashMap, io::Write, sync::atomic::Ordering};
@@ -63,9 +63,8 @@ impl ReminderKind {
             }
     }
 }
-fn text(count: i64) -> String {
-    format!("noending信箱中有{count}条未读信息，请查收")
-}
+pub(crate) const UNREAD_REMINDER: &str = "您的noending信箱中有未读信息";
+
 impl TerminalRegistry {
     pub fn notification_state(&self, id: &str) -> Result<NotificationSnapshot> {
         let records = self.records.lock().map_err(|_| other("终端不可用"))?;
@@ -177,20 +176,23 @@ impl TerminalRegistry {
             }
             for (seq, session, id, immediate) in rows {
                 *frontier = seq;
-                let entry = arrivals.entry(session).or_default();
+                if id.starts_with(DESKTOP_COLLABORATION_INVITE_PREFIX) {
+                    continue;
+                }
+                let immediate_ids = arrivals.entry(session).or_default();
                 if immediate {
-                    entry.push(id);
+                    immediate_ids.push(id);
                 }
             }
         }
-        for (session, immediate) in arrivals {
+        for (session, immediate_ids) in arrivals {
             if let Some(t) = self.for_session(&session) {
                 let records = self.records.lock().unwrap();
                 if let Some(r) = records.get(&t.terminal_id) {
                     let mut r = r.lock().unwrap();
                     if r.notification.enabled {
                         r.notification.pending = true;
-                        r.notification.immediate_ids.extend(immediate);
+                        r.notification.immediate_ids.extend(immediate_ids);
                     }
                 }
             } else if let Some(s) = db.get_session(&session)? {
@@ -207,18 +209,9 @@ impl TerminalRegistry {
                                 let app = app.clone();
                                 let session = session.clone();
                                 std::thread::spawn(move || {
-                                    let state = app.state::<crate::commands::AppState>();
-                                    let result = (|| -> Result<()> {
-                                        let unread = state.db.mailbox_unread(&session)?;
-                                        if unread > 0 {
-                                            crate::commands::launch_mailbox_terminal(
-                                                &app,
-                                                &session,
-                                                &text(unread),
-                                            )?;
-                                        }
-                                        Ok(())
-                                    })();
+                                    let result = crate::commands::wake_mailbox_terminal(
+                                        &app, &session, true,
+                                    );
                                     app.state::<TerminalRegistry>()
                                         .waking_sessions
                                         .lock()
@@ -357,7 +350,6 @@ impl TerminalRegistry {
             r.notification.immediate_ids.clear();
             return Ok(());
         }
-        let content = text(unread);
         let delivery = if kind == ReminderKind::Manual || immediate {
             messaging::MessageDelivery::Steer
         } else {
@@ -387,7 +379,7 @@ impl TerminalRegistry {
         }
         self.emit_notifications();
         let result = (|| -> std::io::Result<()> {
-            writer.write_all(format!("\x1b[200~{content}\x1b[201~").as_bytes())?;
+            writer.write_all(format!("\x1b[200~{UNREAD_REMINDER}\x1b[201~").as_bytes())?;
             {
                 let r = record.lock().unwrap();
                 if !r.summary.live || r.summary.identity_revision != summary.identity_revision {

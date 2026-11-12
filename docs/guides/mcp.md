@@ -122,7 +122,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 读取不自动已读，标记使用实际读取到的版本，冲突后重读。会话不能给自己发信，按后端实际采用的发件身份判断；用户界面发信不受此限制。发送者可用 mailbox_read 查询自己已发出消息的当前状态，不能代收件会话标记。发送成功、已读与任务完成彼此独立。写请求复用 request_id；发送／标记回执不保存另一份正文。
 
-桌面只在新消息到达时唤醒没有运行终端且支持 TUI 的收件会话。运行期自动通知由用户控制，模型无设置接口。普通自动通知在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的未读数量提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动通知，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动通知。多条请求合并，不指定单条消息或改变信箱顺序；开启自动通知时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查收提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及统一技能中的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。
+桌面只在新消息到达时唤醒没有运行终端且支持 TUI 的收件会话。运行期自动通知由用户控制，模型无设置接口。普通自动通知在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的查信提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动通知，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动通知。多条请求合并，不指定单条消息或改变信箱顺序；开启自动通知时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查收提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及统一技能中的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。
 
 事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个摘要事项需要当前摘要 `revision`。序号仍只属于对应摘要版本。摘要查询返回事项 ID；提取延续事项保留原有 ID，新事项由 NoEnding 分配 ID。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
 

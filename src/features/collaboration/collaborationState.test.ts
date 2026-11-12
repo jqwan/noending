@@ -13,7 +13,7 @@ const member = (patch: Partial<CollaborationMemberState> = {}): CollaborationMem
   last_heartbeat_at: "2026-10-27T03:59:50Z",
   last_read_at: null,
   last_read_seq: 4,
-  awaiting_since: "2026-10-27T03:55:00Z", join_prompt: null,
+  awaiting_since: "2026-10-27T03:55:00Z",
   unread_count: 1,
   error: null,
   ...patch,

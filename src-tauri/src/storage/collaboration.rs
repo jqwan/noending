@@ -2,13 +2,20 @@
 //! read positions and run-scoped participation leases. Config rows survive
 //! member deletion only through explicit cleanup; messages never reference
 //! sessions by foreign key so the real sender stays after a purge.
-use super::{new_id, now, Db};
+use super::{mailbox, new_id, now, Db};
 use crate::error::{other, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 pub const WAKE_TERMINAL: &str = "terminal";
 pub const WAKE_DESKTOP: &str = "desktop";
+
+fn invitation_text(task_id: &str, room_id: &str, run_id: &str) -> String {
+    format!(
+        "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}\n\
+         请先阅读 noending 技能的协作参考，再加入本次运行并按技能规则持续监听。"
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelectedMember {
@@ -411,9 +418,9 @@ impl Db {
     }
 
     /// Atomic start: validate the task, membership and exclusivity, persist the
-    /// configuration, open the run and append the start notice plus the
-    /// caller's first user message. A repeated request id returns the existing
-    /// run's current state instead of starting again.
+    /// configuration, open the run, append the first room messages and deliver
+    /// each member's mailbox invitation. A repeated request id returns the
+    /// existing run instead of repeating those writes.
     pub fn collaboration_start(
         &self,
         task_id: &str,
@@ -513,12 +520,18 @@ impl Db {
             )
             .map_err(crate::error::AppError::from)?;
             record_request_conn(tx, request_id, "start", &room_id, &run_id, &fingerprint)?;
+            let invite = invitation_text(task_id, &room_id, &run_id);
             for member in members {
                 tx.execute(
                     "INSERT INTO collaboration_run_members(run_id,session_id,wake_method) VALUES(?1,?2,?3)",
                     params![run_id, member.session_id, member.wake_method],
                 )
                 .map_err(crate::error::AppError::from)?;
+                let mut mail_id = new_id();
+                if member.wake_method == WAKE_DESKTOP {
+                    mail_id.insert_str(0, mailbox::DESKTOP_COLLABORATION_INVITE_PREFIX);
+                }
+                mailbox::insert_message(tx, &mail_id, &member.session_id, None, &invite, false)?;
             }
             let notice_body = serde_json::json!({
                 "task_id": task_id, "room_id": room_id, "run_id": run_id,

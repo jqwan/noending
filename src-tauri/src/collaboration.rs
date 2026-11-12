@@ -32,19 +32,6 @@ fn connection_state(
     }
 }
 
-/// The participation rules every entry point shows. The desktop wake hint and
-/// `member.join_prompt` render this same text, so the UI copies one fact instead
-/// of re-typing rules that would drift from the backend.
-pub(crate) fn join_prompt(task_id: &str, room_id: &str, run_id: &str, session_id: &str) -> String {
-    format!(
-        "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}｜你的会话 {session_id}\n\
-         协作期间只用本房间沟通：暂无任务、发言完毕或一次 wait timeout 都不表示协作结束，不要因此提交宿主最终回复。\n\
-         闭环：room join → room wait → 完整读完本批（next_cursor 非空先续读）→ 按需回复 → room ack 到已读 seq → 继续 wait；纯已读用 ack 表达，不刷「收到」。\n\
-         只有收到 stopped、用户明确退出或不可恢复限制时才收尾；正常退场先 ack 已读部分再 room leave。\n\
-         身份与参数规则见统一 noending 技能的协作参考。"
-    )
-}
-
 /// The full room view for one task: configuration, current run and one member
 /// entry per selected session, composed from four storage projections.
 pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
@@ -63,11 +50,6 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
         None => vec![],
     };
     let run_id = run.as_ref().map(|r| r.id.clone());
-    // A stopped or missing run has nothing to join, so members get no prompt.
-    let active_run = run
-        .as_ref()
-        .filter(|run| run.status != "stopped")
-        .map(|run| run.id.as_str());
     let run_members = match &run_id {
         Some(id) => db.collaboration_run_members(id)?,
         None => vec![],
@@ -111,15 +93,6 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 "session_id": selected.session_id,
                 "wake_method": selected.wake_method,
                 "wake_status": wake_status,
-                "join_prompt": match active_run {
-                    Some(run_id) => json!(join_prompt(
-                        task_id,
-                        &room.id,
-                        run_id,
-                        &selected.session_id
-                    )),
-                    None => Value::Null,
-                },
                 "connection_state": connection_state(participation, now),
                 "phase": participation.and_then(|p| p.phase.clone()).map(|p| json!(p)).unwrap_or(Value::Null),
                 "phase_since": participation.and_then(|p| p.phase_since.clone()).map(|p| json!(p)).unwrap_or(Value::Null),

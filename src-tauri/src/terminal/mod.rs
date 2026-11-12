@@ -3158,6 +3158,40 @@ mod tests {
         registry.initialize_mailboxes(&db).unwrap();
         (registry, db, terminal, session.id, bytes)
     }
+
+    #[test]
+    fn collaboration_invitations_remind_live_terminals_only_for_terminal_members() {
+        use crate::storage::collaboration::{SelectedMember, WAKE_DESKTOP, WAKE_TERMINAL};
+
+        let reminder = "\x1b[200~您的noending信箱中有未读信息\x1b[201~\t";
+        for (wake_method, expected) in [(WAKE_TERMINAL, reminder), (WAKE_DESKTOP, "")] {
+            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let peer = ingested_native(&db, Agent::Codex, "collaboration-peer");
+            let task = selected_task(&db, "协作任务");
+            db.set_session_tracking(&session, &task, true).unwrap();
+            db.set_session_tracking(&peer.id, &task, true).unwrap();
+            let identity = registry.attach(&id).unwrap().summary.identity_revision;
+            registry
+                .set_auto_notifications(&db, &id, identity, true)
+                .unwrap();
+            let members = [(session.clone(), wake_method), (peer.id, WAKE_DESKTOP)].map(
+                |(session_id, method)| SelectedMember {
+                    session_id,
+                    wake_method: method.into(),
+                },
+            );
+            db.collaboration_start(&task, &members, None, None, None, "start")
+                .unwrap();
+            assert_eq!(db.mailbox_unread(&session).unwrap(), 1);
+            registry.check_mailboxes(&db).unwrap();
+            assert_eq!(
+                &*bytes.lock().unwrap(),
+                expected.as_bytes(),
+                "{wake_method}"
+            );
+        }
+    }
+
     #[test]
     fn automatic_reminders_merge_new_mail_and_do_not_wait_for_agent_receipts_or_repeat_old_unread()
     {
@@ -3171,7 +3205,7 @@ mod tests {
         registry.check_mailboxes(&db).unwrap();
         assert_eq!(
             &*bytes.lock().unwrap(),
-            "\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~\t".as_bytes()
+            "\x1b[200~您的noending信箱中有未读信息\x1b[201~\t".as_bytes()
         );
         assert!(db
             .mailbox_read(&session, &first.id)
@@ -3182,7 +3216,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes.lock().unwrap().clone())
                 .unwrap()
-                .matches("请查收")
+                .matches("您的noending信箱中有未读信息")
                 .count(),
             1
         );
@@ -3191,7 +3225,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes.lock().unwrap().clone())
                 .unwrap()
-                .matches("请查收")
+                .matches("您的noending信箱中有未读信息")
                 .count(),
             2
         );
@@ -3219,7 +3253,7 @@ mod tests {
             registry.check_mailboxes(&db).unwrap();
             assert_eq!(
                 &*bytes.lock().unwrap(),
-                "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r".as_bytes()
+                "\x1b[200~您的noending信箱中有未读信息\x1b[201~\r".as_bytes()
             );
             assert_eq!(registry.attach(&id).unwrap().summary.activity.state, state);
             assert!(!registry.notification_state(&id).unwrap().enabled);
@@ -3268,7 +3302,7 @@ mod tests {
             registry.report_native_identity(&db, &id, &event);
             registry.check_mailboxes(&db).unwrap();
             let key = if immediate { "\r" } else { "\t" };
-            let first_frame = format!("\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~{key}");
+            let first_frame = format!("\x1b[200~您的noending信箱中有未读信息\x1b[201~{key}");
             assert_eq!(*bytes.lock().unwrap(), first_frame.as_bytes());
             assert_eq!(
                 registry.attach(&id).unwrap().summary.activity.state,
@@ -3300,7 +3334,7 @@ mod tests {
             registry.report_native_identity(&db, &id, &event);
             registry.check_mailboxes(&db).unwrap();
             let frames =
-                format!("{first_frame}\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~{key}");
+                format!("{first_frame}\x1b[200~您的noending信箱中有未读信息\x1b[201~{key}");
             assert_eq!(*bytes.lock().unwrap(), frames.as_bytes());
             assert!(registry.notification_state(&id).unwrap().enabled);
             assert_eq!(
@@ -3402,13 +3436,13 @@ mod tests {
         registry.check_mailboxes(&db).unwrap();
         assert_eq!(
             &*bytes.lock().unwrap(),
-            "\x1b[200~noending信箱中有2条未读信息，请查收\x1b[201~\r".as_bytes()
+            "\x1b[200~您的noending信箱中有未读信息\x1b[201~\r".as_bytes()
         );
         registry.check_mailboxes(&db).unwrap();
         assert_eq!(
             String::from_utf8(bytes.lock().unwrap().clone())
                 .unwrap()
-                .matches("请查收")
+                .matches("您的noending信箱中有未读信息")
                 .count(),
             1
         );
@@ -3490,7 +3524,7 @@ mod tests {
         e.activity.as_mut().unwrap().starts_turn = true;
         registry.report_native_identity(&db, &id, &e);
         registry.check_mailboxes(&db).unwrap();
-        let expected = "\x1b[200~noending信箱中有3条未读信息，请查收\x1b[201~\r";
+        let expected = "\x1b[200~您的noending信箱中有未读信息\x1b[201~\r";
         assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
         let page = db.mailbox_list(&session, "unread", None, 50).unwrap();
         assert_eq!(
@@ -3513,7 +3547,7 @@ mod tests {
         registry.check_mailboxes(&db).unwrap();
         assert_eq!(
             *bytes.lock().unwrap(),
-            format!("{expected}\x1b[200~noending信箱中有4条未读信息，请查收\x1b[201~\t").as_bytes()
+            format!("{expected}\x1b[200~您的noending信箱中有未读信息\x1b[201~\t").as_bytes()
         );
     }
     #[test]
@@ -3547,7 +3581,7 @@ mod tests {
                 .set_auto_notifications(&db, &id, identity, true)
                 .unwrap();
             registry.check_mailboxes(&db).unwrap();
-            let expected = "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r";
+            let expected = "\x1b[200~您的noending信箱中有未读信息\x1b[201~\r";
             assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
             registry.check_mailboxes(&db).unwrap();
             assert_eq!(*bytes.lock().unwrap(), expected.as_bytes());
@@ -3592,7 +3626,7 @@ mod tests {
         registry.check_mailboxes(&db).unwrap();
         assert_eq!(
             *bytes.lock().unwrap(),
-            "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\t".as_bytes()
+            "\x1b[200~您的noending信箱中有未读信息\x1b[201~\t".as_bytes()
         );
     }
     #[test]
@@ -3631,7 +3665,7 @@ mod tests {
             registry.check_mailboxes(&db).unwrap();
             assert_eq!(
                 *bytes.lock().unwrap(),
-                "\x1b[200~noending信箱中有1条未读信息，请查收\x1b[201~\r".as_bytes()
+                "\x1b[200~您的noending信箱中有未读信息\x1b[201~\r".as_bytes()
             );
         }
     }
