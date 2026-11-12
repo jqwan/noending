@@ -336,7 +336,7 @@ impl TerminalRegistry {
             .session_id
             .as_deref()
             .ok_or_else(|| other("终端尚未绑定会话"))?;
-        let mut writer = writer.lock().map_err(|_| other("终端输入不可用"))?;
+        let mut input = writer.lock().map_err(|_| other("终端输入不可用"))?;
         let unread = db.mailbox_unread(session)?;
         let unread_immediate: std::collections::HashSet<_> = if immediate_ids.is_empty() {
             Default::default()
@@ -379,14 +379,29 @@ impl TerminalRegistry {
         }
         self.emit_notifications();
         let result = (|| -> std::io::Result<()> {
-            writer.write_all(format!("\x1b[200~{UNREAD_REMINDER}\x1b[201~").as_bytes())?;
+            input.write_all(format!("\x1b[200~{UNREAD_REMINDER}\x1b[201~").as_bytes())?;
+            if let Some(gap) = messaging::reminder_submit_gap(summary.agent) {
+                input.flush()?;
+                // Keep user input locked out via `writing`, but let terminal
+                // protocol replies reach the Agent while the paste settles.
+                drop(input);
+                std::thread::sleep(gap);
+                input = writer
+                    .lock()
+                    .map_err(|_| std::io::Error::other("终端输入不可用"))?;
+            }
             {
                 let r = record.lock().unwrap();
                 if !r.summary.live || r.summary.identity_revision != summary.identity_revision {
                     return Err(std::io::Error::other("终端已关闭或身份变化"));
                 }
+                if !kind.eligible(r.summary.activity.state, immediate)
+                    || kind != ReminderKind::Manual && !r.notification.enabled
+                {
+                    return Err(std::io::Error::other("通知条件已变化"));
+                }
             }
-            messaging::write_submit(&mut **writer, key)
+            messaging::write_submit(&mut **input, key)
         })();
         {
             let mut r = record.lock().unwrap();

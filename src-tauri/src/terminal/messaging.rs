@@ -126,6 +126,14 @@ pub(super) fn terminal_reply(data: &[u8]) -> bool {
         && parameters.iter().all(|byte| (0x20..=0x3f).contains(byte))
 }
 
+pub(super) fn reminder_submit_gap(agent: crate::domain::Agent) -> Option<std::time::Duration> {
+    // On ConPTY, Codex's Windows key reader can receive pasted text as a key
+    // burst. Leave room for its 120 ms Enter suppression window and input
+    // dispatch before sending Enter or Tab as a separate key.
+    (cfg!(windows) && agent == crate::domain::Agent::Codex)
+        .then_some(std::time::Duration::from_millis(180))
+}
+
 /// Keep multi-key chords in separate terminal input events (Ink otherwise
 /// treats a coalesced chord/paste as text). This is key framing, not a turn wait.
 pub(super) fn write_submit(

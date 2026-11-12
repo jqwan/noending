@@ -3423,6 +3423,61 @@ mod tests {
     }
 
     #[test]
+    fn reminder_does_not_submit_into_an_approval_that_appears_after_paste() {
+        use std::sync::Arc;
+
+        struct OnPaste(ReminderWriter, Option<Box<dyn FnOnce() + Send>>);
+        impl std::io::Write for OnPaste {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                let n = self.0.write(data)?;
+                if let Some(after_paste) = self.1.take() {
+                    after_paste();
+                }
+                Ok(n)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.flush()
+            }
+        }
+
+        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        db.mailbox_send(&session, None, "unread message").unwrap();
+        let registry = Arc::new(registry);
+        let db = Arc::new(db);
+        let weak_registry = Arc::downgrade(&registry);
+        let event_db = db.clone();
+        let event_terminal = id.clone();
+        let after_paste = move || {
+            let mut event = native_event("mailbox-native");
+            event.activity = Some(activity::ActivitySignal {
+                state: activity::ActivityState::Waiting,
+                turn_id: Some("approval".into()),
+                starts_turn: false,
+            });
+            weak_registry.upgrade().unwrap().report_native_identity(
+                &event_db,
+                &event_terminal,
+                &event,
+            );
+        };
+        registry.records.lock().unwrap()[&id].lock().unwrap().writer =
+            Some(Arc::new(Mutex::new(Box::new(OnPaste(
+                ReminderWriter(bytes.clone(), false),
+                Some(Box::new(after_paste)),
+            )))));
+
+        assert!(registry
+            .remind(&db, &id, notifications::ReminderKind::Manual)
+            .is_err());
+        assert_eq!(
+            &*bytes.lock().unwrap(),
+            "\x1b[200~您的noending信箱中有未读信息\x1b[201~".as_bytes()
+        );
+        assert_eq!(db.mailbox_unread(&session).unwrap(), 1);
+        assert!(!registry.notification_state(&id).unwrap().writing);
+    }
+
+    #[test]
     fn pending_manual_checks_merge_and_override_automatic_queue_submission() {
         let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
