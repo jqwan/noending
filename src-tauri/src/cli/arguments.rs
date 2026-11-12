@@ -31,9 +31,12 @@ impl Options {
             .ok_or_else(|| invalid(format!("缺少 --{key}")))
     }
     fn number<T: std::str::FromStr>(&mut self, key: &str, default: T) -> CliResult<T> {
+        Ok(self.optional_number(key)?.unwrap_or(default))
+    }
+    fn optional_number<T: std::str::FromStr>(&mut self, key: &str) -> CliResult<Option<T>> {
         self.take(key)
             .map(|s| s.parse().map_err(|_| invalid(format!("--{key} 无效"))))
-            .unwrap_or(Ok(default))
+            .transpose()
     }
     fn message(&mut self) -> CliResult<Option<String>> {
         let message = self.take("message");
@@ -500,21 +503,28 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                             .map(|s| s.parse().map_err(|_| invalid("--revision 无效")))
                             .transpose()?,
                     },
-                    "messages" | "search" if kind == Kind::Session => Command::Messages {
-                        id: id(&words)?,
-                        cursor: options.take("cursor"),
-                        query: if action == "search" {
-                            Some(options.required("query")?)
+                    "messages" | "search" if kind == Kind::Session => {
+                        let cursor = options.take("cursor");
+                        let (query, content_cursor) = if action == "search" {
+                            let query = if cursor.is_none() {
+                                Some(options.required("query")?)
+                            } else {
+                                options.take("query")
+                            };
+                            (query, None)
                         } else {
-                            None
-                        },
-                        from: options.number("from", 1)?,
-                        to: options
-                            .take("to")
-                            .map(|s| s.parse().map_err(|_| invalid("--to 无效")))
-                            .transpose()?,
-                        limit: options.number("limit", 8)?,
-                    },
+                            (None, options.take("content-cursor"))
+                        };
+                        Command::Messages(super::messages::Request {
+                            id: id(&words)?,
+                            cursor,
+                            content_cursor,
+                            query,
+                            from: options.optional_number("from")?,
+                            to: options.optional_number("to")?,
+                            limit: options.optional_number("limit")?,
+                        })
+                    }
                     "create" if kind == Kind::Task && words.len() == 2 => Command::CreateTask {
                         title: options.required("title")?,
                         description: options.take("description").unwrap_or_default(),
@@ -659,7 +669,7 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
-        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--cursor CURSOR] [--limit 8]"],
+        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
         Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item complete ID --item-id ID --revision N", "ne task item reopen ID --item-id ID --revision N", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item-id ID | --item NUMBER] [--revision REVISION]"],
         Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--agent codex|claude_code|pi|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],

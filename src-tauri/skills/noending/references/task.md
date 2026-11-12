@@ -126,6 +126,6 @@ FILE 是独立 UTF-8 JSON 文件，用后删除。创建只接受 `{ "title": "�
 | 发现来源中的会话 | `ne source list`，再 `ne sync --source ID` | `source_list`，再 `sync {source: ID}` |
 | 委托后台提取协作摘要 | `ne summary update task ID` | `summary_update {kind: "task", id}` |
 
-消息按 ordinal 读取，长消息按 part 顺序完整拼接。`pending_messages` 只统计已入库、尚未被提取覆盖的消息，未知不按零解释。同步与提取不同，任务事项的修改不推进摘要覆盖位置。
+消息按编号读取，长消息通过 `next_content_cursor` 续读并拼接，见[记忆检索](memory.md)。`pending_messages` 只统计已入库、尚未被提取覆盖的消息，未知不按零解释。同步与提取不同，任务事项的修改不推进摘要覆盖位置。
 
 摘要只通过提取更新或重新生成，不提供手工编辑、删除或清空。摘要事项 ID 用于读取和引用，不是执行状态；需要修改已记录的执行目标或进展时，编辑对应任务事项，不能通过提取改变其完成状态。

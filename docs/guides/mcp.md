@@ -52,7 +52,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 - `session_resolve {agent, native_id}` 按原生主会话／线程身份精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding ID）、`native_id` 和会话元数据（含 `project_id`、`task_ids`）；后续调用及 `from_session` 使用返回的 `id`。未摄入或 Home 不匹配时返回 `not_found`，不扫描或自动同步，无需桌面运行。原生 ID 由调用方提供，不能取 MCP 服务自身环境作为调用者身份；Codex 的转录文件版本后缀、内部子 Agent ID 不作为主会话 ID 解析。
 - `object_list` 的 `kind` 为 `session`、`task` 或 `project`，默认 `scope=unarchived`，也支持 `archived`、`all`。会话支持项目、任务、Agent 筛选；任务支持项目筛选。列表只读取元数据。
 - 优先通过 `summary_search`、`summary_get` 获取事项；需要核对原始依据时，使用 `session_search` 跨会话查找标题和正文，再用 `session_messages` 读取完整内容和前后讨论。
-- `session_messages` 的 `id` 是 NoEnding 会话 ID。`from`、`to` 使用从 1 开始的消息 ordinal。长消息分为多个 part，应按顺序拼接。
+- `session_messages` 使用当前 Home 中的 NoEnding 会话 ID，默认返回最近 8 条已同步消息，`limit` 按消息计数。每页从旧到新排列。提供 `from` 或 `to` 可从旧到新读取包含端点的编号范围，提供 `query` 可查找本会话中的命中片段。后续页只传 `id` 和 `cursor`（取上一页的 `next_cursor`）。消息的 `truncated` 为 true 时，用 `id` 和 `content_cursor`（取该条的 `next_content_cursor`）继续读正文。
 - 分页读取沿用原查询条件并传入 `next_cursor`，直到 `end=true`；每页 `limit` 为 1～50。历史变化返回 `stale_cursor` 时从第一页重新查询。
 - 查询不扫描来源、不生成摘要。需要最新消息时显式调用 `sync`；需要更新摘要时再调用 `summary_update`。
 - `agent_list` 只检查本地 CLI 和提取能力，不证明登录状态、模型权限或服务可达性。

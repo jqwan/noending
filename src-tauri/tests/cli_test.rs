@@ -622,10 +622,7 @@ fn explicit_sync_ingests_only_the_selected_source_then_refreshes_one_session() {
     assert_eq!(synced["data"]["messages"], 1);
     let (_, latest) = f.run(exe, &["session", "messages", sid]);
     assert_eq!(latest["data"]["through_sequence"], 2);
-    assert_eq!(
-        latest["data"]["records"][1]["record"]["content"],
-        "New memory"
-    );
+    assert_eq!(latest["data"]["messages"][1]["content"], "New memory");
     let (success, missing) = f.run(exe, &["sync", "--source", "missing-source"]);
     assert!(!success);
     assert_eq!(missing["error"]["code"], "not_found");

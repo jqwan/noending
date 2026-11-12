@@ -511,11 +511,12 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     let meta = json!({"type":"session_meta","payload":{"id":"mcp-native-session","cwd":cwd}});
     let message = |id: &str, text: &str| json!({"type":"response_item","payload":{"type":"message","id":id,"role":"user","content":[{"type":"input_text","text":text}]}});
     let transcript = source_dir.join("rollout-test.jsonl");
+    let first_prefix = format!("First evidence{}", "甲".repeat(1986));
     std::fs::write(
         &transcript,
         format!(
             "{meta}\n{}\n{}\n",
-            message("m1", "First evidence"),
+            message("m1", &format!("{first_prefix}乙")),
             message("m2", "Second evidence")
         ),
     )
@@ -573,21 +574,27 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
         id
     );
     let first = client.ok("session_messages", json!({"id":id,"limit":1}));
-    assert_eq!(first["records"][0]["record"]["content"], "First evidence");
-    assert_eq!(first["end"], false);
+    assert_eq!(first["messages"][0]["content"], "Second evidence");
+    assert!(first["next_cursor"].is_string());
     let second = client.ok(
         "session_messages",
-        json!({"id":id,"limit":1,"cursor":first["next_cursor"]}),
+        json!({"id":id,"cursor":first["next_cursor"]}),
     );
-    assert_eq!(second["records"][0]["record"]["content"], "Second evidence");
-    assert_eq!(second["end"], true);
+    assert_eq!(second["messages"][0]["content"], first_prefix);
+    assert!(second["next_cursor"].is_null());
     let hits = client.ok("session_search", json!({"query":"Second evidence"}));
     assert_eq!(hits["items"][0]["session_id"], id);
     let snippet = client.ok("session_messages", json!({"id":id,"query":"Second"}));
-    assert_eq!(
-        snippet["records"][0]["record"]["content"],
-        "Second evidence"
+    assert_eq!(snippet["items"][0]["snippet"], "Second evidence");
+    let full = client.ok("session_messages", json!({"id":id,"from":1,"to":1}));
+    assert_eq!(full["messages"][0]["content"], first_prefix);
+    let rest = client.ok(
+        "session_messages",
+        json!({"id":id,"content_cursor":full["messages"][0]["next_content_cursor"]}),
     );
+    assert_eq!(rest["message"]["content"], "乙");
+    assert_eq!(rest["message"]["sequence"], 1);
+    assert!(rest["message"]["next_content_cursor"].is_null());
     client.ok(
         "task_session_set",
         json!({"task":task,"session":id,"tracked":false}),

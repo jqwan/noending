@@ -4,6 +4,71 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 pub const PART_SIZE: i64 = 2000;
 
+pub(crate) struct HistoryMessage {
+    pub sequence: i64,
+    pub id: String,
+    pub role: String,
+    pub timestamp: Option<String>,
+    pub content: String,
+}
+
+impl HistoryMessage {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            sequence: row.get(0)?,
+            id: row.get(1)?,
+            role: row.get(2)?,
+            timestamp: row.get(3)?,
+            content: row.get(4)?,
+        })
+    }
+}
+
+pub(crate) fn history_page(
+    conn: &Connection,
+    id: &str,
+    range: std::ops::RangeInclusive<i64>,
+    newest_first: bool,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<HistoryMessage>> {
+    let direction = if newest_first { "DESC" } else { "ASC" };
+    let mut statement = conn.prepare(&format!(
+        "SELECT p.ordinal,m.id,m.role,m.ts,
+                CASE WHEN ?4 IS NULL THEN SUBSTR(m.content,1,?5)
+                     ELSE SUBSTR(m.content,MAX(INSTR(m.content,?4)-80,1),240) END
+         FROM session_message_projection p
+         JOIN session_messages m ON m.id=p.session_message_id
+         WHERE p.session_id=?1 AND p.ordinal BETWEEN ?2 AND ?3
+           AND (?4 IS NULL OR INSTR(m.content,?4)>0)
+         ORDER BY p.ordinal {direction} LIMIT ?6",
+    ))?;
+    let rows = statement.query_map(
+        params![id, range.start(), range.end(), query, PART_SIZE + 1, limit],
+        HistoryMessage::from_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn history_content(
+    conn: &Connection,
+    id: &str,
+    sequence: i64,
+    message_id: &str,
+    offset: i64,
+) -> Result<Option<HistoryMessage>> {
+    Ok(conn
+        .query_row(
+            "SELECT p.ordinal,m.id,m.role,m.ts,SUBSTR(m.content,?4+1,?5)
+             FROM session_message_projection p
+             JOIN session_messages m ON m.id=p.session_message_id
+             WHERE p.session_id=?1 AND p.ordinal=?2 AND m.id=?3",
+            params![id, sequence, message_id, offset, PART_SIZE + 1],
+            HistoryMessage::from_row,
+        )
+        .optional()?)
+}
+
 /// Projection offsets are rebuilt atomically on a rewrite and extended only
 /// for new messages on append. Two ordinal lookups replace a prose-wide SUM.
 fn part_end(conn: &Connection, id: &str, ordinal: i64) -> Result<i64> {

@@ -1,6 +1,7 @@
 //! MCP contracts translate typed arguments into the shared business commands.
 use crate::cli::{
     extraction_settings::Patch,
+    messages,
     service::{Command, Kind},
     CliError, CliResult,
 };
@@ -150,13 +151,6 @@ impl Scope {
 fn list_limit() -> usize {
     20
 }
-fn message_limit() -> usize {
-    8
-}
-fn first_ordinal() -> i64 {
-    1
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct List {
@@ -190,24 +184,6 @@ struct Search {
     scope: Scope,
     cursor: Option<String>,
     #[serde(default = "list_limit")]
-    #[schemars(range(min = 1, max = 50))]
-    limit: usize,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct Messages {
-    /// NoEnding session ID, not an Agent's native session ID.
-    id: String,
-    query: Option<String>,
-    /// Inclusive message ordinal, starting at 1.
-    #[serde(default = "first_ordinal")]
-    #[schemars(range(min = 1))]
-    from: i64,
-    to: Option<i64>,
-    cursor: Option<String>,
-    /// Number of message parts, 1 to 50. Join parts in order for long messages.
-    #[serde(default = "message_limit")]
     #[schemars(range(min = 1, max = 50))]
     limit: usize,
 }
@@ -475,7 +451,7 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("room_stop", "Stop a collaboration run. Only the room's current coordinator session may call this; the desktop user always can. Appends a stop notice with the real initiator and ends every waiter.", true, false, Command::RoomStop),
         Spec::new("mailbox_wait", "Wait for unread mail in one mailbox instead of re-polling mailbox_list. Returns immediately when unread mail exists with the mailbox_list page contract plus status=messages; otherwise keeps waiting server-side with no periodic empty output until unread mail arrives, the request is cancelled or the connection drops, the recipient session is deleted (not_found), or the optional timeout_seconds (default none) elapses with status=timeout. Never marks anything read; continue paging with mailbox_list next_cursor and mark with mailbox_mark. Works across processes and without the desktop app. Host tool timeouts are client limits: pass a timeout_seconds that fits the host, treat status=timeout as keep-waiting, and call again.",false,false,Command::MailboxWait),
         Spec::new("session_search", "Search ingested session titles and message bodies. Returns evidence locations; use session_messages for full text and context.", false, false, |p: Search| Command::Search {query:p.query,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,cursor:p.cursor,limit:p.limit}),
-        Spec::new("session_messages", "Read or search a session's stored history by ordinal and cursor. Long messages are split into ordered parts. Does not synchronize source files.", false, false, |p: Messages| Command::Messages {id:p.id,cursor:p.cursor,query:p.query,from:p.from,to:p.to,limit:p.limit}),
+        Spec::new("session_messages", "Read the newest page of stored session messages, ordered oldest to newest within the page. Pass only id and cursor for the next page. Use from/to for an inclusive ordinal range, query for matching snippets, or content_cursor to continue one long message. Does not synchronize source files.", false, false, |p: messages::Request| Command::Messages(p)),
         Spec::new("summary_get", "Read a structured summary and its revision, or one item using item_id (preferred) or item plus revision. Does not trigger extraction.", false, false, |p: Summary| Command::Summary {kind:p.kind,id:p.id,item:p.item,item_id:p.item_id,revision:p.revision}),
         Spec::new("summary_search", "Search summary items across sessions, tasks and projects. Results include kind, object ID, item number and revision for summary_get.", false, false, |p: SummarySearch| Command::SearchSummaries {query:p.query,kind:p.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_owned()),project:p.project,scope:p.scope.name(),cursor:p.cursor,limit:p.limit}),
         Spec::new("task_items", "List independent work items, including completed items, with per-item IDs and revisions. These are not summary items. Does not extract or change state.", false, false, |p: TaskItems| Command::TaskItems {task:p.task}),

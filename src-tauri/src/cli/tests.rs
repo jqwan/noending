@@ -225,36 +225,89 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
 }
 
 #[test]
-fn cli_pages_search_whole_messages_preserve_order_cutoff_and_reject_rewritten_history() {
+fn cli_history_pages_messages_and_continues_long_content_across_appends() {
     let f = Fixture::new();
     let id = f.session();
+    f.ingest(&id, "第二条", "m2", 100);
+    f.ingest(&id, "第三条", "m3", 200);
     let first = f
-        .call(&["session", "messages", &id, "--limit", "1"])
+        .call(&["session", "messages", &id, "--limit", "2"])
         .unwrap();
-    assert_eq!(first["records"][0]["record"]["sequence"], 1);
-    assert_eq!(first["records"][0]["record"]["content"], "甲".repeat(2000));
-    assert!(!first["records"][0]["record"]["message_id"]
-        .as_str()
-        .unwrap()
-        .is_empty());
+    assert_eq!(first["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(first["messages"][0]["sequence"], 2);
+    assert_eq!(first["messages"][1]["content"], "第三条");
     let cursor = first["next_cursor"].as_str().unwrap();
-    f.ingest(&id, "查询开始后新增", "m2", 100);
+    f.ingest(&id, "查询开始后新增", "m4", 300);
     let next = f
+        .call(&["session", "messages", &id, "--cursor", cursor])
+        .unwrap();
+    assert_eq!(next["through_sequence"], 3);
+    assert_eq!(next["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(next["messages"][0]["sequence"], 1);
+    assert_eq!(next["messages"][0]["content"], "甲".repeat(2000));
+    assert_eq!(next["messages"][0]["truncated"], true);
+    assert!(next["next_cursor"].is_null());
+    let body_cursor = next["messages"][0]["next_content_cursor"].as_str().unwrap();
+    let body = f
+        .call(&["session", "messages", &id, "--content-cursor", body_cursor])
+        .unwrap();
+    assert_eq!(body["message"]["content"], "乙");
+    assert_eq!(
+        body["message"]["message_id"],
+        next["messages"][0]["message_id"]
+    );
+    assert_eq!(body["message"]["truncated"], false);
+    assert!(body["message"]["next_content_cursor"].is_null());
+
+    let range = f
         .call(&[
-            "session", "messages", &id, "--cursor", cursor, "--limit", "1",
+            "session", "messages", &id, "--from", "2", "--to", "3", "--limit", "1",
         ])
         .unwrap();
-    assert_eq!(next["records"][0]["record"]["content"], "乙");
-    assert_eq!(next["end"], true);
+    assert_eq!(range["messages"][0]["content"], "第二条");
+    let next_range = f
+        .call(&[
+            "session",
+            "messages",
+            &id,
+            "--cursor",
+            range["next_cursor"].as_str().unwrap(),
+        ])
+        .unwrap();
+    assert_eq!(next_range["messages"][0]["content"], "第三条");
+    assert!(next_range["next_cursor"].is_null());
     let search = f
         .call(&["session", "search", &id, "--query", "甲乙"])
         .unwrap();
-    assert_eq!(search["records"].as_array().unwrap().len(), 2);
+    assert_eq!(search["items"].as_array().unwrap().len(), 1);
+    assert_eq!(search["items"][0]["sequence"], 1);
+    assert!(search["items"][0]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("甲乙"));
     let all = f.call(&["session", "messages", &id]).unwrap();
-    assert_eq!(all["through_sequence"], 2);
+    assert_eq!(all["through_sequence"], 4);
+    let other = f.session();
+    assert_eq!(
+        f.call(&["session", "messages", &other, "--limit", "1"])
+            .unwrap()["messages"][0]["sequence"],
+        1
+    );
+    assert_eq!(
+        f.call(&["session", "messages", &other, "--cursor", cursor])
+            .unwrap_err()
+            .code,
+        "invalid_cursor"
+    );
     f.ingest(&id, "历史改写", "replacement", 0);
     assert_eq!(
         f.call(&["session", "messages", &id, "--cursor", cursor])
+            .unwrap_err()
+            .code,
+        "stale_cursor"
+    );
+    assert_eq!(
+        f.call(&["session", "messages", &id, "--content-cursor", body_cursor])
             .unwrap_err()
             .code,
         "stale_cursor"

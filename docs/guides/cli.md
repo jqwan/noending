@@ -63,6 +63,9 @@ ne session show <id>
 ne session summary <id>
 ne session summary <id> --item 2 --revision 3
 ne session messages <id> --limit 8
+ne session messages <id> --cursor CURSOR
+ne session messages <id> --from 40 --to 48
+ne session messages <id> --content-cursor CONTENT_CURSOR
 ne session search <id> --query "关键词"
 ne task list
 ne task show <id>
@@ -77,9 +80,11 @@ ne project summary <id>
 
 `ne search` 跨会话搜索标题、关联背景和当前历史消息，复用 FTS5 及无匹配时的字面子串回退。支持 --project、--task、--agent 和 --scope（默认 unarchived）。返回 session_id，消息命中还包含 message_id 对应的 ref_id 和当前 sequence，可用 session messages --from/--to 读取上下文。分页按相关度及稳定 ID 排序，使用 next_cursor 时保持过滤条件。搜索结果随数据库变化，不是固定快照；阅读固定消息历史仍使用下面的消息分页。
 
-消息始终通过当前消息投影读取，不返回被历史改写淘汰的消息。`sequence` 是当前会话内的顺序，时间字段只作参考。`message_id` 是稳定的消息标识；长消息按 Unicode 字符分为连续的 `part`，直到 `last_part=true`。每页默认 8 块、最多 50 块，需完整拼接，工具显示截断时减小 limit 重读。
+`session messages` 默认返回最近 8 条已同步消息，可用 `--limit` 指定每页条数（1～50）。每页内按消息编号从旧到新排列，下一页是更早的消息。指定 `--from` 或 `--to` 时，按编号范围从旧到新分页，包含指定端点。未指定的起点和终点分别是 1 和查询时的最新编号。提供当前 Home 中的 NoEnding 会话 ID 即可查询。
 
-使用返回的 `next_cursor` 获取下一页，并保持原来的查询条件。一次分页固定消息代次和截止位置，不混入其后新增的消息；历史改写返回 `stale_cursor`，需从第一页重新查询。搜索按大小写敏感的子串匹配完整消息，支持跨分块匹配。根据命中的 sequence，使用 `messages --from <顺序> --to <顺序>` 展开前后讨论。
+`data.messages` 中每条消息有 `sequence`（当前编号）、`message_id`、`role`、`timestamp` 和 `content`。正文每次最多返回 2,000 个 Unicode 字符。出现 `truncated=true` 时，使用 `--content-cursor` 传入该条的 `next_content_cursor`，从 `data.message.content` 继续拼接，直到 `next_content_cursor` 为 null。
+
+使用 `--cursor` 传入 `data.next_cursor` 时只需保留会话 ID，范围、筛选和页大小随游标延续。一次分页固定查询截止编号（`data.through_sequence`），历史改写使已有游标返回 `stale_cursor`。会话内搜索按大小写敏感的子串匹配完整消息，`data.items` 返回命中编号及 `snippet`。用命中编号通过 `messages --from N --to N` 读取正文，调整两端编号可查看上下文。
 
 ## 定位当前项目
 

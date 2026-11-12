@@ -3,7 +3,7 @@ mod agents;
 mod arguments;
 pub(crate) mod extraction_settings;
 mod installation;
-mod messages;
+pub(crate) mod messages;
 pub(crate) mod receipts;
 mod search;
 pub(crate) mod service;

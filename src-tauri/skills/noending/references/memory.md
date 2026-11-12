@@ -25,7 +25,7 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 
 层级可直接选择，不强制逐级遍历。更深层的材料通常更详细，但早期原话、工具输出或源文件记录仍可能被后续决定取代。结合讨论顺序和明确修正关系判断，不把会话最后活动时间套到所有事实。
 
-保持查询范围与分页条件不变，使用 `next_cursor` 继续；长消息的多个 `part` 按顺序拼接。为作出结论而依赖的消息需完整阅读，不能仅凭搜索片段或消息前缀判断。`stale_cursor` / `stale_result` 表示材料已变化，应重新定位和查询。未命中不等于从未讨论过，尤其在来源未同步或范围未查全时。
+消息分页只需会话 ID 和 `next_cursor`，游标保留查询范围及页大小。长消息用该条的 `next_content_cursor` 续读并拼接正文。为作出结论而依赖的消息需完整阅读，不能仅凭搜索片段或消息前缀判断。`stale_cursor` / `stale_result` 表示材料已变化，应重新定位和查询。未命中不等于从未讨论过，尤其在来源未同步或范围未查全时。
 
 ## 判断记忆是否足够新
 
@@ -84,11 +84,13 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 | 按事项读取 | `ne session/task/project summary ID --item-id ITEM_ID --revision REVISION` | `summary_get`，同时提供 `item_id` 和 `revision` |
 | 项目／任务历史搜索 | `ne search --query TEXT --project ID --scope all`，任务范围改为 `--task ID` | `session_search`，`query`、`project` 或 `task`、`scope=all` |
 | 当前已确认会话内搜索 | `ne session search ID --query TEXT` | `session_messages`，`id` 和 `query` |
+| 看最近的历史消息 | `ne session messages ID --limit 8` | `session_messages`，`id` 和 `limit` |
 | 阅读完整消息及上下文 | `ne session messages ID --from ORDINAL --to ORDINAL --limit 8` | `session_messages`，`id`、`from`、`to`、`limit` |
+| 继续读超长消息正文 | `ne session messages ID --content-cursor CURSOR` | `session_messages`，`id` 和 `content_cursor` |
 
 `summary_search` 是事项的字面检索，不是语义检索。项目筛选也可能返回关联任务的摘要，该任务可能覆盖其他项目；核实命中的 `kind` 与归属。严格只查项目会话事项时指定 `kind=session`。协作摘要搜索没有 `task` 参数：先读目标协作摘要，按需列出关联会话并读取其摘要；不要把同项目的全部会话当成任务会话。当前会话摘要直接按其 ID 读取，避免全库搜索后猜测身份。
 
-`session_search` 返回定位信息，完整证据用 `session_messages` 阅读。消息 `sequence` / `from` / `to` 指会话当前投影中从 1 开始的 ordinal；多段 `part` 属于同一条消息。`message_id` 是消息标识，不能拿来充当 ordinal。搜索使用不同匹配机制，无匹配时可换用原话、别称或更短关键词；不要因一次关键词未命中就否定事实。
+`session_search` 返回定位信息，完整证据用 `session_messages` 阅读。只需提供当前 Home 中目标会话的 NoEnding ID。消息 `sequence` / `from` / `to` 指会话当前投影中从 1 开始的编号，范围包含指定端点。`message_id` 是消息标识，不能拿来充当编号。默认读最近 8 条，页内从旧到新，下一页更早。指定编号范围时从旧到新翻页。搜索使用不同匹配机制，无匹配时可换用原话、别称或更短关键词；不要因一次关键词未命中就否定事实。
 
 通用对象查询没有 `source_path`、`source_kind`、原始文件读取入口。源文件层需要当前调用环境或用户提供可核实的路径和来源信息，并使用可用的文件读取能力。JSONL、压缩文件和来源数据库不能混用读取方法；不识别格式时说明限制，不修改原文件，不打开 NoEnding SQLite 寻找路径。MCP 服务报告的 Home 也不能直接当作 Agent 源会话目录。
 
@@ -101,7 +103,7 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 
 跨会话搜索的 `data` 示例：`{"items":[{"kind":"message","session_id":"S","ref_id":"M","sequence":12,"snippet":"命中片段"}],"next_cursor":null,"end":true}`。用 session_id 与 sequence 定位完整消息。
 
-单会话消息的 `data` 示例：`{"session_id":"S","ingest_generation":1,"from_sequence":1,"through_sequence":12,"records":[{"cursor":1,"record":{"type":"message","message_id":"M","sequence":12,"role":"user","content":"完整分块","part":1,"last_part":true,"timestamp":null}}],"next_cursor":null,"end":true}`。records 的正文位于 record，长消息拼接全部 part 后阅读。
+单会话消息的 `data` 示例为 `{"session_id":"S","through_sequence":12,"messages":[{"message_id":"M","sequence":12,"role":"user","content":"完整正文","truncated":false,"next_content_cursor":null,"timestamp":null}],"next_cursor":null}`。会话内搜索返回 `items`，其中 `sequence` 用于定位，`snippet` 用于判断相关性。正文续读结果在 `data.message`，按顺序拼接其中的 `content`，直到 `next_content_cursor` 为空。
 
 摘要搜索的 data 含 items、next_cursor、end；命中项包含 kind、id、revision、item_id、item_number 和 item。当前摘要搜索命中不附带 freshness，需要判断当前结论时，再按命中对象查 freshness；缺少摘要或空结果时也不据此认定范围内没有相关讨论。
 

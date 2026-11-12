@@ -151,14 +151,7 @@ pub(crate) enum Command {
         kind: Kind,
         id: String,
     },
-    Messages {
-        id: String,
-        cursor: Option<String>,
-        query: Option<String>,
-        from: i64,
-        to: Option<i64>,
-        limit: usize,
-    },
+    Messages(super::messages::Request),
     Summary {
         kind: Kind,
         id: String,
@@ -658,22 +651,7 @@ impl Service {
                     }
                 }
             }
-            Command::Messages {
-                id,
-                cursor,
-                query,
-                from,
-                to,
-                limit,
-            } => super::messages::page(
-                &self.db,
-                &id,
-                cursor.as_deref(),
-                query.as_deref(),
-                from,
-                to,
-                limit,
-            ),
+            Command::Messages(request) => super::messages::page(&self.db, request),
             Command::Summary {
                 kind,
                 id,
