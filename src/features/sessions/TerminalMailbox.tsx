@@ -3,7 +3,7 @@ import { DetailLoading, DetailSection } from "../../components/DetailSection";
 import { useEffect, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 import { api } from "../../api";
 import type { MailboxMessage, TerminalNotifications } from "../../types";
-import { Modal } from "../../components/common";
+import { Modal, submitsOnEnter } from "../../components/common";
 import Icon from "../../components/Icon";
 import { useViewState } from "../../hooks/useViewState";
 import { MailboxMessagePreview, useMailboxMessages } from "./MailboxMessages";
@@ -104,8 +104,16 @@ export default function TerminalMailbox({ terminalId, sessionId: session, notifi
     </div>
     <DetailPanelFooter><form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!confirmedSession || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(confirmedSession, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
       <label htmlFor={`mailbox-input-${terminalId}`} className="small">发送消息</label>
-      <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!confirmedSession || busy} rows={4} onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径" />
-      <button className="btn small primary" type="submit" disabled={!confirmedSession || busy || !draft.trim()}>发送到信箱</button>
+      <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!confirmedSession || busy} rows={4}
+        onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径"
+        aria-description="Enter 发送，Shift+Enter 换行"
+        onKeyDown={e => {
+          if (e.defaultPrevented || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || !submitsOnEnter(e)) return;
+          e.preventDefault();
+          if (!e.repeat) e.currentTarget.form?.requestSubmit();
+        }} />
+      <button className="btn small primary" type="submit" disabled={!confirmedSession || busy || !draft.trim()}
+        title="Enter 发送，Shift+Enter 换行" aria-keyshortcuts="Enter">发送到信箱</button>
     </form></DetailPanelFooter>
 
     {confirm && <Modal title="开启自动通知" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动通知</button></>}>

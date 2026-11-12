@@ -92,6 +92,24 @@ it("stores the complete long user message without submitting its body to a termi
   const text = "长消息".repeat(1000); fireEvent.change(input, { target: { value: text } }); fireEvent.click(screen.getByRole("button", { name: "发送到信箱" }));
   await waitFor(() => expect(api.mailboxSend).toHaveBeenCalledWith("self", text)); expect(api.mailboxRemind).not.toHaveBeenCalled();
 });
+it("sends the mailbox draft with Enter and leaves newlines and IME confirmation to the input", async () => {
+  mount();
+  const input = await screen.findByRole("textbox", { name: "发送消息" });
+  fireEvent.change(input, { target: { value: "请查看报告" } });
+
+  expect(fireEvent.keyDown(input, { key: "Enter", shiftKey: true })).toBe(true);
+  expect(fireEvent.keyDown(input, { key: "Enter", isComposing: true })).toBe(true);
+  expect(fireEvent.keyDown(input, { key: "Enter", keyCode: 229 })).toBe(true);
+  expect(fireEvent.keyDown(input, { key: "Enter", repeat: true })).toBe(false);
+  expect(api.mailboxSend).not.toHaveBeenCalled();
+
+  const body = "请查看报告\n文件在工作区";
+  fireEvent.change(input, { target: { value: body } });
+  expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(false);
+  await waitFor(() => expect(input).toHaveProperty("value", ""));
+  expect(api.mailboxSend).toHaveBeenCalledTimes(1);
+  expect(api.mailboxSend).toHaveBeenCalledWith("self", body);
+});
 it("allows editing received unread content and requires a second inline delete action", async () => {
   mount(); await screen.findByText(message.body); fireEvent.click(screen.getByRole("button", { name: "编辑消息" }));
   fireEvent.change(screen.getByRole("textbox", { name: "编辑信箱消息" }), { target: { value: "edited" } }); fireEvent.click(screen.getByRole("button", { name: "保存" }));
