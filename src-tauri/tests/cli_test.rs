@@ -689,10 +689,7 @@ fn desktop_observer_sees_cli_commits_and_cli_preserves_an_unsupported_database()
 #[cfg(unix)]
 #[test]
 fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interruptions() {
-    use noending::{
-        context::summary::ExtractionFiles,
-        domain::{Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate},
-    };
+    use noending::domain::{Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate};
     use serde_json::json;
     use std::{
         os::unix::fs::PermissionsExt,
@@ -840,14 +837,9 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
     let (_, running) = f.run(exe, &["request", "show", "summary-protocol"]);
     assert_eq!(running["data"]["status"], "running");
-    let lock = ExtractionFiles::create(
-        &f.home.runtime_dir.join("context-extraction"),
-        "task-another",
-        std::slice::from_ref(&sid),
-    );
-    assert!(
-        matches!(lock, Err(noending::error::AppError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
-    );
+    let (success, locked) = f.run(exe, &["summary", "update", "session", &sid]);
+    assert!(!success);
+    assert_eq!(locked["error"]["code"], "summary_busy");
     let migration = noending::workspace::home::PendingMigration {
         pointer_path: f.root.join("home.json"),
         from: f.home.root.clone(),
@@ -882,13 +874,9 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
         "Confirmed memory"
     );
     assert_eq!(summary["data"]["pending"], false);
-    let acquired = ExtractionFiles::create(
-        &f.home.runtime_dir.join("context-extraction"),
-        "task-another",
-        std::slice::from_ref(&sid),
-    )
-    .unwrap();
-    drop(acquired);
+    let (success, unchanged) = f.run(exe, &["summary", "update", "session", &sid]);
+    assert!(success, "{unchanged}");
+    assert_eq!(unchanged["data"]["status"], "no_change");
     let (_, completed) = f.run(exe, &["request", "show", "summary-protocol"]);
     assert_eq!(completed["data"]["status"], "completed");
     assert_eq!(completed["data"]["response"]["data"]["revision"], 1);
@@ -970,14 +958,9 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
             preserved["data"]["summary"]["items"][0]["title"],
             "Confirmed memory"
         );
-        drop(
-            ExtractionFiles::create(
-                &f.home.runtime_dir.join("context-extraction"),
-                "task-after-cancellation",
-                std::slice::from_ref(&sid),
-            )
-            .unwrap(),
-        );
+        let (success, unchanged) = f.run(exe, &["summary", "update", "session", &sid]);
+        assert!(success, "{unchanged}");
+        assert_eq!(unchanged["data"]["status"], "no_change");
         std::fs::write(&release, "next phase").unwrap();
     }
 }

@@ -105,7 +105,9 @@ ne summary config set --agent none
 
 `agent list` 单独查询当前机器，返回各 Agent 的 `supports_cli`、`cli_available`、可执行文件路径、可读取的版本、`supports_extraction` 和可覆盖的运行字段。`supports_cli` 表示 NoEnding 提供可调用的 CLI 入口；有些适配器仅摄入历史，不提供这个入口。`cli_available` 仅表示本机找到可执行文件，不证明已登录、模型可用或远程请求会成功；查询只做本地版本探测，不调用模型，不改写检测缓存或提取配置。
 
-`summary config show/set` 复用设置页的提取配置。`set` 只修改提供的字段；切换 Agent 时先清除旧 Agent 的运行参数，再应用本次参数，同一 Agent 的别名不视为切换。模型、provider 和 effort 传空字符串恢复 Agent 默认值。`--agent none` 停用提取；不能同时设置非空运行参数。当前提取支持 Codex、Claude Code 和 Pi，参数字段遵守各自能力约束。允许预先保存尚未安装的 Agent 配置，不自动选择其他 Agent；实际提取仍会重新检查 CLI 并报告调用结果。保存配置本身不触发同步或提取。
+`summary config show/set` 复用设置页的提取配置。`set` 只修改提供的字段；切换 Agent 时先清除旧 Agent 的运行参数，再应用本次参数，同一 Agent 的别名不视为切换。模型、provider 和 effort 传空字符串恢复 Agent 默认值。`--agent none` 停用提取；不能同时设置非空运行参数。当前提取支持 Codex、Claude Code、Pi 和 Antigravity（`agy`），参数字段遵守各自能力约束。允许预先保存尚未安装的 Agent 配置，不自动选择其他 Agent；实际提取仍会重新检查 CLI 并报告调用结果。保存配置本身不触发同步或提取。
+
+Antigravity 后台提取使用已登录的 `agy`，通过其终端沙箱调用 NoEnding CLI。平台要求见 [Antigravity CLI 沙箱说明](https://antigravity.google/docs/sandbox?tab=cli)。
 
 `session resolve --agent AGENT --native-id NATIVE_ID` 按 Agent 与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`agent`、标题、项目 `project_id`、跟踪任务 `task_ids` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。Agent 名称与 `agent list` 一致，接受已有别名，例如 `claude`。
 
@@ -233,7 +235,7 @@ ne summary update project <id>
 
 ## 任务事项
 
-任务描述仍为一个可由用户编辑的文本字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符。目标说明问题和预期结果，必要的范围与验收要求融入其中；现状说明已核实的整体阶段、主要缺口或关键阻碍。Agent 按用户明确要求调整目标，在重要阶段变化时融合更新现状，保留用户确定的要求，不逐轮追加。任务事项保存具体执行进展和完成情况；协作摘要保存该任务协作室的重要共识、原因、依赖和交接背景。任务事项仅作提取背景，保持独立存储，摘要提取不会改变它们或成员已读位置。需要长期稳定保留的执行要求写入描述或任务事项。
+任务描述仍为一个可由用户编辑的文本字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符。目标说明问题和预期结果，必要的范围与验收要求融入其中；现状说明已核实的整体阶段、主要缺口或关键阻碍。Agent 按用户明确要求调整目标，在重要阶段变化时融合更新现状，保留用户确定的要求，不逐轮追加。任务事项保存实际进展、验证结果和待解决的问题。协作摘要保存该任务协作室的重要共识、原因、依赖和交接背景。任务事项仅作提取背景，保持独立存储，摘要提取不会改变它们或成员已读位置。需要长期稳定保留的执行要求写入描述或任务事项。
 
 追加单条进展使用 `task item note`，无需读取后重写全部细则，也无需 revision。后端在当前值上事务性追加，保留已有细则和完成状态、递增事项版本。重试沿用同一 request_id，避免重复追加；需要融合、修正或精简整份进展时，读取最新细则和 revision 后用 update 替换。追加不自动整理重复内容，不将一条新记录误作完整细则提交。
 
@@ -242,16 +244,14 @@ ne task item list TASK_ID
 ne task item create TASK_ID --file item.json
 ne task item note TASK_ID --item-id ITEM_ID --text "已修复重复摄入，历史数据保持完整" --request-id note-1
 ne task item update TASK_ID --item-id ITEM_ID --revision 2 --file progress.json
-ne task item complete TASK_ID --item-id ITEM_ID --revision 3
-ne task item reopen TASK_ID --item-id ITEM_ID --revision 4
-ne task item delete TASK_ID --item-id ITEM_ID --revision 5
+ne task item delete TASK_ID --item-id ITEM_ID --revision 3
 ```
 
-创建文件只接受 `{ "title": "修复同步", "description": "重复同步不产生重复消息" }`，描述可省略。新事项为未完成，进展细则为空。更新文件可包含 `title`、`description`、`details`、`completed`，省略字段保持原值；`details` 替换该事项的进展细则，记录已确认成果、阻碍和验证依据，不是子任务。完成和重新打开只切换 completed，保留内容；删除永久移除，没有废弃状态。
+创建文件只接受 `{ "title": "修复同步", "description": "重复同步不产生重复消息" }`，描述可省略。新事项的进展细则为空。更新文件可包含 `title`、`description`、`details`，省略字段保持原值。`details` 替换该事项的全部进展细则。删除会永久移除该事项。
 
-每个任务事项包含 `id`、`task_id`、`title`、`description`、`details`、`completed`、`revision`、`created_at`、`updated_at`。列表返回全部事项；桌面任务详情将未完成事项排在前面、已完成事项排在后面，状态图标支持直接切换，支持新增、编辑、完成、重新打开和二次确认删除，外部修改自动刷新。任务归档保留事项，永久删除任务时一并删除。
+每个任务事项包含 `id`、`task_id`、`title`、`description`、`details`、`revision`、`created_at`、`updated_at`。列表返回全部事项。桌面任务详情按最近更新排序，支持新增、编辑和二次确认删除，外部修改自动刷新。任务归档保留事项，永久删除任务时一并删除。
 
-完整编辑、完成、重新打开与删除使用该任务事项的 revision（note 无需版本），不使用摘要版本或事项序号。版本冲突先重新读取；相同写操作重试保持 request-id 和全部参数。不会改动摘要、消息消费位置或其他任务事项，不启动或通知 Agent。
+完整编辑和删除使用该任务事项的 revision（note 无需版本），不使用摘要版本或事项序号。版本冲突先重新读取；相同写操作重试保持 request-id 和全部参数。不会改动摘要、消息消费位置或其他任务事项，不启动或通知 Agent。
 
 ## 记忆更新状态
 
@@ -298,7 +298,7 @@ ne request show create-task-1
 
 默认按 `NOENDING_HOME`、应用保存的当前存储位置、默认存储目录依次定位数据，`--home <目录>` 可明确指定 Home；待迁移位置由桌面启动处理，CLI 不执行目录搬迁。桌面、CLI 和 MCP 共用数据库身份、基线、格式版本及开发结构检查入口；不兼容时保留数据并返回错误。格式版本独立于应用版本，只在承诺兼容的发布中递增；本地开发结构调整按 AGENTS.md 的草案规则处理。桌面或 CLI 使用数据目录期间会持有共享锁，目录迁移必须等待这些进程释放访问。`--connection <文件>` 仅用于提取查询，不能用于普通业务命令。
 
-摘要提取为 Agent 提供完整可执行文件路径及一次性连接，只开放 `extraction inputs/read/search`，不能通过该连接调用通用编辑命令；不提供 SQL、原始消息编辑或 `extraction submit`。提取结果仍由后端根据最终回复校验并保存。
+后台提取为 Agent 提供完整可执行文件路径及一次性连接，通过 `extraction inputs/read/search/submit` 查询本次材料并主动提交。每次提交由后端校验、保存并返回回执。CLI 退出状态用于诊断运行结果。
 
 事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个摘要事项需要当前摘要 `revision`。序号仍只属于对应摘要版本。摘要查询返回事项 ID；提取延续事项保留原有 ID，新事项由 NoEnding 分配 ID。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
 
@@ -314,12 +314,12 @@ ne summary search-input <context_id> --input <name> --query "关键词"
 ne summary submit <context_id> --file result.json --request-id extraction-1
 ```
 
-`summary context` 只查询范围，返回 context_id、目标、模式、提取要求及输入清单；不会新建业务任务、启动 Agent 或后台工作进程。默认 update：保留有效旧摘要，读取未处理消息；regenerate：按完整历史重新生成。kind=task 提取任务协作室消息，跨多次协作运行延续，不提取成员会话摘要；没有协作消息时不调用模型。项目范围由项目目录关联关系决定，包含已归档会话；先处理 need_update=true 的会话，再综合项目摘要。重新生成还需完整阅读清单中的 history_input_file，不以旧摘要为事实依据。
+`summary context` 返回 `context_id`、提取要求及输入清单。默认 `update`，用户明确要求重提时使用 `regenerate`。单会话和协作摘要重提读取完整历史。项目覆盖项目目录关联的会话，包含已归档会话。项目重提复用会话摘要，从头生成项目汇总。
 
-`summary read` 从 cursor=0 开始，跟随 next_cursor 至 end=true，长消息完整拼接；搜索仅供辅助，不计完整阅读。范围固定截止位置，期间追加消息不纳入本次。上下文保存临时版本及阅读进度，有效期 24 小时；历史、关联或摘要版本变化返回冲突，需重新查询，不沿用旧结果。
+`summary read` 从 cursor=0 开始，跟随 next_cursor 至 end=true，长消息完整拼接。搜索仅供辅助。范围固定截止位置，期间追加消息留待下次。上下文有效期 24 小时，冲突或过期时重新查询。
 
-提交文件为 `{ "reply": {"status":"completed"}, "results": { "session-<id>": {"summary":{"items":[{"title":"结论","description":"说明","details":[]}]}} } }`。会话和协作摘要使用单目标 reply；只有项目使用批量 reply（包括 skipped_session_ids，部分失败还包括 failed_sessions）。results 的键为 session-ID/task-ID/project-ID；正常跳过及失败目标不提供结果。后端沿用材料阅读、输出、事项 ID 和并发校验，事务性入库并更新覆盖位置，不修改任务事项。成功后上下文被消费，同一 request_id 重试使用回执。详细规则见 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。
+`summary submit` 每次提交一个目标。项目提取按 `pending_sessions` 逐个读取并提交，在文件中携带 `session_id`，`results` 仅包含对应的 `session-ID`。会话全部处理完才可读取并提交项目汇总，提交时省略 `session_id`，结果键为 `project-ID`。已提交的会话摘要会在中断后保留。具体回包及跳过、失败规则见[摘要提交协议](../../src-tauri/skills/noending/references/extraction-protocol.md)。
 
-`summary update/regenerate` 保留原行为，另外启动配置中的 Agent 并等待完成；不要将它们与当前会话自主提取混淆。
+`summary update/regenerate` 另行启动配置中的 Agent，由该会话通过专用连接提交。项目返回 `partial` 时，当前项目摘要仍待汇总，`updated_sessions` 列出已保存的会话，`remaining_session_summaries` 是仍待更新摘要的会话数。`remaining_pending` 还包含已更新但尚未汇入项目的会话。会话失败原因可在提取日志中查看。
 
 `task summary` 返回协作摘要，`processed_through_seq` 为已整理的房间消息位置，`pending_messages` 为未整理消息数；不表示成员已读。项目摘要仍供用户阅读，独立于协作摘要。

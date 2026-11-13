@@ -360,13 +360,12 @@ export interface TaskItem {
   title: string;
   description: string;
   details: string[];
-  completed: boolean;
   revision: number;
   created_at: string;
   updated_at: string;
 }
 export interface TaskItemCreate { title: string; description?: string }
-export interface TaskItemPatch { title?: string; description?: string; details?: string[]; completed?: boolean }
+export interface TaskItemPatch { title?: string; description?: string; details?: string[] }
 
 export interface SummaryItem {
   id: string;
@@ -436,6 +435,7 @@ export interface ProjectContextView {
   updated_at: string | null;
   pending: boolean;
   pending_sessions: number;
+  pending_session_summaries: number;
   freshness: SummaryFreshness;
 }
 export interface ProjectUpdateOutcome {
@@ -446,6 +446,7 @@ export interface ProjectUpdateOutcome {
   skipped_session_ids: string[];
   failed_sessions: { session_id: string; error: string }[];
   remaining_pending: number;
+  remaining_session_summaries: number;
 }
 export interface WorkstreamContextView {
   workstream_id: string;
@@ -705,7 +706,7 @@ export interface AgentRuntimeOverrides {
 }
 
 export interface ExtractionSettings {
-  agent: "codex" | "claude_code" | "pi" | "none";
+  agent: "codex" | "claude_code" | "pi" | "antigravity" | "none";
   runtime: AgentRuntimeOverrides;
 }
 
@@ -781,6 +782,7 @@ export interface OperationStatus {
   state: "queued" | "running";
   targets: { kind: string; id: string }[];
   agent: Agent | null;
+  project_summary_progress?: { processed: number; remaining: number; summary_saved: boolean };
 }
 
 // 协作室：一个任务最多一个协作室，一次开启一个 run。

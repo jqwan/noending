@@ -8,9 +8,8 @@
 //!   error the UI can show).
 //!
 //! Explicit summary extraction uses authenticated Agent CLIs (`codex exec`,
-//! `claude -p`, `pi -p --no-session`). This module runs those commands as child
-//! processes with a hard timeout and returns stdout. Interactive Assistant
-//! conversations use the ordinary launcher and terminal instead.
+//! `claude -p`, `pi -p --no-session`, `agy --print`). These child processes have a hard
+//! timeout and submit results through the extraction connection.
 
 use std::io::Read;
 #[cfg(windows)]
@@ -113,10 +112,12 @@ impl Drop for ChildGuard {
     }
 }
 
-fn drain(mut reader: impl Read, buf: &mut String) {
-    let mut tmp = String::new();
-    let _ = reader.read_to_string(&mut tmp);
-    buf.push_str(&tmp);
+fn capture(mut reader: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = reader.read_to_string(&mut text);
+        text
+    })
 }
 
 /// Run a program headlessly with a hard timeout.
@@ -156,7 +157,7 @@ pub fn run_with_env(
     timeout_secs: u64,
     env: &[(&str, &str)],
 ) -> Result<HeadlessOutput> {
-    run_process(program, args, cwd, timeout_secs, env).map_err(|failure| match failure {
+    run_process(program, args, cwd, timeout_secs, env, true).map_err(|failure| match failure {
         ProcessFailure::Spawn(e) => other(format!("启动 {} 失败: {}", program.display(), e)),
         ProcessFailure::Wait(e) => other(format!("等待进程失败: {}", e)),
         ProcessFailure::Pipe => other("no process output pipe"),
@@ -172,6 +173,7 @@ fn run_process(
     cwd: Option<&Path>,
     timeout_secs: u64,
     env: &[(&str, &str)],
+    capture_output: bool,
 ) -> std::result::Result<HeadlessOutput, ProcessFailure> {
     if super::cancellation::requested() {
         return Err(ProcessFailure::Cancelled);
@@ -186,11 +188,12 @@ fn run_process(
     // cmd `title` and Node process.title can otherwise rename its tab.
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(args).stdin(Stdio::null());
+    if capture_output {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
@@ -200,18 +203,13 @@ fn run_process(
 
     let mut child = ChildGuard(command.spawn().map_err(ProcessFailure::Spawn)?);
 
-    let mut stdout_pipe = child.stdout.take().ok_or(ProcessFailure::Pipe)?;
-    let mut stderr_pipe = child.stderr.take().ok_or(ProcessFailure::Pipe)?;
-    let out_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        drain(&mut stdout_pipe, &mut s);
-        s
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        drain(&mut stderr_pipe, &mut s);
-        s
-    });
+    let output = if capture_output {
+        let stdout = child.stdout.take().ok_or(ProcessFailure::Pipe)?;
+        let stderr = child.stderr.take().ok_or(ProcessFailure::Pipe)?;
+        Some((capture(stdout), capture(stderr)))
+    } else {
+        None
+    };
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut cancelled = false;
@@ -234,8 +232,12 @@ fn run_process(
         }
     };
 
-    let stdout = out_handle.join().unwrap_or_default();
-    let stderr = err_handle.join().unwrap_or_default();
+    let (stdout, stderr) = output.map_or_else(Default::default, |(stdout, stderr)| {
+        (
+            stdout.join().unwrap_or_default(),
+            stderr.join().unwrap_or_default(),
+        )
+    });
     if cancelled {
         return Err(ProcessFailure::Cancelled);
     }
@@ -256,13 +258,13 @@ fn run_process(
     })
 }
 
-/// Run a Context-only child and return a failure without any user-controlled
-/// process output. The `spawned` bit lets the operation log distinguish a
+/// Run a Context-only child and return its exit status without process output.
+/// The `spawned` bit lets the operation log distinguish a
 /// failed executable lookup from a CLI that actually ran.
 pub fn run_context_extraction(
     cmd: &AgentCommand,
     timeout_secs: u64,
-) -> std::result::Result<HeadlessOutput, ContextExecFailure> {
+) -> std::result::Result<(), ContextExecFailure> {
     let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
     let out = run_process(
         Path::new(&cmd.program),
@@ -270,6 +272,7 @@ pub fn run_context_extraction(
         cmd.cwd.as_deref(),
         timeout_secs,
         &[],
+        false,
     )
     .map_err(|failure| {
         let (kind, spawned, io_error_kind) = match &failure {
@@ -310,7 +313,7 @@ pub fn run_context_extraction(
             io_error_kind: None,
         });
     }
-    Ok(out)
+    Ok(())
 }
 
 fn safe_io_error_kind(kind: std::io::ErrorKind) -> &'static str {

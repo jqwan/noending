@@ -6,7 +6,7 @@ import TaskItems from "./TaskItems";
 import type { TaskItem } from "../../types";
 
 let stored: TaskItem[];
-const first = (): TaskItem => ({ id: "work-1", task_id: "task", title: "实现与验收", description: "保证已有数据完整", details: ["已复现问题"], completed: false, revision: 1, created_at: "2026-10-25T00:00:00Z", updated_at: "2026-10-25T00:00:00Z" });
+const first = (): TaskItem => ({ id: "work-1", task_id: "task", title: "实现与验收", description: "保证已有数据完整", details: ["已复现问题"], revision: 1, created_at: "2026-10-25T00:00:00Z", updated_at: "2026-10-25T00:00:00Z" });
 beforeEach(() => {
   clearReadResources();
   stored = [];
@@ -44,7 +44,7 @@ it("keeps the previous items and count visible on return while refreshing, witho
   expect(screen.queryByText("暂无任务事项")).toBeNull();
 });
 
-it("creates work, preserves progress across completion and reopening, and restores it on remount", async () => {
+it("creates work, edits its progress and restores the record on remount", async () => {
   const firstRender = render(<TaskItems taskId="task" />);
   await screen.findByText("暂无任务事项");
   expect(screen.getByRole("region", {name:"任务事项内容"})).toBeTruthy();
@@ -60,19 +60,14 @@ it("creates work, preserves progress across completion and reopening, and restor
   fireEvent.click(screen.getByRole("button", { name: "添加细则" }));
   fireEvent.change(screen.getByRole("textbox", { name: "细则 1" }), { target: { value: "回归验证通过" } });
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
-  await screen.findByRole("button", { name: "标记完成：修复同步" });
-  fireEvent.click(screen.getByRole("button", { name: "标记完成：修复同步" }));
-  await screen.findByRole("button", { name: "标记未完成：修复同步" });
-  screen.getByRole("region", { name: "修复同步" });
+  await screen.findByRole("button", { name: "展开修复同步的细则" });
+  firstRender.unmount();
+  clearReadResources();
+  render(<TaskItems taskId="task" />);
+  await screen.findByRole("region", { name: "修复同步" });
   screen.getByText("历史保持完整");
   fireEvent.click(screen.getByRole("button", { name: "展开修复同步的细则" }));
   screen.getByText("回归验证通过");
-  fireEvent.click(screen.getByRole("button", { name: "标记未完成：修复同步" }));
-  await screen.findByRole("button", { name: "标记完成：修复同步" });
-  firstRender.unmount();
-  render(<TaskItems taskId="task" />);
-  await screen.findByRole("region", { name: "修复同步" });
-  expect(stored[0]).toMatchObject({ completed: false, description: "历史保持完整", details: ["回归验证通过"] });
 });
 
 it("requires a second action to permanently delete, and the deleted work stays gone on remount", async () => {
@@ -99,9 +94,8 @@ it("refreshes external edits while preserving a conflicting draft and prevents o
   await screen.findByRole("region", { name: "实现与验收" });
   fireEvent.click(screen.getByRole("button", { name: "编辑事项：实现与验收" }));
   fireEvent.change(screen.getByRole("textbox", { name: "事项标题" }), { target: { value: "本地草稿" } });
-  stored[0] = { ...stored[0], title: "其他会话的新结论", revision: 2, completed: true };
+  stored[0] = { ...stored[0], title: "其他会话的新结论", revision: 2 };
   await act(async () => { window.dispatchEvent(new Event("focus")); });
-  // A remote completion may reorder the item but must retain the local draft.
   await screen.findByDisplayValue("本地草稿");
   await waitFor(() => expect(screen.getByRole("button", { name: "保存" }).hasAttribute("disabled")).toBe(true));
   screen.getByRole("button", { name: "复制草稿" });
@@ -139,32 +133,14 @@ it("preserves an editor when its item is deleted externally and permits cancelin
   screen.getByText("暂无任务事项");
 });
 
-it("shows all items, sorts completed work last, and exposes completion through the icon toggle", async () => {
-  stored = [{ ...first(), id: "done", title: "之前完成的工作", completed: true }, first()];
-  render(<TaskItems taskId="task" />);
-  const unfinished = await screen.findByRole("button", { name: "标记完成：实现与验收" });
-  const done = screen.getByRole("button", { name: "标记未完成：之前完成的工作" });
-  expect(unfinished.getAttribute("aria-pressed")).toBe("false");
-  expect(done.getAttribute("aria-pressed")).toBe("true");
-  const titles = () => within(screen.getByRole("region", { name: "任务事项" })).getAllByRole("heading", { level: 3 }).map(node => node.textContent);
-  expect(titles()).toEqual(["实现与验收", "之前完成的工作"]);
-  fireEvent.click(unfinished);
-  await screen.findByRole("button", { name: "标记未完成：实现与验收" });
-  expect(titles()).toEqual(["之前完成的工作", "实现与验收"]);
-  fireEvent.click(screen.getByRole("button", { name: "标记未完成：实现与验收" }));
-  await screen.findByRole("button", { name: "标记完成：实现与验收" });
-  expect(titles()).toEqual(["实现与验收", "之前完成的工作"]);
-});
-
-it("keeps unfinished work first and orders each completion state by latest update", async () => {
+it("orders the full work item list by latest update", async () => {
   stored = [
-    { ...first(), id: "done-old", title: "较早完成", completed: true },
-    { ...first(), id: "open-old", title: "较早待办" },
-    { ...first(), id: "open-new", title: "最近待办", updated_at: "2026-10-29T00:00:00Z" },
-    { ...first(), id: "done-new", title: "最近完成", completed: true, updated_at: "2026-10-30T00:00:00Z" },
+    { ...first(), id: "old", title: "同步验证", updated_at: "2026-10-27T00:00:00Z" },
+    { ...first(), id: "new", title: "界面验证", updated_at: "2026-10-30T00:00:00Z" },
+    { ...first(), id: "middle", title: "接口验证", updated_at: "2026-10-29T00:00:00Z" },
   ];
   render(<TaskItems taskId="task" />);
-  await screen.findByRole("button", { name: "标记完成：最近待办" });
+  await screen.findByRole("button", { name: "编辑事项：界面验证" });
   const list = screen.getByRole("region", { name: "任务事项内容" });
-  expect(within(list).getAllByRole("heading", { level: 3 }).map(node => node.textContent)).toEqual(["最近待办", "较早待办", "最近完成", "较早完成"]);
+  expect(within(list).getAllByRole("heading", { level: 3 }).map(node => node.textContent)).toEqual(["界面验证", "接口验证", "同步验证"]);
 });

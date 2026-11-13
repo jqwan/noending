@@ -1,10 +1,11 @@
 import { clearReadResources } from "../../hooks/readResource";
+import { refreshOperationStatus } from "../../hooks/useOperationState";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import { api } from "../../api";
-import type { SkillInventory, ProjectDetailData } from "../../types";
+import type { SkillInventory, ProjectDetailData, OperationStatus } from "../../types";
 
 vi.mock("../../api", () => ({
   api: {
@@ -51,9 +52,10 @@ beforeEach(() => {
   clearReadResources();
   clearProjectDetailCache();
   navigate.mockReset();
+  vi.mocked(api.getOperationStatus).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSkills).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
   vi.mocked(api.listSkillCatalog).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
-  vi.mocked(api.getProjectContextState).mockReset().mockResolvedValue({project_id: "p1", summary: null, context_revision: 0, updated_at: null, pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
+  vi.mocked(api.getProjectContextState).mockReset().mockResolvedValue({project_id: "p1", summary: null, context_revision: 0, updated_at: null, pending: true, pending_sessions: 1, pending_session_summaries: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
@@ -250,7 +252,7 @@ describe("ProjectDetail", () => {
 
   it("reads structured summary topics without extracting, explicitly updates with partial feedback, and regenerates separately", async () => {
     vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
-    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: { items: [{ id: "ProjectDetail.test-item-1", title: "项目状态", description: "**当前结论**", details: [] }] }, context_revision: 1, updated_at: null, pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
+    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: { items: [{ id: "ProjectDetail.test-item-1", title: "项目状态", description: "**当前结论**", details: [] }] }, context_revision: 1, updated_at: null, pending: true, pending_sessions: 1, pending_session_summaries: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
     const conclusion = await screen.findByText("当前结论");
     screen.getByRole("heading", { name: "项目摘要（1）" });
@@ -258,19 +260,66 @@ describe("ProjectDetail", () => {
     expect(screen.getByRole("button", { name: "复制摘要" })).toBeTruthy();
     expect(api.updateProjectContext).not.toHaveBeenCalled();
     expect(api.regenerateProjectContext).not.toHaveBeenCalled();
-    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: { items: [{ id: "ProjectDetail.test-item-2", title: "更新后的项目结论", description: "", details: [] }] }, context_revision: 2, updated_at: null, pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
-    vi.mocked(api.updateProjectContext).mockResolvedValue({project_id: "p1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "读取失败"}], remaining_pending: 1,});
+    vi.mocked(api.updateProjectContext).mockResolvedValue({project_id: "p1", status: "partial", context_revision: 1, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "读取失败"}], remaining_pending: 1, remaining_session_summaries: 1,});
     fireEvent.click(screen.getByRole("button", {name: "更新摘要"}));
-    await screen.findByText("更新后的项目结论");
+    await screen.findByText(/1 个会话待提取/);
+    await screen.findByText(/Session 1：读取失败/);
+    expect(screen.getByText("当前结论")).toBeTruthy();
     expect(api.updateProjectContext).toHaveBeenCalledWith("p1");
     expect(screen.getAllByRole("alert").some(el => el.textContent?.includes("Session 1：读取失败"))).toBe(true);
-    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: { items: [{ id: "ProjectDetail.test-item-3", title: "重新生成的结论", description: "", details: [] }] }, context_revision: 3, updated_at: null, pending: false, pending_sessions: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
-    vi.mocked(api.regenerateProjectContext).mockResolvedValue({project_id: "p1", status: "updated", context_revision: 3, updated_sessions: ["s1"], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0,});
+    vi.mocked(api.getProjectContextState).mockResolvedValue({project_id: "p1", summary: { items: [{ id: "ProjectDetail.test-item-3", title: "重新生成的结论", description: "", details: [] }] }, context_revision: 3, updated_at: null, pending: false, pending_sessions: 0, pending_session_summaries: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },});
+    vi.mocked(api.regenerateProjectContext).mockResolvedValue({project_id: "p1", status: "updated", context_revision: 3, updated_sessions: ["s1"], skipped_session_ids: [], failed_sessions: [], remaining_pending: 0, remaining_session_summaries: 0,});
     fireEvent.click(screen.getByRole("button", {name: "重新生成"}));
     await screen.findByText("重新生成的结论");
     expect(api.regenerateProjectContext).toHaveBeenCalledWith("p1");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByRole("button", {name: "更新摘要"})).toBeNull();
+  });
+
+  it("shows live summary progress for the current project while preserving its existing summary", async () => {
+    vi.mocked(api.getProjectDetail).mockResolvedValue(mockDetail());
+    const view = await api.getProjectContextState("p1");
+    vi.mocked(api.getProjectContextState).mockResolvedValue({
+      ...view,
+      summary: { items: [{ id: "existing", title: "已有项目摘要", description: "", details: [] }] },
+    });
+    const operation: OperationStatus = {
+      id: "project-update", kind: "summary", state: "running", agent: null,
+      targets: [{ kind: "project", id: "p1" }],
+      project_summary_progress: { processed: 0, remaining: 2, summary_saved: false },
+    };
+    vi.mocked(api.getOperationStatus).mockResolvedValue([
+      { ...operation, id: "other-update", targets: [{ kind: "project", id: "other" }] },
+      operation,
+    ]);
+    const first = render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    await screen.findByText("已处理 0 个会话，剩余 2 个");
+    expect(screen.getByText("已有项目摘要")).toBeTruthy();
+
+    operation.project_summary_progress = { processed: 1, remaining: 1, summary_saved: false };
+    await act(() => refreshOperationStatus(true));
+    await screen.findByText("已处理 1 个会话，剩余 1 个");
+
+    first.unmount();
+    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    await screen.findByText("已处理 1 个会话，剩余 1 个");
+    operation.project_summary_progress = { processed: 2, remaining: 0, summary_saved: false };
+    await act(() => refreshOperationStatus(true));
+    await screen.findByText("正在汇总项目摘要");
+
+    vi.mocked(api.getProjectContextState).mockResolvedValue({
+      ...view, pending: false, pending_session_summaries: 0, pending_sessions: 0,
+      summary: { items: [{ id: "new", title: "新项目摘要", description: "", details: [] }] },
+    });
+    operation.project_summary_progress = { processed: 2, remaining: 0, summary_saved: true };
+    await act(() => refreshOperationStatus(true));
+    await screen.findByText("项目摘要已保存");
+    await screen.findByText("新项目摘要");
+
+    vi.mocked(api.getOperationStatus).mockResolvedValue([]);
+    await act(() => refreshOperationStatus(true));
+    expect(screen.queryByText("项目摘要已保存")).toBeNull();
+    expect(screen.getByText("新项目摘要")).toBeTruthy();
   });
 
   it("adds skills to this project from the card", async () => {
@@ -431,7 +480,7 @@ describe("ProjectDetail", () => {
 
   it("retains the current summary on extraction failure and does not show an old project's late result", async () => {
     vi.mocked(api.getProjectDetail).mockImplementation(async id => ({...mockDetail(), project: {...mockDetail().project, id, name: id}}));
-    vi.mocked(api.getProjectContextState).mockImplementation(async id => ({project_id: id, summary: { items: [{ id: `${id}-item`, title: `${id} 当前结论`, description: "", details: [] }] }, context_revision: 1, updated_at: null, pending: true, pending_sessions: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },}));
+    vi.mocked(api.getProjectContextState).mockImplementation(async id => ({project_id: id, summary: { items: [{ id: `${id}-item`, title: `${id} 当前结论`, description: "", details: [] }] }, context_revision: 1, updated_at: null, pending: true, pending_sessions: 1, pending_session_summaries: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false },}));
     vi.mocked(api.updateProjectContext).mockRejectedValueOnce("提取失败");
     const {rerender} = render(<ProjectDetail projectId="p1" navigate={navigate} />);
     await screen.findByText("p1 当前结论");
@@ -444,7 +493,7 @@ describe("ProjectDetail", () => {
     await waitFor(() => expect(api.updateProjectContext).toHaveBeenCalledTimes(2));
     rerender(<ProjectDetail projectId="p2" navigate={navigate} />);
     await screen.findByText("p2 当前结论");
-    finish({project_id: "p1", status: "partial", context_revision: 2, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "旧项目结果"}], remaining_pending: 1,});
+    finish({project_id: "p1", status: "partial", context_revision: 1, updated_sessions: [], skipped_session_ids: [], failed_sessions: [{session_id: "s1", error: "旧项目结果"}], remaining_pending: 1, remaining_session_summaries: 1,});
     await waitFor(() => expect(screen.queryByText(/旧项目结果/)).toBeNull());
     expect(screen.getByText("p2 当前结论")).toBeTruthy();
   });

@@ -11,7 +11,7 @@ import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
 import { extractionSettingsResource } from "./settingsResources";
 
-const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "none"] as const;
+const EXTRACTION_AGENTS = ["codex", "claude_code", "pi", "antigravity", "none"] as const;
 
 export default function ContextSettings() {
   const settings = extractionSettingsResource.useValue("settings") ?? null;

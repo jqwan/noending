@@ -377,13 +377,13 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
     );
     let create_args = json!({"task":task,"content":{"title":"Protocol work","description":"Verify protocol"},"request_id":"create-work-item"});
     let item = client.ok("task_item_create", create_args.clone());
-    assert_eq!(item["completed"], false);
+    assert_eq!(item["details"], json!([]));
     assert_eq!(item["revision"], 1);
-    let update_args = json!({"task":task,"item_id":item["id"],"revision":1,"patch":{"details":["Protocol checks passed"],"completed":true},"request_id":"complete-work-item"});
-    let mut done = client.ok("task_item_update", update_args.clone());
-    done.as_object_mut().unwrap().remove("request_id");
-    assert_eq!(done["completed"], true);
-    assert_eq!(done["description"], "Verify protocol");
+    let update_args = json!({"task":task,"item_id":item["id"],"revision":1,"patch":{"details":["Protocol checks passed"]},"request_id":"update-work-item"});
+    let mut updated = client.ok("task_item_update", update_args.clone());
+    updated.as_object_mut().unwrap().remove("request_id");
+    assert_eq!(updated["details"], json!(["Protocol checks passed"]));
+    assert_eq!(updated["description"], "Verify protocol");
     assert_eq!(
         client.call(
             "task_item_update",
@@ -411,7 +411,7 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
     );
     assert_eq!(
         next.ok("task_items", json!({"task":task}))["items"],
-        json!([done])
+        json!([updated])
     );
     assert_eq!(
         next.ok("summary_config_get", json!({}))["runtime"]["model"],
@@ -419,19 +419,13 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
     );
     assert_eq!(next.ok("task_item_create", create_args)["id"], item["id"]);
     assert_eq!(next.ok("task_item_update", update_args)["revision"], 2);
-    let reopened = next.ok(
-        "task_item_update",
-        json!({"task":task,"item_id":item["id"],"revision":2,"patch":{"completed":false}}),
-    );
-    assert_eq!(reopened["details"], json!(["Protocol checks passed"]));
     let note = "保留旧结论并补充验证";
     let args =
         json!({"task":task,"item_id":item["id"],"text":note,"request_id":"append-work-progress"});
     let noted = next.ok("task_item_note", args.clone());
-    assert_eq!(noted["revision"], 4);
+    assert_eq!(noted["revision"], 3);
     assert_eq!(noted["details"], json!(["Protocol checks passed", note]));
-    assert_eq!(noted["completed"], false);
-    assert_eq!(next.ok("task_item_note", args)["revision"], 4);
+    assert_eq!(next.ok("task_item_note", args)["revision"], 3);
     let output = Command::new(env!("CARGO_BIN_EXE_ne"))
         .args([
             "--home",
@@ -455,7 +449,7 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         String::from_utf8_lossy(&output.stdout)
     );
     let replay: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(replay["data"]["revision"], 4);
+    assert_eq!(replay["data"]["revision"], 3);
     assert_eq!(
         next.call(
             "task_item_note",
@@ -468,7 +462,7 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
         json!(["Protocol checks passed", note])
     );
     let delete =
-        json!({"task":task,"item_id":item["id"],"revision":4,"request_id":"delete-work-item"});
+        json!({"task":task,"item_id":item["id"],"revision":3,"request_id":"delete-work-item"});
     next.ok("task_item_delete", delete.clone());
     next.ok("task_item_delete", delete);
     assert_eq!(
@@ -1049,6 +1043,84 @@ fn current_session_extraction_uses_scoped_mcp_pages_and_commits_without_an_agent
     assert_eq!(summary["data"]["pending_messages"], 0);
     assert_eq!(summary["data"]["processed_through_seq"], 1);
     assert_eq!(summary["data"]["summary"]["items"][0]["title"], "MCP goal");
+}
+
+#[test]
+fn project_extraction_over_mcp_reuses_session_submissions_after_disconnect() {
+    use noending_lib::domain::{Project, SessionMessageRole};
+    let f = Fixture::new();
+    let db = Db::open(&f.home.db_path).unwrap();
+    let project = Project {
+        id: "project-extraction".into(),
+        name: "Project extraction".into(),
+        git_id: None,
+        name_customized: false,
+        visibility: "normal".into(),
+        created_at: noending_lib::storage::now(),
+        updated_at: noending_lib::storage::now(),
+    };
+    db.upsert_project(&project).unwrap();
+    let (session, _) = support::seed_conversation(
+        &db,
+        Agent::Codex,
+        "project-extraction-native",
+        &[support::parsed_message(
+            "m1",
+            SessionMessageRole::User,
+            "Decision",
+        )],
+    );
+    db.tx(|tx| {
+        let path = noending_lib::storage::workspace::insert_workspace_path_conn(
+            tx,
+            f.root.to_str().unwrap(),
+            &project.id,
+        )?;
+        noending_lib::storage::session_paths::attach_session_workspace_path_conn(
+            tx,
+            &session.id,
+            Some(&path),
+        )
+    })
+    .unwrap();
+    drop(db);
+    let mut client = f.start();
+    let plan = client.ok("summary_context", json!({"kind":"project","id":project.id}));
+    let pending = &plan["pending_sessions"][0];
+    assert_eq!(pending["session_id"], session.id);
+    let page = client.ok(
+        "summary_input",
+        json!({"context_id":plan["context_id"],"input":pending["input"]}),
+    );
+    assert_eq!(page["records"][1]["record"]["content"], "Decision");
+    let receipt = client.ok("summary_submit", json!({
+        "context_id":plan["context_id"], "session_id":session.id,
+        "reply":{"status":"completed"},
+        "results":{format!("session-{}",session.id):{"summary":{"items":[{"title":"Saved decision","description":"","details":[]}]}}}
+    }));
+    assert_eq!(receipt["revision"], 1);
+    client.finish();
+
+    let mut client = f.start();
+    let prior = client.ok("summary_get", json!({"kind":"project","id":project.id}));
+    assert!(prior["summary"].is_null());
+    let next = client.ok("summary_context", json!({"kind":"project","id":project.id}));
+    assert_eq!(next["pending_sessions"], json!([]));
+    let input = client.ok(
+        "summary_input",
+        json!({"context_id":next["context_id"],"input":format!("project-{}.jsonl",project.id)}),
+    );
+    assert_eq!(
+        input["records"][1]["record"]["current_summary"]["items"][0]["title"],
+        "Saved decision"
+    );
+    let receipt = client.ok("summary_submit", json!({
+        "context_id":next["context_id"], "reply":{"status":"completed"},
+        "results":{format!("project-{}",project.id):{"summary":{"items":[{"title":"Project decision","description":"","details":[]}]}}}
+    }));
+    assert_eq!(receipt["context_revision"], 1);
+    assert_eq!(receipt["remaining_pending"], 0);
+    client.finish();
 }
 
 #[test]

@@ -82,6 +82,27 @@ fn fresh_database_has_the_current_identity_and_valid_structure() {
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .unwrap();
     assert_eq!(integrity, "ok");
+    let columns = db
+        .read()
+        .prepare("SELECT name FROM pragma_table_info('task_items') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "id",
+            "task_id",
+            "title",
+            "description",
+            "details",
+            "revision",
+            "created_at",
+            "updated_at",
+        ]
+    );
     let sources = db.list_ingest_sources().unwrap();
     assert!(!sources.is_empty());
     assert!(sources.iter().all(|source| source.origin == "default"));

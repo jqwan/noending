@@ -167,9 +167,6 @@
 
 /* ---------- Right rail (Sessions / Activity) ---------- */
 
-button.btn.task-item-status.is-completed,
-button.btn.task-item-status.is-completed:hover:not(:disabled) { color: var(--success); }
-
 .task-item-editor { min-width: 0; display: flex; flex-direction: column; gap: var(--space-icon); }
 .task-item-editor input,
 .task-item-editor textarea {

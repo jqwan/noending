@@ -373,15 +373,20 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
         },
     )
     .unwrap();
+    let patch = f.root.join("receipt-work.json");
+    std::fs::write(&patch, r#"{"description":"Verified scope"}"#).unwrap();
+    let patch = patch.to_str().unwrap();
     let args = [
         "task",
         "item",
-        "complete",
+        "update",
         task,
         "--item-id",
         &item.id,
         "--revision",
         "99",
+        "--file",
+        patch,
         "--request-id",
         "future-revision",
     ];
@@ -393,12 +398,14 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
     f.call(&[
         "task",
         "item",
-        "complete",
+        "update",
         task,
         "--item-id",
         &item.id,
         "--revision",
         "1",
+        "--file",
+        patch,
     ])
     .unwrap();
     assert_eq!(f.call(&args).unwrap_err().code, "stale_result");
@@ -406,12 +413,14 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
         f.call(&[
             "task",
             "item",
-            "reopen",
+            "update",
             task,
             "--item-id",
             &item.id,
             "--revision",
             "2",
+            "--file",
+            patch,
             "--request-id",
             "fresh-edit"
         ])
@@ -1088,7 +1097,7 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
             "--provider",
             "unsupported-provider",
         ],
-        vec!["summary", "config", "set", "--agent", "antigravity"],
+        vec!["summary", "config", "set", "--agent", "qoder"],
         vec!["summary", "config", "set", "--agent", "unknown-agent"],
         vec![
             "summary", "config", "set", "--agent", "none", "--model", "unusable",
@@ -1099,6 +1108,20 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
     assert_eq!(
         show()["runtime"],
         json!({"model":"same-agent-model","provider":null,"effort":"high"})
+    );
+    f.call(&[
+        "summary",
+        "config",
+        "set",
+        "--agent",
+        "antigravity",
+        "--model",
+        "gemini-test",
+    ])
+    .unwrap();
+    assert_eq!(
+        show(),
+        json!({"agent":"antigravity","runtime":{"model":"gemini-test","provider":null,"effort":null}})
     );
     f.call(&["summary", "config", "set", "--agent", "none"])
         .unwrap();
@@ -1187,7 +1210,7 @@ fn cli_work_items_use_independent_revisions_and_receipts_without_rewriting_summa
     let created = f.call(&args).unwrap();
     assert_eq!(f.call(&args).unwrap(), created);
     let id = created["id"].as_str().unwrap();
-    assert_eq!(created["completed"], false);
+    assert_eq!(created["details"], json!([]));
     std::fs::write(&file, r#"{"details":["验证通过"]}"#).unwrap();
     let updated = f
         .call(&[
@@ -1204,54 +1227,45 @@ fn cli_work_items_use_independent_revisions_and_receipts_without_rewriting_summa
         ])
         .unwrap();
     assert_eq!(updated["revision"], 2);
-    let completed = f
+    assert_eq!(updated["details"], json!(["验证通过"]));
+    let mut noted = f
         .call(&[
             "task",
             "item",
-            "complete",
+            "note",
+            &task,
+            "--item-id",
+            id,
+            "--text",
+            "Windows 待验证",
+            "--request-id",
+            "note-work",
+        ])
+        .unwrap();
+    assert_eq!(noted["revision"], 3);
+    assert_eq!(noted["details"], json!(["验证通过", "Windows 待验证"]));
+    std::fs::write(&file, r#"{"description":"旧草稿"}"#).unwrap();
+    assert_eq!(
+        f.call(&[
+            "task",
+            "item",
+            "update",
             &task,
             "--item-id",
             id,
             "--revision",
             "2",
-            "--request-id",
-            "complete-work",
-        ])
-        .unwrap();
-    assert_eq!(completed["completed"], true);
-    assert_eq!(completed["details"], json!(["验证通过"]));
-    assert_eq!(
-        f.call(&[
-            "task",
-            "item",
-            "reopen",
-            &task,
-            "--item-id",
-            id,
-            "--revision",
-            "2"
+            "--file",
+            file.to_str().unwrap(),
         ])
         .unwrap_err()
         .code,
         "stale_result"
     );
-    let mut reopened = f
-        .call(&[
-            "task",
-            "item",
-            "reopen",
-            &task,
-            "--item-id",
-            id,
-            "--revision",
-            "3",
-        ])
-        .unwrap();
-    reopened.as_object_mut().unwrap().remove("request_id");
-    assert_eq!(reopened["completed"], false);
+    noted.as_object_mut().unwrap().remove("request_id");
     assert_eq!(
         f.call(&["task", "item", "list", &task]).unwrap()["items"],
-        json!([reopened])
+        json!([noted])
     );
     let summary = f.call(&["task", "summary", &task]).unwrap();
     assert_eq!(summary["revision"], 0);
@@ -1264,7 +1278,7 @@ fn cli_work_items_use_independent_revisions_and_receipts_without_rewriting_summa
         "--item-id",
         id,
         "--revision",
-        "4",
+        "3",
         "--request-id",
         "delete-work",
     ];

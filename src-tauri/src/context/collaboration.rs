@@ -18,10 +18,17 @@ pub(super) fn guard(conn: &Connection, id: &str) -> Result<Value> {
             |r| r.get(0),
         )
         .optional()?;
-    let mut st = conn.prepare(
-        "SELECT id,title,description,completed FROM task_items WHERE task_id=?1 ORDER BY id",
-    )?;
-    let items = st.query_map([id], |r| Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"completed":r.get::<_,bool>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let mut st =
+        conn.prepare("SELECT id,title,description FROM task_items WHERE task_id=?1 ORDER BY id")?;
+    let items = st
+        .query_map([id], |row| {
+            Ok(json!({
+                "id":row.get::<_,String>(0)?,
+                "title":row.get::<_,String>(1)?,
+                "description":row.get::<_,String>(2)?,
+            }))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(
         json!({"task_id":id,"title":task.title,"description":task.description,"task_items":items,
         "projects":task_projects(conn,id)?,"room_id":room,"revision":state.context_revision,"input_revision":state.input_revision}),
@@ -49,7 +56,7 @@ impl Snapshot {
             regenerate,
         })
     }
-    fn validate(&self, conn: &Connection) -> Result<()> {
+    pub(super) fn validate(&self, conn: &Connection) -> Result<()> {
         if guard(conn, &self.id)? != self.guard {
             return Err(stale());
         }
@@ -188,104 +195,40 @@ pub(super) fn view(db: &Db, id: &str) -> Result<WorkstreamContextView> {
     Ok(view)
 }
 
-pub(super) fn extract(
-    db: &Db,
-    id: &str,
-    home: Option<&crate::workspace::home::NoEndingHome>,
-    regenerate: bool,
-    scope: Option<&interactive::Scope>,
-    runner: &mut ContextRunner<'_>,
-) -> Result<WorkstreamUpdateOutcome> {
-    with_operation(db, id, home, "workstream", scope, |launch, operation, _| {
-        let snapshot = if let Some(scope) = &launch.scope {
-            scope.collaboration_snapshot()?
-        } else {
-            let conn = db.read();
-            let tx = conn.unchecked_transaction()?;
-            let s = Snapshot::read(&tx, id, regenerate)?;
-            tx.commit()?;
-            s
-        };
-        let before = view(db, id)?;
-        if snapshot.through == 0 || (!regenerate && !before.pending) {
-            return Ok((
-                WorkstreamUpdateOutcome {
-                    workstream_id: id.into(),
-                    status: ContextUpdateStatus::NoChange,
-                    context_revision: before.context_revision,
-                    processed_through_seq: before.processed_through_seq,
-                    remaining_pending: before.pending_messages,
-                },
-                "no_change",
-            ));
-        }
-        let files = files_for(operation, &format!("task-{id}"), &[])?;
-        files.inputs.lock().unwrap().insert(
-            format!("task-{id}.jsonl"),
-            query::Input::Collaboration {
-                snapshot: snapshot.clone(),
-            },
-        );
-        let prompt = summary::collaboration_prompt(
-            &files.batch_input("task", id),
-            &files.batch_result("task", id),
-            &launch.templates,
-        );
-        let raw = run_context_once(db, launch, &prompt, &files, operation, runner)?;
-        operation.set_stage("output_validation");
-        let skipped = match summary::parse_session_reply(&raw).map_err(invalid)? {
-            SessionReply::Completed {} => false,
-            SessionReply::Skipped { .. } => true,
-            SessionReply::Failed { .. } => {
-                return Err(AppError::context(ContextUpdateError::ModelCallFailed(
-                    "协作摘要提取失败".into(),
-                )))
-            }
-        };
-        let summary = if skipped {
-            files
-                .require_absent(&files.batch_result("task", id))
-                .map_err(invalid)?;
-            query::target_summary(&db.read(), "task", id, before.context_revision)?
-                .unwrap_or_default()
-        } else {
-            read_summary_result(
-                db,
-                &files,
-                &files.batch_result("task", id),
-                "task",
-                id,
-                before.context_revision,
-            )?
-            .summary
-        };
-        operation.set_stage("database_commit");
+impl Snapshot {
+    pub(super) fn needs_update(&self, db: &Db) -> Result<bool> {
+        Ok(self.through > 0 && (self.regenerate || freshness(&db.read(), &self.id)?.pending))
+    }
+
+    pub(super) fn commit(
+        &self,
+        db: &Db,
+        summary: &crate::domain::Summary,
+        status: ContextUpdateStatus,
+    ) -> Result<WorkstreamUpdateOutcome> {
         let revision = db.tx(|tx| {
-            snapshot.validate(tx)?;
-            commit_workstream_summary_conn(tx, id, &summary, snapshot.through)
+            self.validate(tx)?;
+            commit_workstream_summary_conn(tx, &self.id, summary, self.through)
         })?;
-        let after = view(db, id)?;
-        Ok((
-            WorkstreamUpdateOutcome {
-                workstream_id: id.into(),
-                status: if skipped {
-                    ContextUpdateStatus::Skipped
-                } else {
-                    ContextUpdateStatus::Updated
-                },
-                context_revision: revision,
-                processed_through_seq: snapshot.through,
-                remaining_pending: after.pending_messages,
-            },
-            if skipped { "skipped" } else { "updated" },
-        ))
-    })
+        let after = view(db, &self.id)?;
+        Ok(WorkstreamUpdateOutcome {
+            workstream_id: self.id.clone(),
+            status,
+            context_revision: revision,
+            processed_through_seq: self.through,
+            remaining_pending: after.pending_messages,
+        })
+    }
+
+    pub(super) fn revision(&self) -> i64 {
+        self.guard["revision"].as_i64().unwrap()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::tests::{append, ServiceFixture};
+    use crate::context::tests::{append, submit_reply, submit_result, ServiceFixture};
     use std::path::Path;
 
     pub(super) fn room(f: &ServiceFixture) -> String {
@@ -300,13 +243,14 @@ mod tests {
     pub(super) fn message(f: &ServiceFixture, id: &str, text: &str) -> i64 {
         f.db().write().query_row("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) SELECT ?2,?1,?1,COALESCE(MAX(seq),0)+1,'text',?3,?4 FROM collaboration_messages WHERE room_id=?1 RETURNING seq",params![id,crate::storage::new_id(),text,crate::storage::now()],|r|r.get(0)).unwrap()
     }
-    fn result(dir: &Path, id: &str, title: &str) {
-        std::fs::write(
-            dir.join(format!("task-{id}.result.json")),
-            json!({"summary":{"items":[{"title":title,"description":"","details":[]}]}})
-                .to_string(),
+    fn result(dir: &Path, id: &str, title: &str) -> crate::cli::CliResult<Value> {
+        submit_result(
+            dir,
+            "task",
+            id,
+            json!({"summary":{"items":[{"title":title,"description":"","details":[]}]}}),
+            false,
         )
-        .unwrap();
     }
     fn read(dir: &Path, id: &str) -> Vec<Value> {
         tools::read_input(&dir.join(format!("task-{id}.jsonl")))
@@ -330,10 +274,13 @@ mod tests {
         let content = "协作🌱".repeat(1400);
         message(&f, &id, &content);
         message(&f, &other, "其他任务的消息");
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             let rows = read(dir, &id);
             assert_eq!(rows[0]["type"], "collaboration");
-            assert_eq!(rows[0]["task_items"][0]["id"], item.id);
+            assert_eq!(
+                rows[0]["task_items"],
+                json!([{"id":item.id,"title":"独立执行事项","description":""}])
+            );
             let messages: Vec<_> = rows.iter().filter(|r| r["type"] == "message").collect();
             assert_eq!(messages.len(), 3);
             assert_eq!(
@@ -345,10 +292,10 @@ mod tests {
             );
             assert_eq!(messages[2]["last_part"], true);
             assert!(rows.iter().all(|r| r["content"] != "其他任务的消息"));
-            result(dir, &id, "已形成共识");
-            Ok(r#"{"status":"completed"}"#.into())
+            result(dir, &id, "已形成共识").unwrap();
+            Ok(())
         };
-        let out = extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).unwrap();
+        let out = extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).unwrap();
         assert_eq!(out.remaining_pending, 0);
         assert_eq!(
             view(f.db(), &id).unwrap().summary.unwrap().items[0].title,
@@ -376,35 +323,35 @@ mod tests {
         let f = ServiceFixture::new();
         let id = room(&f);
         message(&f, &id, "初始决定");
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             read(dir, &id);
             message(&f, &id, "晚到的修正");
-            result(dir, &id, "初始决定");
-            Ok(r#"{"status":"completed"}"#.into())
+            result(dir, &id, "初始决定").unwrap();
+            Ok(())
         };
-        let out = extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).unwrap();
+        let out = extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).unwrap();
         assert_eq!(out.remaining_pending, 1);
         assert_eq!(out.processed_through_seq, 1);
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             let rows = read(dir, &id);
             assert_eq!(rows[0]["current_summary"]["items"][0]["title"], "初始决定");
             let messages: Vec<_> = rows.iter().filter(|r| r["type"] == "message").collect();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0]["content"], "晚到的修正");
-            result(dir, &id, "修正结论");
-            Ok(r#"{"status":"completed"}"#.into())
+            result(dir, &id, "修正结论").unwrap();
+            Ok(())
         };
-        extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).unwrap();
+        extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).unwrap();
         f.db().write().execute("INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES('second',?1,'stopped',?2)",params![id,crate::storage::now()]).unwrap();
         f.db().write().execute("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) VALUES('second-message',?1,'second',3,'text','第二次协作',?2)",params![id,crate::storage::now()]).unwrap();
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             let rows = read(dir, &id);
             assert!(rows[0]["current_summary"].is_null());
             assert_eq!(rows.iter().filter(|r| r["type"] == "message").count(), 3);
-            result(dir, &id, "跨次协作结论");
-            Ok(r#"{"status":"completed"}"#.into())
+            result(dir, &id, "跨次协作结论").unwrap();
+            Ok(())
         };
-        extract(f.db(), &id, Some(&f.home()), true, None, &mut runner).unwrap();
+        extract_task(f.db(), &id, Some(&f.home()), true, &mut runner).unwrap();
         assert!(!view(f.db(), &id).unwrap().pending);
     }
     #[test]
@@ -412,10 +359,9 @@ mod tests {
         let f = ServiceFixture::new();
         let task =
             crate::workspace::workstream::create_workstream(f.db(), "单人任务", "", &[]).unwrap();
-        let mut never =
-            |_: Option<&CliExtractor>, _: &str, _: &Path| panic!("没有协作材料不启动提取");
+        let mut never = |_: &CliExtractor, _: &str, _: &Path| panic!("没有协作材料不启动提取");
         assert_eq!(
-            extract(f.db(), &task.id, Some(&f.home()), true, None, &mut never)
+            extract_task(f.db(), &task.id, Some(&f.home()), true, &mut never)
                 .unwrap()
                 .status,
             ContextUpdateStatus::NoChange
@@ -423,15 +369,22 @@ mod tests {
         let id = room(&f);
         assert!(!view(f.db(), &id).unwrap().pending);
         message(&f, &id, "收到，谢谢");
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             read(dir, &id);
-            Ok(r#"{"status":"skipped","reason":"no_summary_content"}"#.into())
+            submit_reply(
+                dir,
+                None,
+                json!({"status":"skipped","reason":"no_summary_content"}),
+                json!({}),
+            )
+            .unwrap();
+            Ok(())
         };
-        let out = extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).unwrap();
+        let out = extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).unwrap();
         assert_eq!(out.status, ContextUpdateStatus::Skipped);
         assert!(view(f.db(), &id).unwrap().summary.is_none());
         assert!(!view(f.db(), &id).unwrap().pending);
-        extract(f.db(), &id, Some(&f.home()), false, None, &mut never).unwrap();
+        extract_task(f.db(), &id, Some(&f.home()), false, &mut never).unwrap();
     }
     #[test]
     fn failed_or_invalid_outputs_keep_previous_summary_and_cursor_and_changed_background_rejects_commit(
@@ -439,29 +392,33 @@ mod tests {
         let f = ServiceFixture::new();
         let id = room(&f);
         message(&f, &id, "第一条有效结论");
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             read(dir, &id);
-            result(dir, &id, "保留结论");
-            Ok(r#"{"status":"completed"}"#.into())
+            result(dir, &id, "保留结论").unwrap();
+            Ok(())
         };
-        extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).unwrap();
+        extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).unwrap();
         message(&f, &id, "后续材料");
         for reply in [
             r#"{"status":"failed","error":"无法提取"}"#,
             r#"{"status":"completed"}"#,
             r#"{"status":"partial","failed_sessions":[],"skipped_session_ids":[]}"#,
         ] {
-            let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+            let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
                 read(dir, &id);
-                Ok(reply.into())
+                assert!(
+                    submit_reply(dir, None, serde_json::from_str(reply).unwrap(), json!({}))
+                        .is_err()
+                );
+                Ok(())
             };
-            assert!(extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).is_err());
+            assert!(extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).is_err());
             let v = view(f.db(), &id).unwrap();
             assert_eq!(v.context_revision, 1);
             assert_eq!(v.processed_through_seq, 1);
             assert_eq!(v.summary.unwrap().items[0].title, "保留结论");
         }
-        let mut runner = |_: Option<&CliExtractor>, _: &str, dir: &Path| {
+        let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
             read(dir, &id);
             crate::workspace::workstream::update_workstream_fields(
                 f.db(),
@@ -470,10 +427,13 @@ mod tests {
                 None,
             )
             .unwrap();
-            result(dir, &id, "已过期的结论");
-            Ok(r#"{"status":"completed"}"#.into())
+            assert_eq!(
+                result(dir, &id, "已过期的结论").unwrap_err().code,
+                "stale_result"
+            );
+            Ok(())
         };
-        assert!(extract(f.db(), &id, Some(&f.home()), false, None, &mut runner).is_err());
+        assert!(extract_task(f.db(), &id, Some(&f.home()), false, &mut runner).is_err());
         assert_eq!(view(f.db(), &id).unwrap().context_revision, 1);
     }
 }
@@ -481,7 +441,9 @@ mod tests {
 #[cfg(test)]
 mod interactive_tests {
     use super::*;
+    use crate::context::summary::Submission;
     use crate::context::tests::ServiceFixture;
+    use std::collections::HashMap;
     #[test]
     fn caller_can_extract_collaboration_without_agent_configuration_and_search_does_not_replace_complete_reading(
     ) {
@@ -507,8 +469,11 @@ mod interactive_tests {
             f.db(),
             &f.home(),
             cid,
-            json!({"status":"completed"}),
-            results.clone()
+            Submission {
+                session_id: None,
+                reply: json!({"status":"completed"}),
+                results: results.clone()
+            }
         )
         .is_err());
         let mut cursor = 0;
@@ -532,8 +497,11 @@ mod interactive_tests {
             f.db(),
             &f.home(),
             cid,
-            json!({"status":"completed"}),
-            results,
+            Submission {
+                session_id: None,
+                reply: json!({"status":"completed"}),
+                results,
+            },
         )
         .unwrap();
         assert_eq!(out["remaining_pending"], 1);

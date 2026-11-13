@@ -68,7 +68,10 @@ impl Connection {
     }
 }
 
-pub(crate) fn serve_pending(connection: &Connection, dispatch: impl Fn(Value) -> CliResult<Value>) {
+pub(crate) fn serve_pending(
+    connection: &Connection,
+    mut dispatch: impl FnMut(Value) -> CliResult<Value>,
+) {
     let Ok(entries) = std::fs::read_dir(&connection.directory) else {
         return;
     };

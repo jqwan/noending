@@ -36,6 +36,13 @@ pub enum State {
     Queued,
     Running,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectSummaryProgress {
+    pub processed: usize,
+    pub remaining: usize,
+    pub summary_saved: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationStatus {
     pub id: String,
@@ -43,6 +50,8 @@ pub struct OperationStatus {
     pub state: State,
     pub targets: Vec<Target>,
     pub agent: Option<Agent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_summary_progress: Option<ProjectSummaryProgress>,
 }
 impl OperationStatus {
     pub fn sync(kind: &str, id: &str, agent: Option<Agent>) -> Self {
@@ -52,6 +61,7 @@ impl OperationStatus {
             state: State::Running,
             targets: vec![Target::new(kind, id)],
             agent,
+            project_summary_progress: None,
         }
     }
     pub fn source(db: &Db, id: &str, agent: Option<Agent>) -> Result<Self> {
@@ -89,6 +99,7 @@ impl OperationStatus {
             state: State::Running,
             targets: vec![Target::new(kind, id)],
             agent: None,
+            project_summary_progress: None,
         }
     }
 }
@@ -125,6 +136,17 @@ impl Operation {
             }
         }
         self.publish()
+    }
+    pub fn set_project_summary_progress(&mut self, progress: ProjectSummaryProgress) -> Result<()> {
+        if self.status.project_summary_progress == Some(progress) {
+            return Ok(());
+        }
+        let previous = self.status.project_summary_progress.replace(progress);
+        if let Err(error) = self.publish() {
+            self.status.project_summary_progress = previous;
+            return Err(error);
+        }
+        Ok(())
     }
     fn publish(&self) -> Result<()> {
         let temp = self.directory.join(format!("{}.tmp", self.status.id));

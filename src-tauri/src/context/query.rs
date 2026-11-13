@@ -1,28 +1,25 @@
 //! Scoped database reads. Guards contain only identities and progress; bodies
 //! are selected when the Agent requests a page, never exported or cached.
-use super::{stale, summary::ExtractionFiles, SessionSnapshot};
+use super::{stale, SessionSnapshot};
 use crate::error::{other, Result};
 use crate::storage::Db;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(super) enum Input {
+pub(super) enum Input<'a> {
     Collaboration {
-        snapshot: super::collaboration::Snapshot,
+        snapshot: &'a super::collaboration::Snapshot,
     },
     Session {
-        snapshot: SessionSnapshot,
+        snapshot: &'a SessionSnapshot,
         include_summary: bool,
-        full_history: bool,
     },
     Batch {
-        kind: String,
-        id: String,
-        header: Value,
+        id: &'a str,
+        header: &'a Value,
         revision: i64,
         regenerate: bool,
-        sessions: Vec<SessionSnapshot>,
+        sessions: &'a [SessionSnapshot],
     },
 }
 
@@ -38,13 +35,6 @@ pub(super) struct TaskState {
 }
 pub(super) fn task_state(conn: &Connection, id: &str) -> Result<TaskState> {
     Ok(conn.query_row("SELECT context_revision,input_revision,consumed_input_revision,processed_through_seq FROM workstream_context_state WHERE workstream_id=?1", [id], |r| Ok(TaskState { context_revision:r.get(0)?, input_revision:r.get(1)?, consumed_input_revision:r.get(2)?, through_seq:r.get(3)? })).optional()?.unwrap_or(TaskState {context_revision:0,input_revision:0,consumed_input_revision:0, through_seq:0}))
-}
-pub(super) struct ProjectState {
-    pub revision: i64,
-    pub input_fingerprint: String,
-}
-pub(super) fn project_state(conn: &Connection, id: &str) -> Result<ProjectState> {
-    Ok(conn.query_row("SELECT context_revision,input_fingerprint FROM project_context_state WHERE project_id=?1", [id], |r| Ok(ProjectState {revision:r.get(0)?,input_fingerprint:r.get(1)?})).optional()?.unwrap_or(ProjectState {revision:0,input_fingerprint:String::new()}))
 }
 pub(super) fn target_summary(
     conn: &Connection,
@@ -71,17 +61,12 @@ pub(super) fn target_summary(
     Ok(row.map(|r| r.1).filter(|s| !s.is_empty()))
 }
 
-impl Input {
+impl Input<'_> {
     pub fn count(&self, conn: &Connection) -> Result<usize> {
         match self {
             Self::Collaboration { snapshot } => snapshot.count(conn),
-            Self::Session {
-                snapshot,
-                full_history,
-                ..
-            } => {
-                snapshot.validate(conn, None)?;
-                let from = if *full_history { 0 } else { snapshot.from };
+            Self::Session { snapshot, .. } => {
+                let from = snapshot.from;
                 Ok(crate::storage::message_query::part_count(
                     conn,
                     &snapshot.session.id,
@@ -95,7 +80,6 @@ impl Input {
     pub fn page(
         &self,
         db: &Db,
-        files: &ExtractionFiles,
         cursor: usize,
         limit: usize,
         search: Option<&str>,
@@ -113,19 +97,19 @@ impl Input {
             Self::Session {
                 snapshot,
                 include_summary,
-                full_history,
-            } => session_page(
-                &tx,
-                snapshot,
-                *include_summary,
-                *full_history,
-                cursor,
-                limit,
-                search,
-                total,
-            )?,
+            } => {
+                snapshot.validate(&tx)?;
+                session_page(
+                    &tx,
+                    snapshot,
+                    *include_summary,
+                    cursor,
+                    limit,
+                    search,
+                    total,
+                )?
+            }
             Self::Batch {
-                kind,
                 id,
                 header,
                 revision,
@@ -135,15 +119,15 @@ impl Input {
                 if search.is_some() {
                     return Err(other("搜索仅用于消息输入"));
                 }
-                let summary = target_summary(&tx, kind, id, *revision)?;
-                for s in sessions {
-                    s.validate(&tx, None)?;
+                let summary = target_summary(&tx, "project", id, *revision)?;
+                for s in *sessions {
+                    s.validate(&tx)?;
                 }
                 let end = (cursor + limit).min(total);
                 let mut records = Vec::new();
                 for position in cursor..end {
                     let record = if position == 0 {
-                        let mut header = header.clone();
+                        let mut header = (*header).clone();
                         header["current_summary"] = if *regenerate {
                             Value::Null
                         } else {
@@ -153,18 +137,14 @@ impl Input {
                             json!(summary.as_ref().map(|s| s.identities()).unwrap_or_default());
                         header
                     } else if position == total - 1 {
-                        json!({"type":"end","marker":format!("END_OF_{}_INPUT",kind.to_uppercase())})
+                        json!({"type":"end","marker":"END_OF_PROJECT_INPUT"})
                     } else {
                         let s = &sessions[position - 1];
-                        let need_update = s.latest > s.from;
                         let current = target_summary(&tx, "session", &s.session.id, s.revision())?;
                         json!({"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
                             "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at,
-                            "need_update":need_update,"current_summary":current,
-                            "item_identities":current.as_ref().map(|s|s.identities()).unwrap_or_default(),
-                            "history_input_file":regenerate.then(||files.history_session_input(&s.session.id)),
-                            "input_file":need_update.then(||files.session_input(&s.session.id)),
-                            "result_file":need_update.then(||files.session_result(&s.session.id))})
+                            "current_summary":current,
+                            "item_identities":current.as_ref().map(|s|s.identities()).unwrap_or_default()})
                     };
                     records.push(json!({"cursor":position,"record":record}));
                 }
@@ -180,20 +160,19 @@ fn session_page(
     conn: &Connection,
     s: &SessionSnapshot,
     include_summary: bool,
-    full_history: bool,
     cursor: usize,
     limit: usize,
     search: Option<&str>,
     total: usize,
 ) -> Result<Value> {
-    let from = if full_history { 0 } else { s.from };
+    let from = s.from;
     let mut records = Vec::new();
     if search.is_none() && cursor == 0 {
         let current = target_summary(conn, "session", &s.session.id, s.revision())?;
         records.push(json!({"cursor":0,"record":{"type":"session","session_id":s.session.id,"project_id":s.session.project_id,"title":s.session.title,
             "working_directory":s.session.cwd,"agent":s.session.agent,"current_summary":if include_summary {current.as_ref()} else {None},
             "item_identities":current.as_ref().map(|s|s.identities()).unwrap_or_default(),
-            "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":if full_history {None} else {s.summary_through_at.as_deref()},
+            "started_at":s.session.started_at,"last_message_at":s.last_message_at(),"summary_through_at":s.summary_through_at.as_deref(),
             "from_sequence":from+1,"through_sequence":s.latest,"message_count":s.latest-from}}));
     }
     records.extend(crate::storage::message_query::parts(

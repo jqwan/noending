@@ -1,21 +1,20 @@
-//! Run-scoped CLI bridge. The app owns query scopes and commits; the helper never
-//! opens SQLite. Connections disappear with the extraction, including on error.
-use super::summary::{self, BatchReply, ExtractionFiles, SessionReply};
+//! Run-scoped CLI bridge. The extraction Agent submits through the same scope
+//! as an autonomous session. A process exit can only report what was saved.
+use super::{
+    interactive::Scope,
+    prompts::PromptTemplates,
+    summary::{RunDirectory, Submission, TIME_RULES},
+};
 use crate::error::{other, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
+#[cfg(test)]
+use serde_json::Value;
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Request {
-    token: String,
-    command: Command,
-}
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
@@ -31,228 +30,95 @@ enum Command {
         cursor: usize,
         limit: usize,
     },
+    Submit {
+        submission: Submission,
+    },
 }
 
-struct Bridge<'a> {
-    db: &'a crate::storage::Db,
-    files: &'a ExtractionFiles,
-    token: String,
-    // Pagination acknowledgement proves delivery, not semantic understanding.
-    delivered: Mutex<HashMap<String, HashSet<usize>>>,
-}
-impl Bridge<'_> {
-    fn dispatch(&self, request: Request) -> Result<Value> {
-        if request.token != self.token {
-            return Err(other("当前提取连接无效"));
-        }
-        match request.command {
-            Command::Inputs => {
-                let inputs = self.files.inputs.lock().unwrap();
-                let mut names: Vec<_> = inputs
-                    .iter()
-                    .map(|(name, input)| {
-                        Ok(json!({"name":name,"record_count":input.count(&self.db.read())?}))
-                    })
-                    .collect::<Result<_>>()?;
-                names.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-                Ok(json!({"inputs":names}))
-            }
-            Command::Read {
-                name,
-                cursor,
-                limit,
-            } => self.page(&name, cursor, limit, None),
-            Command::Search {
-                name,
-                query,
-                cursor,
-                limit,
-            } => {
-                if query.trim().is_empty() {
-                    return Err(other("搜索内容不能为空"));
-                }
-                self.page(&name, cursor, limit, Some(&query))
-            }
-        }
-    }
-    fn page(&self, name: &str, cursor: usize, limit: usize, query: Option<&str>) -> Result<Value> {
-        if !(1..=50).contains(&limit) {
-            return Err(other("limit 必须在 1 到 50 之间"));
-        }
-        let inputs = self.files.inputs.lock().unwrap();
-        let input = inputs
-            .get(name)
-            .ok_or_else(|| other("输入不在本次提取范围内"))?;
-        let page = input.page(self.db, self.files, cursor, limit, query)?;
-        if query.is_none() {
-            self.delivered
-                .lock()
-                .unwrap()
-                .entry(name.into())
-                .or_default()
-                .extend(
-                    page["records"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|r| r["cursor"].as_u64().unwrap() as usize),
-                );
-        }
-        Ok(page)
-    }
-
-    fn validate(&self, reply: &Value) -> Result<()> {
-        let (kind, id) = self
-            .files
-            .target
-            .split_once('-')
-            .ok_or_else(|| other("提取目标无效"))?;
-        let raw = serde_json::to_string(reply)?;
-        let mut excluded = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut failed = false;
-        let target_skipped = if kind == "session" || kind == "task" {
-            match summary::parse_session_reply(&raw)? {
-                SessionReply::Completed {} => false,
-                SessionReply::Skipped { .. } => {
-                    if kind == "session" {
-                        skipped.insert(id.to_string());
-                    }
-                    true
-                }
-                SessionReply::Failed { .. } => {
-                    failed = true;
-                    false
-                }
-            }
-        } else {
-            let (errors, ids, target_skipped) = match summary::parse_batch_reply(&raw)? {
-                BatchReply::Completed {
-                    skipped_session_ids,
-                } => (vec![], skipped_session_ids, false),
-                BatchReply::Partial {
-                    failed_sessions,
-                    skipped_session_ids,
-                } => (failed_sessions, skipped_session_ids, false),
-                BatchReply::Skipped {
-                    skipped_session_ids,
-                    ..
-                } => (vec![], skipped_session_ids, true),
-                BatchReply::Failed { .. } => {
-                    failed = true;
-                    (vec![], vec![], false)
-                }
-            };
-            for item in errors {
-                if item.error.trim().is_empty() || !excluded.insert(item.session_id) {
-                    return Err(other("失败会话无效或重复"));
-                }
-            }
-            for sid in ids {
-                if excluded.contains(&sid) || !skipped.insert(sid) {
-                    return Err(other("跳过会话重复"));
-                }
-            }
-            target_skipped
-        };
-        let inputs = self.files.inputs.lock().unwrap();
-        let targets: HashSet<_> = inputs
-            .keys()
-            .filter_map(|name| {
-                name.strip_prefix("session-")
-                    .and_then(|s| s.strip_suffix(".jsonl"))
-            })
-            .collect();
-        if excluded
-            .iter()
-            .chain(skipped.iter())
-            .any(|id| !targets.contains(id.as_str()))
-        {
-            return Err(other("未知会话 ID"));
-        }
-        let target = self.files.batch_result(kind, id);
-        if failed || target_skipped {
-            self.files.require_absent(&target)?;
-        } else {
-            self.files.read_result(&target)?;
-        }
-        if !failed {
-            for sid in &targets {
-                let result = self.files.session_result(sid);
-                if excluded.contains(*sid) || skipped.contains(*sid) {
-                    self.files.require_absent(&result)?;
-                } else {
-                    self.files.read_result(&result)?;
-                }
-            }
-            let delivered = self.delivered.lock().unwrap();
-            for (name, input) in inputs.iter() {
-                let failed_input = excluded.iter().any(|sid| {
-                    name == &format!("session-{sid}.jsonl")
-                        || name == &format!("history-session-{sid}.jsonl")
-                });
-                if failed_input {
-                    continue;
-                }
-                if delivered.get(name).map_or(0, HashSet::len) != input.count(&self.db.read())? {
-                    return Err(other(format!("输入尚未完整读取：{name}")));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The Agent runs on the caller thread. Only scoped requests touch the bridge;
-/// Filesystem IPC works inside Agent workspace sandboxes without network access.
-/// All durable writes remain in the existing snapshot-guarded transaction.
 pub(super) fn run(
     db: &crate::storage::Db,
-    files: &ExtractionFiles,
-    requirements: &str,
-    invoke: impl FnOnce(&str) -> Result<String>,
-) -> Result<String> {
+    extraction: &mut Scope,
+    home: &crate::workspace::home::NoEndingHome,
+    root: &Path,
+    activity: &mut crate::operations::Operation,
+    invoke: impl FnOnce(&str, &Path) -> Result<()>,
+) -> Result<()> {
+    let files = RunDirectory::create(root, extraction.kind())?;
+    let dir = &files.0;
     let connection =
-        crate::cli::transport::Connection::create(files.dir.join("requests")).map_err(other)?;
-    let connection_path = files.dir.join("connection.json");
+        crate::cli::transport::Connection::create(dir.join("requests")).map_err(other)?;
+    let connection_path = dir.join("connection.json");
     connection.publish(&connection_path).map_err(other)?;
-    let skill_dir = files.dir.join("noending");
+    let skill_dir = dir.join("noending");
     std::fs::create_dir_all(skill_dir.join("references"))?;
     for (relative, content) in crate::skills::BUNDLED_FILES {
         crate::cli::transport::private_write(&skill_dir.join(relative), content).map_err(other)?;
     }
+    let templates = PromptTemplates::default();
+    let requirements = match extraction.kind() {
+        "session" => templates.session,
+        "task" => templates.task,
+        _ => format!(
+            "项目材料包括目录关联会话（含归档会话）及任务背景。\n## 会话摘要\n{}\n## 项目摘要\n{}",
+            templates.session, templates.project
+        ),
+    };
+    let requirements_path = skill_dir.join("references/requirements.md");
     crate::cli::transport::private_write(
-        &skill_dir.join("references/requirements.md"),
-        requirements,
+        &requirements_path,
+        &format!("{TIME_RULES}\n{requirements}"),
     )
     .map_err(other)?;
     let exe = crate::cli::executable()?;
-    let prompt=format!("使用 NoEnding 技能执行本次后台提取：{}。先完整读取该 SKILL.md，再按其中的流程查询材料并生成结果。\nCLI 前缀：{} --connection {} extraction\n提取要求：{}\n最终回复必须是协议规定的单个状态 JSON 对象，不带 Markdown 代码块或其他说明。后端在调用正常结束后校验结果文件并入库。",serde_json::to_string(&skill_dir.join("SKILL.md"))?,executable_command(&exe),shell_quote(&connection_path),serde_json::to_string(&skill_dir.join("references/requirements.md"))?);
-    let bridge = Bridge {
-        db,
-        files,
-        token: connection.token.clone(),
-        delivered: Mutex::default(),
-    };
+    #[cfg(windows)]
+    let executable = format!("& {}", crate::cli::shell_quote(&exe));
+    #[cfg(not(windows))]
+    let executable = crate::cli::shell_quote(&exe);
+    let prompt = format!(
+        "使用 NoEnding 技能执行后台提取。先读取 {}，再按技能查询材料并主动调用 submit 保存。\nCLI 前缀：{executable} --connection {} extraction\n提取要求：{}\n按提交回执报告保存结果。",
+        serde_json::to_string(&skill_dir.join("SKILL.md"))?,
+        crate::cli::shell_quote(&connection_path),
+        serde_json::to_string(&requirements_path)?,
+    );
     let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        scope.spawn(|| {
-            while !stopped.load(Ordering::Acquire) {
+        let stop_flag = &stopped;
+        scope.spawn(move || {
+            while !stop_flag.load(Ordering::Acquire) {
                 crate::cli::transport::serve_pending(&connection, |command| {
                     let command = serde_json::from_value(command)
                         .map_err(|e| crate::cli::CliError::new("invalid_command", e))?;
-                    bridge
-                        .dispatch(Request {
-                            token: connection.token.clone(),
-                            command,
-                        })
-                        .map_err(Into::into)
+                    let result = match command {
+                        Command::Inputs => extraction.describe(db),
+                        Command::Read {
+                            name,
+                            cursor,
+                            limit,
+                        } => extraction.read(db, &name, cursor, limit, None),
+                        Command::Search {
+                            name,
+                            query,
+                            cursor,
+                            limit,
+                        } => extraction.read(db, &name, cursor, limit, Some(&query)),
+                        Command::Submit { submission } => {
+                            let result = extraction.submit(db, home, submission);
+                            if result.is_ok() {
+                                if let Some(progress) = extraction.project_summary_progress() {
+                                    // The checkpoint has already committed. A status file
+                                    // failure must not change the submission receipt.
+                                    let _ = activity.set_project_summary_progress(progress);
+                                }
+                            }
+                            result
+                        }
+                    };
+                    result.map_err(Into::into)
                 });
                 std::thread::park_timeout(Duration::from_millis(10));
             }
             connection.deactivate();
         });
-        // Stop even if a test runner panics. No query worker can outlive its scope.
         struct Stop<'a>(&'a AtomicBool);
         impl Drop for Stop<'_> {
             fn drop(&mut self) {
@@ -260,57 +126,25 @@ pub(super) fn run(
             }
         }
         let _stop = Stop(&stopped);
-        let raw = invoke(&prompt)?;
-        let reply: Value = serde_json::from_str(raw.trim()).map_err(super::invalid)?;
-        bridge.validate(&reply).map_err(|error| match error {
-            crate::error::AppError::Context(_) => error,
-            other => super::invalid(other),
-        })?;
-        Ok(raw)
+        invoke(&prompt, dir)
     })
 }
 
-fn executable_command(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        format!("& {}", shell_quote(path))
-    }
-    #[cfg(not(windows))]
-    {
-        shell_quote(path)
-    }
-}
 #[cfg(test)]
-pub(super) fn input_available(path: &Path) -> bool {
-    let connection = path.parent().unwrap().join("connection.json");
-    let name = path.file_name().unwrap().to_string_lossy();
-    request(&connection, Command::Inputs).unwrap()["inputs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|i| i["name"].as_str() == Some(name.as_ref()))
+pub(super) fn request(path: &Path, command: Value) -> crate::cli::CliResult<Value> {
+    crate::cli::transport::request(&path.join("connection.json"), command)
 }
-fn shell_quote(path: &Path) -> String {
-    crate::cli::shell_quote(path)
-}
-#[cfg(test)]
-fn request(path: &Path, command: Command) -> Result<Value> {
-    crate::cli::transport::request(path, serde_json::to_value(command)?).map_err(other)
-}
+
 #[cfg(test)]
 pub(super) fn read_input(path: &Path) -> Vec<Value> {
-    let connection = path.parent().unwrap().join("connection.json");
-    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let name = path.file_name().unwrap().to_string_lossy();
+    let dir = path.parent().unwrap();
     let mut rows = Vec::new();
     let mut cursor = 0;
     loop {
         let page = request(
-            &connection,
-            Command::Read {
-                name: name.clone(),
-                cursor,
-                limit: 50,
-            },
+            dir,
+            serde_json::json!({"action":"read","name":name,"cursor":cursor,"limit":50}),
         )
         .unwrap();
         rows.extend(
@@ -322,38 +156,24 @@ pub(super) fn read_input(path: &Path) -> Vec<Value> {
         );
         match page["next_cursor"].as_u64() {
             Some(next) => cursor = next as usize,
-            None => break,
+            None => return rows,
         }
     }
-    rows
 }
+
 #[cfg(test)]
-pub(super) fn read_all_for_test(dir: &Path) {
-    let inputs = request(&dir.join("connection.json"), Command::Inputs).unwrap();
-    for item in inputs["inputs"].as_array().unwrap() {
-        read_input(&dir.join(item["name"].as_str().unwrap()));
-    }
+pub(super) fn input_available(path: &Path) -> bool {
+    let name = path.file_name().unwrap().to_string_lossy();
+    request(
+        path.parent().unwrap(),
+        serde_json::json!({"action":"inputs"}),
+    )
+    .unwrap()["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|input| input["name"].as_str() == Some(name.as_ref()))
 }
+
 #[cfg(test)]
 mod tests;
-
-/// Current sessions use the same result and complete-material validation without
-/// a live bridge or Agent subprocess. Receipts come from scoped page reads.
-pub(super) fn validate_external(
-    db: &crate::storage::Db,
-    files: &ExtractionFiles,
-    raw: &str,
-    delivered: &HashMap<String, HashSet<usize>>,
-) -> Result<()> {
-    let bridge = Bridge {
-        db,
-        files,
-        token: String::new(),
-        delivered: Mutex::new(delivered.clone()),
-    };
-    let reply = serde_json::from_str(raw).map_err(super::invalid)?;
-    bridge.validate(&reply).map_err(|error| match error {
-        crate::error::AppError::Context(_) => error,
-        other => super::invalid(other),
-    })
-}

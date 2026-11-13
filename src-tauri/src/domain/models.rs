@@ -479,12 +479,12 @@ pub struct WorkstreamContextState {
 
 /// The outcome vocabulary of an explicit Context update command. Every value
 /// is a SUCCESS from the caller's point of view; failures are `Err`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextUpdateStatus {
     /// Everything the snapshot covered was written.
     Updated,
-    /// Collection summary saved; failed sessions remain pending.
+    /// Some session work was submitted; the project summary still needs a final submission.
     Partial,
     /// Nothing to do — no new messages. The model was NOT called.
     NoChange,

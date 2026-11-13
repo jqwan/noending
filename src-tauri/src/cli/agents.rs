@@ -58,6 +58,6 @@ mod tests {
         assert_eq!(item("qoder")["supports_cli"], false);
         assert_eq!(item("qoder")["cli_available"], false);
         assert_eq!(item("qoder")["supports_extraction"], false);
-        assert_eq!(item("antigravity")["supports_extraction"], false);
+        assert_eq!(item("antigravity")["supports_extraction"], true);
     }
 }

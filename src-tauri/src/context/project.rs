@@ -1,4 +1,4 @@
-//! Project extraction uses the same session/file protocol as task extraction.
+//! Project summary and its independently updated session inputs.
 use super::*;
 use crate::storage::{project_context_repo as repo, workspace::get_project_conn};
 use rusqlite::Connection;
@@ -12,9 +12,10 @@ pub struct ProjectContextView {
     pub updated_at: Option<String>,
     pub pending: bool,
     pub pending_sessions: usize,
+    pub pending_session_summaries: usize,
     pub freshness: super::freshness::SummaryFreshness,
 }
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUpdateOutcome {
     pub project_id: String,
     pub status: ContextUpdateStatus,
@@ -23,13 +24,14 @@ pub struct ProjectUpdateOutcome {
     pub skipped_session_ids: Vec<String>,
     pub failed_sessions: Vec<SessionFailure>,
     pub remaining_pending: usize,
+    pub remaining_session_summaries: usize,
 }
 
 pub(super) struct ProjectInput {
     project: crate::domain::Project,
     paths: Vec<String>,
     tasks: Vec<serde_json::Value>,
-    session_ids: Vec<String>,
+    pub(super) session_ids: Vec<String>,
     pub(super) fingerprint: String,
 }
 impl ProjectInput {
@@ -85,8 +87,10 @@ pub fn project_context_view(db: &Db, id: &str) -> Result<ProjectContextView> {
         )
     };
     let mut pending_sessions = 0;
+    let mut pending_session_summaries = 0;
     for sid in &input.session_ids {
         let view = session_context_view(db, sid)?;
+        pending_session_summaries += usize::from(view.pending);
         if view.pending || frontiers.get(sid).is_none_or(|rev| *rev != view.revision) {
             pending_sessions += 1;
         }
@@ -98,6 +102,7 @@ pub fn project_context_view(db: &Db, id: &str) -> Result<ProjectContextView> {
         updated_at: state.updated_at,
         pending: input.fingerprint != state.input_fingerprint || pending_sessions > 0,
         pending_sessions,
+        pending_session_summaries,
         freshness: super::freshness::summary(&db.read(), "project", id)?,
     })
 }
@@ -107,7 +112,7 @@ pub fn update_project(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<ProjectUpdateOutcome> {
     extract_project(db, id, home, false, &mut |cli, prompt, dir| {
-        cli.unwrap().run_context(prompt, dir)
+        cli.run_context(prompt, dir)
     })
 }
 pub fn regenerate_project(
@@ -116,7 +121,7 @@ pub fn regenerate_project(
     home: Option<&crate::workspace::home::NoEndingHome>,
 ) -> Result<ProjectUpdateOutcome> {
     extract_project(db, id, home, true, &mut |cli, prompt, dir| {
-        cli.unwrap().run_context(prompt, dir)
+        cli.run_context(prompt, dir)
     })
 }
 pub(super) fn extract_project(
@@ -126,140 +131,43 @@ pub(super) fn extract_project(
     regenerate: bool,
     runner: &mut ContextRunner<'_>,
 ) -> Result<ProjectUpdateOutcome> {
-    extract_project_using(db, id, home, regenerate, None, runner)
+    extract(db, id, home, "project", regenerate, runner)
 }
-pub(super) fn extract_project_using(
+
+pub(super) fn needs_update(
     db: &Db,
     id: &str,
-    home: Option<&crate::workspace::home::NoEndingHome>,
-    regenerate: bool,
-    scope: Option<&interactive::Scope>,
-    runner: &mut ContextRunner<'_>,
-) -> Result<ProjectUpdateOutcome> {
-    with_operation(
-        db,
-        id,
-        home,
-        "project",
-        scope,
-        |launch, operation, activity| {
-            let (input, state) = {
-                let conn = db.read();
-                (
-                    ProjectInput::read(&conn, id)?,
-                    query::project_state(&conn, id)?,
-                )
-            };
-            let snapshots = input
-                .session_ids
-                .iter()
-                .map(|sid| {
-                    snapshot_for(
-                        db,
-                        db.get_session(sid)?.ok_or_else(stale)?,
-                        false,
-                        launch.scope.as_ref(),
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            activity.add_sessions(snapshots.iter().map(|s| s.session.id.clone()))?;
-            let frontiers = repo::frontiers(&db.read(), id)?;
-            let pending = input.fingerprint != state.input_fingerprint
-                || snapshots.iter().any(|s| {
-                    s.pending()
-                        || frontiers
-                            .get(&s.session.id)
-                            .is_none_or(|r| *r != s.revision())
-                });
-            if !regenerate && !pending {
-                return Ok((
-                    ProjectUpdateOutcome {
-                        project_id: id.into(),
-                        status: ContextUpdateStatus::NoChange,
-                        context_revision: state.revision,
-                        updated_sessions: vec![],
-                        skipped_session_ids: vec![],
-                        failed_sessions: vec![],
-                        remaining_pending: 0,
-                    },
-                    "no_change",
-                ));
-            }
-            let batch = run_batch(
-                db,
-                id,
-                "project",
-                input.header(home.unwrap()),
-                state.revision,
-                &snapshots,
-                regenerate,
-                launch,
-                operation,
-                runner,
-            )?;
-            operation.set_stage("database_commit");
-            let (revision, updated) = db.tx(|tx| {
-                if get_project_conn(tx, id)?.is_none()
-                    || repo::state(tx, id)?.revision != state.revision
-                    || ProjectInput::read(tx, id)?.fingerprint != input.fingerprint
-                {
-                    return Err(stale());
-                }
-                // Physical project scope is validated above; task ownership is independent.
-                for s in &snapshots {
-                    s.validate(tx, None)?;
-                }
-                let mut updated = vec![];
-                let mut consumed = vec![];
-                for s in &snapshots {
-                    let Some(fields) = batch.results.get(&s.session.id) else {
-                        continue;
-                    };
-                    let revision = if s.pending() {
-                        updated.push(s.session.id.clone());
-                        commit_session_context_conn(
-                            tx,
-                            &s.session.id,
-                            fields,
-                            s.revision(),
-                            s.generation,
-                            s.latest,
-                        )
-                        .and_then(|revision| {
-                            crate::storage::freshness::mark_refreshed(tx, &s.session.id)?;
-                            Ok(revision)
-                        })?
-                    } else {
-                        s.revision()
-                    };
-                    consumed.push((s.session.id.clone(), revision));
-                }
-                let revision = repo::commit(tx, id, &input.fingerprint, &batch.summary, &consumed)?;
-                Ok((revision, updated))
-            })?;
-            let status = if !batch.failed.is_empty() {
-                ContextUpdateStatus::Partial
-            } else if batch.target_skipped {
-                ContextUpdateStatus::Skipped
-            } else {
-                ContextUpdateStatus::Updated
-            };
-            Ok((
-                ProjectUpdateOutcome {
-                    project_id: id.into(),
-                    status,
-                    context_revision: revision,
-                    updated_sessions: updated,
-                    skipped_session_ids: batch.skipped,
-                    failed_sessions: batch.failed,
-                    remaining_pending: project_context_view(db, id)?.pending_sessions,
-                },
-                match status {
-                    ContextUpdateStatus::Partial => "partial",
-                    ContextUpdateStatus::Skipped => "skipped",
-                    _ => "updated",
-                },
-            ))
-        },
-    )
+    fingerprint: &str,
+    sessions: &[SessionSnapshot],
+) -> Result<bool> {
+    let conn = db.read();
+    let state = repo::state(&conn, id)?;
+    let frontiers = repo::frontiers(&conn, id)?;
+    Ok(fingerprint != state.input_fingerprint
+        || sessions
+            .iter()
+            .any(|s| s.pending() || frontiers.get(&s.session.id) != Some(&s.revision())))
+}
+
+pub(super) fn commit(
+    db: &Db,
+    id: &str,
+    fingerprint: &str,
+    revision: i64,
+    sessions: &[SessionSnapshot],
+    summary: &crate::domain::Summary,
+) -> Result<i64> {
+    db.tx(|tx| {
+        if repo::state(tx, id)?.revision != revision
+            || ProjectInput::read(tx, id)?.fingerprint != fingerprint
+        {
+            return Err(stale());
+        }
+        let mut consumed = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            session.validate(tx)?;
+            consumed.push((session.session.id.clone(), session.revision()));
+        }
+        repo::commit(tx, id, fingerprint, summary, &consumed)
+    })
 }

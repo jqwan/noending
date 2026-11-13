@@ -42,7 +42,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | 同步与配置 | `source_list`、`sync`、`summary_config_get`、`summary_config_set` |
 | 写请求状态 | `request_get` |
 
-不提供任意原始终端按键、页面跳转、技能管理、永久删除或直接执行 SQL 的工具。内部摘要提取使用的 `extraction inputs/read/search` 仍是受限的 CLI 通道，不通过这个通用 MCP 暴露。
+不提供任意原始终端按键、页面跳转、技能管理、永久删除或直接执行 SQL 的工具。内部摘要提取使用的 `extraction inputs/read/search/submit` 仍是受限的 CLI 通道，不通过这个通用 MCP 暴露。
 
 ### 查询
 
@@ -76,19 +76,19 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 超时或断开后，先用 `request_get` 查询原编号。`running` 表示仍在执行；`completed` 含最终响应；`interrupted` 表示无法确认完成，应核对业务状态，不换编号盲目重复写入。回执位于 Home 的 `runtime/cli-requests/`，清理该目录会丢失去重记录。
 
-摘要只通过 `summary_update` 提取更新或重新生成，不提供手工编辑、逐项删除、清空或完整覆盖。`summary_get` 可整份读取，也可按 item_id／序号与当前摘要版本读取一项。摘要提取不改变独立任务事项。
+摘要通过 `summary_update` 委托提取，或由当前会话提取后通过 `summary_submit` 提交，不提供手工编辑、逐项删除、清空或完整覆盖。`summary_get` 可整份读取，也可按 item_id／序号与当前摘要版本读取一项。摘要提取不改变独立任务事项。
 
-任务事项独立于摘要，只有未完成／已完成两种状态：
+任务事项独立于摘要。
 
 | 工具 | 参数与语义 |
 | --- | --- |
 | `task_items` | `{task}`，返回全部任务事项及每项版本 |
-| `task_item_create` | `{task, content:{title,description?}}`，新增未完成事项，进展为空 |
-| `task_item_update` | `{task,item_id,revision,patch:{title?,description?,details?,completed?}}`，省略字段保持不变；details 替换该项全部进展；completed=true 完成，false 重新打开 |
-| `task_item_note` | `{task,item_id,text}`，在当前细则末尾追加一条进展，保留原内容和完成状态并递增版本；无需 revision，重试沿用 request_id；融合整理仍使用带版本的 update |
-| `task_item_delete` | `{task,item_id,revision}`，永久删除事项，不保存废弃状态 |
+| `task_item_create` | `{task, content:{title,description?}}`，新增事项，进展为空 |
+| `task_item_update` | `{task,item_id,revision,patch:{title?,description?,details?}}`，省略字段保持不变；details 替换该项全部进展 |
+| `task_item_note` | `{task,item_id,text}`，在当前细则末尾追加一条进展，保留原内容并递增版本；无需 revision，重试沿用 request_id；融合整理仍使用带版本的 update |
+| `task_item_delete` | `{task,item_id,revision}`，永久删除事项 |
 
-写入返回变更后的任务事项及新版本；删除返回 item_id 和 deleted。任务事项的 revision 与摘要无关，始终按稳定 ID 定位。描述表达目标与验收要求，细则表达真实进展、结果、阻碍和验证依据，不是待办子项。只有实际验收通过才完成，阻碍不代表废弃。摘要提取不管理或直接读取任务事项。各写操作支持 request_id 去重，版本冲突重读，不影响其他事项或提取进度，也不启动或通知 Agent。
+写入返回变更后的任务事项及新版本；删除返回 item_id 和 deleted。任务事项的 revision 与摘要无关，始终按稳定 ID 定位。描述表达目标与验收要求，细则表达真实进展、结果、阻碍和验证依据，不是待办子项。协作摘要提取可把事项标题和描述作为背景。各写操作支持 request_id 去重，版本冲突重读，不影响其他事项或提取进度，也不启动或通知 Agent。
 
 `summary_update` 显式调用已配置的 Agent，等待提取及入库完成后返回。默认增量更新；只有明确需要重提时才传 `regenerate=true`。提取进程总运行上限为单会话 30 分钟、协作摘要与项目摘要 90 分钟（项目包括关联会话摘要的处理）。客户端的工具调用超时应覆盖相应时长并留出余量。取消通知会协作停止该请求，终止对应提取子进程；不会取消同连接中的其他请求。已提交的数据保留，取消不是撤销事务。断开连接也会停止未完成操作；强制杀死进程后用回执和业务状态核对。
 
@@ -128,8 +128,8 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 ### 当前会话自行提取摘要
 
-`summary_context {kind,id,mode}` 默认 mode=update，也可显式 regenerate。返回固定范围、输入名称、提取要求和 context_id，不启动 Agent。用 `summary_input {context_id,input,cursor,limit}` 连续完整分页阅读；query 仅辅助搜索。随后调用 `summary_submit {context_id,reply,results,request_id}`：results 按 session-ID/task-ID/project-ID 提供结构化摘要，reply 遵循提取状态协议。它们与 CLI 的自主提取接口共享范围、阅读进度、版本和事务校验，不依赖桌面应用或提取 Agent 配置。
+`summary_context {kind,id,mode}` 返回固定范围、输入名称、提取要求和 `context_id`。用 `summary_input {context_id,input,cursor,limit}` 分页读到结束。随后调用 `summary_submit {context_id,session_id?,reply,results,request_id}` 提交单个目标。项目提取按 `pending_sessions` 逐个处理并传入 `session_id`。待处理清单为空后读取项目汇总输入，提交项目摘要时省略 `session_id`。两个入口共享覆盖与版本校验，已保存的会话摘要可跨轮次复用。
 
-提取期间的新消息保留为后续待处理内容；上下文有效期 24 小时，冲突或过期需重新查询。详见 [CLI 自主提取](cli.md#当前会话自主提取) 与 [摘要提取参考](../../src-tauri/skills/noending/references/extraction.md)。`summary_update` 继续另外启动设置中的 Agent，适用于委托提取。
+提取期间新增消息留待下次处理。上下文有效期 24 小时，冲突或过期需重新查询。详见[摘要提交协议](../../src-tauri/skills/noending/references/extraction-protocol.md)。`summary_update` 用于委托后台 Agent，由该 Agent 主动提交提取结果。
 
 摘要接口的 `kind=task` 表示任务的协作摘要，材料来自协作室消息，跨运行延续，不更新成员会话摘要或已读位置。它和会话摘要使用单目标 reply；项目摘要保留项目范围内的批量提取协议，独立于协作摘要且主要供用户阅读。

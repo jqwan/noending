@@ -378,7 +378,6 @@ const CURRENT_SCHEMA: &str = r#"
       title TEXT NOT NULL CHECK(length(trim(title)) > 0),
       description TEXT NOT NULL DEFAULT '',
       details TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(details) AND json_type(details)='array'),
-      completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
       revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL

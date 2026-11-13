@@ -115,8 +115,7 @@ pub(crate) enum Command {
     },
     SubmitExtraction {
         context_id: String,
-        reply: Value,
-        results: std::collections::HashMap<String, Value>,
+        submission: context::summary::Submission,
     },
     ExtractionSettings,
     ConfigureExtraction {
@@ -541,9 +540,8 @@ impl Service {
             ),
             Command::SubmitExtraction {
                 context_id,
-                reply,
-                results,
-            } => context::interactive::submit(&self.db, &self.home, &context_id, reply, results),
+                submission,
+            } => context::interactive::submit(&self.db, &self.home, &context_id, submission),
             Command::ExtractionSettings => Ok(serde_json::to_value(
                 crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
             )?),
@@ -900,7 +898,7 @@ impl Service {
             }
             Kind::Project => {
                 let view = context::project_context_view(&self.db, id)?;
-                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_sessions":view.pending_sessions})
+                json!({"kind":kind,"id":id,"summary":view.summary,"revision":view.context_revision,"updated_at":view.updated_at,"pending":view.pending,"freshness":view.freshness,"pending_sessions":view.pending_sessions,"pending_session_summaries":view.pending_session_summaries})
             }
         })
     }

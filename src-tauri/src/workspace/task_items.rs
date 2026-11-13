@@ -16,7 +16,6 @@ pub struct TaskItem {
     pub description: String,
     /// Confirmed progress, results and blockers, not subtasks.
     pub details: Vec<String>,
-    pub completed: bool,
     pub revision: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -33,7 +32,6 @@ pub struct ItemPatch {
     pub title: Option<String>,
     pub description: Option<String>,
     pub details: Option<Vec<String>>,
-    pub completed: Option<bool>,
 }
 fn require_task(conn: &Connection, task: &str) -> Result<()> {
     let exists: bool = conn.query_row(
@@ -56,13 +54,13 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskItem> {
         details: serde_json::from_str(&details).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        completed: r.get(5)?,
-        revision: r.get(6)?,
-        created_at: r.get(7)?,
-        updated_at: r.get(8)?,
+        revision: r.get(5)?,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
     })
 }
-const SELECT: &str = "SELECT id,task_id,title,description,details,completed,revision,created_at,updated_at FROM task_items";
+const SELECT: &str =
+    "SELECT id,task_id,title,description,details,revision,created_at,updated_at FROM task_items";
 pub fn list(db: &Db, task: &str) -> Result<Vec<TaskItem>> {
     let conn = db.read();
     require_task(&conn, task)?;
@@ -94,7 +92,6 @@ pub fn create(db: &Db, task: &str, content: CreateItem) -> Result<TaskItem> {
         title: content.title,
         description: content.description.unwrap_or_default(),
         details: vec![],
-        completed: false,
         revision: 1,
         created_at: timestamp.clone(),
         updated_at: timestamp,
@@ -102,7 +99,11 @@ pub fn create(db: &Db, task: &str, content: CreateItem) -> Result<TaskItem> {
     validate(&mut item)?;
     db.tx(|tx| {
         require_task(tx,task)?;
-        tx.execute("INSERT INTO task_items(id,task_id,title,description,details,completed,revision,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,0,1,?6,?6)",params![item.id,task,item.title,item.description,serde_json::to_string(&item.details)?,item.created_at])?;
+        tx.execute(
+            "INSERT INTO task_items(id,task_id,title,description,details,revision,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,1,?6,?6)",
+            params![item.id,task,item.title,item.description,serde_json::to_string(&item.details)?,item.created_at],
+        )?;
         Ok(item)
     })
 }
@@ -125,23 +126,36 @@ fn current(conn: &Connection, task: &str, id: &str, revision: i64) -> Result<Tas
     Ok(item)
 }
 pub fn update(db: &Db, task: &str, id: &str, revision: i64, patch: ItemPatch) -> Result<TaskItem> {
-    if patch.title.is_none()
-        && patch.description.is_none()
-        && patch.details.is_none()
-        && patch.completed.is_none()
-    {
+    if patch.title.is_none() && patch.description.is_none() && patch.details.is_none() {
         return Err(other("至少提供一个需要更新的字段"));
     }
     db.tx(|tx| {
-        let mut item=current(tx,task,id,revision)?;
-        if let Some(title)=patch.title {item.title=title;}
-        if let Some(description)=patch.description {item.description=description;}
-        if let Some(details)=patch.details {item.details=details;}
-        if let Some(completed)=patch.completed {item.completed=completed;}
+        let mut item = current(tx, task, id, revision)?;
+        if let Some(title) = patch.title {
+            item.title = title;
+        }
+        if let Some(description) = patch.description {
+            item.description = description;
+        }
+        if let Some(details) = patch.details {
+            item.details = details;
+        }
         validate(&mut item)?;
-        item.revision+=1;
-        item.updated_at=now();
-        tx.execute("UPDATE task_items SET title=?3,description=?4,details=?5,completed=?6,revision=?7,updated_at=?8 WHERE task_id=?1 AND id=?2",params![task,id,item.title,item.description,serde_json::to_string(&item.details)?,item.completed,item.revision,item.updated_at])?;
+        item.revision += 1;
+        item.updated_at = now();
+        tx.execute(
+            "UPDATE task_items SET title=?3,description=?4,details=?5,revision=?6,updated_at=?7
+             WHERE task_id=?1 AND id=?2",
+            params![
+                task,
+                id,
+                item.title,
+                item.description,
+                serde_json::to_string(&item.details)?,
+                item.revision,
+                item.updated_at
+            ],
+        )?;
         Ok(item)
     })
 }

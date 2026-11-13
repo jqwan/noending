@@ -31,7 +31,7 @@ beforeEach(() => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue({ workstream: task, projects: [], sessions: [] });
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "task", title: task.title, room: null, run: null, members: [] });
   vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [], next_cursor: null });
-  vi.mocked(api.listTaskItems).mockResolvedValue([{ id: "work", task_id: "task", revision: 1, title: "接入公共加载流程", description: "", details: [], completed: false, created_at: "2026-11-08", updated_at: "2026-11-08" }]);
+  vi.mocked(api.listTaskItems).mockResolvedValue([{ id: "work", task_id: "task", revision: 1, title: "接入公共加载流程", description: "", details: [], created_at: "2026-11-08", updated_at: "2026-11-08" }]);
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue({ summary: { items: [{ id: "summary", title: "首屏约定", description: "先预备，再切换。", details: [] }] } } as never);
 });
 

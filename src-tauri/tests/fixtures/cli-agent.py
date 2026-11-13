@@ -30,7 +30,8 @@ def query(*args):
     assert value["ok"], value
     return value["data"]
 
-for entry in query("inputs")["inputs"]:
+plan = query("inputs")
+for entry in plan["inputs"]:
     name = entry["name"]
     cursor = 0
     while True:
@@ -38,8 +39,14 @@ for entry in query("inputs")["inputs"]:
         cursor = page.get("next_cursor")
         if cursor is None:
             break
-    if name.startswith("session-") and name.endswith(".jsonl"):
-        Path(name.removesuffix(".jsonl") + ".result.json").write_text(json.dumps({
-            "summary": {"items": [{"title": "Confirmed memory", "description": "Saved before exit", "details": ["Read through the scoped CLI"]}]}
-        }))
-print('{"status":"completed"}')
+key = plan["result_key"]
+payload = Path("submission.json")
+payload.write_text(json.dumps({
+    "reply": {"status": "completed"},
+    "results": {key: {
+        "summary": {"items": [{"title": "Confirmed memory", "description": "Saved before exit", "details": ["Read through the scoped CLI"]}]}
+    }}
+}))
+receipt = query("submit", "--file", str(payload))
+assert receipt["status"] == "updated", receipt
+print("Saved through NoEnding")

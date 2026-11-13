@@ -100,6 +100,12 @@ it("saves extraction settings immediately on selection and handles disable extra
   fireEvent.click(screen.getByRole("button", { name: "high" }));
   await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(highEffortExpected));
 
+  const antigravityExpected = { agent: "antigravity" as const, runtime: { model: null, provider: null, effort: null } };
+  vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(antigravityExpected);
+  fireEvent.click(screen.getByRole("button", { name: "提取 Agent：Pi" }));
+  fireEvent.click(screen.getByText("Antigravity", { selector: ".menu-item-label" }));
+  await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(antigravityExpected));
+
   const noneExpected = { agent: "none" as const, runtime: { model: null, provider: null, effort: null } };
   vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(noneExpected);
   fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });

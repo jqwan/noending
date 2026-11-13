@@ -68,12 +68,12 @@ it("uses independent task work item IDs and revisions over IPC", async () => {
   vi.mocked(invoke).mockResolvedValue(undefined);
   await api.listTaskItems("task");
   await api.createTaskItem("task", { title: "验收", description: "已有数据完整" });
-  await api.updateTaskItem("task", "work", 3, { details: ["回归通过"], completed: true });
+  await api.updateTaskItem("task", "work", 3, { details: ["回归通过"] });
   await api.deleteTaskItem("task", "work", 4);
   expect(vi.mocked(invoke).mock.calls).toEqual([
     ["list_task_items", { taskId: "task" }],
     ["create_task_item", { taskId: "task", content: { title: "验收", description: "已有数据完整" } }],
-    ["update_task_item", { taskId: "task", itemId: "work", revision: 3, patch: { details: ["回归通过"], completed: true } }],
+    ["update_task_item", { taskId: "task", itemId: "work", revision: 3, patch: { details: ["回归通过"] } }],
     ["delete_task_item", { taskId: "task", itemId: "work", revision: 4 }],
   ]);
 });

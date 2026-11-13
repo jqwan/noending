@@ -46,7 +46,7 @@ fn create(db: &Db, task: &str) -> task_items::TaskItem {
     .unwrap()
 }
 #[test]
-fn work_items_persist_separately_from_summaries_and_completion_retains_progress() {
+fn work_item_goals_and_progress_persist_separately_from_summaries() {
     let dir = TempDir::new();
     let path = dir.path().join("db.sqlite");
     let db = Db::open(&path).unwrap();
@@ -55,23 +55,21 @@ fn work_items_persist_separately_from_summaries_and_completion_retains_progress(
     let first = create(&db, &task.id);
     let other = create(&db, &task.id);
     assert_eq!(first.title, "实现并验证");
-    assert!(!first.completed);
     assert!(first.details.is_empty());
-    let done = task_items::update(
+    let updated = task_items::update(
         &db,
         &task.id,
         &first.id,
         1,
         ItemPatch {
             details: Some(vec!["回归通过，Windows 尚未实测".into()]),
-            completed: Some(true),
             ..Default::default()
         },
     )
     .unwrap();
-    assert_eq!(done.description, "验收目标");
+    assert_eq!(updated.description, "验收目标");
+    assert_eq!(updated.details, ["回归通过，Windows 尚未实测"]);
     assert_eq!(task_items::list(&db, &task.id).unwrap().len(), 2);
-    // A generated summary replacement is never an execution-state change.
     support::summary::seed_summary(
         &db,
         "task",
@@ -83,21 +81,8 @@ fn work_items_persist_separately_from_summaries_and_completion_retains_progress(
     drop(db);
     let db = Db::open(&path).unwrap();
     let items = task_items::list(&db, &task.id).unwrap();
-    assert_eq!(items.iter().find(|i| i.id == done.id).unwrap(), &done);
+    assert_eq!(items.iter().find(|i| i.id == updated.id).unwrap(), &updated);
     assert_eq!(items.iter().find(|i| i.id == other.id).unwrap(), &other);
-    let reopened = task_items::update(
-        &db,
-        &task.id,
-        &first.id,
-        2,
-        ItemPatch {
-            completed: Some(false),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert!(!reopened.completed);
-    assert_eq!(reopened.details, done.details);
     let state = db.get_workstream_context_state(&task.id).unwrap();
     assert_eq!(state.context_revision, 2);
     assert_eq!(state.summary.items[0].title, "重新整理后的记忆");
@@ -125,7 +110,7 @@ fn item_edits_reject_stale_cross_task_and_invalid_input_without_affecting_other_
         &item.id,
         1,
         ItemPatch {
-            completed: Some(true),
+            title: Some("属于其他任务".into()),
             ..Default::default()
         }
     )
@@ -163,7 +148,7 @@ fn item_edits_reject_stale_cross_task_and_invalid_input_without_affecting_other_
         &item.id,
         1,
         ItemPatch {
-            completed: Some(true),
+            details: Some(vec!["旧进展".into()]),
             ..Default::default()
         }
     )
@@ -215,7 +200,6 @@ fn concurrent_progress_notes_preserve_existing_details_and_make_stale_replacemen
         1,
         ItemPatch {
             details: Some(previous.clone()),
-            completed: Some(true),
             ..Default::default()
         },
     )
@@ -244,7 +228,6 @@ fn concurrent_progress_notes_preserve_existing_details_and_make_stale_replacemen
     expected.sort();
     assert_eq!(appended, expected);
     assert!(actual.revision > before.revision);
-    assert!(actual.completed);
     assert_eq!(actual.title, before.title);
     assert_eq!(actual.description, before.description);
     assert_eq!(actual.created_at, before.created_at);

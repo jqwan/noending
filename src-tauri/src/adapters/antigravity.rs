@@ -761,7 +761,42 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         _opts: &ExecOptions,
         _prompt: &str,
     ) -> Result<AgentCommand> {
-        Err(other("Antigravity 尚未接入一次性执行（headless）"))
+        Err(other("Antigravity 尚未接入助手的一次性执行"))
+    }
+
+    fn build_context_extraction_command(
+        &self,
+        install: &crate::platform::exec_resolver::AgentInstallation,
+        opts: &ExecOptions,
+        prompt: &str,
+        runtime_dir: &Path,
+    ) -> Result<AgentCommand> {
+        // AGY records print-mode turns. Keep its store inside the disposable
+        // extraction directory so the normal session scanner never sees them.
+        let executable = crate::cli::executable()?;
+        // The sandbox needs to run the NoEnding CLI from outside its workspace.
+        let settings = serde_json::json!({
+            "toolPermission": "proceed-in-sandbox",
+            "permissions": {
+                "allow": [format!("read_file({})", executable.display())],
+            },
+        });
+        let mut args = vec![
+            format!("--gemini_dir={}", runtime_dir.join("agy").display()),
+            "--log-file".into(),
+            runtime_dir.join("agy.log").to_string_lossy().into_owned(),
+            "--disable-slash-commands".into(),
+            "--sandbox".into(),
+            "--settings".into(),
+            settings.to_string(),
+        ];
+        args.extend(runtime_args(opts));
+        args.extend(["--print".into(), prompt.into()]);
+        Ok(AgentCommand {
+            program: install.executable_path.clone(),
+            args,
+            cwd: Some(runtime_dir.to_path_buf()),
+        })
     }
 
     fn desktop_app_name(&self) -> Option<&'static str> {
@@ -811,7 +846,7 @@ fn interactive_args(opts: &ExecOptions) -> Vec<String> {
 }
 
 /// `agy` flags for NoEnding's runtime-override intent. `--effort` accepts
-/// low|medium|high|max and `--model` a model name; there is no provider
+/// low|medium|high|xhigh|max and `--model` a model name; there is no provider
 /// switch, and capabilities.rs keeps provider Unsupported so a value can
 /// never reach this point.
 fn runtime_args(opts: &ExecOptions) -> Vec<String> {
@@ -899,6 +934,53 @@ mod tests {
             ["--dangerously-skip-permissions", "--sandbox=false"]
         );
         assert_eq!(bare.cwd, None);
+    }
+
+    #[test]
+    fn extraction_uses_sandboxed_print_mode_and_redirects_the_agy_store() {
+        let install = crate::platform::exec_resolver::AgentInstallation {
+            agent: Agent::Antigravity,
+            executable_path: "agy".into(),
+            version: None,
+        };
+        let cwd = Path::new("extraction directory");
+        let options = ExecOptions {
+            model: Some("gemini-test".into()),
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+        let command = AntigravityAdapter
+            .build_context_extraction_command(&install, &options, "summarize", cwd)
+            .unwrap();
+        assert_eq!(command.program, "agy");
+        assert_eq!(command.cwd.as_deref(), Some(cwd));
+        let settings = command
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str::<serde_json::Value>(&pair[1]).unwrap())
+            .unwrap();
+        let executable = crate::cli::executable().unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!([format!("read_file({})", executable.display())])
+        );
+        assert_eq!(settings["toolPermission"], "proceed-in-sandbox");
+        assert!(command.args.iter().any(|arg| arg == "--sandbox"));
+        assert!(command
+            .args
+            .contains(&format!("--gemini_dir={}", cwd.join("agy").display())));
+        assert!(command.args.ends_with(
+            &[
+                "--model",
+                "gemini-test",
+                "--effort",
+                "low",
+                "--print",
+                "summarize"
+            ]
+            .map(String::from)
+        ));
     }
 
     fn temp_dir(tag: &str) -> PathBuf {

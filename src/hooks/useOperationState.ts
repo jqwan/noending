@@ -48,6 +48,9 @@ export function useOperationState(kind: "sync" | "summary", targetKind?: string,
   return {
     busy: active.length > 0,
     queued: active.length > 0 && active.every(operation => operation.state === "queued"),
+    projectSummaryProgress: targetKind === "project"
+      ? active.find(operation => operation.project_summary_progress)?.project_summary_progress
+      : undefined,
     checking: state.checking || state.error !== null,
     error: state.error,
   };

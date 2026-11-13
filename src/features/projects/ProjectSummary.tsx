@@ -18,10 +18,12 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
   const [view, setView] = useState<ProjectContextView | null>(() => cache.get(projectId) ?? null);
   const summaryExpansion = useSummaryExpansion(view?.summary);
   const operation = useOperationState("summary", "project", projectId);
+  const progress = operation.projectSummaryProgress;
   const [busy, setBusy] = useState<"update" | "regenerate" | false>(false);
   const busyRef = useRef(false);
   const active = useRef(true);
   const request = useRef(0);
+  const wasRunning = useRef(false);
   const [readError, setReadError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [error, setError] = useState<ReturnType<typeof contextUpdateErrorDetails> | null>(null);
   const [failed, setFailed] = useState<{ session_id: string; error: string }[]>([]);
@@ -45,6 +47,13 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
     return () => { active.current = false; ++request.current; };
   }, [refresh]);
   useRefreshSignal(refresh);
+  useEffect(() => {
+    if (wasRunning.current && !operation.busy && !busyRef.current) refresh();
+    wasRunning.current = operation.busy;
+  }, [operation.busy, refresh]);
+  useEffect(() => {
+    if (progress?.summary_saved) refresh();
+  }, [progress?.summary_saved, refresh]);
 
   const update = async (regenerate = false) => {
     if (busyRef.current || operation.busy || operation.checking) return;
@@ -56,7 +65,15 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
       const result = await (regenerate ? api.regenerateProjectContext(projectId) : api.updateProjectContext(projectId));
       if (!active.current) return;
       setFailed(result.failed_sessions);
-      showToast(result.status === "no_change" ? "摘要无变化" : result.status === "skipped" ? "没有新的摘要内容" : result.remaining_pending > 0 ? `已更新摘要（待更新 ${result.remaining_pending}）` : "已更新摘要");
+      if (result.status === "partial") {
+        const saved = result.updated_sessions.length + result.skipped_session_ids.length;
+        const remaining = result.remaining_session_summaries;
+        showToast(remaining > 0
+          ? `已处理 ${saved} 个会话，剩余 ${remaining} 个`
+          : "会话摘要已处理，项目摘要待汇总");
+      } else {
+        showToast(result.status === "no_change" ? "摘要无变化" : result.status === "skipped" ? "没有新的摘要内容" : result.remaining_pending > 0 ? `已更新摘要（待更新 ${result.remaining_pending}）` : "已更新摘要");
+      }
       refresh();
     } catch (e) {
       if (active.current) setError(contextUpdateErrorDetails(e));
@@ -108,8 +125,16 @@ export default function ProjectSummary({ projectId, sessions }: { projectId: str
             </button>
           )}
         </>} status={<>
-      {view?.pending && <p className="muted small" style={{ margin: 0 }}>有待更新内容{view.pending_sessions > 0 ? `，涉及 ${view.pending_sessions} 个会话` : ""}</p>}
-      {failed.length > 0 && <div role="alert"><p>项目摘要已更新，以下会话仍待重试：</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
+      {progress ? <p className="muted small" style={{ margin: 0 }} role="status">
+        {progress.summary_saved ? "项目摘要已保存" : progress.remaining > 0
+          ? `已处理 ${progress.processed} 个会话，剩余 ${progress.remaining} 个`
+          : "正在汇总项目摘要"}
+      </p> : view?.pending && <p className="muted small" style={{ margin: 0 }}>
+        {view.pending_session_summaries > 0
+          ? `${view.pending_session_summaries} 个会话待提取，完成后汇总项目摘要`
+          : "项目摘要待汇总"}
+      </p>}
+      {failed.length > 0 && <div role="alert"><p>以下会话待重试</p><ul>{failed.map(f => <li key={f.session_id}>{sessions.find(s => s.id === f.session_id)?.title || f.session_id}：{f.error}</li>)}</ul></div>}
       {shownError && <div role="alert"><p>{shownError.message}</p><button className="btn small ghost" onClick={async () => { await copyToClipboard(contextUpdateErrorCopyText(shownError)); }}>复制错误详情</button>{!view && <button className="btn small ghost" onClick={() => { setReadError(null); refresh(); }}>重试</button>}</div>}
     </>}>
 

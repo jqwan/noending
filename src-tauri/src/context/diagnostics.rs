@@ -45,6 +45,8 @@ pub struct ContextOperation {
     cli_exit_code: Option<i32>,
     cli_start_error: Option<&'static str>,
     failure: Option<(&'static str, &'static str)>,
+    cli_failure_code: Option<&'static str>,
+    failed_sessions: Vec<super::summary::SessionFailure>,
 }
 
 impl ContextOperation {
@@ -63,15 +65,13 @@ impl ContextOperation {
             cli_exit_code: None,
             cli_start_error: None,
             failure: None,
+            cli_failure_code: None,
+            failed_sessions: Vec::new(),
         }
     }
 
     pub fn set_stage(&mut self, stage: &'static str) {
         self.stage = stage;
-    }
-
-    pub fn home(&self) -> Option<&NoEndingHome> {
-        self.home.as_ref()
     }
 
     pub fn record_config(
@@ -91,9 +91,11 @@ impl ContextOperation {
         }
     }
 
-    pub fn record_invocation_config(&mut self, agent: Agent, opts: &ExecOptions) {
-        self.agent = Some(agent.as_str().to_string());
-        self.model_override = Some(opts.override_summary());
+    pub(super) fn record_session_failures(
+        &mut self,
+        failures: Vec<super::summary::SessionFailure>,
+    ) {
+        self.failed_sessions = failures;
     }
 
     pub fn set_cli_result(
@@ -105,6 +107,11 @@ impl ContextOperation {
         self.cli_invoked = spawned;
         self.cli_exit_code = exit_code;
         self.cli_start_error = io_error_kind;
+    }
+
+    pub(super) fn record_cli_failure(&mut self, code: &'static str, message: &'static str) {
+        self.cli_failure_code = Some(code);
+        self.fail_with("model_call", code, message);
     }
 
     pub fn succeed(&mut self, outcome: &'static str) {
@@ -147,10 +154,12 @@ impl ContextOperation {
             cli_invoked: self.cli_invoked,
             cli_exit_code: self.cli_exit_code,
             cli_start_error: self.cli_start_error,
+            cli_failure_code: self.cli_failure_code,
             stage: self.stage,
             outcome,
             error_code,
             message,
+            failed_sessions: &self.failed_sessions,
         };
         let _ = append_record(&dir, &date, &record);
     }
@@ -169,10 +178,27 @@ struct ContextLogRecord<'a> {
     cli_invoked: bool,
     cli_exit_code: Option<i32>,
     cli_start_error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cli_failure_code: Option<&'static str>,
     stage: &'a str,
     outcome: &'a str,
     error_code: Option<&'a str>,
     message: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[super::summary::SessionFailure]>::is_empty")]
+    failed_sessions: &'a [super::summary::SessionFailure],
+}
+
+pub(super) fn record_checkpoint(
+    home: &NoEndingHome,
+    project_id: &str,
+    failure: &super::summary::SessionFailure,
+) {
+    let now = Utc::now();
+    let record = serde_json::json!({
+        "operation_type":"project", "target_id":project_id, "finished_at":now.to_rfc3339(),
+        "stage":"session_submission", "outcome":"session_failed", "failed_sessions":[failure],
+    });
+    let _ = append_record(&log_dir(home), &now.format("%Y-%m-%d").to_string(), &record);
 }
 
 fn append_record(dir: &Path, date: &str, record: &impl Serialize) -> std::io::Result<()> {
@@ -262,7 +288,7 @@ pub fn cli_failure(
         ),
         K::UnsupportedAgent => (
             "agent_unsupported",
-            "Context 提取支持 Codex、Claude Code 和 Pi，请更改 Agent。",
+            "所选 Agent 不支持摘要提取，请更改 Agent。",
         ),
         K::CommandInvalid => (
             "runtime_dir_unavailable",

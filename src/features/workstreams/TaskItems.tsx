@@ -82,16 +82,9 @@ export default function TaskItems({ taskId }: { taskId: string }) {
   const editor = draft && <TaskItemEditor editor={editorState} showDetails={Boolean(draft.original)} />;
   const actions = (summary: SummaryItem) => {
     const item = items.find(item => item.id === summary.id)!;
-    return <>
-      <button type="button" className={`btn ghost icon-button small task-item-status${item.completed ? " is-completed" : ""}`}
-        title={item.completed ? "已完成，点击标记未完成" : "未完成，点击标记完成"}
-        aria-label={`${item.completed ? "标记未完成" : "标记完成"}：${item.title}`} aria-pressed={item.completed}
-        disabled={busy || Boolean(draft)} onClick={() => void mutate(() => api.updateTaskItem(taskId, item.id, item.revision, { completed: !item.completed }))}
-      ><Icon name={item.completed ? "circleCheck" : "circle"} /></button>
-      <button type="button" className="btn ghost icon-button small" title="编辑事项" aria-label={`编辑事项：${item.title}`} disabled={busy || Boolean(draft)} onClick={() => start(item)}><Icon name="edit" /></button>
-    </>;
+    return <button type="button" className="btn ghost icon-button small" title="编辑事项" aria-label={`编辑事项：${item.title}`} disabled={busy || Boolean(draft)} onClick={() => start(item)}><Icon name="edit" /></button>;
   };
-  const ordered = recentFirst(items, item => item.updated_at).sort((a, b) => Number(a.completed) - Number(b.completed));
+  const ordered = recentFirst(items, item => item.updated_at);
   return <DetailSection sectionId="items" label="任务事项" title={<><Icon name="tasks" /><span>任务事项{!loading && `（${items.length}）`}</span></>} actions={({ expand }) => <><SummaryControls expansion={expansion} disabled={Boolean(draft)} /><button type="button" className="btn ghost icon-button small" aria-label="新增事项" title="新增事项" disabled={loading || busy || Boolean(draft)} onClick={() => { expand(); start(null); }}><Icon name="plus" /></button></>} status={<>
       {error && !draft && <div role="alert"><span>{error}</span><button type="button" className="btn ghost small" disabled={busy} onClick={() => { setError(""); void refresh(); }}>重新读取</button></div>}
     </>}>

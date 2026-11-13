@@ -277,7 +277,7 @@ fn invalid_extraction_settings_are_rejected_without_overwriting_saved_settings()
             runtime: overrides(None, Some("openai"), None),
         },
         ExtractionSettings {
-            agent: "antigravity".into(),
+            agent: "qoder".into(),
             runtime: Default::default(),
         },
         ExtractionSettings {

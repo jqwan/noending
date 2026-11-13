@@ -6,7 +6,10 @@ use crate::error::{other, Result};
 use crate::storage::Db;
 
 pub fn supports_extraction(agent: Agent) -> bool {
-    matches!(agent, Agent::Codex | Agent::ClaudeCode | Agent::Pi)
+    matches!(
+        agent,
+        Agent::Codex | Agent::ClaudeCode | Agent::Pi | Agent::Antigravity
+    )
 }
 
 /// Dedicated runtime for all summary extraction.
@@ -42,7 +45,7 @@ impl ExtractionSettings {
         let agent = Agent::parse(&self.agent)
             .ok_or_else(|| other(format!("未知的 Agent: {}", self.agent)))?;
         if !supports_extraction(agent) {
-            return Err(other("摘要提取仅支持 Codex、Claude Code 和 Pi"));
+            return Err(other(format!("{} 不支持摘要提取", agent.as_str())));
         }
         crate::agent_runtime::validate_runtime_overrides(agent, &self.runtime)?;
         Ok(Some((agent, self.runtime.exec_options())))
@@ -137,7 +140,7 @@ impl CliExtractor {
         &self,
         prompt: &str,
         runtime_dir: &std::path::Path,
-    ) -> std::result::Result<String, ContextCallFailure> {
+    ) -> std::result::Result<(), ContextCallFailure> {
         if !supports_extraction(self.agent) {
             return Err(ContextCallFailure {
                 kind: ContextCallFailureKind::UnsupportedAgent,
@@ -171,8 +174,8 @@ impl CliExtractor {
                 io_error_kind: None,
             });
         }
-        let out = crate::platform::exec_runner::run_context_extraction(&cmd, self.timeout_secs)
-            .map_err(|failure| ContextCallFailure {
+        crate::platform::exec_runner::run_context_extraction(&cmd, self.timeout_secs).map_err(
+            |failure| ContextCallFailure {
                 kind: match failure.kind {
                     crate::platform::exec_runner::ContextExecFailureKind::Start => {
                         ContextCallFailureKind::Start
@@ -193,7 +196,7 @@ impl CliExtractor {
                 spawned: failure.spawned,
                 exit_code: failure.exit_code,
                 io_error_kind: failure.io_error_kind,
-            })?;
-        Ok(crate::platform::exec_runner::clean_exec_stdout(&out.stdout))
+            },
+        )
     }
 }
