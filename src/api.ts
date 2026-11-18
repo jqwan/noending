@@ -355,6 +355,46 @@ export const api = {
     invoke<AgentRuntimeSettings>("get_agent_runtime_settings", { agent }),
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
+
+  listAssistantProfiles: (query: import("./types").AssistantListQuery = {}) =>
+    invoke<import("./types").AssistantPage<import("./types").AssistantCard>>("list_assistant_profiles", { query }),
+  getAssistantProfile: (id: string) =>
+    invoke<import("./types").AssistantDetail>("get_assistant_profile", { id }),
+  createAssistantProfile: (input: import("./types").CreateAssistantInput) =>
+    invoke<import("./types").AssistantDetail>("create_assistant_profile", { input }),
+  updateAssistantProfile: (id: string, revision: number, patch: import("./types").UpdateAssistantPatch) =>
+    invoke<import("./types").AssistantDetail>("update_assistant_profile", { id, revision, patch }),
+  setAssistantResponsibilities: (id: string, revision: number, projectIds: string[], taskIds: string[]) =>
+    invoke<import("./types").AssistantDetail>("set_assistant_responsibilities", {
+      id,
+      revision,
+      project_ids: projectIds,
+      task_ids: taskIds,
+    }),
+  setAssistantArchived: (id: string, revision: number, archived: boolean) =>
+    invoke<import("./types").AssistantDetail>("set_assistant_archived", { id, revision, archived }),
+  listAssistantSessions: (
+    id: string,
+    query: { scope?: "unarchived" | "archived" | "all"; cursor?: string; limit?: number } = {},
+  ) =>
+    invoke<import("./types").AssistantPage<import("./types").SessionListItem>>("list_assistant_sessions", {
+      id,
+      query,
+    }),
+  startAssistantSession: (
+    id: string,
+    taskIds?: string[],
+    initialMessage?: string,
+    runtimeOverride?: import("./types").AgentRuntimeOverrides,
+  ) =>
+    invoke<import("./types").LaunchResult>("start_assistant_session", {
+      id,
+      task_ids: taskIds,
+      initial_message: initialMessage,
+      runtime_override: runtimeOverride,
+    }),
+  prepareAssistantFiles: (id: string, revision: number) =>
+    invoke<import("./types").AssistantDetail>("prepare_assistant_files", { id, revision }),
 };
 
 export type { Agent };

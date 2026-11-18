@@ -44,6 +44,8 @@ export type Route =
    *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），
    *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
+  | { view: "assistants"; action?: ViewAction; scope?: "unarchived" | "archived" | "all" }
+  | { view: "assistant"; assistantId: string; initialTitle?: string; entry?: "detail" | "sessions" }
   | { view: "agents"; agent?: Agent }
   | { view: "skills"; projectId?: string }
   | { view: "skill"; resourceId: string; initialTitle?: string; projectId?: string; workspacePathId?: string }

@@ -875,3 +875,84 @@ export interface CollaborationStartedMember {
   session_id: string;
   wake_method: CollaborationWakeMethod;
 }
+
+export type AssistantVisibility = "normal" | "archived";
+export type AssistantInstructionsState = "missing" | "current" | "outdated" | "conflict";
+
+export interface AssistantProfile {
+  id: string;
+  name: string;
+  avatar: string;
+  description: string;
+  instructions: string;
+  agent: Agent;
+  runtime_override: AgentRuntimeOverrides | null;
+  workspace_path_id: string;
+  visibility: AssistantVisibility;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantCard {
+  id: string;
+  name: string;
+  avatar: string;
+  description: string;
+  agent: Agent;
+  runtime_override: AgentRuntimeOverrides | null;
+  visibility: AssistantVisibility;
+  revision: number;
+  directory: string;
+  project_id: string;
+  directory_exists: boolean;
+  session_count: number;
+  project_count: number;
+  task_count: number;
+  last_activity_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantDetail {
+  profile: AssistantProfile;
+  project: Project;
+  workspace_path: WorkspacePath;
+  projects: Project[];
+  tasks: Workstream[];
+  session_count: number;
+  last_activity_at: string | null;
+  instructions_state: AssistantInstructionsState;
+}
+
+export interface AssistantPage<T> {
+  items: T[];
+  next_cursor: string | null;
+  end: boolean;
+}
+
+export interface AssistantListQuery {
+  query?: string;
+  scope?: "unarchived" | "archived" | "all";
+  cursor?: string;
+  limit?: number;
+}
+
+export interface CreateAssistantInput {
+  name: string;
+  agent: Agent;
+  avatar?: string;
+  description?: string;
+  instructions?: string;
+  runtime_override?: AgentRuntimeOverrides | null;
+}
+
+export interface UpdateAssistantPatch {
+  name?: string;
+  avatar?: string;
+  description?: string;
+  instructions?: string;
+  agent?: Agent;
+  runtime_override?: AgentRuntimeOverrides | null;
+}
+

@@ -13,6 +13,7 @@ import { workstreamCardsCache } from "../features/workstreams/useWorkstreamCards
 import { sessionsCache } from "../features/sessions/sessionsCache";
 import { skillDetailCache, skillProjectsCache, setSkillProjectsCache } from "../features/skills/skillDetailCache";
 import { packageDetailCache } from "../features/packages/packageDetailCache";
+import { assistantCardsCache, assistantDetailCache } from "../features/assistants/assistantsCache";
 import { projectSummaryCache } from "../features/projects/projectSummaryCache";
 import { taskItemsResource, taskSummaryResource } from "../features/workstreams/taskResources";
 import { prepareCollaborationMembers } from "../features/collaboration/collaborationResources";
@@ -93,6 +94,22 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
       if (!detail) throw new Error("插件包已移除或来源已变化");
       if (!isRemovedRoute(route)) packageDetailCache.set(route.packageId, detail);
       return route;
+    });
+  }
+  if (route.view === "assistants" && (route.scope === "archived" ? assistantCardsCache.archived : assistantCardsCache.unarchived) === null) {
+    return api.listAssistantProfiles({ scope: route.scope, limit: 50 }).then(page => {
+      if (route.scope === "archived") assistantCardsCache.archived = page.items;
+      else if (route.scope === "all") assistantCardsCache.all = page.items;
+      else assistantCardsCache.unarchived = page.items;
+      return route;
+    });
+  }
+  if (route.view === "assistant") {
+    const initialTitle = route.initialTitle ?? assistantDetailCache.get(route.assistantId)?.profile.name;
+    if (assistantDetailCache.has(route.assistantId)) return { ...route, initialTitle };
+    return api.getAssistantProfile(route.assistantId).then(detail => {
+      if (!isRemovedRoute(route)) assistantDetailCache.set(route.assistantId, detail);
+      return { ...route, initialTitle: detail.profile.name };
     });
   }
   return route;

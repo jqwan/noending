@@ -4,7 +4,7 @@ import type { Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
 import { preloadAgentsCache } from "../features/agents/agentsCache";
 
-export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "skills" | "packages" | "settings";
+export type RailSection = "sessions" | "workstreams" | "projects" | "assistants" | "agents" | "skills" | "packages" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
@@ -14,6 +14,7 @@ export function getRouteSection(route: Route): RailSection | null {
   if (isSessionRoute(route)) return "sessions";
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
   if (route.view === "projects" || route.view === "project") return "projects";
+  if (route.view === "assistants" || route.view === "assistant") return "assistants";
   if (route.view === "agents") return "agents";
   if (route.view === "skills" || route.view === "skill") return "skills";
   if (route.view === "packages" || route.view === "package") return "packages";
@@ -29,6 +30,8 @@ export function getSectionRootRoute(section: RailSection): Route {
       return { view: "workstreams" };
     case "projects":
       return { view: "projects" };
+    case "assistants":
+      return { view: "assistants" };
     case "agents":
       return { view: "agents" };
     case "skills":
@@ -85,7 +88,8 @@ export default function NavigationRail({ route, navigate }: {
     { section: "sessions", label: "会话", icon: "chat", active: currentSection === "sessions" },
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: ["projects", "project"].includes(route.view) },
-    { section: "agents", label: "Agent", icon: "agent", active: route.view === "agents" },
+    { section: "assistants", label: "智能体", icon: "spark", active: ["assistants", "assistant"].includes(route.view) },
+    { section: "agents", label: "运行工具", icon: "agent", active: route.view === "agents" },
     { section: "skills", label: "技能", icon: "skill", active: currentSection === "skills" },
     { section: "packages", label: "插件包", icon: "puzzle", active: currentSection === "packages" },
   ];
