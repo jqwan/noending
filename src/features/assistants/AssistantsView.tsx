@@ -62,6 +62,7 @@ export default function AssistantsView({
 
   const loadCards = useCallback(async () => {
     const seq = ++requestSeq.current;
+    setLoadingMore(false);
     setFailure("");
     try {
       const res = await api.listAssistantProfiles({
@@ -94,7 +95,7 @@ export default function AssistantsView({
 
   const handleLoadMore = async () => {
     if (!nextCursor || loadingMore || !hasMore) return;
-    const seq = requestSeq.current;
+    const seq = ++requestSeq.current;
     setLoadingMore(true);
     try {
       const res = await api.listAssistantProfiles({
@@ -196,14 +197,21 @@ export default function AssistantsView({
         </BoardToolbar>
 
         {failure && (
-          <Notice tone="error">
-            {failure}
-          </Notice>
+          <div style={{ marginBottom: "var(--space-md)" }}>
+            <Notice tone="error">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-sm)" }}>
+                <span>{failure}</span>
+                <button type="button" className="btn small ghost" onClick={() => void loadCards()}>
+                  重试
+                </button>
+              </div>
+            </Notice>
+          </div>
         )}
 
         <BoardLoading loading={cards === null && !failure} viewMode="cards" />
 
-        {cards !== null && !failure && cards.length === 0 && (
+        {cards !== null && cards.length === 0 && !failure && (
           <EmptyState
             title={query ? "未找到匹配的智能体" : scope === "archived" ? "暂无已归档智能体" : "暂无智能体"}
             hint={
@@ -216,6 +224,7 @@ export default function AssistantsView({
             actions={
               !query && scope !== "archived" ? (
                 <button
+                  type="button"
                   className="btn primary"
                   onClick={() => setCreateOpen(true)}
                 >
@@ -226,15 +235,15 @@ export default function AssistantsView({
           />
         )}
 
-        {cards !== null && !failure && cards.length > 0 && (
-          <div className="board-grid assistant-grid">
+        {cards !== null && cards.length > 0 && (
+          <div className="ws-grid board-grid">
             {cards.map((card) => {
               const isStarting = startingId === card.id;
               const isArchived = card.visibility === "archived";
               return (
-                <div
+                <article
                   key={card.id}
-                  className={`board-card assistant-card${isArchived ? " archived" : ""}`}
+                  className={`ws-card full assistant-card${isArchived ? " archived" : ""}`}
                   aria-label={`智能体：${card.name}`}
                   role="button"
                   tabIndex={0}
@@ -257,53 +266,48 @@ export default function AssistantsView({
                     }
                   }}
                 >
-                  <div className="assistant-card-header">
-                    <div className="assistant-avatar">
+                  <header className="ws-card-head">
+                    <h3 className="ws-card-title" title={card.name}>
                       <Icon name={getAvatarIcon(card.avatar)} />
+                      <span>{card.name}</span>
+                    </h3>
+                    <div className="ws-card-side">
+                      {isArchived ? (
+                        <span className="badge small">已归档</span>
+                      ) : (
+                        <span className="badge">
+                          <Icon name="agent" /> {card.agent}
+                        </span>
+                      )}
                     </div>
-                    <div className="assistant-card-info">
-                      <div className="assistant-card-title-row">
-                        <span className="assistant-name">{card.name}</span>
-                        {isArchived && <span className="badge small">已归档</span>}
-                      </div>
-                      <span className="muted small assistant-desc">
-                        {card.description || "暂无职责描述"}
-                      </span>
-                    </div>
+                  </header>
+
+                  <div className="ws-card-body">
+                    <p className="ws-card-desc" title={card.description || "暂无职责描述"}>
+                      {card.description || "暂无职责描述"}
+                    </p>
                   </div>
 
-                  <div className="assistant-card-meta">
-                    <span className="badge">
-                      <Icon name="agent" /> {card.agent}
-                    </span>
+                  <footer className="ws-card-meta">
                     <span className="muted small">
-                      {card.session_count} 次会话 · {card.task_count} 项负责任务
-                    </span>
-                  </div>
-
-                  <div className="assistant-card-footer">
-                    <span className="muted x-small">
-                      {card.last_activity_at
-                        ? `活跃于 ${timeAgo(card.last_activity_at)}`
-                        : "尚未有会话活动"}
+                      {card.session_count} 次会话 · {card.last_activity_at ? `活跃于 ${timeAgo(card.last_activity_at)}` : "暂无会话"}
                     </span>
                     {!isArchived && (
-                      <button
-                        type="button"
-                        className="btn small primary"
-                        disabled={isStarting}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleStartSession(card);
-                        }}
-                        onKeyDown={(e) => e.stopPropagation()}
-                        title="在智能体专属空间拉起会话"
-                      >
-                        <Icon name="chat" /> {isStarting ? "启动中…" : "开始交流"}
-                      </button>
+                      <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="btn small primary"
+                          disabled={isStarting}
+                          onClick={() => void handleStartSession(card)}
+                          onKeyDown={(e) => e.stopPropagation()}
+                          title="在智能体专属空间拉起会话"
+                        >
+                          <Icon name="chat" /> {isStarting ? "启动中…" : "开始交流"}
+                        </button>
+                      </div>
                     )}
-                  </div>
-                </div>
+                  </footer>
+                </article>
               );
             })}
           </div>

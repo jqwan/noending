@@ -449,12 +449,12 @@ describe("AssistantDetailView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
 
-    expect(screen.getByLabelText("继承应用默认 (null)")).toBeTruthy();
-    expect(screen.getByLabelText("Agent CLI 原生默认 ({})")).toBeTruthy();
+    expect(screen.getByLabelText("继承应用默认")).toBeTruthy();
+    expect(screen.getByLabelText("Agent CLI 默认")).toBeTruthy();
     expect(screen.getByLabelText("自定义模型与推理")).toBeTruthy();
 
-    // 1. 选择 Agent CLI 原生默认 ({})
-    fireEvent.click(screen.getByLabelText("Agent CLI 原生默认 ({})"));
+    // 1. 选择 Agent CLI 默认
+    fireEvent.click(screen.getByLabelText("Agent CLI 默认"));
 
     vi.mocked(api.updateAssistantProfile).mockResolvedValue({
       ...mockDetail,
@@ -509,6 +509,104 @@ describe("AssistantDetailView", () => {
 
     await waitFor(() => {
       expect(api.getAgentStatus).toHaveBeenCalled();
+    });
+  });
+
+  it("uses fixed base revision when saving in edit profile modal even if background refreshed", async () => {
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "编辑资料" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
+
+    // 用户在弹窗中修改名称
+    const nameInput = screen.getByDisplayValue("测试架构师");
+    fireEvent.change(nameInput, { target: { value: "新名称" } });
+
+    // 此时后台刷新，更新 revision 到 5
+    const remoteUpdated: AssistantDetail = {
+      ...mockDetail,
+      profile: {
+        ...mockDetail.profile,
+        revision: 5,
+      },
+    };
+    vi.mocked(api.getAssistantProfile).mockResolvedValue(remoteUpdated);
+
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    // 点击保存：提交必须使用固定基线 revision 1，而非被后台污染的 revision 5
+    vi.mocked(api.updateAssistantProfile).mockResolvedValue({
+      ...mockDetail,
+      profile: { ...mockDetail.profile, name: "新名称", revision: 2 },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(api.updateAssistantProfile).toHaveBeenCalledWith(
+        "asst-1",
+        1, // 必须是基线 1！
+        expect.objectContaining({ name: "新名称" }),
+      );
+    });
+  });
+
+  it("uses fixed base revision when saving responsibilities even if background refreshed", async () => {
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "调整分配" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "调整分配" }));
+
+    // 此时后台刷新，更新 revision 到 8
+    const remoteUpdated: AssistantDetail = {
+      ...mockDetail,
+      profile: {
+        ...mockDetail.profile,
+        revision: 8,
+      },
+    };
+    vi.mocked(api.getAssistantProfile).mockResolvedValue(remoteUpdated);
+
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    // 保存分配：必须使用固定开窗 revision 1
+    vi.mocked(api.setAssistantResponsibilities).mockResolvedValue(mockDetail);
+
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "确认分配" }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "确认分配" }));
+
+    await waitFor(() => {
+      expect(api.setAssistantResponsibilities).toHaveBeenCalledWith(
+        "asst-1",
+        1, // 必须是固定开窗 revision 1
+        [],
+        [],
+      );
     });
   });
 

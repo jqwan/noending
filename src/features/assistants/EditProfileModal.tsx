@@ -48,11 +48,13 @@ export default function EditProfileModal({
   const [loadingAgentStatus, setLoadingAgentStatus] = useState(false);
   const [agentStatusError, setAgentStatusError] = useState("");
 
+  const baseRevisionRef = useRef(profile.revision);
   const wasOpenRef = useRef(false);
   const runtimeHook = useAgentRuntime(agent, open);
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
+      baseRevisionRef.current = profile.revision;
       setName(profile.name);
       setDescription(profile.description);
       setAgent(profile.agent);
@@ -130,7 +132,7 @@ export default function EditProfileModal({
           patch.runtime_override = runtimeOverride;
         }
       }
-      const updated = await api.updateAssistantProfile(profile.id, profile.revision, patch);
+      const updated = await api.updateAssistantProfile(profile.id, baseRevisionRef.current, patch);
       onSaved(updated);
       onClose();
     } catch (err) {
@@ -219,7 +221,7 @@ export default function EditProfileModal({
                 }}
                 disabled={busy}
               />
-              <span className="small">继承应用默认 (null)</span>
+              <span className="small">继承应用默认</span>
             </label>
             <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer" }}>
               <input
@@ -233,7 +235,7 @@ export default function EditProfileModal({
                 }}
                 disabled={busy}
               />
-              <span className="small">Agent CLI 原生默认 (&#123;&#125;)</span>
+              <span className="small">Agent CLI 默认</span>
             </label>
             <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer" }}>
               <input

@@ -124,6 +124,7 @@ export default function AssistantDetailView({
   const loadSessions = useCallback(async () => {
     const seq = ++sessionRequestSeq.current;
     setLoadingSessions(true);
+    setLoadingMoreSessions(false);
     setSessionsFailure("");
     try {
       const res = await api.listAssistantSessions(assistantId, { limit: 20 });
@@ -145,7 +146,7 @@ export default function AssistantDetailView({
 
   const handleLoadMoreSessions = async () => {
     if (!nextSessionCursor || loadingMoreSessions || !hasMoreSessions) return;
-    const seq = sessionRequestSeq.current;
+    const seq = ++sessionRequestSeq.current;
     setLoadingMoreSessions(true);
     try {
       const res = await api.listAssistantSessions(assistantId, {
@@ -270,8 +271,11 @@ export default function AssistantDetailView({
     }
   }, []);
 
+  const respBaseRevision = useRef<number | null>(null);
+
   const handleOpenRespModal = () => {
     if (!data) return;
+    respBaseRevision.current = data.profile.revision;
     const pIds = data.projects.map((p) => p.id);
     const tIds = data.tasks.map((t) => t.id);
     setSelectedProjectIds(pIds);
@@ -282,13 +286,13 @@ export default function AssistantDetailView({
   };
 
   const handleSaveResp = async () => {
-    if (!data || savingResp) return;
+    if (!data || savingResp || respBaseRevision.current === null) return;
     setSavingResp(true);
     setFailure("");
     try {
       const updated = await api.setAssistantResponsibilities(
         data.profile.id,
-        data.profile.revision,
+        respBaseRevision.current,
         selectedProjectIds,
         selectedTaskIds,
       );
@@ -380,7 +384,7 @@ export default function AssistantDetailView({
 
         {showSkeleton && (
           <div className="detail-loading-skeleton" style={{ padding: "var(--space-lg)" }}>
-            <div className="board-card skeleton" style={{ height: "200px" }} />
+            <div className="ws-card skeleton" style={{ height: "200px" }} />
           </div>
         )}
 

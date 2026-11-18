@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api";
+import { notifyDataChanged } from "../../app/routes";
 import type { AssistantCard, AssistantPage } from "../../types";
 import { clearAssistantsCache } from "./assistantsCache";
 import AssistantsView from "./AssistantsView";
@@ -209,5 +210,50 @@ describe("AssistantsView", () => {
     await waitFor(() => {
       expect(api.getAgentStatus).toHaveBeenCalled();
     });
+  });
+
+  it("retains existing cards and shows error notice when background refresh fails", async () => {
+    render(<AssistantsView navigate={navigate} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试架构师")).toBeTruthy();
+    });
+
+    // 模拟后台静默刷新失败
+    vi.mocked(api.listAssistantProfiles).mockRejectedValueOnce(new Error("网络中断"));
+
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/网络中断/)).toBeTruthy();
+      // 关键行为：已有卡片保留展示，不被错误态整体隐藏！
+      expect(screen.getByText("测试架构师")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    });
+  });
+
+  it("resets loadingMore on query or refresh to prevent permanent pagination freeze", async () => {
+    const page1: AssistantPage<AssistantCard> = {
+      items: [mockCard],
+      next_cursor: "cursor-1",
+      end: false,
+    };
+    vi.mocked(api.listAssistantProfiles).mockResolvedValue(page1);
+
+    render(<AssistantsView navigate={navigate} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("加载更多")).toBeTruthy();
+    });
+
+    // 触发刷新：验证加载更多状态可正常点击，不会被锁死
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    const loadMoreBtn = screen.getByRole("button", { name: "加载更多" });
+    expect((loadMoreBtn as HTMLButtonElement).disabled).toBe(false);
   });
 });
