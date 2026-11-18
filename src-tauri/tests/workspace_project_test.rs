@@ -1711,6 +1711,7 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
+            "cleanable_missing_path_ids",
             "kind",
             "project",
             "purpose",
@@ -1720,6 +1721,9 @@ fn project_detail_has_the_frozen_shape() {
             "workstreams"
         ]
     );
+    // This project's only path is still referenced by a Session, regardless
+    // of its physical availability, so none of its registrations is removable.
+    assert_eq!(value["cleanable_missing_path_ids"], serde_json::json!([]));
     let mut workstream_keys: Vec<&str> = value["workstreams"][0]
         .as_object()
         .unwrap()
