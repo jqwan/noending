@@ -110,6 +110,18 @@ fn prepare_with(
         pending: BTreeMap::new(),
     });
     for (name, text) in content {
+        if let Some(pending) = journal.pending.get(&name) {
+            match fs::read(root.join(&name)) {
+                Ok(bytes) if digest(&bytes) == *pending => {
+                    // A previous replacement landed before its manifest commit.
+                    // Keep that observed version owned before replacing pending.
+                    journal.hashes.insert(name.clone(), pending.clone());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         let hash = digest(text.as_bytes());
         // Persist both the old committed hash and the next candidate before
         // replacing an entry. Recovery recognizes either side of the rename.
@@ -161,8 +173,20 @@ mod tests {
         assert!(fs::read_to_string(root.join("AGENTS.md"))
             .unwrap()
             .contains("# New"));
+        profile.name = "Newest".into();
+        let result = prepare_with(&root, &profile, &mut |root, name, bytes| {
+            if name == "AGENTS.md" {
+                return Err(other("simulated replacement failure after another edit"));
+            }
+            replace(root, name, bytes)
+        });
+        assert!(result.is_err());
+        assert_eq!(state(&root, &profile).unwrap(), "outdated");
         prepare(&root, &profile).unwrap();
         assert_eq!(state(&root, &profile).unwrap(), "current");
+        assert!(fs::read_to_string(root.join("AGENTS.md"))
+            .unwrap()
+            .contains("# Newest"));
         fs::write(root.join("AGENTS.md"), "User-authored content").unwrap();
         assert!(prepare(&root, &profile).is_err());
         assert_eq!(
