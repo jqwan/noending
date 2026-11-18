@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import CustomSelect from "../../components/CustomSelect";
@@ -33,25 +33,42 @@ export default function EditProfileModal({
   const [description, setDescription] = useState(profile.description);
   const [agent, setAgent] = useState<Agent>(profile.agent);
   const [avatar, setAvatar] = useState(profile.avatar);
+  const [runtimeMode, setRuntimeMode] = useState<"inherit" | "native" | "custom">(() => {
+    if (profile.runtime_override === null) return "inherit";
+    if (!profile.runtime_override.model && !profile.runtime_override.provider && !profile.runtime_override.effort) return "native";
+    return "custom";
+  });
   const [runtimeOverride, setRuntimeOverride] = useState<AgentRuntimeOverrides>(
     profile.runtime_override ?? NATIVE_RUNTIME,
   );
+  const [runtimeModified, setRuntimeModified] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [agentStatus, setAgentStatus] = useState<Record<Agent, AgentStatusEntry> | null>(null);
   const [loadingAgentStatus, setLoadingAgentStatus] = useState(false);
   const [agentStatusError, setAgentStatusError] = useState("");
 
+  const wasOpenRef = useRef(false);
   const runtimeHook = useAgentRuntime(agent, open);
 
   useEffect(() => {
-    setName(profile.name);
-    setDescription(profile.description);
-    setAgent(profile.agent);
-    setAvatar(profile.avatar);
-    setRuntimeOverride(profile.runtime_override ?? NATIVE_RUNTIME);
-    setError("");
-  }, [profile, open]);
+    if (open && !wasOpenRef.current) {
+      setName(profile.name);
+      setDescription(profile.description);
+      setAgent(profile.agent);
+      setAvatar(profile.avatar);
+      const mode = profile.runtime_override === null
+        ? "inherit"
+        : (!profile.runtime_override.model && !profile.runtime_override.provider && !profile.runtime_override.effort)
+        ? "native"
+        : "custom";
+      setRuntimeMode(mode);
+      setRuntimeOverride(profile.runtime_override ?? NATIVE_RUNTIME);
+      setRuntimeModified(false);
+      setError("");
+    }
+    wasOpenRef.current = open;
+  }, [open, profile]);
 
   const loadAgentStatus = useCallback(async () => {
     setLoadingAgentStatus(true);
@@ -98,15 +115,21 @@ export default function EditProfileModal({
     setBusy(true);
     setError("");
     try {
-      const isDefaultRuntime =
-        !runtimeOverride.model && !runtimeOverride.provider && !runtimeOverride.effort;
       const patch: UpdateAssistantPatch = {
         name: trimmedName,
         avatar,
         description: description.trim(),
         agent,
-        runtime_override: isDefaultRuntime ? null : runtimeOverride,
       };
+      if (runtimeModified) {
+        if (runtimeMode === "inherit") {
+          patch.runtime_override = null;
+        } else if (runtimeMode === "native") {
+          patch.runtime_override = NATIVE_RUNTIME;
+        } else {
+          patch.runtime_override = runtimeOverride;
+        }
+      }
       const updated = await api.updateAssistantProfile(profile.id, profile.revision, patch);
       onSaved(updated);
       onClose();
@@ -171,7 +194,9 @@ export default function EditProfileModal({
             onChange={(val) => {
               const nextAgent = val as Agent;
               setAgent(nextAgent);
+              setRuntimeMode("inherit");
               setRuntimeOverride(NATIVE_RUNTIME);
+              setRuntimeModified(true);
             }}
             options={agentOptions}
             disabled={busy || loadingAgentStatus}
@@ -180,28 +205,67 @@ export default function EditProfileModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">模型与推理配置</label>
-          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}>
-            <RuntimePopover
-              agent={agent}
-              runtime={runtimeHook}
-              value={runtimeOverride}
-              onChange={setRuntimeOverride}
-              disabled={busy}
-              direction="down"
-            />
-            {(runtimeOverride.model || runtimeOverride.effort) && (
-              <button
-                type="button"
-                className="btn ghost small"
-                onClick={() => setRuntimeOverride(NATIVE_RUNTIME)}
+          <label className="label bold">运行与推理配置</label>
+          <div style={{ display: "flex", gap: "var(--space-md)", flexWrap: "wrap", marginBottom: "var(--space-xs)" }}>
+            <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="runtimeMode"
+                value="inherit"
+                checked={runtimeMode === "inherit"}
+                onChange={() => {
+                  setRuntimeMode("inherit");
+                  setRuntimeModified(true);
+                }}
                 disabled={busy}
-                title="重置为 Agent 默认模型与推理等级"
-              >
-                重置默认
-              </button>
-            )}
+              />
+              <span className="small">继承应用默认 (null)</span>
+            </label>
+            <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="runtimeMode"
+                value="native"
+                checked={runtimeMode === "native"}
+                onChange={() => {
+                  setRuntimeMode("native");
+                  setRuntimeModified(true);
+                }}
+                disabled={busy}
+              />
+              <span className="small">Agent CLI 原生默认 (&#123;&#125;)</span>
+            </label>
+            <label className="checkbox-row" style={{ display: "flex", alignItems: "center", gap: "var(--space-xs)", cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="runtimeMode"
+                value="custom"
+                checked={runtimeMode === "custom"}
+                onChange={() => {
+                  setRuntimeMode("custom");
+                  setRuntimeModified(true);
+                }}
+                disabled={busy}
+              />
+              <span className="small">自定义模型与推理</span>
+            </label>
           </div>
+
+          {runtimeMode === "custom" && (
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)", marginTop: "var(--space-xs)" }}>
+              <RuntimePopover
+                agent={agent}
+                runtime={runtimeHook}
+                value={runtimeOverride}
+                onChange={(val) => {
+                  setRuntimeOverride(val);
+                  setRuntimeModified(true);
+                }}
+                disabled={busy}
+                direction="down"
+              />
+            </div>
+          )}
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
@@ -235,7 +299,7 @@ export default function EditProfileModal({
           </button>
           <button
             type="submit"
-            className="btn solid"
+            className="btn primary"
             disabled={busy}
           >
             {busy ? "保存中…" : "保存"}

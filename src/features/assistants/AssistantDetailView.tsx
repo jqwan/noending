@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { notifyDataChanged, type Route } from "../../app/routes";
-import { Field, Modal, timeAgo } from "../../components/common";
-import CompactPath from "../../components/CompactPath";
+import { Field, Modal, timeAgo, useRefreshSignal } from "../../components/common";
 import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
 import { DetailFields, DetailList, DetailListRow, DetailSection } from "../../components/DetailSection";
 import DialogActions from "../../components/DialogActions";
@@ -59,16 +58,23 @@ export default function AssistantDetailView({
   // Sessions list
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [sessionsFailure, setSessionsFailure] = useState("");
   const [nextSessionCursor, setNextSessionCursor] = useState<string | null>(null);
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
 
   // Responsibilities modal
   const [respModalOpen, setRespModalOpen] = useState(false);
+  const [loadingRespOptions, setLoadingRespOptions] = useState(false);
+  const [respOptionsError, setRespOptionsError] = useState("");
   const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
   const [availableTasks, setAvailableTasks] = useState<Workstream[]>([]);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const initialRespIds = useRef<{ projectIds: string[]; taskIds: string[] }>({
+    projectIds: [],
+    taskIds: [],
+  });
   const [savingResp, setSavingResp] = useState(false);
 
   // Archive modal
@@ -79,6 +85,7 @@ export default function AssistantDetailView({
   const [startingSession, setStartingSession] = useState(false);
 
   const requestSeq = useRef(0);
+  const sessionRequestSeq = useRef(0);
 
   const loadDetail = useCallback(async () => {
     const seq = ++requestSeq.current;
@@ -115,41 +122,62 @@ export default function AssistantDetailView({
   }, [assistantId]);
 
   const loadSessions = useCallback(async () => {
+    const seq = ++sessionRequestSeq.current;
     setLoadingSessions(true);
+    setSessionsFailure("");
     try {
       const res = await api.listAssistantSessions(assistantId, { limit: 20 });
-      setSessions(res.items);
-      setNextSessionCursor(res.next_cursor ?? null);
-      setHasMoreSessions(!res.end && Boolean(res.next_cursor));
-    } catch {
-      // 容错处理
+      if (seq === sessionRequestSeq.current) {
+        setSessions(res.items);
+        setNextSessionCursor(res.next_cursor ?? null);
+        setHasMoreSessions(!res.end && Boolean(res.next_cursor));
+      }
+    } catch (err) {
+      if (seq === sessionRequestSeq.current) {
+        setSessionsFailure(String(err));
+      }
     } finally {
-      setLoadingSessions(false);
+      if (seq === sessionRequestSeq.current) {
+        setLoadingSessions(false);
+      }
     }
   }, [assistantId]);
 
   const handleLoadMoreSessions = async () => {
     if (!nextSessionCursor || loadingMoreSessions || !hasMoreSessions) return;
+    const seq = sessionRequestSeq.current;
     setLoadingMoreSessions(true);
     try {
       const res = await api.listAssistantSessions(assistantId, {
         cursor: nextSessionCursor,
         limit: 20,
       });
-      setSessions((prev) => [...prev, ...res.items]);
-      setNextSessionCursor(res.next_cursor ?? null);
-      setHasMoreSessions(!res.end && Boolean(res.next_cursor));
+      if (seq === sessionRequestSeq.current) {
+        setSessions((prev) => [...prev, ...res.items]);
+        setNextSessionCursor(res.next_cursor ?? null);
+        setHasMoreSessions(!res.end && Boolean(res.next_cursor));
+      }
     } catch (err) {
-      setFailure(`加载更多会话失败：${String(err)}`);
+      if (seq === sessionRequestSeq.current) {
+        setSessionsFailure(`加载更多会话失败：${String(err)}`);
+      }
     } finally {
-      setLoadingMoreSessions(false);
+      if (seq === sessionRequestSeq.current) {
+        setLoadingMoreSessions(false);
+      }
     }
   };
 
-  useEffect(() => {
+  const refreshAll = useCallback(() => {
     void loadDetail();
     void loadSessions();
   }, [loadDetail, loadSessions]);
+
+  useEffect(() => {
+    refreshAll();
+  }, [refreshAll]);
+
+  useRefreshSignal(refreshAll);
 
   const handleSaveInstructions = async (forceOverwrite = false) => {
     if (!data || savingInstructions) return;
@@ -225,11 +253,9 @@ export default function AssistantDetailView({
     }
   };
 
-  const handleOpenRespModal = async () => {
-    if (!data) return;
-    setSelectedProjectIds(data.projects.map((p) => p.id));
-    setSelectedTaskIds(data.tasks.map((t) => t.id));
-    setRespModalOpen(true);
+  const loadRespOptions = useCallback(async () => {
+    setLoadingRespOptions(true);
+    setRespOptionsError("");
     try {
       const [pList, tList] = await Promise.all([
         api.listProjects(),
@@ -238,8 +264,21 @@ export default function AssistantDetailView({
       setAvailableProjects(pList);
       setAvailableTasks(tList);
     } catch (err) {
-      setFailure(`读取项目/任务失败：${String(err)}`);
+      setRespOptionsError(`读取项目/任务失败：${String(err)}`);
+    } finally {
+      setLoadingRespOptions(false);
     }
+  }, []);
+
+  const handleOpenRespModal = () => {
+    if (!data) return;
+    const pIds = data.projects.map((p) => p.id);
+    const tIds = data.tasks.map((t) => t.id);
+    setSelectedProjectIds(pIds);
+    setSelectedTaskIds(tIds);
+    initialRespIds.current = { projectIds: pIds, taskIds: tIds };
+    setRespModalOpen(true);
+    void loadRespOptions();
   };
 
   const handleSaveResp = async () => {
@@ -317,7 +356,7 @@ export default function AssistantDetailView({
                 </button>
                 {!isArchived && (
                   <button
-                    className="btn solid"
+                    className="btn primary"
                     disabled={startingSession}
                     onClick={handleStartSession}
                     title="在智能体专属空间拉起交流会话"
@@ -386,7 +425,9 @@ export default function AssistantDetailView({
                       </span>
                     </Field>
                     <Field label="主目录位置" copyValue={data.workspace_path.canonical_path}>
-                      <CompactPath path={data.workspace_path.canonical_path} />
+                      <div style={{ wordBreak: "break-all", userSelect: "text" }}>
+                        <code>{data.workspace_path.canonical_path}</code>
+                      </div>
                     </Field>
                     <Field label="档案 ID" copyValue={data.profile.id}>
                       <code>{data.profile.id}</code>
@@ -398,22 +439,19 @@ export default function AssistantDetailView({
                 </DetailSection>
 
                 {/* 专属技能配置 */}
-                <DetailSection sectionId="assistant-skills" label="专属技能配置" title="专属技能配置">
-                  <div className="muted x-small" style={{ marginBottom: "var(--space-sm)" }}>
-                    在此为该智能体独立项目启用或停用技能：
-                  </div>
-                  <SkillScopeConfig
-                    projectId={data.project.id}
-                    workspacePaths={[data.workspace_path.canonical_path]}
-                    navigate={navigate}
-                  />
-                </DetailSection>
+                <SkillScopeConfig
+                  projectId={data.project.id}
+                  workspacePaths={[data.workspace_path.canonical_path]}
+                  navigate={navigate}
+                />
               </>
             }
           >
             {isArchived && (
-              <div className="notice warning" style={{ marginBottom: "var(--space-md)" }}>
-                当前智能体已归档。归档期间不可新建管理会话与添加责任，已有历史与资料完整保留。
+              <div style={{ marginBottom: "var(--space-md)" }}>
+                <Notice tone="warning">
+                  当前智能体已归档。归档期间不可新建管理会话与添加责任，已有历史与资料完整保留。
+                </Notice>
               </div>
             )}
 
@@ -423,7 +461,7 @@ export default function AssistantDetailView({
               label="角色设定与指令"
               title="角色设定与指令 (Instructions)"
               status={
-                <span className={`tag small ${data.instructions_state === "current" ? "success" : "warning"}`}>
+                <span className={`badge small ${data.instructions_state === "current" ? "success" : "warning"}`}>
                   {data.instructions_state === "current" ? "已同步" : "需同步"}
                 </span>
               }
@@ -440,7 +478,7 @@ export default function AssistantDetailView({
                     </button>
                   )}
                   <button
-                    className="btn small solid"
+                    className="btn small primary"
                     disabled={!instructionsModified || savingInstructions || isArchived}
                     onClick={() => void handleSaveInstructions(false)}
                   >
@@ -465,7 +503,7 @@ export default function AssistantDetailView({
                           </button>
                           <button
                             type="button"
-                            className="btn small solid"
+                            className="btn small primary"
                             disabled={savingInstructions}
                             onClick={() => void handleSaveInstructions(true)}
                           >
@@ -592,7 +630,22 @@ export default function AssistantDetailView({
                 </button>
               }
             >
-              {sessions.length === 0 ? (
+              {loadingSessions && sessions.length === 0 ? (
+                <div className="muted small" style={{ padding: "var(--space-sm) 0" }}>
+                  正在加载会话记录…
+                </div>
+              ) : sessionsFailure ? (
+                <div style={{ padding: "var(--space-sm) 0" }}>
+                  <Notice tone="error">
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-sm)" }}>
+                      <span>读取会话失败：{sessionsFailure}</span>
+                      <button className="btn small ghost" onClick={() => void loadSessions()}>
+                        重试
+                      </button>
+                    </div>
+                  </Notice>
+                </div>
+              ) : sessions.length === 0 ? (
                 <div className="muted small" style={{ padding: "var(--space-sm) 0" }}>
                   该智能体尚未产生任何会话。点击上方「开始交流」拉起首次会话。
                 </div>
@@ -655,69 +708,106 @@ export default function AssistantDetailView({
             title="调整负责项目与任务"
             onClose={() => setRespModalOpen(false)}
           >
-            <div className="responsibilities-modal-content">
-              <div className="responsibilities-modal-section">
-                <span className="label bold">负责工程项目</span>
-                <div className="responsibilities-checklist">
-                  {availableProjects.length === 0 ? (
-                    <span className="muted small">暂无可分配项目</span>
-                  ) : (
-                    availableProjects.map((p) => {
-                      const checked = selectedProjectIds.includes(p.id);
-                      return (
-                        <label key={p.id} className="checkbox-row">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedProjectIds([...selectedProjectIds, p.id]);
-                              } else {
-                                setSelectedProjectIds(
-                                  selectedProjectIds.filter((id) => id !== p.id),
-                                );
-                              }
-                            }}
-                          />
-                          <span>{p.name}</span>
-                        </label>
-                      );
-                    })
-                  )}
-                </div>
+            {loadingRespOptions ? (
+              <div className="muted small" style={{ padding: "var(--space-lg) 0", textAlign: "center" }}>
+                正在读取项目与任务列表…
               </div>
+            ) : respOptionsError ? (
+              <div style={{ margin: "var(--space-md) 0" }}>
+                <Notice tone="error">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-sm)" }}>
+                    <span>{respOptionsError}</span>
+                    <button
+                      type="button"
+                      className="btn small ghost"
+                      onClick={() => void loadRespOptions()}
+                    >
+                      重试
+                    </button>
+                  </div>
+                </Notice>
+              </div>
+            ) : (
+              <div className="responsibilities-modal-content">
+                <div className="responsibilities-modal-section">
+                  <span className="label bold">负责工程项目</span>
+                  <div className="responsibilities-checklist">
+                    {availableProjects.filter(
+                      (p) => p.visibility !== "archived" || initialRespIds.current.projectIds.includes(p.id),
+                    ).length === 0 ? (
+                      <span className="muted small">暂无可分配项目</span>
+                    ) : (
+                      availableProjects
+                        .filter(
+                          (p) => p.visibility !== "archived" || initialRespIds.current.projectIds.includes(p.id),
+                        )
+                        .map((p) => {
+                          const checked = selectedProjectIds.includes(p.id);
+                          const isArchivedProject = p.visibility === "archived";
+                          return (
+                            <label key={p.id} className="checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedProjectIds([...selectedProjectIds, p.id]);
+                                  } else {
+                                    setSelectedProjectIds(
+                                      selectedProjectIds.filter((id) => id !== p.id),
+                                    );
+                                  }
+                                }}
+                              />
+                              <span>{p.name}</span>
+                              {isArchivedProject && <span className="badge small">已归档</span>}
+                            </label>
+                          );
+                        })
+                    )}
+                  </div>
+                </div>
 
-              <div className="responsibilities-modal-section">
-                <span className="label bold">跟踪工程任务</span>
-                <div className="responsibilities-checklist">
-                  {availableTasks.length === 0 ? (
-                    <span className="muted small">暂无可分配任务</span>
-                  ) : (
-                    availableTasks.map((t) => {
-                      const checked = selectedTaskIds.includes(t.id);
-                      return (
-                        <label key={t.id} className="checkbox-row">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedTaskIds([...selectedTaskIds, t.id]);
-                              } else {
-                                setSelectedTaskIds(
-                                  selectedTaskIds.filter((id) => id !== t.id),
-                                );
-                              }
-                            }}
-                          />
-                          <span>{t.title}</span>
-                        </label>
-                      );
-                    })
-                  )}
+                <div className="responsibilities-modal-section">
+                  <span className="label bold">跟踪工程任务</span>
+                  <div className="responsibilities-checklist">
+                    {availableTasks.filter(
+                      (t) => t.visibility !== "archived" || initialRespIds.current.taskIds.includes(t.id),
+                    ).length === 0 ? (
+                      <span className="muted small">暂无可分配任务</span>
+                    ) : (
+                      availableTasks
+                        .filter(
+                          (t) => t.visibility !== "archived" || initialRespIds.current.taskIds.includes(t.id),
+                        )
+                        .map((t) => {
+                          const checked = selectedTaskIds.includes(t.id);
+                          const isArchivedTask = t.visibility === "archived";
+                          return (
+                            <label key={t.id} className="checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedTaskIds([...selectedTaskIds, t.id]);
+                                  } else {
+                                    setSelectedTaskIds(
+                                      selectedTaskIds.filter((id) => id !== t.id),
+                                    );
+                                  }
+                                }}
+                              />
+                              <span>{t.title}</span>
+                              {isArchivedTask && <span className="badge small">已归档</span>}
+                            </label>
+                          );
+                        })
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             <DialogActions>
               <button
@@ -728,8 +818,8 @@ export default function AssistantDetailView({
                 取消
               </button>
               <button
-                className="btn solid"
-                disabled={savingResp}
+                className="btn primary"
+                disabled={savingResp || loadingRespOptions || Boolean(respOptionsError)}
                 onClick={handleSaveResp}
               >
                 {savingResp ? "保存中…" : "确认分配"}
@@ -758,7 +848,7 @@ export default function AssistantDetailView({
                 取消
               </button>
               <button
-                className={`btn solid${isArchived ? "" : " danger"}`}
+                className={`btn primary${isArchived ? "" : " danger"}`}
                 disabled={archiveBusy}
                 onClick={handleToggleArchive}
               >

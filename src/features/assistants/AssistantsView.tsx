@@ -1,16 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route, ViewAction } from "../../app/routes";
+import BoardLoading from "../../components/BoardLoading";
 import BoardToolbar from "../../components/BoardToolbar";
-import { timeAgo } from "../../components/common";
-import CustomSelect from "../../components/CustomSelect";
+import { timeAgo, useRefreshSignal } from "../../components/common";
 import EmptyState from "../../components/EmptyState";
 import Icon, { type IconName } from "../../components/Icon";
 import Notice from "../../components/Notice";
-import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 import { useViewScroll } from "../../hooks/useViewState";
 import PageHeader from "../../layout/PageHeader";
-import { AGENT_LABELS, type Agent, type AgentStatusEntry, type AssistantCard } from "../../types";
+import type { AssistantCard } from "../../types";
 import { assistantCardsCache, clearAssistantCardsCache } from "./assistantsCache";
 import CreateAssistantModal from "./CreateAssistantModal";
 import "./assistants.css";
@@ -33,17 +32,13 @@ export default function AssistantsView({
   });
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [agentFilter, setAgentFilter] = useState("all");
-  const [loading, setLoading] = useState(cards === null);
   const [failure, setFailure] = useState("");
   const [createOpen, setCreateOpen] = useState(action === "new");
   const [startingId, setStartingId] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [agentStatus, setAgentStatus] = useState<Record<Agent, AgentStatusEntry> | null>(null);
 
-  const showSkeleton = useLoadingDelay(loading && cards === null);
   const scrollRef = useViewScroll("assistants.scroll", cards !== null);
   const requestSeq = useRef(0);
 
@@ -53,28 +48,6 @@ export default function AssistantsView({
     }, 200);
     return () => clearTimeout(timer);
   }, [query]);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getAgentStatus().then((status) => {
-      if (!cancelled && status) setAgentStatus(status);
-    }).catch(console.error);
-    return () => { cancelled = true; };
-  }, []);
-
-  const agentFilterOptions = useMemo(() => {
-    const allAgents = Object.keys(AGENT_LABELS) as Agent[];
-    const cliAgents = agentStatus
-      ? allAgents.filter((a) => Boolean(agentStatus[a]?.terminal_cli))
-      : [];
-    return [
-      { value: "all", label: "全部运行工具" },
-      ...cliAgents.map((a) => ({
-        value: a,
-        label: AGENT_LABELS[a] ?? a,
-      })),
-    ];
-  }, [agentStatus]);
 
   // 响应快捷动作（如从 Palette 导航至新建）
   const lastActionSeq = useRef(actionSeq);
@@ -89,7 +62,6 @@ export default function AssistantsView({
 
   const loadCards = useCallback(async () => {
     const seq = ++requestSeq.current;
-    setLoading(true);
     setFailure("");
     try {
       const res = await api.listAssistantProfiles({
@@ -101,7 +73,7 @@ export default function AssistantsView({
         setCards(res.items);
         setNextCursor(res.next_cursor ?? null);
         setHasMore(!res.end && Boolean(res.next_cursor));
-        if (!debouncedQuery.trim() && agentFilter === "all") {
+        if (!debouncedQuery.trim()) {
           if (scope === "archived") assistantCardsCache.archived = res.items;
           else if (scope === "all") assistantCardsCache.all = res.items;
           else assistantCardsCache.unarchived = res.items;
@@ -111,45 +83,43 @@ export default function AssistantsView({
       if (seq === requestSeq.current) {
         setFailure(String(err));
       }
-    } finally {
-      if (seq === requestSeq.current) {
-        setLoading(false);
-      }
     }
-  }, [scope, debouncedQuery, agentFilter]);
+  }, [scope, debouncedQuery]);
 
   useEffect(() => {
     void loadCards();
   }, [loadCards]);
 
+  useRefreshSignal(loadCards);
+
   const handleLoadMore = async () => {
     if (!nextCursor || loadingMore || !hasMore) return;
+    const seq = requestSeq.current;
     setLoadingMore(true);
     try {
       const res = await api.listAssistantProfiles({
         scope,
-        query: query.trim() || undefined,
+        query: debouncedQuery.trim() || undefined,
         cursor: nextCursor,
         limit: 50,
       });
-      setCards((prev) => (prev ? [...prev, ...res.items] : res.items));
-      setNextCursor(res.next_cursor ?? null);
-      setHasMore(!res.end && Boolean(res.next_cursor));
+      if (seq === requestSeq.current) {
+        setCards((prev) => (prev ? [...prev, ...res.items] : res.items));
+        setNextCursor(res.next_cursor ?? null);
+        setHasMore(!res.end && Boolean(res.next_cursor));
+      }
     } catch (err) {
-      setFailure(`加载更多失败：${String(err)}`);
+      if (seq === requestSeq.current) {
+        setFailure(`加载更多失败：${String(err)}`);
+      }
     } finally {
-      setLoadingMore(false);
+      if (seq === requestSeq.current) {
+        setLoadingMore(false);
+      }
     }
   };
 
-  const filteredCards = useMemo(() => {
-    if (!cards) return [];
-    if (agentFilter === "all") return cards;
-    return cards.filter((card) => card.agent === agentFilter);
-  }, [cards, agentFilter]);
-
-  const handleStartSession = async (card: AssistantCard, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleStartSession = async (card: AssistantCard) => {
     if (startingId) return;
     setStartingId(card.id);
     try {
@@ -222,17 +192,7 @@ export default function AssistantsView({
           query={query}
           onQueryChange={setQuery}
         >
-          <div className="toolbar ws-controls">
-            <div className="ws-control">
-              <span className="muted small">运行工具</span>
-              <CustomSelect
-                value={agentFilter}
-                onChange={setAgentFilter}
-                ariaLabel="选择运行工具筛选"
-                options={agentFilterOptions}
-              />
-            </div>
-          </div>
+          {null}
         </BoardToolbar>
 
         {failure && (
@@ -241,15 +201,9 @@ export default function AssistantsView({
           </Notice>
         )}
 
-        {showSkeleton && (
-          <div className="board-grid assistant-grid">
-            <div className="board-card skeleton" />
-            <div className="board-card skeleton" />
-            <div className="board-card skeleton" />
-          </div>
-        )}
+        <BoardLoading loading={cards === null && !failure} viewMode="cards" />
 
-        {!showSkeleton && filteredCards.length === 0 && (
+        {cards !== null && !failure && cards.length === 0 && (
           <EmptyState
             title={query ? "未找到匹配的智能体" : scope === "archived" ? "暂无已归档智能体" : "暂无智能体"}
             hint={
@@ -262,7 +216,7 @@ export default function AssistantsView({
             actions={
               !query && scope !== "archived" ? (
                 <button
-                  className="btn solid"
+                  className="btn primary"
                   onClick={() => setCreateOpen(true)}
                 >
                   <Icon name="plus" /> 新建智能体
@@ -272,9 +226,9 @@ export default function AssistantsView({
           />
         )}
 
-        {!showSkeleton && filteredCards.length > 0 && (
+        {cards !== null && !failure && cards.length > 0 && (
           <div className="board-grid assistant-grid">
-            {filteredCards.map((card) => {
+            {cards.map((card) => {
               const isStarting = startingId === card.id;
               const isArchived = card.visibility === "archived";
               return (
@@ -282,6 +236,8 @@ export default function AssistantsView({
                   key={card.id}
                   className={`board-card assistant-card${isArchived ? " archived" : ""}`}
                   aria-label={`智能体：${card.name}`}
+                  role="button"
+                  tabIndex={0}
                   onClick={() =>
                     navigate({
                       view: "assistant",
@@ -289,10 +245,10 @@ export default function AssistantsView({
                       initialTitle: card.name,
                     })
                   }
-                  role="button"
-                  tabIndex={0}
                   onKeyDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
                     if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
                       navigate({
                         view: "assistant",
                         assistantId: card.id,
@@ -308,7 +264,7 @@ export default function AssistantsView({
                     <div className="assistant-card-info">
                       <div className="assistant-card-title-row">
                         <span className="assistant-name">{card.name}</span>
-                        {isArchived && <span className="tag small">已归档</span>}
+                        {isArchived && <span className="badge small">已归档</span>}
                       </div>
                       <span className="muted small assistant-desc">
                         {card.description || "暂无职责描述"}
@@ -317,7 +273,7 @@ export default function AssistantsView({
                   </div>
 
                   <div className="assistant-card-meta">
-                    <span className="badge-agent">
+                    <span className="badge">
                       <Icon name="agent" /> {card.agent}
                     </span>
                     <span className="muted small">
@@ -333,9 +289,14 @@ export default function AssistantsView({
                     </span>
                     {!isArchived && (
                       <button
-                        className="btn small solid"
+                        type="button"
+                        className="btn small primary"
                         disabled={isStarting}
-                        onClick={(e) => handleStartSession(card, e)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleStartSession(card);
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
                         title="在智能体专属空间拉起会话"
                       >
                         <Icon name="chat" /> {isStarting ? "启动中…" : "开始交流"}

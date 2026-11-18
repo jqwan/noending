@@ -209,7 +209,7 @@ export default function CreateAssistantModal({
           </button>
           <button
             type="submit"
-            className="btn solid"
+            className="btn primary"
             disabled={busy || !name.trim() || agentOptions.length === 0}
           >
             {busy ? "创建中…" : "创建智能体"}

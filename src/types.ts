@@ -187,6 +187,7 @@ export interface ProjectDetailData {
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
   workspace_paths: WorkspacePath[];
+  cleanable_missing_path_ids?: string[];
   workstreams: ProjectWorkstreamRow[];
   sessions: SessionListItem[];
   /** 链接仓库的远程 URL（origin 优先），随 git 身份的最近一次观察刷新；

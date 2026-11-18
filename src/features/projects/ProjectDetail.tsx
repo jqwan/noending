@@ -105,8 +105,13 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       return a.canonical_path.localeCompare(b.canonical_path);
     });
   }, [detail]);
-  const unusedMissingPaths = detail?.workspace_paths.filter(path => !path.exists
-    && !detail.sessions.some(session => session.workspace_path_id === path.id)) ?? [];
+  const unusedMissingPaths = detail?.workspace_paths.filter(path => {
+    if (path.exists) return false;
+    if (detail.cleanable_missing_path_ids) {
+      return detail.cleanable_missing_path_ids.includes(path.id);
+    }
+    return !detail.sessions.some(session => session.workspace_path_id === path.id);
+  }) ?? [];
   const cleanup = async () => {
     if (cleanupBusyRef.current) return;
     cleanupBusyRef.current = true; setCleanupBusy(true);

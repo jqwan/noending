@@ -1,147 +1,59 @@
-.assistants-page .assistant-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--space-md);
-  padding: var(--space-md) var(--space-lg);
-}
-
-.assistant-card {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  padding: var(--space-md);
-  cursor: pointer;
-  transition: border-color var(--transition-fast), transform var(--transition-fast);
-}
-
-.assistant-card:hover {
-  border-color: var(--border-hover);
-  transform: translateY(-1px);
-}
+/* Assistants feature styles - builds upon public .ws-card and tokens */
 
 .assistant-card.archived {
   opacity: 0.75;
 }
 
-.assistant-card-header {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-sm);
-}
-
 .assistant-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
   background: var(--bg-panel);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--primary);
+  color: var(--accent);
   flex-shrink: 0;
 }
 
 .assistant-avatar.large {
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
 }
 
-.assistant-card-info {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  flex: 1;
-}
-
-.assistant-card-title-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-}
-
-.assistant-name {
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.assistant-desc {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  margin-top: 2px;
-  line-height: 1.4;
-}
-
-.assistant-card-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-xs);
-  margin-top: var(--space-sm);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--border-subtle);
-}
-
-.badge-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-xs);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-panel);
-  color: var(--text-secondary);
-}
-
-.assistant-card-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: var(--space-sm);
-}
-
-/* Modal styles */
+/* Avatar selection in modals */
 .avatar-picker {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-sm);
-  margin-top: var(--space-xs);
+  gap: var(--space-xs);
+  margin-top: var(--space-2xs);
 }
 
 .avatar-choice {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-surface);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all var(--transition-fast);
 }
 
 .avatar-choice:hover {
-  border-color: var(--border-hover);
+  background: var(--bg-panel);
   color: var(--text-primary);
 }
 
 .avatar-choice.selected {
-  border-color: var(--primary);
-  background: var(--primary-subtle);
-  color: var(--primary);
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent);
   font-weight: 500;
 }
 
-/* Detail page */
+/* Instructions editor on detail page */
 .instructions-editor {
   display: flex;
   flex-direction: column;
@@ -152,24 +64,26 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
   background: var(--bg-panel);
-  font-size: var(--font-xs);
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
 }
 
 .instructions-status-bar.missing,
 .instructions-status-bar.conflict,
 .instructions-status-bar.outdated {
-  background: var(--warning-subtle);
-  color: var(--warning-text);
+  background: var(--warning-wash);
+  color: var(--warning);
 }
 
 .instructions-status-bar.current {
-  background: var(--success-subtle);
-  color: var(--success-text);
+  background: var(--success-wash);
+  color: var(--success);
 }
 
+/* Responsibilities checklist modal */
 .responsibilities-modal-section {
   margin-bottom: var(--space-md);
 }
@@ -177,7 +91,7 @@
 .responsibilities-checklist {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2xs);
   max-height: 180px;
   overflow-y: auto;
   border: 1px solid var(--border-subtle);
@@ -188,10 +102,10 @@
 .checkbox-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
+  gap: var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
   cursor: pointer;
-  font-size: var(--font-sm);
+  border-radius: var(--radius-sm);
 }
 
 .checkbox-row:hover {

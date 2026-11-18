@@ -151,4 +151,63 @@ describe("AssistantsView", () => {
       });
     });
   });
+
+  it("supports server query filtering and cursor pagination with 加载更多", async () => {
+    const page1: AssistantPage<AssistantCard> = {
+      items: [mockCard],
+      next_cursor: "cursor-page-2",
+      end: false,
+    };
+    const card2: AssistantCard = {
+      ...mockCard,
+      id: "asst-2",
+      name: "测试安全官",
+    };
+    const page2: AssistantPage<AssistantCard> = {
+      items: [card2],
+      next_cursor: null,
+      end: true,
+    };
+
+    vi.mocked(api.listAssistantProfiles).mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
+
+    render(<AssistantsView navigate={navigate} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("加载更多")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByText("加载更多"));
+
+    await waitFor(() => {
+      expect(api.listAssistantProfiles).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cursor: "cursor-page-2",
+          limit: 50,
+        }),
+      );
+      expect(screen.getByText("测试安全官")).toBeTruthy();
+    });
+  });
+
+  it("handles agent detection failure with retry in create modal", async () => {
+    vi.mocked(api.getAgentStatus).mockRejectedValueOnce(new Error("网络或探测错误"));
+
+    render(<AssistantsView action="new" navigate={navigate} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/读取运行工具状态失败/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    });
+
+    vi.mocked(api.getAgentStatus).mockResolvedValueOnce({
+      codex: { terminal_cli: true, detected: true, launch_enabled: true },
+    } as any);
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() => {
+      expect(api.getAgentStatus).toHaveBeenCalled();
+    });
+  });
 });

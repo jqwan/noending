@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api";
+import { notifyDataChanged } from "../../app/routes";
 import type { AssistantDetail, AssistantPage, SessionListItem } from "../../types";
 import AssistantDetailView from "./AssistantDetailView";
 import { clearAssistantsCache } from "./assistantsCache";
@@ -172,7 +173,7 @@ describe("AssistantDetailView", () => {
     });
   });
 
-  it("preserves instructions draft and handles remote revision conflict", async () => {
+  it("preserves instructions draft and handles remote revision conflict via refresh signal", async () => {
     render(
       <AssistantDetailView
         assistantId="asst-1"
@@ -200,8 +201,17 @@ describe("AssistantDetailView", () => {
     };
     vi.mocked(api.getAssistantProfile).mockResolvedValue(remoteUpdated);
 
-    // 触发刷新：验证本地草稿不被覆盖
-    expect(textarea).toHaveProperty("value", "用户未保存的本地草稿");
+    // 触发全局刷新信号（如后台同步、外部修改完成）
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    // 验证第二次读取发生，冲突警告浮现，且用户草稿完好保留
+    await waitFor(() => {
+      expect(api.getAssistantProfile).toHaveBeenCalledTimes(2);
+      expect(screen.getByText(/后台档案已更新为版本 r2/)).toBeTruthy();
+      expect(textarea).toHaveProperty("value", "用户未保存的本地草稿");
+    });
 
     // 保存草稿
     vi.mocked(api.updateAssistantProfile).mockResolvedValue({
@@ -222,6 +232,283 @@ describe("AssistantDetailView", () => {
         1, // 提交时携带草稿基线 revision 1
         { instructions: "用户未保存的本地草稿" },
       );
+    });
+  });
+
+  it("handles conflict resolution by discarding draft or force overwriting", async () => {
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("严格遵循系统边界")).toBeTruthy();
+    });
+
+    const textarea = screen.getByDisplayValue("严格遵循系统边界");
+    fireEvent.change(textarea, { target: { value: "本地编辑中" } });
+
+    // 模拟后台更新并触发刷新信号
+    const remoteNew: AssistantDetail = {
+      ...mockDetail,
+      profile: {
+        ...mockDetail.profile,
+        instructions: "远端最新版本指令",
+        revision: 5,
+      },
+    };
+    vi.mocked(api.getAssistantProfile).mockResolvedValue(remoteNew);
+
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/当前草稿基于版本 r1/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "放弃草稿" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "覆盖远端修改" })).toBeTruthy();
+    });
+
+    // 1. 覆盖远端修改
+    vi.mocked(api.updateAssistantProfile).mockResolvedValue({
+      ...remoteNew,
+      profile: {
+        ...remoteNew.profile,
+        instructions: "本地编辑中",
+        revision: 6,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "覆盖远端修改" }));
+
+    await waitFor(() => {
+      expect(api.updateAssistantProfile).toHaveBeenCalledWith(
+        "asst-1",
+        5, // 强制覆盖使用当前远端 revision 5
+        { instructions: "本地编辑中" },
+      );
+      expect(screen.queryByText(/当前草稿基于版本/)).toBeNull();
+    });
+
+    // 2. 再次修改后选择放弃草稿
+    fireEvent.change(textarea, { target: { value: "又一次本地编辑" } });
+    const remoteNewer: AssistantDetail = {
+      ...mockDetail,
+      profile: {
+        ...mockDetail.profile,
+        instructions: "远端最新更新",
+        revision: 7,
+      },
+    };
+    vi.mocked(api.getAssistantProfile).mockResolvedValue(remoteNewer);
+
+    await act(async () => {
+      notifyDataChanged([]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "放弃草稿" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "放弃草稿" }));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("远端最新更新")).toBeTruthy();
+      expect(screen.queryByText(/当前草稿基于版本/)).toBeNull();
+    });
+  });
+
+  it("manages responsibilities with loading, error retry, and archived item preservation", async () => {
+    const detailWithResp: AssistantDetail = {
+      ...mockDetail,
+      projects: [
+        {
+          id: "proj-archived",
+          name: "旧归档项目",
+          git_id: null,
+          name_customized: false,
+          visibility: "archived",
+          created_at: "2026-11-01T00:00:00Z",
+          updated_at: "2026-11-01T00:00:00Z",
+        },
+      ],
+      tasks: [],
+    };
+    vi.mocked(api.getAssistantProfile).mockResolvedValue(detailWithResp);
+
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("旧归档项目")).toBeTruthy();
+    });
+
+    // 首次点击调整分配，模拟项目读取失败
+    vi.mocked(api.listProjects).mockRejectedValueOnce(new Error("网络超时"));
+    fireEvent.click(screen.getByRole("button", { name: "调整分配" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/读取项目\/任务失败/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+      expect((screen.getByRole("button", { name: "确认分配" }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    // 点击重试，返回已有归档项目、未分配归档项目、正常项目
+    vi.mocked(api.listProjects).mockResolvedValue([
+      {
+        id: "proj-archived",
+        name: "旧归档项目",
+        git_id: null,
+        name_customized: false,
+        visibility: "archived",
+        created_at: "2026-11-01T00:00:00Z",
+        updated_at: "2026-11-01T00:00:00Z",
+      },
+      {
+        id: "proj-other-archived",
+        name: "其他归档项目",
+        git_id: null,
+        name_customized: false,
+        visibility: "archived",
+        created_at: "2026-11-01T00:00:00Z",
+        updated_at: "2026-11-01T00:00:00Z",
+      },
+      {
+        id: "proj-active",
+        name: "活跃项目",
+        git_id: null,
+        name_customized: false,
+        visibility: "normal",
+        created_at: "2026-11-10T00:00:00Z",
+        updated_at: "2026-11-10T00:00:00Z",
+      },
+    ]);
+    vi.mocked(api.listWorkstreams).mockResolvedValue([]);
+
+    const retryBtn = screen.getByRole("button", { name: "重试" });
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("活跃项目")).toBeTruthy();
+      // 已分配的归档项目保留展示且带标记
+      expect(screen.getAllByText("旧归档项目").length).toBeGreaterThanOrEqual(1);
+      // 未分配的归档项目不可新增（未在列表中展示）
+      expect(screen.queryByText("其他归档项目")).toBeNull();
+    });
+
+    // 勾选新项目并确认保存
+    fireEvent.click(screen.getByRole("checkbox", { name: "活跃项目" }));
+    vi.mocked(api.setAssistantResponsibilities).mockResolvedValue({
+      ...detailWithResp,
+      projects: [
+        detailWithResp.projects[0],
+        {
+          id: "proj-active",
+          name: "活跃项目",
+          git_id: null,
+          name_customized: false,
+          visibility: "normal",
+          created_at: "2026-11-10T00:00:00Z",
+          updated_at: "2026-11-10T00:00:00Z",
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "确认分配" }));
+
+    await waitFor(() => {
+      expect(api.setAssistantResponsibilities).toHaveBeenCalledWith(
+        "asst-1",
+        1,
+        ["proj-archived", "proj-active"],
+        [],
+      );
+    });
+  });
+
+  it("supports tri-state runtime override selection in edit profile modal", async () => {
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "编辑资料" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
+
+    expect(screen.getByLabelText("继承应用默认 (null)")).toBeTruthy();
+    expect(screen.getByLabelText("Agent CLI 原生默认 ({})")).toBeTruthy();
+    expect(screen.getByLabelText("自定义模型与推理")).toBeTruthy();
+
+    // 1. 选择 Agent CLI 原生默认 ({})
+    fireEvent.click(screen.getByLabelText("Agent CLI 原生默认 ({})"));
+
+    vi.mocked(api.updateAssistantProfile).mockResolvedValue({
+      ...mockDetail,
+      profile: {
+        ...mockDetail.profile,
+        runtime_override: { model: null, provider: null, effort: null },
+        revision: 2,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(api.updateAssistantProfile).toHaveBeenCalledWith(
+        "asst-1",
+        1,
+        expect.objectContaining({
+          runtime_override: { model: null, provider: null, effort: null },
+        }),
+      );
+    });
+  });
+
+  it("handles agent status detection error with retry in edit profile modal", async () => {
+    vi.mocked(api.getAgentStatus).mockRejectedValueOnce(new Error("探测超时"));
+
+    render(
+      <AssistantDetailView
+        assistantId="asst-1"
+        navigate={navigate}
+        goBack={goBack}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "编辑资料" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑资料" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/读取运行工具状态失败/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    });
+
+    vi.mocked(api.getAgentStatus).mockResolvedValueOnce({
+      codex: { terminal_cli: true, detected: true, launch_enabled: true },
+      claude_code: { terminal_cli: true, detected: true, launch_enabled: true },
+    } as any);
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    await waitFor(() => {
+      expect(api.getAgentStatus).toHaveBeenCalled();
     });
   });
 
