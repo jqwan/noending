@@ -2358,6 +2358,12 @@ fn chrono_now_minus(seconds: i64) -> String {
 fn assistant_cli_preserves_profile_revisions_and_idempotent_creation_without_desktop() {
     let f = Fixture::new();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let (success, help) = f.run(exe, &["--help"]);
+    assert!(success, "{help}");
+    assert!(help["data"]["usage"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("ne assistant --help")));
     let file = f.root.join("profile.json");
     std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"name":"Manager 中文","agent":"codex","instructions":"Review actual results","runtime_override":{"model":"fixture-model"}})).unwrap()).unwrap();
     let args = [
@@ -2371,6 +2377,27 @@ fn assistant_cli_preserves_profile_revisions_and_idempotent_creation_without_des
     let (success, created) = f.run(exe, &args);
     assert!(success, "{created}");
     let id = created["data"]["profile"]["id"].as_str().unwrap();
+    let (success, sessions) = f.run(
+        exe,
+        &[
+            "assistant",
+            "sessions",
+            id,
+            "--scope",
+            "all",
+            "--limit",
+            "1",
+        ],
+    );
+    assert!(success, "{sessions}");
+    assert_eq!(sessions["data"]["items"], serde_json::json!([]));
+    let (success, unsupported) = f.run(exe, &["assistant", "sessions", id, "--query", "missing"]);
+    assert!(!success, "{unsupported}");
+    assert_eq!(unsupported["error"]["code"], "invalid_arguments");
+    assert!(unsupported["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("--query"));
     let (success, repeated) = f.run(exe, &args);
     assert!(success, "{repeated}");
     assert_eq!(repeated["data"]["profile"]["id"], id);

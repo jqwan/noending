@@ -398,6 +398,9 @@ pub fn list_profile_sessions(
     id: &str,
     query: AssistantListQuery,
 ) -> Result<AssistantPage<SessionListItem>> {
+    if query.query.is_some() {
+        return Err(other("智能体会话列表不支持 query 筛选"));
+    }
     repo::get(&db.read(), id)?;
     let scope = match query.scope.as_deref().unwrap_or("unarchived") {
         "all" => SessionListScope::All,

@@ -610,6 +610,28 @@ fn assistant_profile_pages_preserve_filters_and_archive_visibility() {
     let first = create_profile(&f, "Alpha");
     let second = create_profile(&f, "Beta");
     let _third = create_profile(&f, "Gamma");
+    let session = profile_session(&f, &first, "visible-role-session");
+    let sessions = assistant::list_profile_sessions(
+        f.db(),
+        &first.profile.id,
+        assistant::AssistantListQuery {
+            scope: Some("all".into()),
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(sessions.items[0].id, session);
+    let unsupported = assistant::list_profile_sessions(
+        f.db(),
+        &first.profile.id,
+        assistant::AssistantListQuery {
+            query: Some("missing-session".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(unsupported.to_string().contains("不支持 query"));
     let one = assistant::list_profiles(
         f.db(),
         assistant::AssistantListQuery {

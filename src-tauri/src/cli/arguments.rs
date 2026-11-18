@@ -671,7 +671,12 @@ fn assistant_command(words: &[String], options: &mut Options) -> CliResult<Comma
         "assign"=>AssistantCommand::Responsibilities(AssistantResponsibilities{id:id(words)?,revision:revision(options)?,project_ids:options.0.remove("project").unwrap_or_default(),task_ids:options.0.remove("task").unwrap_or_default()}),
         "archive"|"unarchive"=>AssistantCommand::Archive(AssistantArchive{id:id(words)?,revision:revision(options)?,archived:action=="archive"}),
         "prepare"=>AssistantCommand::Prepare(AssistantPrepare{id:id(words)?,revision:revision(options)?}),
-        "sessions"=>AssistantCommand::Sessions(AssistantSessions{id:id(words)?,query:assistant_query(options)?}),
+        "sessions"=>{
+            if options.0.contains_key("query") {
+                return Err(invalid("智能体会话列表不支持 --query 筛选"));
+            }
+            AssistantCommand::Sessions(AssistantSessions{id:id(words)?,query:assistant_query(options)?})
+        },
         "current" if words.len()==2=>AssistantCommand::ForSession(AssistantForSession{session:options.required("session")?}),
         "new"=>{
             let id=id(words)?;
@@ -692,7 +697,7 @@ fn read_submission(options: &mut Options) -> CliResult<crate::context::summary::
 
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
-        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne assistant --help", "ne sync --help", "ne mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
