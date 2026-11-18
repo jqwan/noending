@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import CustomSelect from "../../components/CustomSelect";
@@ -25,6 +25,7 @@ export default function CreateAssistantModal({
   onClose: () => void;
   onCreated: (id: string, name: string) => void;
 }) {
+  const formId = useId();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [agent, setAgent] = useState<Agent>("codex");
@@ -130,10 +131,11 @@ export default function CreateAssistantModal({
         )}
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">
+          <label className="label bold" htmlFor={`${formId}-name`}>
             名称 <span style={{ color: "var(--danger)" }}>*</span>
           </label>
           <input
+            id={`${formId}-name`}
             type="text"
             className="input"
             value={name}
@@ -145,8 +147,9 @@ export default function CreateAssistantModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">职责简介</label>
+          <label className="label bold" htmlFor={`${formId}-description`}>职责简介</label>
           <input
+            id={`${formId}-description`}
             type="text"
             className="input"
             value={description}
@@ -157,11 +160,12 @@ export default function CreateAssistantModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">运行工具 (Agent)</label>
+          <label className="label bold">运行工具</label>
           <CustomSelect
             value={agent}
             onChange={(val) => setAgent(val as Agent)}
             options={agentOptions}
+            disabled={busy || loadingAgentStatus || Boolean(agentStatusError)}
             ariaLabel="选择默认运行工具"
           />
         </div>
@@ -174,6 +178,7 @@ export default function CreateAssistantModal({
                 key={item.token}
                 type="button"
                 className={`avatar-choice${avatar === item.token ? " selected" : ""}`}
+                disabled={busy}
                 onClick={() => setAvatar(item.token)}
                 aria-checked={avatar === item.token}
                 role="radio"
@@ -187,8 +192,9 @@ export default function CreateAssistantModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">初始角色指令 (Prompt)</label>
+          <label className="label bold" htmlFor={`${formId}-instructions`}>初始角色指令</label>
           <textarea
+            id={`${formId}-instructions`}
             className="input textarea"
             rows={4}
             value={instructions}

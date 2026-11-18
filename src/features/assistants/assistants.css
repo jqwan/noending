@@ -4,23 +4,6 @@
   opacity: 0.75;
 }
 
-.assistant-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-panel);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-.assistant-avatar.large {
-  width: 40px;
-  height: 40px;
-}
-
 /* Avatar selection in modals */
 .avatar-picker {
   display: flex;
@@ -67,7 +50,7 @@
   padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
   background: var(--bg-panel);
-  font-size: 0.8125rem;
+  font-size: var(--font-size-sm);
   color: var(--text-secondary);
 }
 

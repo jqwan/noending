@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import CustomSelect from "../../components/CustomSelect";
@@ -29,6 +29,7 @@ export default function EditProfileModal({
   onClose: () => void;
   onSaved: (detail: AssistantDetail) => void;
 }) {
+  const formId = useId();
   const [name, setName] = useState(profile.name);
   const [description, setDescription] = useState(profile.description);
   const [agent, setAgent] = useState<Agent>(profile.agent);
@@ -165,10 +166,11 @@ export default function EditProfileModal({
         )}
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">
+          <label className="label bold" htmlFor={`${formId}-name`}>
             名称 <span style={{ color: "var(--danger)" }}>*</span>
           </label>
           <input
+            id={`${formId}-name`}
             type="text"
             className="input"
             value={name}
@@ -179,8 +181,9 @@ export default function EditProfileModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">职责简介</label>
+          <label className="label bold" htmlFor={`${formId}-description`}>职责简介</label>
           <input
+            id={`${formId}-description`}
             type="text"
             className="input"
             value={description}
@@ -190,7 +193,7 @@ export default function EditProfileModal({
         </div>
 
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold">运行工具 (Agent)</label>
+          <label className="label bold">运行工具</label>
           <CustomSelect
             value={agent}
             onChange={(val) => {

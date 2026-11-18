@@ -153,7 +153,7 @@ describe("AgentsView", () => {
   it("renders synchronization counts, configured source counts and both Antigravity formats", async () => {
     render(<AgentsView navigate={vi.fn()} />);
 
-    expect(await screen.findByText("Agent")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "运行工具" })).toBeTruthy();
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
     expect(await screen.findByText(/同步发现 5 条记录 · 写入 12 条新消息/)).toBeTruthy();
 

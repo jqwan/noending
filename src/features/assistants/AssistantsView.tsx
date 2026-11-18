@@ -10,6 +10,7 @@ import Notice from "../../components/Notice";
 import { useViewScroll } from "../../hooks/useViewState";
 import PageHeader from "../../layout/PageHeader";
 import type { AssistantCard } from "../../types";
+import { AGENT_LABELS } from "../../types";
 import { assistantCardsCache, clearAssistantCardsCache } from "./assistantsCache";
 import CreateAssistantModal from "./CreateAssistantModal";
 import "./assistants.css";
@@ -89,6 +90,7 @@ export default function AssistantsView({
 
   useEffect(() => {
     void loadCards();
+    return () => { ++requestSeq.current; };
   }, [loadCards]);
 
   useRefreshSignal(loadCards);
@@ -276,7 +278,7 @@ export default function AssistantsView({
                         <span className="badge small">已归档</span>
                       ) : (
                         <span className="badge">
-                          <Icon name="agent" /> {card.agent}
+                          <Icon name="agent" /> {AGENT_LABELS[card.agent]}
                         </span>
                       )}
                     </div>

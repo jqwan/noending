@@ -15,6 +15,7 @@ import type {
   SessionListItem,
   Workstream,
 } from "../../types";
+import { AGENT_LABELS } from "../../types";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import {
   assistantDetailCache,
@@ -67,6 +68,7 @@ export default function AssistantDetailView({
   const [respModalOpen, setRespModalOpen] = useState(false);
   const [loadingRespOptions, setLoadingRespOptions] = useState(false);
   const [respOptionsError, setRespOptionsError] = useState("");
+  const [respSaveError, setRespSaveError] = useState("");
   const [availableProjects, setAvailableProjects] = useState<Project[]>([]);
   const [availableTasks, setAvailableTasks] = useState<Workstream[]>([]);
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
@@ -176,6 +178,10 @@ export default function AssistantDetailView({
 
   useEffect(() => {
     refreshAll();
+    return () => {
+      ++requestSeq.current;
+      ++sessionRequestSeq.current;
+    };
   }, [refreshAll]);
 
   useRefreshSignal(refreshAll);
@@ -276,6 +282,7 @@ export default function AssistantDetailView({
   const handleOpenRespModal = () => {
     if (!data) return;
     respBaseRevision.current = data.profile.revision;
+    setRespSaveError("");
     const pIds = data.projects.map((p) => p.id);
     const tIds = data.tasks.map((t) => t.id);
     setSelectedProjectIds(pIds);
@@ -288,7 +295,7 @@ export default function AssistantDetailView({
   const handleSaveResp = async () => {
     if (!data || savingResp || respBaseRevision.current === null) return;
     setSavingResp(true);
-    setFailure("");
+    setRespSaveError("");
     try {
       const updated = await api.setAssistantResponsibilities(
         data.profile.id,
@@ -301,7 +308,7 @@ export default function AssistantDetailView({
       clearAssistantCardsCache();
       setRespModalOpen(false);
     } catch (err) {
-      setFailure(`保存责任分配失败：${String(err)}`);
+      setRespSaveError(`保存责任分配失败：${String(err)}`);
     } finally {
       setSavingResp(false);
     }
@@ -339,6 +346,12 @@ export default function AssistantDetailView({
 
   const isArchived = data?.profile.visibility === "archived";
   const title = data?.profile.name || initialTitle || "智能体详情";
+  const runtime = data?.profile.runtime_override;
+  const runtimeDescription = runtime === null
+    ? "继承应用默认"
+    : runtime
+      ? [runtime.provider, runtime.model, runtime.effort].filter(Boolean).join(" · ") || "Agent CLI 默认"
+      : "—";
 
   return (
     <DetailPanelProvider kind="assistants">
@@ -418,14 +431,12 @@ export default function AssistantDetailView({
                     </Field>
                     <Field label="默认运行工具">
                       <span className="badge-agent">
-                        <Icon name="agent" /> {data.profile.agent}
+                        <Icon name="agent" /> {AGENT_LABELS[data.profile.agent]}
                       </span>
                     </Field>
                     <Field label="模型与推理">
                       <span className="small">
-                        {data.profile.runtime_override?.model
-                          ? `${data.profile.runtime_override.model}${data.profile.runtime_override.effort ? ` (${data.profile.runtime_override.effort})` : ""}`
-                          : "Agent 默认"}
+                        {runtimeDescription}
                       </span>
                     </Field>
                     <Field label="主目录位置" copyValue={data.workspace_path.canonical_path}>
@@ -463,12 +474,7 @@ export default function AssistantDetailView({
             <DetailSection
               sectionId="assistant-instructions"
               label="角色设定与指令"
-              title="角色设定与指令 (Instructions)"
-              status={
-                <span className={`badge small ${data.instructions_state === "current" ? "success" : "warning"}`}>
-                  {data.instructions_state === "current" ? "已同步" : "需同步"}
-                </span>
-              }
+              title="角色设定与指令"
               actions={
                 <>
                   {data.instructions_state !== "current" && (
@@ -535,7 +541,8 @@ export default function AssistantDetailView({
                   className="input textarea"
                   rows={6}
                   value={instructionsInput}
-                  disabled={isArchived}
+                  disabled={isArchived || savingInstructions}
+                  aria-label="角色设定与指令"
                   placeholder="编写该智能体的角色人设、行为准则、交流风格与任务调度规范…"
                   onChange={(e) => {
                     if (!instructionsModified) {
@@ -546,7 +553,7 @@ export default function AssistantDetailView({
                   }}
                 />
                 <span className="muted x-small">
-                  系统将根据当前绑定的运行工具，自动在智能体主目录生成对应的适配文件（如 AGENTS.md / CLAUDE.md）。
+                  保存的设定在后续新会话中生效。
                 </span>
               </div>
             </DetailSection>
@@ -555,12 +562,7 @@ export default function AssistantDetailView({
             <DetailSection
               sectionId="assistant-responsibilities"
               label="负责项目与跟踪任务"
-              title="负责项目与跟踪任务"
-              status={
-                <span className="muted small">
-                  {data.tasks.length + data.projects.length} 项
-                </span>
-              }
+              title={`负责项目与任务（${data.tasks.length + data.projects.length}）`}
               actions={
                 !isArchived && (
                   <button
@@ -621,8 +623,7 @@ export default function AssistantDetailView({
             <DetailSection
               sectionId="assistant-sessions"
               label="会话记录"
-              title="会话记录"
-              status={<span className="muted small">{sessions.length} 次</span>}
+              title={`会话记录（${data.session_count}）`}
               actions={
                 <button
                   className="btn ghost small icon-button"
@@ -712,6 +713,7 @@ export default function AssistantDetailView({
             title="调整负责项目与任务"
             onClose={() => setRespModalOpen(false)}
           >
+            {respSaveError && <Notice tone="error">{respSaveError}</Notice>}
             {loadingRespOptions ? (
               <div className="muted small" style={{ padding: "var(--space-lg) 0", textAlign: "center" }}>
                 正在读取项目与任务列表…

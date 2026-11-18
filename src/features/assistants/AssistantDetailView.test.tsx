@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../api";
 import { notifyDataChanged } from "../../app/routes";
@@ -108,6 +108,8 @@ describe("AssistantDetailView", () => {
     clearAssistantsCache();
     vi.mocked(api.getAssistantProfile).mockResolvedValue(mockDetail);
     vi.mocked(api.listAssistantSessions).mockResolvedValue(mockSessionsPage);
+    vi.mocked(api.listProjects).mockResolvedValue([]);
+    vi.mocked(api.listWorkstreams).mockResolvedValue([]);
   });
 
   afterEach(cleanup);
@@ -563,6 +565,7 @@ describe("AssistantDetailView", () => {
   });
 
   it("uses fixed base revision when saving responsibilities even if background refreshed", async () => {
+    vi.mocked(api.listProjects).mockResolvedValue([mockDetail.project]);
     render(
       <AssistantDetailView
         assistantId="asst-1"
@@ -576,6 +579,9 @@ describe("AssistantDetailView", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "调整分配" }));
+
+    const projectChoice = await screen.findByRole("checkbox", { name: mockDetail.project.name });
+    fireEvent.click(projectChoice);
 
     // 此时后台刷新，更新 revision 到 8
     const remoteUpdated: AssistantDetail = {
@@ -592,7 +598,7 @@ describe("AssistantDetailView", () => {
     });
 
     // 保存分配：必须使用固定开窗 revision 1
-    vi.mocked(api.setAssistantResponsibilities).mockResolvedValue(mockDetail);
+    vi.mocked(api.setAssistantResponsibilities).mockRejectedValue(new Error("版本冲突，请重新读取"));
 
     await waitFor(() => {
       expect((screen.getByRole("button", { name: "确认分配" }) as HTMLButtonElement).disabled).toBe(false);
@@ -604,9 +610,12 @@ describe("AssistantDetailView", () => {
       expect(api.setAssistantResponsibilities).toHaveBeenCalledWith(
         "asst-1",
         1, // 必须是固定开窗 revision 1
-        [],
+        [mockDetail.project.id],
         [],
       );
+      const dialog = screen.getByRole("dialog", { name: "调整负责项目与任务" });
+      expect(within(dialog).getByText(/版本冲突，请重新读取/)).toBeTruthy();
+      expect(projectChoice).toHaveProperty("checked", true);
     });
   });
 
