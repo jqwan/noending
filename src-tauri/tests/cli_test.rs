@@ -2425,3 +2425,111 @@ fn assistant_cli_preserves_profile_revisions_and_idempotent_creation_without_des
     assert!(!success, "{start}");
     assert_eq!(start["error"]["code"], "desktop_unavailable");
 }
+
+#[test]
+fn assistant_cli_assigns_multiple_projects_and_tasks_and_forwards_all_start_tasks() {
+    use noending::{
+        domain::Project,
+        session_control::{ControlCommand, DesktopHost},
+        storage::now,
+        workspace::workstream,
+    };
+    let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let file = f.root.join("profile.json");
+    std::fs::write(&file, r#"{"name":"Multi-project manager","agent":"codex"}"#).unwrap();
+    let (success, created) = f.run(
+        exe,
+        &["assistant", "create", "--file", file.to_str().unwrap()],
+    );
+    assert!(success, "{created}");
+    let id = created["data"]["profile"]["id"].as_str().unwrap();
+    let db = f.db.as_ref().unwrap();
+    for (id, name) in [("project-a", "Alpha"), ("project-b", "Beta")] {
+        db.upsert_project(&Project {
+            id: id.into(),
+            name: name.into(),
+            git_id: None,
+            name_customized: true,
+            visibility: "normal".into(),
+            created_at: now(),
+            updated_at: now(),
+        })
+        .unwrap();
+    }
+    let first = workstream::create_workstream(db, "First", "", &["project-a".into()]).unwrap();
+    let second = workstream::create_workstream(db, "Second", "", &["project-b".into()]).unwrap();
+    let (success, assigned) = f.run(
+        exe,
+        &[
+            "assistant",
+            "assign",
+            id,
+            "--revision",
+            "1",
+            "--project",
+            "project-a",
+            "--project",
+            "project-b",
+            "--task",
+            &first.id,
+            "--task",
+            &second.id,
+        ],
+    );
+    assert!(success, "{assigned}");
+    assert_eq!(
+        assigned["data"]["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["project-a", "project-b"]
+    );
+    let mut task_ids = assigned["data"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    task_ids.sort();
+    let mut expected = [first.id.as_str(), second.id.as_str()];
+    expected.sort();
+    assert_eq!(task_ids, expected);
+    let _host=DesktopHost::start(&f.home,|command,_|match command {
+        ControlCommand::StartAssistant(p)=>Ok(serde_json::json!({"terminal_id":"pending-manager","assistant_id":p.id,"task_ids":p.task_ids})),
+        _=>panic!("unexpected control request"),
+    }).unwrap();
+    let (success, started) = f.run(
+        exe,
+        &[
+            "assistant",
+            "new",
+            id,
+            "--task",
+            &first.id,
+            "--task",
+            &second.id,
+        ],
+    );
+    assert!(success, "{started}");
+    assert_eq!(started["data"]["assistant_id"], id);
+    assert_eq!(
+        started["data"]["task_ids"],
+        serde_json::json!([first.id, second.id])
+    );
+    let (success, ambiguous) = f.run(
+        exe,
+        &[
+            "assistant",
+            "list",
+            "--project",
+            "project-a",
+            "--project",
+            "project-b",
+        ],
+    );
+    assert!(!success, "{ambiguous}");
+    assert_eq!(ambiguous["error"]["code"], "invalid_arguments");
+}

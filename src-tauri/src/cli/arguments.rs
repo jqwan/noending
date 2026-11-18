@@ -137,14 +137,16 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         return Err(invalid("此命令只接受一个 --path"));
     }
     if options.0.get("task").is_some_and(|v| v.len() > 1)
-        && !(resource == "session" && action == "new")
+        && !((resource == "session" && action == "new")
+            || (resource == "assistant" && matches!(action, "assign" | "new") && words.len() == 3))
     {
         return Err(invalid("此命令只接受一个 --task"));
     }
     if options.0.get("project").is_some_and(|v| v.len() > 1)
-        && !(resource == "task"
+        && !((resource == "task"
             && (action == "create"
                 || (action == "project" && words.get(2).is_some_and(|s| s == "set"))))
+            || (resource == "assistant" && action == "assign" && words.len() == 3))
     {
         return Err(invalid("此命令只接受一个 --project"));
     }
