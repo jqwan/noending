@@ -332,6 +332,15 @@ pub fn run() {
             commands::get_extraction_settings,
             commands::set_extraction_settings,
             commands::assistant_workspace,
+            commands::assistant::list_assistant_profiles,
+            commands::assistant::get_assistant_profile,
+            commands::assistant::create_assistant_profile,
+            commands::assistant::update_assistant_profile,
+            commands::assistant::set_assistant_responsibilities,
+            commands::assistant::set_assistant_archived,
+            commands::assistant::list_assistant_sessions,
+            commands::assistant::start_assistant_session,
+            commands::assistant::prepare_assistant_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

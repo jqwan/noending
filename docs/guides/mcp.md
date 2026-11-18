@@ -34,6 +34,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | 状态与定位 | `status`、`freshness`、`agent_list`、`project_resolve`、`session_resolve` |
 | 对象查询 | `object_list`、`object_get` |
 | 信箱 | `mailbox_list`、`mailbox_read`、`mailbox_send`、`mailbox_mark`、`mailbox_wait` |
+| 智能体档案 | `assistant_list`、`assistant_get`、`assistant_create`、`assistant_update`、`assistant_responsibilities_set`、`assistant_archive`、`assistant_prepare`、`assistant_sessions`、`assistant_for_session`、`assistant_start`（启动需桌面） |
 | 会话控制（需桌面运行） | `session_terminals`、`session_start` |
 | 历史与证据 | `session_search`、`session_messages` |
 | 事项摘要 | `summary_search`、`summary_get`、`summary_update`、`summary_context`、`summary_input`、`summary_submit` |

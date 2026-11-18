@@ -74,8 +74,8 @@ pub fn set_tracking_conn(conn: &Connection, sid: &str, tid: &str, tracked: bool)
             return Err(other("不能新增跟踪已归档任务"));
         }
         let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects WHERE workstream_id=?1 AND project_id=?2)",params![tid,session.project_id],|r|r.get(0))?;
-        if !eligible {
-            return Err(other("任务未关联会话所属项目"));
+        if !eligible && !super::assistant_profiles::management_eligible(conn, sid, tid)? {
+            return Err(other("任务未关联会话所属项目，或未分配给该智能体"));
         }
         conn.execute(
             "INSERT INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",

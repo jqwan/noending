@@ -198,6 +198,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         }
     } else {
         let c = match resource {
+            "assistant" => assistant_command(&words, &mut options)?,
             "status" if words.len() == 1 => Command::Status,
             "freshness" if words.len() == 1 => {
                 let targets = [
@@ -644,6 +645,43 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
         request_id,
     })
 }
+fn assistant_query(options: &mut Options) -> CliResult<crate::assistant::AssistantListQuery> {
+    Ok(crate::assistant::AssistantListQuery {
+        query: options.take("query"),
+        scope: options.take("scope"),
+        cursor: options.take("cursor"),
+        limit: options.optional_number("limit")?,
+    })
+}
+fn assistant_command(words: &[String], options: &mut Options) -> CliResult<Command> {
+    use crate::assistant::*;
+    let action = words.get(1).map(String::as_str).unwrap_or("");
+    let revision = |options: &mut Options| {
+        options
+            .optional_number::<i64>("revision")?
+            .ok_or_else(|| invalid("需要 --revision"))
+    };
+    let command=match action {
+        "list" if words.len()==2=>AssistantCommand::List(assistant_query(options)?),
+        "show"=>AssistantCommand::Get(AssistantId{id:id(words)?}),
+        "create" if words.len()==2=>AssistantCommand::Create(serde_json::from_str(&std::fs::read_to_string(options.required("file")?)?)?),
+        "update"=>AssistantCommand::Update(AssistantUpdate{id:id(words)?,revision:revision(options)?,patch:serde_json::from_str(&std::fs::read_to_string(options.required("file")?)?)?}),
+        "assign"=>AssistantCommand::Responsibilities(AssistantResponsibilities{id:id(words)?,revision:revision(options)?,project_ids:options.0.remove("project").unwrap_or_default(),task_ids:options.0.remove("task").unwrap_or_default()}),
+        "archive"|"unarchive"=>AssistantCommand::Archive(AssistantArchive{id:id(words)?,revision:revision(options)?,archived:action=="archive"}),
+        "prepare"=>AssistantCommand::Prepare(AssistantPrepare{id:id(words)?,revision:revision(options)?}),
+        "sessions"=>AssistantCommand::Sessions(AssistantSessions{id:id(words)?,query:assistant_query(options)?}),
+        "current" if words.len()==2=>AssistantCommand::ForSession(AssistantForSession{session:options.required("session")?}),
+        "new"=>{
+            let id=id(words)?;
+            let task_ids=options.0.remove("task").unwrap_or_default();
+            let initial_message=options.message()?;
+            let runtime_override=options.take("runtime").map(|s|serde_json::from_str(&s)).transpose()?;
+            return Ok(Command::SessionControl{command:crate::session_control::ControlCommand::StartAssistant(AssistantStart{id,task_ids,initial_message,runtime_override})});
+        }
+        _=>return Err(invalid("使用 assistant list/show/create/update/assign/archive/unarchive/prepare/sessions/current/new")),
+    };
+    Ok(Command::Assistant { command })
+}
 fn read_submission(options: &mut Options) -> CliResult<crate::context::summary::Submission> {
     Ok(serde_json::from_str(&std::fs::read_to_string(
         options.required("file")?,
@@ -661,6 +699,7 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item-id ID | --item NUMBER] [--revision REVISION]"],
         Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--agent codex|claude_code|pi|antigravity|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],
         Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
+        Some("assistant") => vec!["ne assistant list [--scope all] [--query TEXT] [--cursor CURSOR]", "ne assistant show ID", "ne assistant create --file PROFILE_JSON", "ne assistant update ID --revision N --file PATCH_JSON", "ne assistant assign ID --revision N [--project ID] [--task ID]", "ne assistant archive ID --revision N", "ne assistant unarchive ID --revision N", "ne assistant prepare ID --revision N", "ne assistant sessions ID [--scope all]", "ne assistant current --session SESSION_ID", "ne assistant new ID [--task ID] [--message TEXT | --file FILE] [--runtime JSON]"],
         Some("agent") => vec!["ne agent list"],
         Some("source") => vec!["ne source list"],
         Some("search")=>vec!["ne search --query TEXT [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],

@@ -755,6 +755,19 @@ fn compute_state_fingerprint_with_runtime(
     if mode == "new" && !crate::agent_runtime::store::launch_enabled(db, agent)? {
         return Err(other("该 Agent 已关闭用于新建会话"));
     }
+    if mode == "new" {
+        if let Some(path) = resolution
+            .cwd
+            .as_deref()
+            .and_then(crate::workspace::path_identity_of)
+        {
+            if crate::storage::assistant_profiles::profile_for_path(&db.read(), &path)?
+                .is_some_and(|profile| profile.visibility != "normal")
+            {
+                return Err(other("已归档智能体不能开始新会话"));
+            }
+        }
+    }
     let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
     hasher.update(b"runtime:");
     hasher.update(agent.as_str().as_bytes());
@@ -1016,8 +1029,10 @@ fn validate_initial_task(
     let path_id = crate::workspace::path_identity_of(cwd).ok_or_else(|| other("工作目录无效"))?;
     let conn = db.read();
     let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=?1 AND wp.id=?2)",rusqlite::params![task,path_id],|r|r.get(0))?;
-    if !eligible {
-        return Err(other("所选任务未关联工作目录所属项目"));
+    if !eligible
+        && !crate::storage::assistant_profiles::management_path_eligible(&conn, &path_id, task)?
+    {
+        return Err(other("所选任务未关联工作目录所属项目，或未分配给该智能体"));
     }
     Ok(())
 }

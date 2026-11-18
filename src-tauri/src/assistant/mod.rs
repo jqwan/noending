@@ -1,5 +1,14 @@
-//! An empty, path-backed Assistant project. Agent sessions use the ordinary
-//! launch and ingestion flow; users choose their own project files and Skills.
+//! Persistent assistant profiles and the legacy empty Assistant workspace.
+//! Each profile owns a registered directory; native sessions reuse the shared
+//! launcher, ingestion, task tracking and Skill loading services.
+mod api;
+pub use api::*;
+mod files;
+mod models;
+mod profiles;
+pub use models::*;
+pub use profiles::*;
+
 use crate::{
     domain::Project,
     error::{other, Result},

@@ -16,6 +16,10 @@ const INITIALIZED: &str = "skills.noending_initialized";
 
 pub(crate) const FILES: &[(&str, &str)] = &[
     (
+        "references/assistant.md",
+        include_str!("../../skills/noending/references/assistant.md"),
+    ),
+    (
         "references/access.json",
         include_str!("../../skills/noending/references/access.json"),
     ),

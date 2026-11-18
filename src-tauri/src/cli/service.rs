@@ -85,6 +85,9 @@ pub(crate) enum Command {
         run: String,
         connection: String,
     },
+    Assistant {
+        command: crate::assistant::AssistantCommand,
+    },
     Status,
     SessionControl {
         command: crate::session_control::ControlCommand,
@@ -234,6 +237,9 @@ pub(crate) enum Command {
 }
 impl Command {
     pub(crate) fn is_write(&self) -> bool {
+        if let Self::Assistant { command } = self {
+            return command.is_write();
+        }
         if let Self::SessionControl { command } = self {
             return command.is_write();
         }
@@ -328,6 +334,12 @@ impl Service {
                 request_id,
                 command,
             } => self.execute_once(&request_id, *command),
+            Command::Assistant { command } => Ok(crate::assistant::dispatch_command(
+                &self.db,
+                &self.home,
+                &self.layer,
+                command,
+            )?),
             Command::Receipt { id } => super::receipts::show(&self.home, &id),
             Command::SessionControl { command } => {
                 if command.is_write() {
@@ -481,7 +493,7 @@ impl Service {
                 Ok(json!({"listening":false,"exit":code}))
             }
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","room"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","room","assistant"]}),
             ),
             Command::Freshness { kind, id } => {
                 if kind.is_some() != id.is_some() {

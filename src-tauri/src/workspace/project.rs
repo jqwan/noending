@@ -526,6 +526,8 @@ pub fn delete_project_permanently(db: &Db, id: &str, policy: &dyn WorkspacePolic
         if project.visibility != "archived" {
             return Err(other("只能永久删除已归档的项目"));
         }
+        let owns_assistant:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM assistant_profiles a JOIN workspace_paths wp ON wp.id=a.workspace_path_id WHERE wp.project_id=?1)",[id],|r|r.get(0))?;
+        if owns_assistant{return Err(other("项目仍承载智能体档案，不能永久删除"));}
         let paths = list_workspace_paths_for_project_conn(tx, id)?;
         let canonical: Vec<String> = paths.iter().map(|p| p.canonical_path.clone()).collect();
         if project_purpose(&canonical, policy).is_some() {
@@ -944,6 +946,7 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         crate::storage::bump_input_revision_conn(conn, task)?;
     }
     conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT workstream_id,?1 FROM workstream_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
+    conn.execute("INSERT OR IGNORE INTO assistant_projects(assistant_id,project_id) SELECT assistant_id,?1 FROM assistant_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
     let old = crate::storage::project_context_repo::state(conn, &loser.id)?;
     let current = crate::storage::project_context_repo::state(conn, &survivor.id)?;
     if current.summary.is_empty() && !old.summary.is_empty() {

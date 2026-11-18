@@ -12,6 +12,7 @@ use crate::error::{other, Result};
 
 // The WorkspacePath registry, explicit task/project memberships and Session→path
 // attach each live in their own impl file rather than growing this monolith.
+pub mod assistant_profiles;
 pub mod collaboration;
 pub mod context_repo;
 pub mod freshness;
@@ -184,6 +185,7 @@ fn upsert_logical_session_conn(
                 metadata.to_string()
             ],
         )?;
+        assistant_profiles::bind_session(conn, &id)?;
         index_session_conn(conn, &id)?;
         return Ok((id, false));
     }
@@ -209,6 +211,7 @@ fn upsert_logical_session_conn(
             metadata.to_string()
         ],
     )?;
+    assistant_profiles::bind_session(conn, &id)?;
     index_session_conn(conn, &id)?;
     Ok((id, true))
 }
@@ -1085,12 +1088,27 @@ impl Db {
     /// A launch selection is applied once to its exact native session. A deleted,
     /// archived or detached task cannot prevent terminal identity binding.
     pub fn inherit_terminal_tracking(&self, session: &Session, tasks: &[String]) -> Result<()> {
+        self.inherit_terminal_tracking_for_assistant(session, tasks, None)
+    }
+    pub fn inherit_terminal_tracking_for_assistant(
+        &self,
+        session: &Session,
+        tasks: &[String],
+        assistant: Option<&str>,
+    ) -> Result<()> {
         self.tx(|tx| {
             let current=get_session_conn(tx,&session.id)?.ok_or_else(||other("会话不存在"))?;
             if current.agent!=session.agent || current.root_agent_session_id!=session.root_agent_session_id { return Err(other("终端会话身份已变化")); }
+            if let Some(assistant)=assistant {
+                assistant_profiles::get(tx,assistant)?;
+                let existing=assistant_profiles::profile_for_session(tx,&current.id)?;
+                if existing.is_some_and(|p| p.id!=assistant) { return Err(other("会话已关联其他智能体")); }
+                tx.execute("INSERT OR IGNORE INTO assistant_sessions(session_id,assistant_id) VALUES(?1,?2)",params![current.id,assistant])?;
+            }
             for tid in tasks {
+                let active=get_workstream_conn(tx,tid)?.is_some_and(|task|task.visibility=="normal");
                 let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM workstreams w JOIN workstream_projects p ON p.workstream_id=w.id WHERE w.id=?1 AND w.visibility='normal' AND p.project_id=?2)",params![tid,current.project_id],|r|r.get(0))?;
-                if eligible { workstream_projects::set_tracking_conn(tx,&current.id,tid,true)?; }
+                if active && (eligible || assistant_profiles::management_eligible(tx, &current.id, tid)?) { workstream_projects::set_tracking_conn(tx,&current.id,tid,true)?; }
             }
             Ok(())
         })

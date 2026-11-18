@@ -108,7 +108,7 @@ impl Db {
     }
 }
 
-fn row_list_item(r: &Row<'_>) -> rusqlite::Result<SessionListItem> {
+pub(super) fn row_list_item(r: &Row<'_>) -> rusqlite::Result<SessionListItem> {
     Ok(SessionListItem {
         id: r.get("id")?,
         agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),

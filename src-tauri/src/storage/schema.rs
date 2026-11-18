@@ -597,6 +597,37 @@ END;
       PRIMARY KEY(session_id, workstream_id)
     );
     CREATE INDEX IF NOT EXISTS idx_session_workstreams_task ON session_workstreams(workstream_id);
+    CREATE TABLE IF NOT EXISTS assistant_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL CHECK(length(trim(name)) > 0),
+      avatar TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      instructions TEXT NOT NULL DEFAULT '',
+      agent TEXT NOT NULL,
+      runtime_override TEXT CHECK(runtime_override IS NULL OR json_valid(runtime_override)),
+      workspace_path_id TEXT NOT NULL UNIQUE REFERENCES workspace_paths(id) ON DELETE RESTRICT,
+      visibility TEXT NOT NULL DEFAULT 'normal' CHECK(visibility IN ('normal','archived')),
+      revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS assistant_projects (
+      assistant_id TEXT NOT NULL REFERENCES assistant_profiles(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY(assistant_id,project_id)
+    );
+    CREATE TABLE IF NOT EXISTS assistant_tasks (
+      assistant_id TEXT NOT NULL REFERENCES assistant_profiles(id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
+      PRIMARY KEY(assistant_id,task_id)
+    );
+    CREATE TABLE IF NOT EXISTS assistant_sessions (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      assistant_id TEXT NOT NULL REFERENCES assistant_profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS assistant_sessions_by_profile ON assistant_sessions(assistant_id);
+    CREATE INDEX IF NOT EXISTS assistant_tasks_by_task ON assistant_tasks(task_id);
+
     CREATE INDEX IF NOT EXISTS idx_workspace_paths_project ON workspace_paths(project_id);
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_git_id

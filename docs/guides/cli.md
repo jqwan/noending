@@ -158,6 +158,30 @@ ne session terminals --session SESSION_ID
 
 `ne session identity` 只查询当前命令继承的 NoEnding 终端身份，返回 `data.session_id`，不接收显式身份参数，不需要自行读取环境变量或筛选终端列表。缺少终端上下文返回 `terminal_context_missing`，外部会话再用宿主提供的原生 ID 执行 `session resolve`；尚未绑定返回 `sender_unbound`，等待摄入后重试。桌面不可用返回 `desktop_unavailable`，终端失效返回 `sender_unavailable`，不回退到其他会话。此查询不启动、同步或修改会话，也不需要请求编号。
 
+## 智能体档案
+
+智能体档案对应独立的主目录项目，角色、运行默认值和负责范围由 NoEnding 保存；工程执行仍使用工程项目的普通会话。档案数据操作无需桌面，新建管理终端需要同 Home 桌面运行。
+
+```sh
+ne assistant list --scope all
+ne assistant create --file profile.json
+ne assistant show ASSISTANT_ID
+ne assistant update ASSISTANT_ID --revision N --file patch.json
+ne assistant assign ASSISTANT_ID --revision N --project PROJECT_ID --task TASK_ID
+ne assistant new ASSISTANT_ID --task TASK_ID --message "核对进展"
+ne assistant current --session SESSION_ID
+ne assistant sessions ASSISTANT_ID --scope all
+ne assistant archive ASSISTANT_ID --revision N
+ne assistant unarchive ASSISTANT_ID --revision N
+ne assistant prepare ASSISTANT_ID --revision N
+```
+
+profile.json 至少包含 `name` 和 `agent`。可选 `avatar`、`description`、`instructions` 和 `runtime_override`。patch 省略字段保持原值；`runtime_override:null` 继承运行工具保存配置，`{}` 使用 CLI 原生默认。新建管理会话用档案配置，`--runtime JSON` 可以临时整份覆盖。新建返回终端和待绑定事实，继续会话使用已有会话入口。
+
+`assign` 完整替换两组 ID，`--project` 和 `--task` 均可重复；二者分别显式选择，不要求交集，支持无项目任务。已确认属于该档案且明确分配任务的管理会话可以跟踪跨项目任务，不改写任务项目集合。普通会话继续遵循项目资格。取消责任保留既有跟踪历史，活动协作成员解除责任会被拒绝。
+
+列表、会话列表支持 `--cursor`、`--limit`；只读返回不能证明模型执行或消息已送达。档案完整修改和范围替换要求当前 revision，写入可使用 `--request-id`。归档保留目录、资料和原生会话；不提供永久删除档案。生成的角色入口遇到用户修改时明确冲突并保留原文件。
+
 ## 会话信箱
 
 所有会话都能收信，包括没有终端 TUI 的 Agent。信箱持久化，数据命令无需桌面运行：

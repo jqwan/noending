@@ -163,6 +163,7 @@ struct TerminalRecord {
     root_agent_session_id: Option<String>,
     /// One-shot task assignment for the launch's first native conversation.
     pending_tracking: Option<PendingTracking>,
+    pending_assistant: Option<PendingAssistant>,
     identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
     scrollback: Scrollback,
     cols: u16,
@@ -174,6 +175,11 @@ struct TerminalRecord {
     started_turns: u64,
     master: Box<dyn portable_pty::MasterPty + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+}
+
+struct PendingAssistant {
+    id: String,
+    native_id: Option<String>,
 }
 
 struct PendingTracking {
@@ -585,6 +591,17 @@ impl TerminalRegistry {
                 .as_ref()
                 .is_some_and(|cwd| record.summary.cwd.as_ref() != Some(cwd));
             if identity_changed {
+                if let Some(pending) = &mut record.pending_assistant {
+                    if pending
+                        .native_id
+                        .as_ref()
+                        .is_some_and(|id| id != &event.native_id)
+                    {
+                        record.pending_assistant = None;
+                    } else {
+                        pending.native_id = Some(event.native_id.clone());
+                    }
+                }
                 if let Some(pending) = &mut record.pending_tracking {
                     if pending
                         .native_id
@@ -688,7 +705,7 @@ impl TerminalRegistry {
         let Ok(reservations) = self.resume_reservations.lock() else {
             return;
         };
-        let owner = {
+        let (owner, assistant) = {
             let Ok(records) = self.records.lock() else {
                 return;
             };
@@ -723,14 +740,22 @@ impl TerminalRegistry {
                 );
                 return;
             }
-            record
+            let owner = record
                 .pending_tracking
                 .as_ref()
                 .filter(|pending| pending.native_id.as_deref() == Some(native_id))
                 .map(|pending| pending.workstream_ids.clone())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let assistant = record
+                .pending_assistant
+                .as_ref()
+                .filter(|pending| pending.native_id.as_deref() == Some(native_id))
+                .map(|pending| pending.id.clone());
+            (owner, assistant)
         };
-        if let Err(error) = db.inherit_terminal_tracking(session, &owner) {
+        if let Err(error) =
+            db.inherit_terminal_tracking_for_assistant(session, &owner, assistant.as_deref())
+        {
             eprintln!("[terminal] native binding failed: {error}");
             return;
         }
@@ -747,6 +772,7 @@ impl TerminalRegistry {
             record.summary.session_id = Some(session.id.clone());
             record.summary.initial_workstream_ids.clear();
             record.pending_tracking = None;
+            record.pending_assistant = None;
             record.summary.session_title = session.title.clone();
             record.summary.identity_revision += 1;
             let state = record.summary.activity.state;
@@ -1062,6 +1088,7 @@ impl TerminalRegistry {
         &self,
         summary: TerminalSummary,
         root_agent_session_id: Option<String>,
+        assistant_profile_id: Option<String>,
         identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
         scrollback: Scrollback,
         master: Box<dyn portable_pty::MasterPty + Send>,
@@ -1080,7 +1107,12 @@ impl TerminalRegistry {
                 .insert(terminal_id.clone(), flow.clone());
             flow
         };
+        let pending_assistant = assistant_profile_id.map(|id| PendingAssistant {
+            id,
+            native_id: root_agent_session_id.clone(),
+        });
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
+            pending_assistant,
             pending_tracking: (summary.session_id.is_none()
                 && !summary.initial_workstream_ids.is_empty())
             .then(|| PendingTracking {
@@ -1267,6 +1299,24 @@ pub fn spawn_embedded(
     // Capture before spawning: a fast CLI can write its source before register.
     let started_at = now();
     let terminal_id = new_id();
+    // Resolve application-owned role context before a process can consume its
+    // first prompt. Storage failures are launch failures, not silent defaults.
+    let assistant_profile_id = if target.session_id.is_none() {
+        if let (Some(app), Some(cwd)) = (&target.registry.app, cmd.cwd.as_ref()) {
+            let state = app
+                .try_state::<crate::commands::AppState>()
+                .ok_or_else(|| other("应用状态未初始化"))?;
+            let path = crate::workspace::path_identity_of(&cwd.to_string_lossy())
+                .ok_or_else(|| other("工作目录无效"))?;
+            let profile =
+                crate::storage::assistant_profiles::profile_for_path(&state.db.read(), &path)?;
+            profile.map(|p| p.id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let prepared_identity = if target.registry.app.is_some() {
         identity::prepare(cmd, target.agent, &terminal_id)?
     } else {
@@ -1322,6 +1372,7 @@ pub fn spawn_embedded(
         .register(
             summary,
             target.root_agent_session_id.map(str::to_string),
+            assistant_profile_id,
             bridge.clone(),
             Scrollback::default(),
             pty.into_master(),
@@ -1720,6 +1771,7 @@ mod tests {
                 session_title: None,
             },
             root_agent_session_id: native_id.map(str::to_string),
+            pending_assistant: None,
             pending_tracking: owner.map(|owner| PendingTracking {
                 workstream_ids: vec![owner.into()],
                 native_id: native_id.map(str::to_string),
@@ -1790,6 +1842,147 @@ mod tests {
                 .code,
             "sender_unavailable"
         );
+    }
+
+    #[test]
+    fn assistant_launch_binding_persists_without_source_cwd_and_does_not_follow_native_switches() {
+        let db = binding_db();
+        let path = crate::workspace::path_identity_of(&fixture_cwd()).unwrap();
+        let profile = crate::assistant::AssistantProfile {
+            id: new_id(),
+            name: "Manager".into(),
+            avatar: String::new(),
+            description: String::new(),
+            instructions: String::new(),
+            agent: Agent::Codex,
+            runtime_override: None,
+            workspace_path_id: path,
+            visibility: "normal".into(),
+            revision: 1,
+            created_at: now(),
+            updated_at: now(),
+        };
+        crate::storage::assistant_profiles::save(&db.write(), &profile, None).unwrap();
+        let registry = TerminalRegistry::new(None);
+        let terminal = identity_terminal(&registry, Agent::Codex, None, None);
+        registry.records.lock().unwrap()[&terminal]
+            .lock()
+            .unwrap()
+            .pending_assistant = Some(PendingAssistant {
+            id: profile.id.clone(),
+            native_id: None,
+        });
+        registry.report_native_identity(&db, &terminal, &native_event("role-native"));
+        let (sid, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "role-native",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            crate::storage::assistant_profiles::profile_for_session(&db.read(), &sid)
+                .unwrap()
+                .is_none()
+        );
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(sid.as_str())
+        );
+        assert_eq!(
+            crate::storage::assistant_profiles::profile_for_session(&db.read(), &sid)
+                .unwrap()
+                .unwrap()
+                .id,
+            profile.id
+        );
+        registry.report_native_identity(&db, &terminal, &native_event("ordinary-native"));
+        let (ordinary, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "ordinary-native",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry
+                .attach(&terminal)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(ordinary.as_str())
+        );
+        assert!(
+            crate::storage::assistant_profiles::profile_for_session(&db.read(), &ordinary)
+                .unwrap()
+                .is_none()
+        );
+        registry.close(&terminal);
+
+        let switched = identity_terminal(&registry, Agent::Codex, None, None);
+        registry.records.lock().unwrap()[&switched]
+            .lock()
+            .unwrap()
+            .pending_assistant = Some(PendingAssistant {
+            id: profile.id.clone(),
+            native_id: None,
+        });
+        registry.report_native_identity(
+            &db,
+            &switched,
+            &native_event("cancelled-before-ingestion"),
+        );
+        registry.report_native_identity(
+            &db,
+            &switched,
+            &native_event("unrelated-before-ingestion"),
+        );
+        let (unrelated, _) = db
+            .upsert_logical_session_unchecked(
+                Agent::Codex,
+                "unrelated-before-ingestion",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        registry.bind_discovered(&db);
+        assert_eq!(
+            registry
+                .attach(&switched)
+                .unwrap()
+                .summary
+                .session_id
+                .as_deref(),
+            Some(unrelated.as_str())
+        );
+        assert!(
+            crate::storage::assistant_profiles::profile_for_session(&db.read(), &unrelated)
+                .unwrap()
+                .is_none()
+        );
+        registry.close(&switched);
     }
 
     fn native_event(native_id: &str) -> identity::NativeIdentityEvent {

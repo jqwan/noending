@@ -37,6 +37,7 @@ pub enum ControlCommand {
     List { session: Option<String> },
     Identity { claimed: Option<String> },
     Start(StartSession),
+    StartAssistant(crate::assistant::AssistantStart),
 }
 impl ControlCommand {
     pub(crate) fn is_write(&self) -> bool {
@@ -251,6 +252,18 @@ pub(crate) fn dispatch(
         ControlCommand::Identity { claimed } => Ok(
             json!({"session_id":sender_session(&registry,&state.db,sender_terminal,claimed.as_deref())?}),
         ),
+        ControlCommand::StartAssistant(options) => {
+            let result = crate::commands::assistant::start_assistant_session(
+                app.clone(),
+                state,
+                registry,
+                options.id,
+                Some(options.task_ids),
+                options.initial_message,
+                options.runtime_override,
+            )?;
+            Ok(json!({"launch":result,"session_id":Value::Null,"binding":"pending"}))
+        }
         ControlCommand::Start(options) => {
             if let Some(cwd) = &options.cwd {
                 if !std::path::Path::new(cwd).is_absolute() || !std::path::Path::new(cwd).is_dir() {

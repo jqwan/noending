@@ -12,6 +12,7 @@ NoEnding 是同一份本地历史、摘要、任务事项、信箱和协作室�
 | 当前请求 | 按需读取 |
 | --- | --- |
 | 回忆讨论、核对原话与决策、查询覆盖状态 | [记忆检索](references/memory.md) |
+| 创建或使用智能体档案、以角色管理项目与任务 | [智能体](references/assistant.md) |
 | 创建、接手或跟踪任务，维护描述、事项及进展 | [任务管理](references/task.md) |
 | 查收提醒、读取或标记信件、向其他会话传话 | [会话信箱](references/mailbox.md) |
 | 加入任务协作室、分工执行、持续监听或协调收尾 | [任务协作](references/collaboration.md) |

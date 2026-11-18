@@ -1217,6 +1217,9 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
             }),
         },
         ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
+        ControlCommand::StartAssistant(_) => {
+            panic!("unexpected assistant startup in ordinary session fixture")
+        }
         ControlCommand::Start(options) => {
             let terminal_id = noending::storage::new_id();
             if options.message.as_deref() == Some("disconnect fixture") {
@@ -1377,6 +1380,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     let mut disconnected = Command::new(exe)
         .args(disconnect_args)
         .env("NOENDING_HOME", &f.home.root)
+        .env_remove("NOENDING_TERMINAL_ID")
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -2348,4 +2352,76 @@ fn collaboration_participation_survives_across_real_cli_processes() {
 
 fn chrono_now_minus(seconds: i64) -> String {
     (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339()
+}
+
+#[test]
+fn assistant_cli_preserves_profile_revisions_and_idempotent_creation_without_desktop() {
+    let f = Fixture::new();
+    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
+    let file = f.root.join("profile.json");
+    std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"name":"Manager 中文","agent":"codex","instructions":"Review actual results","runtime_override":{"model":"fixture-model"}})).unwrap()).unwrap();
+    let args = [
+        "assistant",
+        "create",
+        "--file",
+        file.to_str().unwrap(),
+        "--request-id",
+        "assistant-create-once",
+    ];
+    let (success, created) = f.run(exe, &args);
+    assert!(success, "{created}");
+    let id = created["data"]["profile"]["id"].as_str().unwrap();
+    let (success, repeated) = f.run(exe, &args);
+    assert!(success, "{repeated}");
+    assert_eq!(repeated["data"]["profile"]["id"], id);
+    let (_, listed) = f.run(exe, &["assistant", "list"]);
+    assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 1);
+    let patch = f.root.join("patch.json");
+    std::fs::write(
+        &patch,
+        r#"{"runtime_override":null,"description":"clear override"}"#,
+    )
+    .unwrap();
+    let (success, updated) = f.run(
+        exe,
+        &[
+            "assistant",
+            "update",
+            id,
+            "--revision",
+            "1",
+            "--file",
+            patch.to_str().unwrap(),
+        ],
+    );
+    assert!(success, "{updated}");
+    assert!(updated["data"]["profile"]["runtime_override"].is_null());
+    let (success, stale) = f.run(
+        exe,
+        &[
+            "assistant",
+            "update",
+            id,
+            "--revision",
+            "1",
+            "--file",
+            patch.to_str().unwrap(),
+        ],
+    );
+    assert!(!success, "{stale}");
+    let (success, read) = f.run(exe, &["assistant", "show", id]);
+    assert!(success, "{read}");
+    assert_eq!(read["data"]["profile"]["description"], "clear override");
+    let (success, start) = f.run(
+        exe,
+        &[
+            "assistant",
+            "new",
+            id,
+            "--request-id",
+            "assistant-start-offline",
+        ],
+    );
+    assert!(!success, "{start}");
+    assert_eq!(start["error"]["code"], "desktop_unavailable");
 }
