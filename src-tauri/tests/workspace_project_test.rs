@@ -2225,6 +2225,10 @@ fn explicit_cleanup_keeps_existing_and_referenced_paths_and_preserves_project_da
     workstream(&db, "cleanup-task", "保留关联任务");
     add_ws_path(&db, "cleanup-task", &unused.id);
     let project_id = unused.project_id.clone();
+    let before = project_detail(&db, &project_id, &UnrestrictedWorkspace)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.cleanable_missing_path_ids, [unused.id.clone()]);
     assert_eq!(
         noending::workspace::project::clean_missing_project_paths(&db, &project_id).unwrap(),
         1

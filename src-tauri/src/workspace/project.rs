@@ -471,18 +471,15 @@ pub fn set_project_archived(db: &Db, id: &str, archived: bool) -> Result<Project
     })
 }
 
-/// Explicitly forget missing, unused paths. Recheck the filesystem without a DB
-/// lock; unreadable paths and symlinks are retained. The transaction then checks
-/// ownership and all session references again, including archived sessions.
-pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
-    if db.get_project(project_id)?.is_none() {
-        return Err(other(format!("Project {project_id} 不存在")));
-    }
+/// Shared cleanup projection. Physical checks run outside a database lock;
+/// unreadable paths, symlinks, Session and Assistant references are retained.
+fn cleanable_missing_paths(db: &Db, project_id: &str) -> Result<Vec<(String, String)>> {
     let candidates = {
         let conn = db.read();
         let mut statement = conn.prepare(
             "SELECT id,canonical_path FROM workspace_paths WHERE project_id=?1 AND exists_on_disk=0
-             AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=workspace_paths.id)",
+             AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=workspace_paths.id)
+             AND NOT EXISTS(SELECT 1 FROM assistant_profiles WHERE workspace_path_id=workspace_paths.id) ORDER BY id",
         )?;
         let rows = statement.query_map([project_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -494,6 +491,16 @@ pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
             matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
         })
         .collect();
+    Ok(missing)
+}
+
+/// Explicitly forget eligible missing paths, rechecking ownership and all
+/// Session/Assistant references in the deletion transaction.
+pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
+    if db.get_project(project_id)?.is_none() {
+        return Err(other(format!("Project {project_id} 不存在")));
+    }
+    let missing = cleanable_missing_paths(db, project_id)?;
     db.tx(|tx| {
         if get_project_conn(tx, project_id)?.is_none() {
             return Err(other(format!("Project {project_id} 不存在")));
@@ -503,7 +510,8 @@ pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
             removed += tx.execute(
                 "DELETE FROM workspace_paths WHERE id=?1 AND project_id=?2
                  AND canonical_path=?3 AND exists_on_disk=0
-                 AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=?1)",
+                 AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=?1)
+                 AND NOT EXISTS(SELECT 1 FROM assistant_profiles WHERE workspace_path_id=?1)",
                 rusqlite::params![id, project_id, path],
             )?;
         }
@@ -1121,6 +1129,8 @@ pub struct ProjectDetail {
     pub kind: ProjectKind,
     pub purpose: Option<ProjectPurpose>,
     pub workspace_paths: Vec<WorkspacePath>,
+    /// Missing, physically absent paths with neither Session nor Assistant references.
+    pub cleanable_missing_path_ids: Vec<String>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<SessionListItem>,
     /// The linked repository's remote URL (origin preferred), read from the
@@ -1178,7 +1188,12 @@ pub fn project_detail(
             .collect::<Vec<_>>(),
         policy,
     );
+    let cleanable_missing_path_ids = cleanable_missing_paths(db, project_id)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     Ok(Some(ProjectDetail {
+        cleanable_missing_path_ids,
         purpose,
         project,
         kind,

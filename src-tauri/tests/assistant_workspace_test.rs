@@ -712,3 +712,43 @@ fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
             .to_string_lossy()
             .starts_with("assistant-create-")));
 }
+
+#[test]
+fn missing_assistant_main_directory_remains_registered_and_its_project_cannot_be_purged() {
+    let f = Fixture::new();
+    let p = create_profile(&f, "Retained role");
+    std::fs::remove_dir_all(&p.workspace_path.canonical_path).unwrap();
+    project::reconcile_workspace_paths(f.db(), &f.layer.projection(), usize::MAX).unwrap();
+    let before = project::project_detail(f.db(), &p.project.id, f.layer.projection().policy())
+        .unwrap()
+        .unwrap();
+    assert!(!before.workspace_paths[0].exists);
+    assert!(before.cleanable_missing_path_ids.is_empty());
+    assert_eq!(
+        project::clean_missing_project_paths(f.db(), &p.project.id).unwrap(),
+        0
+    );
+    assert!(f
+        .db()
+        .get_workspace_path(&p.workspace_path.id)
+        .unwrap()
+        .is_some());
+    project::set_project_archived(f.db(), &p.project.id, true).unwrap();
+    let reason =
+        project::delete_project_permanently(f.db(), &p.project.id, f.layer.projection().policy())
+            .unwrap_err();
+    assert!(reason.to_string().contains("智能体档案"), "{reason}");
+    assert!(f.db().get_project(&p.project.id).unwrap().is_some());
+    assert_eq!(
+        assistant::detail(f.db(), &p.profile.id)
+            .unwrap()
+            .workspace_path
+            .id,
+        p.workspace_path.id
+    );
+    let restored =
+        assistant::prepare_profile_files(f.db(), &f.home, &p.profile.id, p.profile.revision)
+            .unwrap();
+    assert_eq!(restored.instructions_state, "current");
+    assert!(std::path::Path::new(&p.workspace_path.canonical_path).is_dir());
+}
