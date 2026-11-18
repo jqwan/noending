@@ -538,7 +538,7 @@ export default function AgentsView({
   return (
     <div className="main board-page agents-page">
       <PageHeader
-        title="Agent" icon={<Icon name="agent" />}
+        title="运行工具" icon={<Icon name="agent" />}
         navigation={<div className="settings-seg icon-seg" role="group" aria-label="Agent 运行界面">
               <button
                 className={surface === "tui" ? "on" : ""}

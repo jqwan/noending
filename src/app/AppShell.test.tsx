@@ -103,7 +103,7 @@ it("keeps the current page until Agent header prerequisites are ready", async ()
   let finish!: () => void;
   vi.mocked(preloadAgentsCache).mockReturnValue(new Promise(resolve => { finish = resolve; }));
   render(<AppShell />);
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => { finish(); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
@@ -202,7 +202,7 @@ it("restores the last session page and parameters across history navigation", as
 it("remembers a background launch result without changing the current section", async () => {
   render(<AppShell />);
   const finishLaunch = sessionNavigation.navigate!;
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
@@ -280,7 +280,7 @@ it("retains the current page until code is ready and ignores a late destination 
   render(<AppShell />);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   await act(async () => finish());
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
 });
@@ -332,7 +332,7 @@ it.each([
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Agent" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: section })); });
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(replacement);
 });
