@@ -669,6 +669,59 @@ fn assistant_profile_pages_preserve_filters_and_archive_visibility() {
 }
 
 #[test]
+fn assistant_creation_prepares_native_skills_despite_a_single_agent_user_entry() {
+    let f = Fixture::new();
+    let roots = profile_roots(&f);
+    noending::skills::prepare_noending_skill(f.db(), &f.home, &std::env::current_exe().unwrap())
+        .unwrap();
+    let registry = noending::skills::load_skill_registry(f.db()).unwrap();
+    let source = registry
+        .sources
+        .iter()
+        .find(|s| s.name == "noending")
+        .unwrap();
+    let inventory = noending::skills::list(&roots, None);
+    let claude = inventory
+        .locations
+        .iter()
+        .find(|location| {
+            location.scope == "user" && location.agent == Some(noending::domain::Agent::ClaudeCode)
+        })
+        .unwrap();
+    noending::skills::enable_skill(&roots, None, &source.id, Some(&source.path), &claude.id)
+        .unwrap();
+    let user_skill = roots.claude.join("skills/noending/SKILL.md");
+    assert!(user_skill.is_file());
+    assert!(!roots.home.join(".agents/skills/noending/SKILL.md").exists());
+
+    let profile = create_profile(&f, "Native skills");
+    let cwd = PathBuf::from(&profile.workspace_path.canonical_path);
+    let shared_skill = cwd.join(".agents/skills/noending/SKILL.md");
+    // This native project entry is read by both Codex and Pi.
+    assert_eq!(
+        std::fs::canonicalize(&shared_skill).unwrap(),
+        std::fs::canonicalize(&source.path).unwrap()
+    );
+    assert!(cwd.join(".claude/skills/noending/SKILL.md").is_file());
+    assert!(cwd.join(".workbuddy/skills/noending/SKILL.md").is_file());
+    assert!(user_skill.is_file());
+
+    noending::skills::disable_skill_project(&roots, &[cwd.clone()], &source.id).unwrap();
+    assistant::profile_launch(f.db(), &f.home, &profile.profile.id, &[], None).unwrap();
+    assistant::prepare_profile_files(
+        f.db(),
+        &f.home,
+        &profile.profile.id,
+        profile.profile.revision,
+    )
+    .unwrap();
+    assert!(!shared_skill.exists());
+    assert!(!cwd.join(".claude/skills/noending/SKILL.md").exists());
+    assert!(user_skill.is_file());
+    assert!(std::path::Path::new(&source.path).is_file());
+}
+
+#[test]
 fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
     let f = Fixture::new();
     let first = create_profile(&f, "Existing");

@@ -943,6 +943,19 @@ pub fn enable_skill_project(
     if user_entry_exists(roots, id) {
         return Err(other("该 Skill 已由用户级启用，不能再配置项目级入口"));
     }
+    prepare_project_skill_entries(roots, cwds, id, source)
+}
+
+/// Prepare native project loading entries for an application's newly created
+/// workspace. Unlike the user-facing scope switch, this must work even when a
+/// user entry only covers some Agents. Call only during initial provisioning,
+/// so reopening a workspace never restores entries the user disabled.
+pub(crate) fn prepare_project_skill_entries(
+    roots: &Roots,
+    cwds: &[PathBuf],
+    id: &str,
+    source: Option<&str>,
+) -> Result<SkillInstallResult> {
     let source = match source {
         Some(path) => PathBuf::from(path),
         None => find_source_path(roots, cwds, id).ok_or_else(|| other("Skill 已不存在"))?,

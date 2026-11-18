@@ -83,24 +83,12 @@ fn prepare_default_skill(
         .iter()
         .find(|s| s.name == "noending")
         .ok_or_else(|| other("NoEnding 技能未安装，请在技能管理中恢复"))?;
-    let inventory = crate::skills::list(roots, None);
-    let global = inventory.resources.iter().any(|row| {
-        row.id == source.id
-            && row.locations.iter().any(|id| {
-                inventory
-                    .locations
-                    .iter()
-                    .any(|l| &l.id == id && l.scope == "user")
-            })
-    });
-    if !global {
-        crate::skills::enable_skill_project(
-            roots,
-            &[cwd.to_path_buf()],
-            &source.id,
-            Some(&source.path),
-        )?;
-    }
+    crate::skills::prepare_project_skill_entries(
+        roots,
+        &[cwd.to_path_buf()],
+        &source.id,
+        Some(&source.path),
+    )?;
     crate::skills::invalidate_catalog();
     Ok(())
 }
