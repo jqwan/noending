@@ -147,9 +147,6 @@ pub fn run() {
                 {
                     eprintln!("[noending] NoEnding skill unavailable: {error}");
                 }
-                if let Err(error) = assistant::ensure_workspace(&state.db, &home, &layer) {
-                    eprintln!("[noending] Assistant workspace unavailable: {error}");
-                }
             }
 
             // Application Reconcile: at every startup, queue a background
@@ -331,15 +328,8 @@ pub fn run() {
             commands::refresh_agent_runtime_options,
             commands::get_extraction_settings,
             commands::set_extraction_settings,
-            commands::assistant_workspace,
-            commands::assistant::list_assistant_profiles,
-            commands::assistant::get_assistant_profile,
             commands::assistant::create_assistant_profile,
             commands::assistant::update_assistant_profile,
-            commands::assistant::set_assistant_responsibilities,
-            commands::assistant::set_assistant_archived,
-            commands::assistant::list_assistant_sessions,
-            commands::assistant::start_assistant_session,
             commands::assistant::prepare_assistant_files,
         ])
         .build(tauri::generate_context!())

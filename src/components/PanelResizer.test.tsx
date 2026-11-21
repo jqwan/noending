@@ -36,36 +36,45 @@ function Pane({ side = "left", label = "侧栏宽度" }: { side?: "left" | "righ
 const start = (target: HTMLElement, pointerId = 1) => fireEvent.pointerDown(target, { pointerId, clientX: 300, button: 0 });
 const move = (target: HTMLElement, clientX: number, pointerId = 1) => fireEvent.pointerMove(target, { pointerId, clientX });
 
-it.each(["left", "right"] as const)("resizes the %s pane in its physical direction, clamps bounds and stops on release", side => {
-  render(<Pane side={side} />);
-  const divider = screen.getByRole("separator");
-  start(divider); move(divider, 340);
-  expect(divider.getAttribute("aria-valuenow")).toBe(side === "left" ? "340" : "260");
-  move(divider, 10_000);
-  const boundary = side === "left" ? "480" : "200";
-  expect(divider.getAttribute("aria-valuenow")).toBe(boundary);
-  fireEvent.pointerUp(divider, { pointerId: 1 });
-  move(divider, -10_000);
-  expect(divider.getAttribute("aria-valuenow")).toBe(boundary);
-  fireEvent.doubleClick(divider);
-  expect(divider.getAttribute("aria-valuenow")).toBe("360");
+it("resizes both edges in their physical direction and restores default width", () => {
+  render(<><Pane label="左侧栏" /><Pane side="right" label="右侧栏" /></>);
+  for (const [label, moved, boundary] of [["左侧栏", "340", "480"], ["右侧栏", "260", "200"]]) {
+    const divider = screen.getByRole("separator", { name: label });
+    start(divider); move(divider, 340);
+    expect(divider.getAttribute("aria-valuenow")).toBe(moved);
+    move(divider, 10_000);
+    expect(divider.getAttribute("aria-valuenow")).toBe(boundary);
+    fireEvent.pointerUp(divider, { pointerId: 1 });
+    move(divider, -10_000);
+    expect(divider.getAttribute("aria-valuenow")).toBe(boundary);
+    fireEvent.doubleClick(divider);
+    expect(divider.getAttribute("aria-valuenow")).toBe("360");
+  }
 });
 
-it.each(["cancel", "capture-loss", "blur", "escape"])("releases a %s gesture so another divider can be dragged", end => {
+it("releases drag ownership after cancellation, lost capture, blur or Escape", () => {
   render(<><Pane label="左侧栏" /><Pane side="right" label="右侧栏" /></>);
   const left = screen.getByRole("separator", { name: "左侧栏" });
   const right = screen.getByRole("separator", { name: "右侧栏" });
-  start(left); move(left, 320);
-  start(right, 2); move(right, 280, 2);
-  expect(right.getAttribute("aria-valuenow")).toBe("300");
-  if (end === "cancel") fireEvent.pointerCancel(left, { pointerId: 1 });
-  if (end === "capture-loss") fireEvent.lostPointerCapture(left, { pointerId: 1 });
-  if (end === "blur") fireEvent(window, new Event("blur"));
-  if (end === "escape") fireEvent.keyDown(left, { key: "Escape" });
-  move(left, 400);
-  expect(left.getAttribute("aria-valuenow")).toBe("320");
-  start(right, 2); move(right, 280, 2);
-  expect(right.getAttribute("aria-valuenow")).toBe("320");
+  const endings = {
+    cancel: () => fireEvent.pointerCancel(left, { pointerId: 1 }),
+    captureLoss: () => fireEvent.lostPointerCapture(left, { pointerId: 1 }),
+    blur: () => fireEvent(window, new Event("blur")),
+    escape: () => fireEvent.keyDown(left, { key: "Escape" }),
+  };
+  for (const [event, end] of Object.entries(endings)) {
+    const leftWidth = Number(left.getAttribute("aria-valuenow"));
+    const rightWidth = Number(right.getAttribute("aria-valuenow"));
+    start(left); move(left, 320);
+    start(right, 2); move(right, 280, 2);
+    expect(right.getAttribute("aria-valuenow"), event).toBe(String(rightWidth));
+    end();
+    move(left, 400);
+    expect(left.getAttribute("aria-valuenow"), event).toBe(String(leftWidth + 20));
+    start(right, 2); move(right, 280, 2);
+    expect(right.getAttribute("aria-valuenow"), event).toBe(String(rightWidth + 20));
+    fireEvent.pointerUp(right, { pointerId: 2 });
+  }
 });
 
 it("ignores secondary pointers and releases ownership when a dragging pane is removed", () => {

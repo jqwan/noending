@@ -54,7 +54,7 @@ impl ProjectInput {
                 |w| serde_json::json!({"task_id":w.id,"title":w.title,"description":w.description}),
             )
             .collect();
-        let mut st=conn.prepare("SELECT s.id FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE wp.project_id=?1 ORDER BY s.id")?;
+        let mut st = conn.prepare("SELECT session_id FROM project_session_membership WHERE project_id=?1 ORDER BY session_id")?;
         let session_ids = st
             .query_map([id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<String>, _>>()?;

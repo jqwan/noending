@@ -301,34 +301,10 @@ fn sessions_sharing_message_ids_ingest_independently() {
 
 /// Re-scanning an unchanged source adds nothing: the session cursor already
 /// covers the file, so the same content is never stored twice.
-#[test]
-fn rescanning_an_unchanged_source_adds_nothing() {
-    let dir = unique_dir("idempotent");
-    let db = open_db("idempotent");
-    let file = write_transcript(&dir, 3);
-    let s = session_row(&db, &file);
-
-    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 3);
-    assert_eq!(
-        ingestion::ingest_session(&db, &s).unwrap(),
-        0,
-        "an unchanged source is a no-op"
-    );
-    assert_eq!(
-        ingestion::ingest_session(&db, &s).unwrap(),
-        0,
-        "and stays a no-op"
-    );
-
-    assert_eq!(db.message_count(&s.id).unwrap(), 3);
-    assert_eq!(db.message_projection_ids(&s.id).unwrap().len(), 3);
-    assert_eq!(context_footprint(&db), (0, 0, 0));
-}
-
 /// A source that grew between passes contributes exactly its new delta, and
 /// the fact generation still never moves a Context byte.
 #[test]
-fn appended_source_ingests_only_the_delta() {
+fn incremental_ingest_skips_an_unchanged_source_and_adds_only_the_append() {
     let dir = unique_dir("delta");
     let db = open_db("delta");
     let file = write_transcript(&dir, 2);
@@ -337,6 +313,7 @@ fn appended_source_ingests_only_the_delta() {
     support::track(&db, &s.id, Some(&ws.id)).unwrap();
 
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
+    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 0);
     let generation = db.get_session_ingest_state(&s.id).unwrap().0;
 
     // Two offline days: the source grows by one event.
@@ -366,20 +343,20 @@ fn appended_source_ingests_only_the_delta() {
 /// Trash is a visibility filter, not an ingestion gate: a trashed Session keeps
 /// taking its source's facts.
 #[test]
-fn archived_session_still_ingests_its_source() {
+fn per_session_refresh_still_ingests_source_appends_after_archive() {
     let dir = unique_dir("trash");
     let db = open_db("trash");
     let file = write_transcript(&dir, 2);
     let s = session_row(&db, &file);
 
-    assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
+    assert_eq!(ingestion::refresh_session(&db, &s.id).unwrap(), 2);
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
     lifecycle::archive_session(&db, &s.id).unwrap();
     write_transcript(&dir, 3);
 
     assert_eq!(
-        ingestion::ingest_session(&db, &s).unwrap(),
+        ingestion::refresh_session(&db, &s.id).unwrap(),
         1,
         "a trashed session keeps ingesting its source"
     );
@@ -394,20 +371,6 @@ fn archived_session_still_ingests_its_source() {
         "the session cursor advances exactly as it would for an active session"
     );
     assert_eq!(context_footprint(&db), (0, 0, 0));
-}
-
-/// `refresh_session` is the per-Session incremental entry point (Resume
-/// trigger); its unchanged-source and Context contracts are the ones
-/// `rescanning_an_unchanged_source_adds_nothing` pins for `ingest_session`.
-#[test]
-fn refresh_session_ingests_incrementally() {
-    let dir = unique_dir("refresh");
-    let db = open_db("refresh");
-    let file = write_transcript(&dir, 3);
-    let s = session_row(&db, &file);
-
-    assert_eq!(ingestion::refresh_session(&db, &s.id).unwrap(), 3);
-    assert_eq!(db.message_count(&s.id).unwrap(), 3);
 }
 
 /// The Conversation reader: a preview is the TAIL of the conversation, and the

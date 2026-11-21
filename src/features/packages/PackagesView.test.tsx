@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
 import PackagesView from "./PackagesView";
@@ -299,22 +299,6 @@ it("treats a never-written switch as off: gray button, click enables", async () 
   expect(api.disablePackage).not.toHaveBeenCalled();
 });
 
-it("keeps build-metadata versions off the card while the full string stays reachable", async () => {
-  const longVersion = "5.6.2-wb.39298511.g37a65c0b.hbf00e3f3d64d";
-  inventory = { packages: [entry({ id: "pkg-wb-long", agent: "workbuddy", name: "longver", origin: "bundled", marketplace: "workbuddy-builtin", version: longVersion })], warnings: [] };
-  render(<PackageTestApp />);
-  expect(await screen.findByText("longver")).toBeTruthy();
-  // Card shows the shortened version; the full string is only the tooltip.
-  expect(screen.getByText("v5.6.2")).toBeTruthy();
-  expect(screen.queryByText(`v${longVersion}`)).toBeNull();
-  expect(screen.getByTitle(longVersion)).toBeTruthy();
-  // Footer carries the origin class, not the marketplace name.
-  expect(screen.getByText("Agent 内置")).toBeTruthy();
-
-  fireEvent.click(screen.getByRole("button", { name: /longver/ }));
-  expect(await screen.findByText("Agent 内置")).toBeTruthy();
-});
-
 it("renders never-written config files as non-clickable and marked", async () => {
   inventory = { packages: [entry({ scopes: [
     { scope: "user", state: "enabled", config_path: "/home/.codex/config.toml", config_exists: false, project_path: null },
@@ -335,15 +319,15 @@ it("toggles from the card footer; uninstall-only entries get no switch but a tra
   ], warnings: [] };
   render(<PackageTestApp />);
   expect(await screen.findByText("review")).toBeTruthy();
-  // The footer button toggles user level in place.
-  fireEvent.click(screen.getByRole("button", { name: "停用" }));
-  await vi.waitFor(() => expect(api.disablePackage).toHaveBeenCalledWith("pkg-codex-review", "r1"));
-  // Pi can only uninstall: still manageable, so it stays on this tab with a
-  // trash shortcut and no power switch.
-  expect(await screen.findByText("team-tools")).toBeTruthy();
-  const piCard = screen.getByText("team-tools").closest("article");
-  expect(within(piCard as HTMLElement).queryByRole("button", { name: "停用" })).toBeNull();
-  expect(within(piCard as HTMLElement).getByRole("button", { name: "卸载插件包" })).toBeTruthy();
+  for (const mode of ["卡片视图", "列表视图"]) {
+    fireEvent.click(screen.getByRole("button", { name: mode }));
+    const piCard = screen.getByText("team-tools").closest("article")!;
+    expect(within(piCard).queryByRole("button", { name: "停用" })).toBeNull();
+    expect(within(piCard).getByRole("button", { name: "卸载插件包" })).toBeTruthy();
+    vi.mocked(api.disablePackage).mockClear();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "停用" })));
+    expect(api.disablePackage).toHaveBeenCalledWith("pkg-codex-review", "r1");
+  }
 });
 
 it("uninstalls from the card through a confirm dialog", async () => {
@@ -356,17 +340,6 @@ it("uninstalls from the card through a confirm dialog", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "卸载" }));
   await vi.waitFor(() => expect(api.uninstallPackage).toHaveBeenCalledWith("pkg-codex-review"));
   await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "卸载插件包" })).toBeNull());
-});
-
-it("exposes the same toggle on list rows", async () => {
-  inventory = { packages: [entry()], warnings: [] };
-  render(<PackageTestApp />);
-  expect(await screen.findByText("review")).toBeTruthy();
-  // The view preference persists across mounts; the row carries the toggle.
-  fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
-  const row = await screen.findByText("review").then(node => node.closest("article"));
-  fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "停用" }));
-  await vi.waitFor(() => expect(api.disablePackage).toHaveBeenCalledWith("pkg-codex-review", "r1"));
 });
 
 it("shows the desktop-only dsh bundle as manageable with unknown enablement", async () => {

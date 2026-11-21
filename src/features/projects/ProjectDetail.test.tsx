@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import { api } from "../../api";
+import { notifyDataChanged } from "../../app/routes";
 import type { SkillInventory, ProjectDetailData, OperationStatus } from "../../types";
 
 vi.mock("../../api", () => ({
@@ -25,6 +26,9 @@ vi.mock("../../api", () => ({
     regenerateProjectContext: vi.fn(),
     getAgentStatus: vi.fn(),
     continueSessionDesktop: vi.fn(),
+    updateAssistantProfile: vi.fn(),
+    archiveProject: vi.fn(),
+    deleteProjectPermanently: vi.fn(),
   },
 }));
 
@@ -59,6 +63,9 @@ beforeEach(() => {
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
+  vi.mocked(api.updateAssistantProfile).mockReset();
+  vi.mocked(api.archiveProject).mockReset();
+  vi.mocked(api.deleteProjectPermanently).mockReset();
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.createWorkstream).mockReset();
   vi.mocked(api.cleanMissingProjectPaths).mockReset();
@@ -134,23 +141,103 @@ function mockDetail(): ProjectDetailData {
   };
 }
 
+function assistantProject(): ProjectDetailData & { assistant: NonNullable<ProjectDetailData["assistant"]> } {
+  const detail = mockDetail();
+  return { ...detail, assistant: {
+    agents_md: "核对交付", revision: "hash-1",
+    agents_md_state: "current",
+    workspace_path_id: "wp-linked",
+  } };
+}
+
 describe("ProjectDetail", () => {
-  it("keeps project type and assistant purpose separate", async () => {
-    const detail = mockDetail();
-    detail.kind = "git";
-    detail.purpose = "assistant";
+  it("switches project subpages in the title bar with shared sessions and skills", async () => {
+    const detail = assistantProject();
     detail.workspace_paths[0].exists = false;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-    render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Test Project");
     const newSessionBtn = screen.getByRole("button", { name: "新建会话" });
-    expect(newSessionBtn).toBeTruthy();
-
-    fireEvent.click(newSessionBtn);
-    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
+    const skills = within(screen.getByRole("complementary", { name: "详情栏" })).getByRole("region", { name: "技能" });
     expect(screen.getByText("Git 项目")).toBeTruthy();
-    expect(screen.getByText("助手")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "项目摘要" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "关联任务" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "AGENTS.md" })).toBeNull();
+    const workingDirectories = screen.getByRole("region", { name: "工作目录" });
+    expect(within(workingDirectories).getByTitle("/z/main/worktree")).toBeTruthy();
+    const tabs = within(screen.getByRole("group", { name: "项目子页" }));
+    const projectTab = tabs.getByRole("button", { name: "项目详情", pressed: true });
+    const assistantTab = tabs.getByRole("button", { name: "智能体详情", pressed: false });
+    fireEvent.click(assistantTab);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", entry: "assistant" });
+
+    rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+    expect(tabs.getByRole("button", { name: "智能体详情", pressed: true })).toBe(assistantTab);
+    expect(screen.getByText("核对交付")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "项目摘要" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "关联任务" })).toBeNull();
+    const archiveDirectory = screen.getByRole("region", { name: "档案目录" });
+    expect(within(archiveDirectory).getByRole("heading", { name: "档案目录" })).toBeTruthy();
+    expect(within(archiveDirectory).getByTitle("/a/linked/worktree")).toBeTruthy();
+    expect(screen.queryByTitle("/z/main/worktree")).toBeNull();
+    expect(screen.getByRole("region", { name: "技能" })).toBe(skills);
+    expect(screen.getByRole("button", { name: "Session 1" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "所属项目" })).toBeNull();
+    fireEvent.click(projectTab);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project" });
+    expect(screen.getByRole("button", { name: "新建会话" })).toBe(newSessionBtn);
+    fireEvent.click(newSessionBtn);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1" });
+  });
+
+  it("keeps the AGENTS.md draft across subpages and detects external writes", async () => {
+    const detail = assistantProject();
+    const remote = { ...detail, assistant: { ...detail.assistant, agents_md: "外部修改", revision: "hash-2" } };
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    vi.mocked(api.updateAssistantProfile).mockRejectedValueOnce(new Error("版本冲突"));
+    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 AGENTS.md" }));
+    const input = screen.getByRole("textbox", { name: "AGENTS.md" });
+    fireEvent.change(input, { target: { value: "本地草稿" } });
+    fireEvent.click(screen.getByRole("button", { name: "项目详情" }));
+    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", fromAssistants: true });
+    rerender(<ProjectDetail projectId="p1" navigate={navigate} fromAssistants />);
+    expect(screen.queryByRole("textbox", { name: "AGENTS.md" })).toBeNull();
+    vi.mocked(api.getProjectDetail).mockResolvedValue(remote);
+    await act(async () => notifyDataChanged(["projects"]));
+    rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
+    expect(await screen.findByText(/AGENTS.md 已在外部修改/)).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "AGENTS.md" })).toHaveProperty("value", "本地草稿");
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByText(/保存 AGENTS.md 失败/)).toBeTruthy();
+    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-1", { agents_md: "本地草稿" });
+    const saved = { agents_md: "本地草稿", revision: "hash-3", agents_md_state: "current" as const };
+    vi.mocked(api.updateAssistantProfile).mockResolvedValue(saved);
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...remote.assistant, ...saved } });
+    fireEvent.click(screen.getByRole("button", { name: "覆盖文件修改" }));
+    expect(await screen.findByText("本地草稿")).toBeTruthy();
+    expect(screen.getByTitle("/a/linked/worktree")).toBeTruthy();
+    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-2", { agents_md: "本地草稿" });
+  });
+
+  it("uses project deletion and returns to the originating archive filter", async () => {
+    const detail = assistantProject();
+    const archived = { ...detail, sessions: [], project: { ...detail.project, visibility: "archived" as const } };
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    vi.mocked(api.archiveProject).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue(archived);
+      return archived.project;
+    });
+    vi.mocked(api.deleteProjectPermanently).mockResolvedValue({ warnings: [] });
+    render(<ProjectDetail projectId="p1" navigate={navigate} fromAssistants />);
+    fireEvent.click(await screen.findByRole("button", { name: "归档项目" }));
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除项目" }));
+    expect(screen.getByText(/档案目录及其中的文件也会永久删除/)).toBeTruthy();
+    expect(api.deleteProjectPermanently).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "projects", scope: "archived", assistantOnly: true }));
+    expect(api.deleteProjectPermanently).toHaveBeenCalledWith("p1", { view: "projects", scope: "archived", assistantOnly: true });
   });
 
   it("does not offer new sessions in chat-directory projects", async () => {
@@ -161,17 +248,18 @@ describe("ProjectDetail", () => {
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
 
     await screen.findByText("Codex Chat");
+    expect(screen.queryByRole("group", { name: "项目子页" })).toBeNull();
     expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   });
 
-  it("navigates without defaulting project for new sessions when directories are missing", async () => {
+  it("uses the same project route when directories are missing", async () => {
     const d = mockDetail();
     d.workspace_paths = d.workspace_paths.map(path => ({ ...path, exists: false }));
     vi.mocked(api.getProjectDetail).mockResolvedValue(d);
     render(<ProjectDetail projectId="p1" navigate={navigate} />);
     const newSession = await screen.findByRole("button", { name: "新建会话" });
     fireEvent.click(newSession);
-    expect(navigate).toHaveBeenCalledWith({ view: "new-session" });
+    expect(navigate).toHaveBeenCalledWith({ view: "new-session", projectId: "p1" });
   });
 
   it("creates a task in this project and refreshes its associated task list", async () => {

@@ -382,48 +382,31 @@ fn a_plain_table_cannot_stand_in_for_the_fts_index() {
     );
 }
 
-/// A foreign SQLite file is not an empty database: it has objects of its own, so
-/// it is refused and left exactly as it was found.
 #[test]
-fn foreign_sqlite_file_is_refused_and_left_untouched() {
-    let path = db_path("foreign");
-    let conn = Connection::open(path.path()).unwrap();
-    conn.execute("CREATE TABLE foo (a TEXT)", []).unwrap();
-    drop(conn);
-
-    let err = open_error(path.path());
-    assert!(
-        err.contains("application_id=0"),
-        "refusal must report the identity found, got: {err}"
-    );
-
-    let conn = Connection::open(path.path()).unwrap();
-    assert!(object_exists(&conn, "foo"), "the foreign file was modified");
-    assert!(
-        !object_exists(&conn, "projects"),
-        "NoEnding schema was created inside a foreign file"
-    );
-    assert_eq!(application_id(&conn), 0);
-    assert_eq!(user_version(&conn), 0);
-}
-
-/// A generation marker without the identity that belongs with it is not a
-/// NoEnding database either: the version number alone never proves the format.
-#[test]
-fn version_marker_without_the_database_identity_is_refused() {
-    let path = db_path("no-identity");
-    let conn = Connection::open(path.path()).unwrap();
-    conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)", [])
+fn foreign_sqlite_files_are_refused_without_writes_even_with_the_current_version() {
+    for version in [0, DATABASE_FORMAT_VERSION] {
+        let path = db_path("foreign");
+        let conn = Connection::open(path.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects(id TEXT); INSERT INTO projects VALUES('foreign-data');",
+        )
         .unwrap();
-    conn.pragma_update(None, "user_version", DATABASE_FORMAT_VERSION)
-        .unwrap();
-    drop(conn);
+        conn.pragma_update(None, "user_version", version).unwrap();
+        drop(conn);
 
-    let err = open_error(path.path());
-    assert!(
-        err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
-        "refusal must name the required format, got: {err}"
-    );
+        let before = std::fs::read(path.path()).unwrap();
+        let err = open_error(path.path());
+        assert!(err.contains("application_id=0"), "{err}");
+        assert!(
+            err.contains(&format!("required_format={DATABASE_FORMAT_VERSION}")),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read(path.path()).unwrap(),
+            before,
+            "version {version}"
+        );
+    }
 }
 
 /// Invalid and newer version markers cannot bypass the supported-schema gate.

@@ -43,7 +43,6 @@ pub enum ProjectKind {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectPurpose {
     Chat,
-    Assistant,
 }
 
 /// One observed physical working path — the bridge between the filesystem and

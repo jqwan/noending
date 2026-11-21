@@ -65,28 +65,13 @@ it("reads room metadata without history in task details and catches up when ente
   await waitFor(() => expect(view.result.current.messages.map(m => m.seq)).toEqual([1, 2]));
 });
 
-it("appends a newer page to the single shared sequence without duplicating or reordering", () => {
-  // 用户与成员的发言共用一条序列：合并只按 ID 去重、按 seq 排序。
-  const merged = mergeMessages(
-    [message(1, { sender_session_id: null }), message(2)],
-    [message(2, { sender_session_id: null }), message(3)],
-  );
-  expect(merged.map(m => m.seq)).toEqual([1, 2, 3]);
-});
-
-it("preserves known history when merging a page beyond a gap", () => {
-  const merged = mergeMessages([message(1), message(2)], [message(40), message(41)]);
-  expect(merged.map(m => m.seq)).toEqual([1, 2, 40, 41]);
-});
-
-it("prepends an earlier page in sequence order", () => {
-  const merged = mergeMessages([message(5), message(6)], [message(3), message(4)]);
-  expect(merged.map(m => m.seq)).toEqual([3, 4, 5, 6]);
-});
-
-it("leaves an empty page alone instead of clearing what is already shown", () => {
-  const merged = mergeMessages([message(1)], []);
-  expect(merged.map(m => m.seq)).toEqual([1]);
+it("merges overlapping, earlier and empty message pages without losing history", () => {
+  const initial = [message(3, { sender_session_id: null }), message(4)];
+  const newer = mergeMessages(initial, [message(4), message(40)]);
+  expect(newer.map(m => m.seq)).toEqual([3, 4, 40]);
+  const older = mergeMessages(newer, [message(1), message(2), message(3)]);
+  expect(older.map(m => m.seq)).toEqual([1, 2, 3, 4, 40]);
+  expect(mergeMessages(older, []).map(m => m.seq)).toEqual([1, 2, 3, 4, 40]);
 });
 
 it("fills a multi-page burst without losing already displayed history", async () => {

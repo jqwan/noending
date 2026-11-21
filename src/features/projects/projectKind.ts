@@ -8,7 +8,6 @@ export const projectKindLabels: Record<ProjectKind, string> = {
 
 export const projectPurposeLabels: Record<ProjectPurpose, string> = {
   chat: "聊天",
-  assistant: "助手",
 };
 
 export function isDirectoryGroupProject(project: { kind?: ProjectKind }): boolean {

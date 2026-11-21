@@ -449,44 +449,28 @@ it("triggers incremental scan when clicking the refresh button in header", async
   await waitFor(() => expect(api.refreshSession).toHaveBeenCalledWith("me"));
 });
 
-it("renders immediately from cache on remount without flashing 加载中", async () => {
-  const me = session("me", { title: "已缓存的会话" });
-  await renderDetail(detail(me));
-  expect(screen.getByText("已缓存的会话")).toBeDefined();
-
+it("restores cached session details and summary together while refreshing on remount", async () => {
+  const data = detail(session("me", { title: "已缓存的会话" }));
+  const context = contextView({
+    fields: {
+      summary: { items: [{ id: "cached-summary", title: "已缓存的会话摘要", description: "", details: [] }] },
+    },
+  });
+  vi.mocked(api.getSessionContext).mockResolvedValue(context);
+  await renderDetail(data);
+  await screen.findByText("已缓存的会话摘要");
   cleanup();
 
-  // On remount (e.g. returning from conversation):
-  // Delay api.getSessionDetail to verify cached detail is rendered immediately
-  let resolveDetail: (d: any) => void;
-  vi.mocked(api.getSessionDetail).mockReturnValue(new Promise((r) => { resolveDetail = r; }) as any);
-
+  let resolveDetail!: (value: typeof data) => void;
+  let resolveContext!: (value: typeof context) => void;
+  vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(resolve => { resolveDetail = resolve; }));
+  vi.mocked(api.getSessionContext).mockReturnValue(new Promise(resolve => { resolveContext = resolve; }));
   render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
 
-  // Should render "已缓存的会话" immediately, NOT "加载中…"
-  expect(screen.queryByText("加载中…")).toBeNull();
-  expect(screen.getByText("已缓存的会话")).toBeDefined();
-
-  await act(async () => {
-    resolveDetail!(detail(me));
-  });
-});
-
-it("renders cached summary immediately without flashing 暂无摘要", async () => {
-  const me = session("me", { title: "带摘要的会话" });
-  const d = detail(me);
-  sessionDetailCache.set("me", d);
-  sessionContextCache.set("me", contextView({
-    fields: {
-      summary: { items: [{ id: "SessionDetailView.test-item-3", title: "这是已缓存的会话摘要", description: "", details: [] }] },
-    },
-  }));
-  vi.mocked(api.getSessionDetail).mockResolvedValue(d);
-
-  render(<SessionDetailView sessionId="me" navigate={vi.fn()} />);
-
-  expect(screen.getByText("这是已缓存的会话摘要")).toBeDefined();
-  expect(screen.getByRole("button", { name: "复制摘要" })).toBeDefined();
+  expect(screen.getByText("已缓存的会话")).toBeTruthy();
+  expect(screen.getByText("已缓存的会话摘要")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "复制摘要" })).toBeTruthy();
+  await act(async () => { resolveDetail(data); resolveContext(context); });
 });
 
 it("copies a labeled NoEnding session ID and preserves the raw Agent ID", async () => {

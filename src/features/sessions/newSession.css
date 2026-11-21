@@ -122,6 +122,11 @@
 /* 目录框跟着内容走，不占满整行：默认目录通常一眼就够，
    长路径由标签自身的中间省略负责，完整路径在 title 里。 */
 .new-session-dir { flex: 0 1 auto; min-width: 140px; max-width: 320px; }
+.new-session-context .new-session-dir:not(.has-custom-menu) {
+  opacity: 1;
+  background: transparent;
+  cursor: default;
+}
 
 /* Custom dropdown menu matching reference design */
 .new-session-composer {

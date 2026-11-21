@@ -23,7 +23,7 @@ pub fn summary(conn: &Connection, kind: &str, id: &str) -> Result<SummaryFreshne
     }
     let (state, key, scope) = match kind {
         "session" => ("session_contexts", "session_id", "s.id=?1"),
-        "project" => ("project_context_state", "project_id", "EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.id=s.workspace_path_id AND wp.project_id=?1)"),
+        "project" => ("project_context_state", "project_id", "EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?1)"),
         _ => return Err(other("无效的记忆范围")),
     };
     let refreshed_at: Option<String> = conn
@@ -140,7 +140,7 @@ pub fn view(db: &Db, kind: Option<&str>, id: Option<&str>) -> Result<FreshnessVi
         (None,None) => "1=1",
         (Some("session"),Some(_)) => "s.id=?1",
         (Some("task"),Some(_)) => "EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1)",
-        (Some("project"),Some(_)) => "EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.id=s.workspace_path_id AND wp.project_id=?1)",
+        (Some("project"),Some(_)) => "EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?1)",
         _ => return Err(other("kind 与 id 必须同时提供，kind 为 session/task/project")),
     };
     if let (Some(kind), Some(id)) = (kind, id) {

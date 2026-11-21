@@ -1308,26 +1308,21 @@ mod jsonl_integrity_tests {
     }
 
     #[test]
-    fn an_open_source_rejects_changes_to_its_file() {
+    fn an_open_source_rejects_in_place_edits_and_path_replacement() {
         let path = temp_file("original\n");
         let source = StableFile::open(&path).unwrap();
         source.validate().unwrap();
         std::fs::write(&path, "longer replacement\n").unwrap();
         assert!(source.validate().is_err());
         drop(source);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_open_source_rejects_replacement_of_its_path() {
-        let path = temp_file("original\n");
-        let source = StableFile::open(&path).unwrap();
-        let replacement = path.with_extension("replacement");
-        std::fs::write(&replacement, "original\n").unwrap();
-        std::fs::rename(replacement, &path).unwrap();
-        assert!(source.validate().is_err());
-        drop(source);
+        #[cfg(unix)]
+        {
+            let source = StableFile::open(&path).unwrap();
+            let replacement = path.with_extension("replacement");
+            std::fs::write(&replacement, "longer replacement\n").unwrap();
+            std::fs::rename(replacement, &path).unwrap();
+            assert!(source.validate().is_err());
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
@@ -1570,26 +1565,6 @@ mod fingerprint_tests {
         assert_eq!(fingerprint_line(&pi_event), Some(Agent::Pi));
     }
 
-    #[test]
-    fn detect_format_skips_unrecognized_head_lines() {
-        let dir = std::env::temp_dir().join(format!("noending-fp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("mixed.jsonl");
-        // junk lines first, then a decisive claude event line
-        std::fs::write(
-            &path,
-            "not json at all\n{\"a\":1}\n{\"sessionId\":\"s\",\"uuid\":\"u\",\"message\":{\"role\":\"user\",\"content\":[]}}\n",
-        )
-        .unwrap();
-        assert_eq!(detect_format(&path), Some(Agent::ClaudeCode));
-
-        // a file with no decisive lines is not a session file
-        let path2 = dir.join("foreign.jsonl");
-        std::fs::write(&path2, "{\"hello\":\"world\"}\n{\"more\":\"data\"}\n").unwrap();
-        assert_eq!(detect_format(&path2), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// A Claude Code 2.1.x transcript HEAD is four bookkeeping lines (mode →
     /// permission-mode → atis-latch → file-history-snapshot) before the first
     /// message line. Every one of them used to be stealable — the snapshot
@@ -1598,11 +1573,13 @@ mod fingerprint_tests {
     /// transcripts invisible to discovery. None of the four may decide
     /// anything now; the first message line claims the file.
     #[test]
-    fn a_new_format_claude_head_resolves_to_claude() {
+    fn claude_is_detected_after_unrecognized_lines_and_bookkeeping() {
         let dir =
             std::env::temp_dir().join(format!("noending-fp-claude-head-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let head = [
+            "not json at all",
+            r#"{"a":1}"#,
             r#"{"type":"mode","mode":"default","sessionId":"f6dcd71f"}"#,
             r#"{"type":"permission-mode","permissionMode":"auto","sessionId":"f6dcd71f"}"#,
             r#"{"type":"atis-latch","atis":true,"sessionId":"f6dcd71f"}"#,
@@ -1623,6 +1600,8 @@ mod fingerprint_tests {
         )
         .unwrap();
         assert_eq!(detect_format(&path), Some(Agent::ClaudeCode));
+        std::fs::write(&path, head.join("\n")).unwrap();
+        assert_eq!(detect_format(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1684,7 +1663,7 @@ mod title_tests {
     use super::{is_injected_preamble, title_from_text, user_request_text};
 
     #[test]
-    fn a_title_is_one_line_and_short() {
+    fn titles_shorten_user_text_and_omit_empty_or_structured_payloads() {
         // Lines are joined with a space (a title is one line) and the ends are
         // trimmed; inner spacing is left as the writer wrote it.
         assert_eq!(
@@ -1696,13 +1675,6 @@ mod title_tests {
         let t = title_from_text(&long).unwrap();
         assert!(t.chars().count() <= 37, "a long title is shortened");
         assert!(t.ends_with('…'), "the shortening is visible");
-    }
-
-    /// A structured blob is a machine payload, not a title. Codex's review
-    /// threads open with one — 27 of this machine's 50 internal threads do — and
-    /// the session list is the wrong place for `{"risk_level":"medium",…}`.
-    #[test]
-    fn a_machine_blob_is_not_a_title() {
         assert_eq!(
             title_from_text("{\"risk_level\":\"medium\",\"outcome\":\"allow\"}"),
             None

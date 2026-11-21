@@ -308,10 +308,6 @@ impl WorkspacePolicy for Home {
         self.default_workspace.clone()
     }
 
-    fn assistant_workspace(&self) -> Option<String> {
-        Some(canon(&format!("{}/assistant", self.root)))
-    }
-
     fn exists_on_disk(&self, canonical_path: &str) -> bool {
         // Same rule the production policy uses: existence is read from the real
         // host, never assumed. Tests that hand in a non-existent path therefore
@@ -323,9 +319,12 @@ impl WorkspacePolicy for Home {
 // the door
 
 #[test]
-fn new_non_git_path_creates_exactly_one_project() {
+fn a_new_plain_path_and_its_aliases_share_one_project() {
     let (_d, db) = temp_db();
     let path = ensure(&db, &plain("/work/alpha", true));
+    let alias = ensure(&db, &plain("/work/alpha/./", true));
+    assert_eq!(alias.id, path.id);
+    assert_eq!(alias.project_id, path.project_id);
 
     assert_eq!(path.canonical_path, canon("/work/alpha"));
     assert_eq!(
@@ -345,28 +344,6 @@ fn new_non_git_path_creates_exactly_one_project() {
     assert!(!projects[0].name_customized);
     assert_eq!(paths_of(&db, &projects[0].id).len(), 1);
     registry_is_consistent(&db).expect("consistent");
-}
-
-#[test]
-fn ensuring_the_same_path_twice_is_idempotent() {
-    let (_d, db) = temp_db();
-    let first = ensure(&db, &plain("/work/alpha", true));
-    // A different spelling of the same directory is the same identity, so it must
-    // not become a second WorkspacePath.
-    let second = ensure(&db, &plain("/work/alpha/./", true));
-
-    assert_eq!(first.id, second.id);
-    assert_eq!(first.project_id, second.project_id);
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
-    assert_eq!(db.list_projects().unwrap().len(), 1);
-
-    // Replaying the same observation preserves the path and its project.
-    ensure(&db, &plain("/work/alpha", true));
-    assert_eq!(db.list_workspace_paths().unwrap().len(), 1);
-    let projects = db.list_projects().unwrap();
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].name, "Alpha", "a re-ensure never renames");
-    assert_eq!(projects[0].git_id, None, "nor invents an identity");
 }
 
 #[test]
@@ -867,10 +844,10 @@ fn project_deletion_requires_explicit_archive() {
     let (_d, db) = temp_db();
     let path = ensure(&db, &plain("/doomed/path", true));
     let doomed = path.project_id.clone();
-    assert!(delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace).is_err());
+    assert!(delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace, None).is_err());
     assert!(db.get_workspace_path(&path.id).unwrap().is_some());
     set_project_archived(&db, &doomed, true).unwrap();
-    delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace).unwrap();
+    delete_project_permanently(&db, &doomed, &UnrestrictedWorkspace, None).unwrap();
     assert!(db.get_workspace_path(&path.id).unwrap().is_none());
     assert!(db.get_project(&doomed).unwrap().is_none());
 
@@ -934,9 +911,13 @@ fn project_archive_is_independent_and_all_sessions_block_permanent_deletion() {
             .visibility,
         "archived"
     );
-    assert!(delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).is_err());
+    assert!(
+        delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace, None).is_err()
+    );
     noending::lifecycle::archive_session(&db, &s.id).unwrap();
-    assert!(delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).is_err());
+    assert!(
+        delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace, None).is_err()
+    );
     assert_eq!(
         noending::storage::workstream_projects::project_ids_for_workstream(
             &db.read(),
@@ -1004,7 +985,7 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
     })
     .unwrap();
     set_project_archived(&db, &path.project_id, true).unwrap();
-    delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace).unwrap();
+    delete_project_permanently(&db, &path.project_id, &UnrestrictedWorkspace, None).unwrap();
     for (id, visibility) in [("task-active", "normal"), ("task-archived", "archived")] {
         assert_eq!(
             db.get_workstream(id).unwrap().unwrap().visibility,
@@ -1046,17 +1027,16 @@ fn permanent_project_deletion_unlinks_tasks_preserving_other_paths_and_disk() {
 }
 
 #[test]
-fn chat_and_assistant_projects_cannot_be_deleted_even_after_git_conversion() {
+fn chat_projects_cannot_be_deleted_even_after_git_conversion() {
     let (_d, db) = temp_db();
     let home = Home::new("/app/noending", &[], Some("/app/noending/workspace"));
     for raw in [
         "/app/noending/workspace",
-        "/app/noending/assistant",
         &home_path("Documents/Codex/protected"),
     ] {
         let path = ensure_workspace_path(&db, &plain(raw, true), &home).unwrap();
         set_project_archived(&db, &path.project_id, true).unwrap();
-        assert!(delete_project_permanently(&db, &path.project_id, &home).is_err());
+        assert!(delete_project_permanently(&db, &path.project_id, &home, None).is_err());
         let upgraded = ensure_workspace_path(
             &db,
             &repo(raw, &format!("{raw}/.git"), GitWorktreeKind::Main, &[]),
@@ -1064,7 +1044,7 @@ fn chat_and_assistant_projects_cannot_be_deleted_even_after_git_conversion() {
         )
         .unwrap();
         assert_eq!(upgraded.project_id, path.project_id);
-        assert!(delete_project_permanently(&db, &path.project_id, &home).is_err());
+        assert!(delete_project_permanently(&db, &path.project_id, &home, None).is_err());
         assert!(db.get_workspace_path(&path.id).unwrap().is_some());
         assert_eq!(
             project_of(&db, &upgraded).visibility,
@@ -1095,7 +1075,7 @@ fn chat_and_assistant_projects_cannot_be_deleted_even_after_git_conversion() {
             "new split destination inherits source state"
         );
         assert_eq!(project_of(&db, &external).visibility, "archived");
-        assert!(delete_project_permanently(&db, &returned.project_id, &home).is_err());
+        assert!(delete_project_permanently(&db, &returned.project_id, &home, None).is_err());
         set_project_archived(&db, &returned.project_id, false).unwrap();
         assert_eq!(project_of(&db, &returned).visibility, "normal");
         assert_eq!(
@@ -1711,6 +1691,7 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
+            "assistant",
             "cleanable_missing_path_ids",
             "kind",
             "project",
@@ -1760,7 +1741,7 @@ fn list_projects_reports_every_derived_project_and_no_ghost() {
     // Explicitly archived projects remain listed until permanent deletion.
     set_project_archived(&db, &b.project_id, true).unwrap();
     assert_eq!(db.list_projects().unwrap().len(), 2);
-    delete_project_permanently(&db, &b.project_id, &UnrestrictedWorkspace).unwrap();
+    delete_project_permanently(&db, &b.project_id, &UnrestrictedWorkspace, None).unwrap();
     let rest: Vec<String> = db
         .list_projects()
         .unwrap()
@@ -1950,43 +1931,18 @@ fn project_refresh_does_not_scan_unrelated_projects() {
 }
 
 #[test]
-fn missing_unreferenced_directory_and_project_survive_reconciliation() {
+fn missing_directories_keep_their_project_and_become_available_again() {
     let (_d, db) = temp_db_locked();
     let observer = Scripted::new();
     observer.set("/work/a", plain("/work/a", false));
     let projection = ProjectProjection::new(&observer);
-    let (wp, project_id) = {
-        let wp = ensure(&db, &plain("/work/a", true));
-        let project_id = wp.project_id.clone();
-        (wp, project_id)
-    };
-
-    let report =
-        reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
-    assert_eq!(report.missing_paths, 1);
-    assert!(!db.get_workspace_path(&wp.id).unwrap().unwrap().exists);
-    assert!(db.get_project(&project_id).unwrap().is_some());
-    registry_is_consistent(&db).expect("registry stays consistent");
-}
-
-#[test]
-fn restored_directory_becomes_present_again() {
-    let (_d, db) = temp_db_locked();
-    let observer = Scripted::new();
-    observer.set("/work/a", plain("/work/a", false));
-    let projection = ProjectProjection::new(&observer);
-    let wp = {
-        let wp = ensure(&db, &plain("/work/a", true));
-        // 移动盘重新挂载的故事：路径有引用（比如 Session），所以两轮都存活。
-        session(&db, "s-a", "/work/a", &wp.id);
-        wp
-    };
+    let wp = ensure(&db, &plain("/work/a", true));
 
     let gone =
         reconcile_workspace_path_ids(&db, &projection, &[wp.id.clone()], &|_, _| {}).unwrap();
     assert_eq!(gone.missing_paths, 1);
-    let still_there = { db.get_workspace_path(&wp.id).unwrap() };
-    assert!(!still_there.expect("row survives").exists);
+    assert!(!db.get_workspace_path(&wp.id).unwrap().unwrap().exists);
+    assert!(db.get_project(&wp.project_id).unwrap().is_some());
 
     // 目录回来了（从备份恢复、移动盘重新挂载……）：下一次刷新把它翻回来。
     observer.set("/work/a", plain("/work/a", true));
@@ -1995,6 +1951,7 @@ fn restored_directory_becomes_present_again() {
     assert_eq!(back.missing_paths, 0);
     let present = { db.get_workspace_path(&wp.id).unwrap() };
     assert!(present.expect("row survives").exists);
+    registry_is_consistent(&db).unwrap();
 }
 
 #[test]

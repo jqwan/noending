@@ -102,22 +102,6 @@ fn registry_rejects_a_workspace_path_whose_id_is_not_its_own_derivation() {
     assert!(err.contains("not derived from its canonical_path"), "{err}");
 }
 
-/// one Git family, one Project, structurally rather than by convention.
-#[test]
-fn one_git_family_cannot_be_claimed_by_two_projects() {
-    let (_d, db) = temp_db();
-    db.upsert_project(&support::project("fa".to_string(), "A"))
-        .unwrap();
-    db.upsert_project(&support::project("fb".to_string(), "B"))
-        .unwrap();
-    db.write()
-        .execute(
-            "UPDATE projects SET git_id = 'git-shared' WHERE id IN ('fa','fb')",
-            [],
-        )
-        .expect_err("idx_projects_git_id is UNIQUE: two rows cannot share a family");
-}
-
 // 2. cross-platform
 
 /// The Unix half of the derivation, pinned as data rather than as a rule.

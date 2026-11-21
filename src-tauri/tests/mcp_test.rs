@@ -187,6 +187,7 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             "freshness",
             "agent_list",
             "project_resolve",
+            "project_rename",
             "session_resolve",
             "session_messages",
             "session_terminals",
@@ -222,6 +223,24 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
                 "Missing {name}"
             );
         }
+        assert!(tools
+            .iter()
+            .all(|tool| { !tool["name"].as_str().unwrap().starts_with("assistant_") }));
+        let start = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_start")
+            .unwrap();
+        assert!(start["inputSchema"]["properties"].get("cwd").is_some());
+        assert!(start["inputSchema"]["properties"]
+            .get("assistant_id")
+            .is_none());
+        assert_eq!(
+            client.call(
+                "session_start",
+                json!({"agent":"codex","assistant_id":"project-id"})
+            )["error"]["code"],
+            "invalid_arguments"
+        );
         let send = tools
             .iter()
             .find(|tool| tool["name"] == "mailbox_send")
@@ -775,7 +794,6 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
     let _host=DesktopHost::start(&f.home,move|command,sender_terminal|match command {
         ControlCommand::List{session}=>Ok(json!({"items":[],"session":session})),
         ControlCommand::Start(p)=>Ok(json!({"terminal_id":noending_lib::storage::new_id(),"options":p,"caller_terminal":sender_terminal})),
-        ControlCommand::StartAssistant(_)=>panic!("unexpected assistant startup in ordinary session fixture"),
         ControlCommand::Identity{claimed}=>if claimed.as_deref().is_none_or(|id|id=="sender") {
             Ok(json!({"session_id":"sender"}))
         } else {
@@ -828,16 +846,18 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
         client.ok("session_terminals", json!({"session":"a"}))["session"],
         "a"
     );
-    let start = client.ok(
-        "session_start",
-        json!({"agent":"codex","message":"literal 中文\n$()","request_id":"mcp-start"}),
-    );
-    let replay = client.ok(
-        "session_start",
-        json!({"agent":"codex","message":"literal 中文\n$()","request_id":"mcp-start"}),
-    );
+    let cwd = f.root.to_str().unwrap();
+    let arguments = json!({
+        "cwd": cwd,
+        "agent": "codex",
+        "message": "literal 中文\n$()",
+        "request_id": "mcp-start"
+    });
+    let start = client.ok("session_start", arguments.clone());
+    let replay = client.ok("session_start", arguments);
     assert_eq!(start["terminal_id"], replay["terminal_id"]);
     assert_eq!(start["caller_terminal"], "caller-terminal");
+    assert_eq!(start["options"]["cwd"], cwd);
     let output = Command::new(env!("CARGO_BIN_EXE_ne"))
         .env("NOENDING_HOME", &f.home.root)
         .args(["request", "show", "mcp-start"])
@@ -1459,41 +1479,4 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
     let replayed = c.ok("room_send", accepted_args);
     assert_eq!(replayed["id"], accepted["id"]);
     c.finish();
-}
-
-#[test]
-fn assistant_mcp_contract_supports_nullable_patch_and_explicit_task_scope_without_desktop() {
-    let f = Fixture::new();
-    let mut client = f.start();
-    let created=client.ok("assistant_create",json!({"name":"Coordinator","agent":"codex","runtime_override":{"model":"fixture-model"},"request_id":"assistant-create-once"}));
-    let id = created["profile"]["id"].as_str().unwrap().to_string();
-    let repeated=client.ok("assistant_create",json!({"name":"Coordinator","agent":"codex","runtime_override":{"model":"fixture-model"},"request_id":"assistant-create-once"}));
-    assert_eq!(repeated["profile"]["id"], id);
-    let task=client.ok("task_create",json!({"title":"Independent task","description":"No engineering project yet","projects":[]}));
-    let task_id = task["task"]["id"].as_str().unwrap();
-    let assigned = client.ok(
-        "assistant_responsibilities_set",
-        json!({"id":id,"revision":1,"project_ids":[],"task_ids":[task_id]}),
-    );
-    assert_eq!(assigned["tasks"][0]["id"], task_id);
-    assert!(assigned["projects"].as_array().unwrap().is_empty());
-    let update = client.ok(
-        "assistant_update",
-        json!({"id":id,"revision":2,"patch":{"runtime_override":null}}),
-    );
-    assert!(update["profile"]["runtime_override"].is_null());
-    let archive = client.ok(
-        "assistant_archive",
-        json!({"id":id,"revision":3,"archived":true}),
-    );
-    assert_eq!(archive["profile"]["visibility"], "archived");
-    let live = client.ok("assistant_list", json!({}));
-    assert!(live["items"].as_array().unwrap().is_empty());
-    let all = client.ok("assistant_list", json!({"scope":"all"}));
-    assert_eq!(all["items"][0]["id"], id);
-    assert_eq!(
-        client.call("assistant_start", json!({"id":id}))["error"]["code"],
-        "desktop_unavailable"
-    );
-    client.finish();
 }

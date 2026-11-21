@@ -37,9 +37,9 @@ pub use context_repo::{
 pub use schema::{DATABASE_APPLICATION_ID, DATABASE_FORMAT_VERSION};
 pub use session_lifecycle::PermanentDeletionCounts;
 
-/// Session API projection: Project membership is read through the path, never stored.
+/// Project membership comes from the registered path or a verified terminal binding.
 const SESSION_SELECT: &str = "SELECT sessions.*,
-    (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id = sessions.workspace_path_id) AS project_id,
+    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id,
     (SELECT json_group_array(workstream_id) FROM (SELECT workstream_id FROM session_workstreams WHERE session_id=sessions.id ORDER BY workstream_id)) AS tracked_workstream_ids
     FROM sessions";
 
@@ -185,7 +185,6 @@ fn upsert_logical_session_conn(
                 metadata.to_string()
             ],
         )?;
-        assistant_profiles::bind_session(conn, &id)?;
         index_session_conn(conn, &id)?;
         return Ok((id, false));
     }
@@ -211,7 +210,6 @@ fn upsert_logical_session_conn(
             metadata.to_string()
         ],
     )?;
-    assistant_profiles::bind_session(conn, &id)?;
     index_session_conn(conn, &id)?;
     Ok((id, true))
 }
@@ -1088,27 +1086,19 @@ impl Db {
     /// A launch selection is applied once to its exact native session. A deleted,
     /// archived or detached task cannot prevent terminal identity binding.
     pub fn inherit_terminal_tracking(&self, session: &Session, tasks: &[String]) -> Result<()> {
-        self.inherit_terminal_tracking_for_assistant(session, tasks, None)
-    }
-    pub fn inherit_terminal_tracking_for_assistant(
-        &self,
-        session: &Session,
-        tasks: &[String],
-        assistant: Option<&str>,
-    ) -> Result<()> {
         self.tx(|tx| {
-            let current=get_session_conn(tx,&session.id)?.ok_or_else(||other("会话不存在"))?;
-            if current.agent!=session.agent || current.root_agent_session_id!=session.root_agent_session_id { return Err(other("终端会话身份已变化")); }
-            if let Some(assistant)=assistant {
-                assistant_profiles::get(tx,assistant)?;
-                let existing=assistant_profiles::profile_for_session(tx,&current.id)?;
-                if existing.is_some_and(|p| p.id!=assistant) { return Err(other("会话已关联其他智能体")); }
-                tx.execute("INSERT OR IGNORE INTO assistant_sessions(session_id,assistant_id) VALUES(?1,?2)",params![current.id,assistant])?;
+            let current = get_session_conn(tx, &session.id)?.ok_or_else(|| other("会话不存在"))?;
+            if current.agent != session.agent
+                || current.root_agent_session_id != session.root_agent_session_id
+            {
+                return Err(other("终端会话身份已变化"));
             }
             for tid in tasks {
-                let active=get_workstream_conn(tx,tid)?.is_some_and(|task|task.visibility=="normal");
-                let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM workstreams w JOIN workstream_projects p ON p.workstream_id=w.id WHERE w.id=?1 AND w.visibility='normal' AND p.project_id=?2)",params![tid,current.project_id],|r|r.get(0))?;
-                if active && (eligible || assistant_profiles::management_eligible(tx, &current.id, tid)?) { workstream_projects::set_tracking_conn(tx,&current.id,tid,true)?; }
+                let active =
+                    get_workstream_conn(tx, tid)?.is_some_and(|task| task.visibility == "normal");
+                if active && workstream_projects::session_can_track_task(tx, &current, tid)? {
+                    workstream_projects::set_tracking_conn(tx, &current.id, tid, true)?;
+                }
             }
             Ok(())
         })
@@ -1550,7 +1540,8 @@ pub fn reindex_tracking_sessions_conn(conn: &Connection, workstream_id: &str) ->
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
-        let mut st = conn.prepare("SELECT s.id FROM sessions s JOIN workspace_paths wp ON wp.id = s.workspace_path_id WHERE wp.project_id = ?1")?;
+        let mut st =
+            conn.prepare("SELECT session_id FROM project_session_membership WHERE project_id=?1")?;
         for row in st.query_map(params![project_id], |r| r.get(0))? {
             ids.push(row?);
         }
@@ -1566,10 +1557,10 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
     let row: Option<(String, String, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT COALESCE(s.title, s.agent), COALESCE(p.name, ''), (SELECT group_concat(title, char(10)) FROM (SELECT w.title FROM session_workstreams sw JOIN workstreams w ON w.id=sw.workstream_id WHERE sw.session_id=s.id ORDER BY w.id)), s.cwd
+            "SELECT COALESCE(s.title, s.agent), COALESCE((SELECT p.name FROM project_session_membership m
+                 JOIN projects p ON p.id=m.project_id WHERE m.session_id=s.id), ''),
+               (SELECT group_concat(title, char(10)) FROM (SELECT w.title FROM session_workstreams sw JOIN workstreams w ON w.id=sw.workstream_id WHERE sw.session_id=s.id ORDER BY w.id)), s.cwd
                FROM sessions s
-               LEFT JOIN workspace_paths wp ON wp.id = s.workspace_path_id
-               LEFT JOIN projects p ON p.id = wp.project_id
               WHERE s.id = ?1",
             params![session_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),

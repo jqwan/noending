@@ -761,10 +761,15 @@ fn compute_state_fingerprint_with_runtime(
             .as_deref()
             .and_then(crate::workspace::path_identity_of)
         {
-            if crate::storage::assistant_profiles::profile_for_path(&db.read(), &path)?
-                .is_some_and(|profile| profile.visibility != "normal")
-            {
-                return Err(other("已归档智能体不能开始新会话"));
+            let project_id =
+                crate::storage::assistant_profiles::project_for_path(&db.read(), &path)?;
+            if let Some(id) = project_id {
+                if db
+                    .get_project(&id)?
+                    .is_some_and(|project| project.visibility != "normal")
+                {
+                    return Err(other("已归档智能体不能开始新会话"));
+                }
             }
         }
     }
@@ -1029,10 +1034,8 @@ fn validate_initial_task(
     let path_id = crate::workspace::path_identity_of(cwd).ok_or_else(|| other("工作目录无效"))?;
     let conn = db.read();
     let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=?1 AND wp.id=?2)",rusqlite::params![task,path_id],|r|r.get(0))?;
-    if !eligible
-        && !crate::storage::assistant_profiles::management_path_eligible(&conn, &path_id, task)?
-    {
-        return Err(other("所选任务未关联工作目录所属项目，或未分配给该智能体"));
+    if !eligible {
+        return Err(other("所选任务未关联工作目录所属项目"));
     }
     Ok(())
 }

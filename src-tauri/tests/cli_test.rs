@@ -1217,9 +1217,6 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
             }),
         },
         ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
-        ControlCommand::StartAssistant(_) => {
-            panic!("unexpected assistant startup in ordinary session fixture")
-        }
         ControlCommand::Start(options) => {
             let terminal_id = noending::storage::new_id();
             if options.message.as_deref() == Some("disconnect fixture") {
@@ -2355,208 +2352,62 @@ fn chrono_now_minus(seconds: i64) -> String {
 }
 
 #[test]
-fn assistant_cli_preserves_profile_revisions_and_idempotent_creation_without_desktop() {
+fn cli_session_start_forwards_working_directory_and_multiple_tasks() {
+    use noending::session_control::{ControlCommand, DesktopHost};
+
     let f = Fixture::new();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
-    let (success, help) = f.run(exe, &["--help"]);
-    assert!(success, "{help}");
-    assert!(help["data"]["usage"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("ne assistant --help")));
-    let file = f.root.join("profile.json");
-    std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"name":"Manager 中文","agent":"codex","instructions":"Review actual results","runtime_override":{"model":"fixture-model"}})).unwrap()).unwrap();
-    let args = [
-        "assistant",
-        "create",
-        "--file",
-        file.to_str().unwrap(),
-        "--request-id",
-        "assistant-create-once",
-    ];
-    let (success, created) = f.run(exe, &args);
-    assert!(success, "{created}");
-    let id = created["data"]["profile"]["id"].as_str().unwrap();
-    let (success, sessions) = f.run(
+    let cwd = f.root.to_str().unwrap();
+    let (success, unsupported) = f.run(exe, &["assistant", "list"]);
+    assert!(!success, "{unsupported}");
+    assert_eq!(unsupported["error"]["code"], "invalid_arguments");
+
+    let (success, unsupported) = f.run(
         exe,
         &[
-            "assistant",
-            "sessions",
-            id,
-            "--scope",
-            "all",
-            "--limit",
-            "1",
+            "session",
+            "new",
+            "--assistant",
+            "project-id",
+            "--agent",
+            "pi",
         ],
     );
-    assert!(success, "{sessions}");
-    assert_eq!(sessions["data"]["items"], serde_json::json!([]));
-    let (success, unsupported) = f.run(exe, &["assistant", "sessions", id, "--query", "missing"]);
     assert!(!success, "{unsupported}");
     assert_eq!(unsupported["error"]["code"], "invalid_arguments");
     assert!(unsupported["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("--query"));
-    let (success, repeated) = f.run(exe, &args);
-    assert!(success, "{repeated}");
-    assert_eq!(repeated["data"]["profile"]["id"], id);
-    let (_, listed) = f.run(exe, &["assistant", "list"]);
-    assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 1);
-    let patch = f.root.join("patch.json");
-    std::fs::write(
-        &patch,
-        r#"{"runtime_override":null,"description":"clear override"}"#,
-    )
-    .unwrap();
-    let (success, updated) = f.run(
-        exe,
-        &[
-            "assistant",
-            "update",
-            id,
-            "--revision",
-            "1",
-            "--file",
-            patch.to_str().unwrap(),
-        ],
-    );
-    assert!(success, "{updated}");
-    assert!(updated["data"]["profile"]["runtime_override"].is_null());
-    let (success, stale) = f.run(
-        exe,
-        &[
-            "assistant",
-            "update",
-            id,
-            "--revision",
-            "1",
-            "--file",
-            patch.to_str().unwrap(),
-        ],
-    );
-    assert!(!success, "{stale}");
-    let (success, read) = f.run(exe, &["assistant", "show", id]);
-    assert!(success, "{read}");
-    assert_eq!(read["data"]["profile"]["description"], "clear override");
-    let (success, start) = f.run(
-        exe,
-        &[
-            "assistant",
-            "new",
-            id,
-            "--request-id",
-            "assistant-start-offline",
-        ],
-    );
-    assert!(!success, "{start}");
-    assert_eq!(start["error"]["code"], "desktop_unavailable");
-}
+        .contains("assistant"));
 
-#[test]
-fn assistant_cli_assigns_multiple_projects_and_tasks_and_forwards_all_start_tasks() {
-    use noending::{
-        domain::Project,
-        session_control::{ControlCommand, DesktopHost},
-        storage::now,
-        workspace::workstream,
-    };
-    let f = Fixture::new();
-    let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
-    let file = f.root.join("profile.json");
-    std::fs::write(&file, r#"{"name":"Multi-project manager","agent":"codex"}"#).unwrap();
-    let (success, created) = f.run(
-        exe,
-        &["assistant", "create", "--file", file.to_str().unwrap()],
-    );
-    assert!(success, "{created}");
-    let id = created["data"]["profile"]["id"].as_str().unwrap();
-    let db = f.db.as_ref().unwrap();
-    for (id, name) in [("project-a", "Alpha"), ("project-b", "Beta")] {
-        db.upsert_project(&Project {
-            id: id.into(),
-            name: name.into(),
-            git_id: None,
-            name_customized: true,
-            visibility: "normal".into(),
-            created_at: now(),
-            updated_at: now(),
-        })
-        .unwrap();
-    }
-    let first = workstream::create_workstream(db, "First", "", &["project-a".into()]).unwrap();
-    let second = workstream::create_workstream(db, "Second", "", &["project-b".into()]).unwrap();
-    let (success, assigned) = f.run(
-        exe,
-        &[
-            "assistant",
-            "assign",
-            id,
-            "--revision",
-            "1",
-            "--project",
-            "project-a",
-            "--project",
-            "project-b",
-            "--task",
-            &first.id,
-            "--task",
-            &second.id,
-        ],
-    );
-    assert!(success, "{assigned}");
-    assert_eq!(
-        assigned["data"]["projects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| p["id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        ["project-a", "project-b"]
-    );
-    let mut task_ids = assigned["data"]["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["id"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    task_ids.sort();
-    let mut expected = [first.id.as_str(), second.id.as_str()];
-    expected.sort();
-    assert_eq!(task_ids, expected);
-    let _host=DesktopHost::start(&f.home,|command,_|match command {
-        ControlCommand::StartAssistant(p)=>Ok(serde_json::json!({"terminal_id":"pending-manager","assistant_id":p.id,"task_ids":p.task_ids})),
-        _=>panic!("unexpected control request"),
-    }).unwrap();
+    let _host = DesktopHost::start(&f.home, |command, _| match command {
+        ControlCommand::Start(options) => Ok(serde_json::to_value(options).unwrap()),
+        _ => panic!("unexpected control request"),
+    })
+    .unwrap();
     let (success, started) = f.run(
         exe,
         &[
-            "assistant",
+            "session",
             "new",
-            id,
+            "--cwd",
+            cwd,
+            "--agent",
+            "pi",
+            "--model",
+            "one-time-model",
             "--task",
-            &first.id,
+            "first-task",
             "--task",
-            &second.id,
+            "second-task",
         ],
     );
     assert!(success, "{started}");
-    assert_eq!(started["data"]["assistant_id"], id);
+    assert_eq!(started["data"]["cwd"], cwd);
+    assert_eq!(started["data"]["agent"], "pi");
+    assert_eq!(started["data"]["runtime"]["model"], "one-time-model");
     assert_eq!(
-        started["data"]["task_ids"],
-        serde_json::json!([first.id, second.id])
+        started["data"]["tasks"],
+        serde_json::json!(["first-task", "second-task"])
     );
-    let (success, ambiguous) = f.run(
-        exe,
-        &[
-            "assistant",
-            "list",
-            "--project",
-            "project-a",
-            "--project",
-            "project-b",
-        ],
-    );
-    assert!(!success, "{ambiguous}");
-    assert_eq!(ambiguous["error"]["code"], "invalid_arguments");
 }

@@ -816,6 +816,7 @@ fn project_metadata_and_membership_changes_mark_pending_without_discarding_summa
         f.db(),
         &p.id,
         &crate::workspace::project::UnrestrictedWorkspace,
+        None,
     )
     .unwrap();
     let conn = f.db().read();

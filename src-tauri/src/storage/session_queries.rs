@@ -9,7 +9,7 @@ use std::collections::HashMap;
 const LIST_SELECT: &str = "SELECT sessions.id,agent,root_agent_session_id,title,cwd,
     workspace_path_id,started_at,last_activity_at,last_conversation_at,archived_at,
     source_kind,latest_message_seq,
-    (SELECT wp.project_id FROM workspace_paths wp WHERE wp.id=sessions.workspace_path_id) AS project_id,
+    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id,
     (SELECT json_group_array(workstream_id) FROM
       (SELECT workstream_id FROM session_workstreams WHERE session_id=sessions.id ORDER BY workstream_id)) AS tracked_workstream_ids
     FROM sessions";
@@ -26,7 +26,7 @@ pub(super) fn query_sessions<T>(
     if let Some(project) = &filter.project_id {
         values.push(Box::new(project.clone()));
         sql.push_str(&format!(
-            " AND EXISTS (SELECT 1 FROM workspace_paths wp WHERE wp.id=sessions.workspace_path_id AND wp.project_id=?{})",
+            " AND sessions.id IN (SELECT session_id FROM project_session_membership WHERE project_id=?{})",
             values.len()
         ));
     }
@@ -53,6 +53,16 @@ pub(super) fn query_sessions<T>(
 }
 
 impl Db {
+    pub(crate) fn project_session_items(&self, project_id: &str) -> Result<Vec<SessionListItem>> {
+        let conn = self.read();
+        let mut statement = conn.prepare(&format!(
+            "{LIST_SELECT} WHERE sessions.id IN (SELECT session_id FROM project_session_membership WHERE project_id=?1)
+             ORDER BY COALESCE(last_conversation_at,last_activity_at,started_at) DESC,id"
+        ))?;
+        let rows = statement.query_map([project_id], row_list_item)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn list_session_items(
         &self,
         filter: SessionFilter,

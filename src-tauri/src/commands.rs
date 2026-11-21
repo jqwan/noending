@@ -1093,18 +1093,6 @@ pub fn set_extraction_settings(
 
 // ---------------- Assistant ----------------
 
-#[tauri::command]
-pub async fn assistant_workspace(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    layer: State<'_, std::sync::Arc<crate::workspace::wiring::WorkspaceLayer>>,
-) -> Result<crate::assistant::AssistantWorkspace> {
-    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 未初始化"))?;
-    let db = state.db.clone();
-    let layer = layer.inner().clone();
-    run_on_blocking_worker(move || crate::assistant::ensure_workspace(&db, &home, &layer)).await?
-}
-
 /// The async seam test: the refresh command's blocking CLI probe must run on
 /// a blocking worker, never on the calling thread, and the seam must deliver
 /// a usable discovery for an agent whose catalog is static (no CLI spawn at

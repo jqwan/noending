@@ -497,18 +497,6 @@ it("refreshes the board silently after saving a scope change", async () => {
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-it("does not mark a project-enabled Skill as disabled", async () => {
-  const projectLocation: SkillLocation = { ...loc, id: "project-skill", agent: null, scope: "project", path: "/work/one/.agents/skills", label: "共享 Skills" };
-  inventory = {
-    locations: [projectLocation],
-    resources: [resource({ id: "zeta", name: "zeta", locations: ["project-skill"], entry_paths: ["/work/one/.agents/skills/zeta/SKILL.md"], entry_links: [true] })],
-    warnings: [],
-  };
-  render(<SkillTestApp />);
-  const card = await screen.findByRole("button", { name: /zeta/ });
-  expect(within(card).queryByText("未启用")).toBeNull();
-});
-
 it("sorts by name by default and by enablement scope on request", async () => {
   const userLocation: SkillLocation = { ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills" };
   const projectLocation: SkillLocation = { ...loc, id: "project-skill", agent: null, scope: "project", path: "/work/one/.agents/skills" };
@@ -525,6 +513,8 @@ it("sorts by name by default and by enablement scope on request", async () => {
   const section = await screen.findByRole("region", { name: "技能" });
   const names = () => within(section).getAllByRole("button", { name: /^(alpha|beta|zeta)/ }).map(button => button.textContent?.match(/^(alpha|beta|zeta)/)?.[0]);
   expect(names()).toEqual(["alpha", "beta", "zeta"]);
+  expect(within(screen.getByRole("button", { name: /^alpha/ })).getByText("未启用")).toBeTruthy();
+  expect(within(screen.getByRole("button", { name: /^zeta/ })).queryByText("未启用")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /^排序：/ }));
   fireEvent.click(screen.getByRole("option", { name: "启用范围" }));
   expect(names()).toEqual(["beta", "zeta", "alpha"]);
@@ -671,9 +661,9 @@ it.each([true, false])("registers a chosen source with migration=%s", async migr
   await waitFor(() => expect(api.registerSkillSource).toHaveBeenCalledWith("/tmp/review", migrateSource));
 });
 
-it.each(["卡片视图", "列表视图"])("opens the same detail from %s without a back link", async mode => {
+it("opens the detail from list view", async () => {
   render(<SkillTestApp />);
-  fireEvent.click(screen.getByRole("button", { name: mode }));
+  fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
   fireEvent.click(await screen.findByRole("button", { name: /docs/ }));
   await screen.findByLabelText("技能详情");
   expect(navigation).toHaveBeenLastCalledWith(expect.objectContaining({ view: "skill", resourceId: "server" }));

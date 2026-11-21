@@ -62,6 +62,19 @@ pub fn tracked_session_ids(conn: &Connection, id: &str) -> Result<Vec<String>> {
     let rows = st.query_map([id], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
+
+pub(super) fn session_can_track_task(
+    conn: &Connection,
+    session: &Session,
+    task_id: &str,
+) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workstream_projects WHERE workstream_id=?1 AND project_id=?2)",
+        params![task_id, session.project_id],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn set_tracking_conn(conn: &Connection, sid: &str, tid: &str, tracked: bool) -> Result<()> {
     let session = super::get_session_conn(conn, sid)?.ok_or_else(|| other("会话不存在"))?;
     let task = super::get_workstream_conn(conn, tid)?.ok_or_else(|| other("任务不存在"))?;
@@ -73,9 +86,8 @@ pub fn set_tracking_conn(conn: &Connection, sid: &str, tid: &str, tracked: bool)
         if task.visibility != "normal" {
             return Err(other("不能新增跟踪已归档任务"));
         }
-        let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects WHERE workstream_id=?1 AND project_id=?2)",params![tid,session.project_id],|r|r.get(0))?;
-        if !eligible && !super::assistant_profiles::management_eligible(conn, sid, tid)? {
-            return Err(other("任务未关联会话所属项目，或未分配给该智能体"));
+        if !session_can_track_task(conn, &session, tid)? {
+            return Err(other("任务未关联会话所属项目"));
         }
         conn.execute(
             "INSERT INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",

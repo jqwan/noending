@@ -143,20 +143,22 @@ export default function NewSessionView({
   useEffect(() => {
     let cancelled = false;
     setProjectError("");
-    Promise.all([api.listWorkstreamCards(), api.listProjectCards(), api.getWorkspaceSettings()])
+    void Promise.all([api.listWorkstreamCards(), api.listProjectCards(), api.getWorkspaceSettings()])
       .then(async ([ws, cards, settings]) => {
         if (cancelled) return;
         cards = cards.filter(p => p.visibility !== "archived");
         const preferences = readNewSessionPreferences();
         const normal = ws.filter((w) => w.visibility === "normal");
         const targetWs = normal.find((w) => w.id === workstreamId);
-        let projectId = initialProjectId && initialProjectId !== "none" ? initialProjectId : "";
+        const entryProject = cards.find(p => p.id === initialProjectId && isSelectableProject(p));
+        let projectId = entryProject?.id ?? "";
         let defaultDir = "";
         if (!projectId && targetWs?.projects.length) {
           projectId = targetWs.projects[0].id;
         }
         if (projectId && !cards.some(p => p.id === projectId)) projectId = "";
-        if (!projectId && !initialProjectId && (!workstreamId || workstreamId === STANDALONE) && cards.some(p => p.id === preferences.projectId)) {
+        if (!projectId && initialProjectId !== "none" && (!workstreamId || workstreamId === STANDALONE)
+          && cards.some(p => p.id === preferences.projectId && isSelectableProject(p))) {
           projectId = preferences.projectId;
         }
         if (!projectId) {
@@ -178,7 +180,7 @@ export default function NewSessionView({
         setProjects(cards);
         setWorkstreams(normal);
         const presetProject = Boolean(
-          (initialProjectId && initialProjectId !== "none" && cards.some(p => p.id === initialProjectId))
+          entryProject
           || (targetWs && targetWs.projects.some(p => p.id === projectId)),
         );
         // An entry preset must stay selected even when it belongs to another
@@ -345,7 +347,9 @@ export default function NewSessionView({
 
   const launchCwd = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
 
-  const availableTasks = workstreams.filter(w => w.visibility === "normal" && w.projects.some(p => p.id === selectedProjectId));
+  const canCreateTask = Boolean(selectedProject && isSelectableProject(selectedProject));
+  const availableTasks = workstreams.filter(task => task.visibility === "normal"
+    && task.projects.some(project => project.id === selectedProjectId));
   const eligibleTask = trackedWorkstreamIds.every(id => availableTasks.some(w => w.id === id));
 
   // 没有目录不是错误：后端 `resolve_new_cwd` 会回落到 NoEnding 默认工作目录
@@ -499,10 +503,7 @@ export default function NewSessionView({
     : selectedProject.name;
 
   const currentDir = launchCwd || "";
-  const dirLabel = useMemo(() => {
-    if (!currentDir) return "默认工作目录";
-    return ellipsisPathMiddle(currentDir, 28);
-  }, [currentDir]);
+  const dirLabel = currentDir ? ellipsisPathMiddle(currentDir, 28) : "默认工作目录";
 
   const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
 
@@ -511,9 +512,10 @@ export default function NewSessionView({
   const taskLabel = trackedTasks.length === 0
     ? "任务"
     : trackedTasks.length === 1 ? trackedTasks[0].title : `任务 · ${trackedTasks.length}`;
+  const noTasks = "该项目下还没有跟踪任务";
   const taskTitle = trackedTasks.length > 0
     ? trackedTasks.map(task => task.title).join("、")
-    : availableTasks.length > 0 ? "选择跟踪任务" : "该项目下还没有跟踪任务";
+    : availableTasks.length > 0 ? "选择跟踪任务" : noTasks;
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
@@ -743,7 +745,7 @@ export default function NewSessionView({
                 {taskMenuOpen && (
                   <PopupMenu className="picker-menu" role="group" aria-label="跟踪任务列表" onDismiss={() => setTaskMenuOpen(false)}>
                     {availableTasks.length === 0 ? (
-                      <p className="picker-menu-empty">该项目下还没有跟踪任务</p>
+                      <p className="picker-menu-empty">{noTasks}</p>
                     ) : (
                       <div className="picker-menu-list">
                         {availableTasks.map(task => {
@@ -771,7 +773,7 @@ export default function NewSessionView({
                     <PopupMenuItem
                       type="button"
                       className="picker-menu-action"
-                      disabled={busy || !selectedProject}
+                      disabled={busy || !canCreateTask}
                       onClick={() => {
                         setTaskMenuOpen(false);
                         setShowNewWorkstreamModal(true);
@@ -971,7 +973,7 @@ export default function NewSessionView({
             } catch(e) { showToast(`读取任务失败：${String(e)}`); }
             setShowNewWorkstreamModal(false);
           }}
-          initialProjectId={selectedProject && isSelectableProject(selectedProject) ? selectedProjectId : undefined}
+          initialProjectId={canCreateTask ? selectedProjectId : undefined}
         />
       )}
     </main>

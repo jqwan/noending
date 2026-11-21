@@ -39,18 +39,6 @@ it("retains the known terminal status across remounts and applies the refreshed 
   expect(exited).toHaveProperty("disabled", true);
   expect(exited.title).toBe("源会话已不存在");
 });
-it("switches between history and detail without launching an Agent", async () => {
-  const navigate = vi.fn();
-  const view = render(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" navigate={navigate} />);
-  await act(async () => {});
-  fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
-  view.rerender(<SessionSubpageTabs sessionId="s1" title="Session" agent="codex" entry="conversation" navigate={navigate} />);
-  expect(screen.getByRole("button", { name: "历史消息" }).getAttribute("aria-pressed")).toBe("true");
-  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialAgent: "codex" });
-  expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
-});
 it("switches among this session's live and exited terminals and remembers the selected instance", async () => {
   vi.mocked(api.terminalList).mockResolvedValue([{ ...terminal("t1"), activity: { state: "working", revision: 1, unread: false } }, terminal("t2", false), terminal("other", true, "s2")]);
   const navigate = vi.fn();
@@ -83,17 +71,23 @@ it("switches among this session's live and exited terminals and remembers the se
   expect(screen.queryByRole("button", { name: "切换终端" })).toBeNull();
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
 });
-it("starts resume only on explicit terminal continue and blocks archived launches", async () => {
+it("changes detail tabs without launching until the user selects an available terminal action", async () => {
   vi.mocked(api.terminalForSession).mockResolvedValue(null);
   vi.mocked(api.launchEmbeddedResume).mockResolvedValue({ terminal_id: "new" } as never);
   const navigate = vi.fn();
-  const view = render(<SessionSubpageTabs sessionId="s1" agent="codex" archived navigate={navigate} />);
-  await waitFor(() => expect(api.terminalList).toHaveBeenCalled());
-  fireEvent.click(screen.getByRole("button", { name: "在终端中继续" }));
+  const props = { sessionId: "s1", title: "Session", agent: "codex" as const, navigate };
+  const view = render(<SessionSubpageTabs {...props} archived />);
+  const terminal = await screen.findByRole("button", { name: "在终端中继续" });
+  expect(terminal).toHaveProperty("disabled", true);
+  fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
+  view.rerender(<SessionSubpageTabs {...props} entry="conversation" />);
+  expect(screen.getByRole("button", { name: "历史消息" }).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialAgent: "codex" });
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
-  view.rerender(<SessionSubpageTabs sessionId="s1" agent="codex" navigate={navigate} />);
   fireEvent.click(screen.getByRole("button", { name: "在终端中继续" }));
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "new" })));
+  await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "new" })));
 });
 
 it("only marks the displayed, attached terminal read in a focused window", async () => {

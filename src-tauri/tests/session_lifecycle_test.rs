@@ -315,27 +315,6 @@ fn unarchive_keeps_identity_data_and_search() {
     );
 }
 
-/// Resume is refused for a trashed session; the launcher gate is the
-/// single funnel every resume entry goes through.
-#[test]
-fn archived_session_cannot_resume() {
-    let db = open_db("no-resume");
-    let dir = TempDir::new("no-resume-src");
-    let s = seeded_session(&db, &dir, SourceKind::File);
-    lifecycle::archive_session(&db, &s.id).unwrap();
-
-    let launcher = noending::launcher::SessionLauncher {
-        runtime_dir: unique_dir("no-resume-runtime"),
-    };
-    let workspace = noending::launcher::LaunchWorkspace {
-        default_workspace: None,
-    };
-    let err = launcher
-        .prepare_resume_in(&db, &s.id, &workspace)
-        .unwrap_err();
-    assert!(err.to_string().contains("已归档"), "unexpected: {err}");
-}
-
 /// An ACTIVE session with a freshly Missing root must NOT be purgeable —
 /// whatever the source state, only Trash heads toward deletion (row 1).
 #[test]

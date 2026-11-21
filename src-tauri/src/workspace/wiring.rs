@@ -30,15 +30,11 @@ use crate::workspace::WorkspaceAttaching;
 pub struct HomePolicy {
     reserved: ReservedPaths,
     default_workspace: Option<String>,
-    assistant_workspace: String,
 }
 
 impl HomePolicy {
     pub fn new(home: &NoEndingHome) -> Self {
         Self {
-            assistant_workspace: crate::assistant::directory(home)
-                .to_string_lossy()
-                .into_owned(),
             reserved: home.reserved(),
             default_workspace: Some(home.default_workspace_str()),
         }
@@ -52,10 +48,6 @@ impl WorkspacePolicy for HomePolicy {
 
     fn default_workspace(&self) -> Option<String> {
         self.default_workspace.clone()
-    }
-
-    fn assistant_workspace(&self) -> Option<String> {
-        Some(self.assistant_workspace.clone())
     }
 
     fn exists_on_disk(&self, canonical_path: &str) -> bool {

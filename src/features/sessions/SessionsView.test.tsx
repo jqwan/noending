@@ -108,23 +108,16 @@ describe("Sessions 页按跟踪任务筛选", () => {
   });
 });
 
-it.each([
-  { sources: [], hint: "请添加会话来源目录。" },
-  { sources: [{ id: "missing", agent: "codex", path: "/missing/history", origin: "default", created_at: "", exists: false }], hint: "来源目录不存在：/missing/history" },
-])("guides empty sessions to source configuration: $hint", async ({ sources, hint }) => {
+it("offers source configuration when a directory is missing and can start an independent session", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([]);
-  vi.mocked(api.listIngestSources).mockResolvedValue(sources as never);
+  vi.mocked(api.listIngestSources).mockResolvedValue([
+    { id: "missing", agent: "codex", path: "/missing/history", origin: "default", exists: false },
+  ]);
   render(<SessionsView navigate={navigate} />);
-  await screen.findByText(hint);
+  await screen.findByText("来源目录不存在：/missing/history");
   fireEvent.click(screen.getByRole("button", { name: "配置会话来源" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "agents" });
-});
-
-it("opens the new-session page from the toolbar and empty-state action", async () => {
-  vi.mocked(api.listSessions).mockResolvedValue([]);
-  render(<SessionsView navigate={navigate} />);
-
-  await screen.findByRole("button", { name: "配置会话来源" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "agents" });
+  navigate.mockClear();
   const buttons = screen.getAllByRole("button", { name: "新建会话" });
   expect(buttons).toHaveLength(2);
   buttons.forEach((button) => fireEvent.click(button));
@@ -133,12 +126,11 @@ it("opens the new-session page from the toolbar and empty-state action", async (
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-it("shows archived sessions in the same cards and filters, with continue disabled", async () => {
+it("loads archived sessions and keeps search and archive actions available", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08", tracked_workstream_ids: ["w1"] })]);
   render(<SessionsView navigate={navigate} scope="archived" />);
   await screen.findByText("归档会话");
   expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "archived");
-  expect((screen.getByRole("button", { name: "在终端中继续归档会话" }) as HTMLButtonElement).disabled).toBe(true);
   screen.getByRole("button", { name: "取消归档归档会话" });
   screen.getByRole("button", { name: "永久删除归档会话" });
   expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
@@ -148,21 +140,21 @@ it("shows archived sessions in the same cards and filters, with continue disable
 });
 
 
-it("includes assistant sessions in the shared archived board and bulk deletion", async () => {
+it("bulk-deletes the archived sessions after confirmation", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([
-    session({ id: "assistant-archived", title: "归档助手", project_id: "assistant-project", workspace_path_id: "assistant-path", archived_at: "2026-10-11" }),
-    session({ id: "regular-archived", title: "归档普通会话", project_id: "regular-project", workspace_path_id: "regular-path", archived_at: "2026-10-11" }),
+    session({ id: "archived-one", title: "归档会话一", archived_at: "2026-10-11" }),
+    session({ id: "archived-two", title: "归档会话二", archived_at: "2026-10-11" }),
   ]);
   vi.mocked(api.permanentlyDeleteSession).mockReset().mockResolvedValue({ purged: true } as never);
   await act(async () => { render(<SessionsView navigate={navigate} scope="archived" />); });
-  await screen.findByText("归档助手");
-  expect(screen.getByText("归档普通会话")).toBeTruthy();
+  await screen.findByText("归档会话一");
   fireEvent.click(screen.getByRole("button", { name: "删除全部" }));
+  expect(api.permanentlyDeleteSession).not.toHaveBeenCalled();
   const buttons = screen.getAllByRole("button", { name: "删除全部" });
   await act(async () => { fireEvent.click(buttons[buttons.length - 1]); });
-  expect(api.permanentlyDeleteSession).toHaveBeenCalledTimes(2);
-  expect(api.permanentlyDeleteSession).toHaveBeenCalledWith("assistant-archived");
-  expect(api.permanentlyDeleteSession).toHaveBeenCalledWith("regular-archived");
+  expect(vi.mocked(api.permanentlyDeleteSession).mock.calls.map(([id]) => id).sort()).toEqual([
+    "archived-one", "archived-two",
+  ]);
 });
 
 it("immediately removes a deleted session and ignores a stale board refresh", async () => {

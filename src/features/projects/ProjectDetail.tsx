@@ -11,20 +11,23 @@ import PageHeader from "../../layout/PageHeader";
 import { Field, submitsOnEnter, timeAgo, useRefreshSignal, Modal, openPath, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError } from "../workstreams/WorkspacePaths";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
+import ProjectAssistantSection from "../assistants/ProjectAssistantSection";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
 import { showToast } from "../../components/Toast";
 import ProjectSummary from "./ProjectSummary";
 import SessionMiniList from "../sessions/SessionMiniList";
+import NewProjectSessionButton from "../sessions/NewProjectSessionButton";
 import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import { clearWorkstreamCardsCache } from "../workstreams/useWorkstreamCards";
 import { notifyDataChanged } from "../../app/routes";
 import { httpsRemoteUrl } from "./remoteUrl";
-import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject, isProjectAllPathsMissing } from "./projectKind";
+import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
 import {
+  type ProjectAssistant,
   type ProjectDetailData,
 } from "../../types";
-import type { Route } from "../../app/routes";
+import type { ProjectEntry, Route } from "../../app/routes";
 
 /**
  * Project Detail：一次 `get_project_detail` 读到全部真相——它拥有的 WorkspacePaths、
@@ -37,10 +40,12 @@ import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 export { projectDetailCache, clearProjectDetailCache };
 
 
-export default function ProjectDetail({ projectId, initialTitle, navigate }: {
+export default function ProjectDetail({ projectId, initialTitle, navigate, entry, fromAssistants }: {
   projectId: string;
   initialTitle?: string;
   navigate: (r: Route) => void;
+  entry?: ProjectEntry;
+  fromAssistants?: boolean;
 }) {
   const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
   const [gone, setGone] = useState(false);
@@ -85,16 +90,28 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   }, [projectId]);
 
   useEffect(refresh, [refresh]);
-  useEffect(() => setConfirmCleanup(false), [projectId]);
+  useEffect(() => setConfirmCleanup(false), [projectId, entry]);
   useRefreshSignal(refresh);
 
   const detail = data;
   const project = detail?.project ?? null;
-  const allPathsMissing = !detail || isProjectAllPathsMissing({
-    path_count: detail.workspace_paths.length,
-    missing_path_count: detail.workspace_paths.filter(path => !path.exists).length,
-  });
-  useEffect(() => setNewTaskOpen(false), [projectId]);
+  const assistant = detail?.assistant;
+  const assistantView = entry === "assistant" && Boolean(assistant);
+  const icon = (detail ? assistantView : entry === "assistant") ? "spark" : "project";
+  const archiveBoard: Route = { view: "projects", scope: "archived", ...(fromAssistants && { assistantOnly: true }) };
+  const onAssistantSaved = (updated: ProjectAssistant) => {
+    if (removedTargets.projects.has(projectId)) return;
+    ++seqRef.current;
+    setData(current => {
+      if (!current?.assistant) return current;
+      const next = { ...current, assistant: { ...current.assistant, ...updated } };
+      projectDetailCache.set(projectId, next);
+      return next;
+    });
+    clearProjectCardsCache();
+    notifyDataChanged(["projects"]);
+  };
+  useEffect(() => setNewTaskOpen(false), [projectId, entry]);
 
   const sortedWorkspacePaths = useMemo(() => {
     if (!detail) return [];
@@ -105,6 +122,10 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       return a.canonical_path.localeCompare(b.canonical_path);
     });
   }, [detail]);
+  const displayedPaths = assistantView
+    ? sortedWorkspacePaths.filter(path => path.id === assistant?.workspace_path_id)
+    : sortedWorkspacePaths;
+  const directoryLabel = assistantView ? "档案目录" : "工作目录";
   const unusedMissingPaths = detail?.workspace_paths.filter(path => {
     if (path.exists) return false;
     if (detail.cleanable_missing_path_ids) {
@@ -153,7 +174,8 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
         return nextData;
       });
       setRenaming(false);
-      refresh();
+      clearProjectCardsCache();
+      notifyDataChanged(["projects"]);
     } catch (e) {
       // 失败留在弹窗里说原因：静默关闭会让用户以为已经改好了。
       console.error(e);
@@ -169,7 +191,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
       return (
         <div className="main project-detail" role="status">
           <PageHeader
-            title={initialTitle ?? ""} icon={<Icon name="project" />}
+            title={initialTitle ?? ""} icon={<Icon name={icon} />}
           />
           {showSkeleton && (
             <div style={{ display: "flex", flexDirection: "column", gap: 16, marginTop: 16 }}>
@@ -183,7 +205,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
     return (
       <div className="main project-detail">
         <PageHeader
-          title={initialTitle ?? ""} icon={<Icon name="project" />}
+          title={initialTitle ?? ""} icon={<Icon name={icon} />}
         >
           {failure !== "" && <PathError text={failure} />}
           {gone && (
@@ -205,25 +227,46 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
   }
 
 
+  const openEntry = (next?: ProjectEntry) => {
+    if (next === entry) return;
+    navigate({
+      view: "project", projectId, initialTitle: project.name,
+      ...(next && { entry: next }),
+      ...(fromAssistants && { fromAssistants }),
+    });
+  };
+
   return (
     <DetailPanelProvider kind="project"><div className="main project-detail detail-page">
       <PageHeader
-        title={project.name} icon={<Icon name="project" />}
+        title={project.name} icon={<Icon name={icon} />}
+        navigation={assistant && <div className="settings-seg icon-seg" role="group" aria-label="项目子页">
+          <button type="button" className={assistantView ? "" : "on"} aria-pressed={!assistantView}
+            aria-label="项目详情" title="项目详情" onClick={() => openEntry()}>
+            <Icon name="project" />
+          </button>
+          <button type="button" className={assistantView ? "on" : ""} aria-pressed={assistantView}
+            aria-label="智能体详情" title="智能体详情" onClick={() => openEntry("assistant")}>
+            <Icon name="spark" />
+          </button>
+        </div>}
         actions={
           <>
           <button className="btn ghost icon-button" title="重命名" aria-label="重命名"
             onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
             <Icon name="edit" />
           </button>
-          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, session_count: detail.sessions.length }}
+          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, is_assistant: Boolean(assistant), session_count: detail.sessions.length }}
             onChanged={() => { clearProjectCardsCache(); refresh(); }}
-            onDeleted={() => { clearProjectDetailCache(); navigate({ view: "projects", scope: "archived" }); }} />
+            replacement={fromAssistants ? archiveBoard : undefined}
+            onDeleted={() => navigate(archiveBoard)} />
           </>
         }
       />
 
-      {/* 概览数字与类型 / 命名 / 创建时间都收在右栏「属性」块里：标题栏只放标题与图标动作。 */}
-      <DetailLayout panel={<><DetailSection sectionId="properties" label="属性" title={<>
+      <DetailLayout panel={<>
+        {!assistantView && (
+          <DetailSection sectionId="properties" label="属性" title={<>
               <Icon name="info" />
               <span>属性</span>
             </>}>
@@ -235,6 +278,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
                 {projectKindLabels[detail.kind]}
               </span>
               {detail.purpose && <span className="badge accent">{projectPurposeLabels[detail.purpose]}</span>}
+              {assistant && <span className="badge accent">智能体</span>}
               <span className="badge">{project.visibility === "archived" ? "已归档" : "未归档"}</span>
               {project.name_customized && <span className="small muted">自定义名称</span>}
             </div>
@@ -265,24 +309,26 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               {detail.workspace_paths.length} 个工作目录 ·{" "}
               {detail.workstreams.length} 个任务 · {detail.sessions.length} 个会话
             </Field>
+            <Field label="项目 ID" copyValue={project.id}><code>{project.id}</code></Field>
             <Field label="创建时间">{timeAgo(project.created_at)}</Field>
             </DetailFields>
           </DetailSection>
-<DetailSection sectionId="workspace-paths" label="工作目录" className="project-workspace-paths" title={<>
+        )}
+          <DetailSection sectionId="workspace-paths" label={directoryLabel} className="project-workspace-paths" title={<>
               <Icon name="folder" />
-              <span>工作目录（{sortedWorkspacePaths.length}）</span>
-            </>} actions={unusedMissingPaths.length > 0 && <button type="button" className="btn ghost icon-button small"
+              <span>{assistantView ? directoryLabel : `${directoryLabel}（${displayedPaths.length}）`}</span>
+            </>} actions={!assistantView && unusedMissingPaths.length > 0 && <button type="button" className="btn ghost icon-button small"
               title="清理失效目录" aria-label="清理失效目录" disabled={cleanupBusy} onClick={() => setConfirmCleanup(true)}>
               <Icon name="trash" />
             </button>}>
 
-            {sortedWorkspacePaths.length === 0 && (
+            {displayedPaths.length === 0 && (
               <div className="detail-empty">
-                这个项目目前没有登记目录。
+                {assistantView ? "尚未登记档案目录。" : "这个项目目前没有登记目录。"}
               </div>
             )}
-            <DetailList label="工作目录列表">
-            {sortedWorkspacePaths.map((p) => (
+            <DetailList label={`${directoryLabel}列表`}>
+            {displayedPaths.map((p) => (
               <DetailListRow key={p.id} icon={<Icon name="folder" />}
                 title={<CompactPath path={p.canonical_path} />}
                 titleHint={p.canonical_path} onOpen={() => void openPath(p.canonical_path)}
@@ -293,17 +339,24 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               />
             ))}
             </DetailList>
-          </DetailSection></>}><ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
-<DetailSection sectionId="tasks" label="关联任务" title={<>
+          </DetailSection>
+          <SkillScopeConfig projectId={projectId} navigate={navigate}
+            workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
+      </>}>
+        {assistant && <div hidden={!assistantView}>
+          <ProjectAssistantSection projectId={projectId} assistant={assistant}
+            archived={project.visibility === "archived"} onSaved={onAssistantSaved} onRefresh={refresh} />
+        </div>}
+        {!assistantView && <>
+          <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
+          <DetailSection sectionId="tasks" label="关联任务" title={<>
                 <Icon name="tasks" />
                 <span>关联任务（{detail.workstreams.length}）</span>
-              </>} actions={<><button type="button" className="btn ghost icon-button small"
+              </>} actions={<button type="button" className="btn ghost icon-button small"
                 title="新建任务"
                 aria-label="新建任务" onClick={() => setNewTaskOpen(true)}>
                 <Icon name="plus" />
-              </button></>}>
-
-
+              </button>}>
             {detail.workstreams.length === 0 ? (
               <div className="detail-empty">未关联任何任务</div>
             ) : (
@@ -318,26 +371,18 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
               </DetailList>
             )}
           </DetailSection>
-<DetailSection sectionId="sessions" label="会话" className="project-sessions-section" title={<>
+        </>}
+          <DetailSection sectionId="sessions" label="会话" className="project-sessions-section" title={<>
                 <Icon name="chat" />
                 <span>会话（{detail.sessions.length}）</span>
-              </>} actions={<>{(detail.purpose === "assistant" || !isDirectoryGroupProject({ ...detail.project, kind: detail.kind })) && (
-                <button
-                  className="btn ghost icon-button small"
-                  title="新建会话"
-                  aria-label="新建会话"
-                  onClick={() => navigate(allPathsMissing ? { view: "new-session" } : { view: "new-session", projectId: project.id })}
-                >
-                  <Icon name="plus" />
-                </button>
-              )}</>}>
-
-
+              </>} actions={project.visibility !== "archived" && !isDirectoryGroupProject(detail) && (
+                <NewProjectSessionButton projectId={project.id} navigate={navigate} />
+              )}>
             <SessionMiniList sessions={detail.sessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
           </DetailSection>
-<SkillScopeConfig projectId={projectId} navigate={navigate} workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} /></DetailLayout>
+      </DetailLayout>
 
-      {newTaskOpen && (
+      {!assistantView && newTaskOpen && (
         <WorkstreamFormModal
           key={projectId}
           initialProjectId={projectId}
@@ -368,7 +413,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate }: {
           </DialogActions>
         </Modal>
       )}
-      {confirmCleanup && <Modal title="清理失效目录？" onClose={() => { if (!cleanupBusyRef.current) setConfirmCleanup(false); }}>
+      {!assistantView && confirmCleanup && <Modal title="清理失效目录？" onClose={() => { if (!cleanupBusyRef.current) setConfirmCleanup(false); }}>
         <p>清理 {unusedMissingPaths.length} 个缺失且没有会话引用的目录登记？</p>
         <p className="small muted">仅移除 NoEnding 中的登记，不删除磁盘内容，项目本身保留。执行时会重新检查目录及会话引用。</p>
         <DialogActions>

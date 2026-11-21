@@ -74,9 +74,10 @@ export const api = {
     invoke<Project>("rename_project", { projectId, name }),
   archiveProject: (projectId: string) => invoke<Project>("archive_project", { projectId }),
   restoreProject: (projectId: string) => invoke<Project>("restore_project", { projectId }),
-  deleteProjectPermanently: async (projectId: string) => {
-    await invoke<void>("delete_project_permanently", { projectId });
-    invalidateTargets({ projectIds: [projectId], replacement: { view: "projects", scope: "archived" } });
+  deleteProjectPermanently: async (projectId: string, replacement: import("./app/routes").Route = { view: "projects", scope: "archived" }) => {
+    const result = await invoke<{ warnings: string[] }>("delete_project_permanently", { projectId });
+    invalidateTargets({ projectIds: [projectId], replacement });
+    return result;
   },
   addProjectPath: (path: string) =>
     invoke<AddProjectPathResult>("add_project_path", { path }),
@@ -356,45 +357,12 @@ export const api = {
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
 
-  listAssistantProfiles: (query: import("./types").AssistantListQuery = {}) =>
-    invoke<import("./types").AssistantPage<import("./types").AssistantCard>>("list_assistant_profiles", { query }),
-  getAssistantProfile: (id: string) =>
-    invoke<import("./types").AssistantDetail>("get_assistant_profile", { id }),
   createAssistantProfile: (input: import("./types").CreateAssistantInput) =>
-    invoke<import("./types").AssistantDetail>("create_assistant_profile", { input }),
-  updateAssistantProfile: (id: string, revision: number, patch: import("./types").UpdateAssistantPatch) =>
-    invoke<import("./types").AssistantDetail>("update_assistant_profile", { id, revision, patch }),
-  setAssistantResponsibilities: (id: string, revision: number, projectIds: string[], taskIds: string[]) =>
-    invoke<import("./types").AssistantDetail>("set_assistant_responsibilities", {
-      id,
-      revision,
-      project_ids: projectIds,
-      task_ids: taskIds,
-    }),
-  setAssistantArchived: (id: string, revision: number, archived: boolean) =>
-    invoke<import("./types").AssistantDetail>("set_assistant_archived", { id, revision, archived }),
-  listAssistantSessions: (
-    id: string,
-    query: { scope?: "unarchived" | "archived" | "all"; cursor?: string; limit?: number } = {},
-  ) =>
-    invoke<import("./types").AssistantPage<import("./types").SessionListItem>>("list_assistant_sessions", {
-      id,
-      query,
-    }),
-  startAssistantSession: (
-    id: string,
-    taskIds?: string[],
-    initialMessage?: string,
-    runtimeOverride?: import("./types").AgentRuntimeOverrides,
-  ) =>
-    invoke<import("./types").LaunchResult>("start_assistant_session", {
-      id,
-      task_ids: taskIds,
-      initial_message: initialMessage,
-      runtime_override: runtimeOverride,
-    }),
-  prepareAssistantFiles: (id: string, revision: number) =>
-    invoke<import("./types").AssistantDetail>("prepare_assistant_files", { id, revision }),
+    invoke<Project>("create_assistant_profile", { input }),
+  updateAssistantProfile: (id: string, revision: string, patch: { agents_md: string }) =>
+    invoke<import("./types").ProjectAssistant>("update_assistant_profile", { id, revision, patch }),
+  prepareAssistantFiles: (id: string) =>
+    invoke<import("./types").ProjectAssistant>("prepare_assistant_files", { id }),
 };
 
 export type { Agent };

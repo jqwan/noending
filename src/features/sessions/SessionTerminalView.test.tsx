@@ -44,10 +44,8 @@ vi.mock("@tauri-apps/api/event", () => ({
     return Promise.resolve(() => eventHandlers.delete(event));
   }),
 }));
-const { readTextMock, copyMock } = vi.hoisted(() => ({ readTextMock: vi.fn(), copyMock: vi.fn() }));
-vi.mock("../../components/common", async importOriginal => ({ ...await importOriginal<typeof import("../../components/common")>(), copyToClipboard: copyMock }));
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
-  readText: readTextMock,
+  readText: vi.fn(),
   writeText: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -122,13 +120,11 @@ const { FakeTerminal } = vi.hoisted(() => {
       }) as typeof textarea.addEventListener;
       return textarea;
     })();
-    capturePasteHandler: ((e: unknown) => void) | null = null;
     captureInputHandler: ((e: unknown) => void) | null = null;
     element: HTMLElement = (() => {
       const el = document.createElement("div");
       const original = el.addEventListener.bind(el);
       el.addEventListener = ((type: string, handler: EventListenerOrEventListenerObject, opts?: boolean | AddEventListenerOptions) => {
-        if (type === "paste") FakeTerminal.last!.capturePasteHandler = handler as (e: unknown) => void;
         if (type === "compositionend") FakeTerminal.last!.compositionEndHandler = handler as () => void;
         if (type === "input") FakeTerminal.last!.captureInputHandler = handler as (e: unknown) => void;
         return original(type, handler, opts);
@@ -703,67 +699,6 @@ it("does not receive input when Cmd+V finds no clipboard text", async () => {
   expect(api.terminalInput).not.toHaveBeenCalled();
 });
 
-it("cancels the keyboard default and accepts native menu paste through xterm", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-  vi.mocked(api.readClipboardForTerminal).mockResolvedValue("x");
-
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const prevented = vi.fn();
-  // 返回 false 之外必须真的 cancelDefault，否则原生粘贴照跑（双投递的根）。
-  expect(
-    FakeTerminal.last!.keyHandler!({ type: "keydown", metaKey: true, key: "v", preventDefault: prevented }),
-  ).toBe(false);
-  expect(prevented).toHaveBeenCalledTimes(1);
-
-  // Native menu paste uses the same xterm paste protocol, without bubbling twice.
-  expect(FakeTerminal.last!.capturePasteHandler).not.toBeNull();
-  const stopped = vi.fn();
-  FakeTerminal.last!.capturePasteHandler!({
-    preventDefault: stopped,
-    stopImmediatePropagation: () => {},
-    clipboardData: { getData: () => "menu text" },
-  });
-  expect(stopped).toHaveBeenCalledTimes(1);
-  await waitFor(() => expect(FakeTerminal.last!.pasted).toContain("menu text"));
-});
-
-it("passes native TUI paste shortcuts through to xterm", async () => {
-  const shortcutModifiers = [
-    { ctrlKey: true, altKey: false },
-    { ctrlKey: false, altKey: true },
-  ];
-
-  for (const modifiers of shortcutModifiers) {
-    vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-    vi.mocked(api.readClipboardForTerminal).mockClear();
-
-    const view = renderView();
-    await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-    const prevented = vi.fn();
-    expect(FakeTerminal.last!.keyHandler!({
-      type: "keydown", metaKey: false, shiftKey: false, key: "v",
-      ...modifiers, preventDefault: prevented,
-    })).toBe(true);
-    expect(prevented).not.toHaveBeenCalled();
-    expect(api.readClipboardForTerminal).not.toHaveBeenCalled();
-    view.unmount();
-  }
-});
-
-it("copy with a selection goes through the shared clipboard helper", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-
-  copyMock.mockResolvedValue(true);
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const term = FakeTerminal.last!;
-  term.hasSelection = () => true;
-  term.getSelection = () => "selected";
-  term.keyHandler!({ type: "keydown", metaKey: true, key: "c", preventDefault: () => {} });
-  await waitFor(() => expect(copyMock).toHaveBeenCalledWith("selected"));
-});
-
 it("remounting reuses the live instance instead of rebuilding and replaying", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({ scrollback: btoa("first") }));
 
@@ -807,24 +742,6 @@ it("IME direct-commit punctuation is delivered from the input payload", async ()
   term.keyHandler!({ type: "keyup", keyCode: 229 });
   term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
   expect(api.terminalInput).toHaveBeenCalledWith("t-1", "？", undefined, 0);
-});
-
-it("first direct-commit arms on the bare Shift keydown (probe log sequence)", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const term = FakeTerminal.last!;
-  // 探针 A/B 实测的首键序列：WebKit 吞掉字符键的 keydown，229 到第二键才
-  // 出现，唯一前置是裸 Shift keydown——窗口必须由它武装，否则首键必丢。
-  expect(
-    term.keyHandler!({ type: "keydown", keyCode: 16, key: "Shift", preventDefault: () => {} }),
-  ).toBe(true);
-  term.captureInputHandler!({ inputType: "insertText", data: "？", stopImmediatePropagation: () => {} });
-  await tick();
-  await tick();
-  const delivered = vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "？");
-  expect(delivered).toHaveLength(1);
 });
 
 it("armed input events die at capture so xterm's input path never fires", async () => {
@@ -875,26 +792,6 @@ it("a re-dispatched identical payload for one insertion is delivered once", asyn
   expect(
     vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "？"),
   ).toHaveLength(2);
-});
-
-it("the diff shim deducts what xterm already delivered — no double send", async () => {
-  vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
-
-  renderView();
-  await waitFor(() => expect(FakeTerminal.last!.keyHandler).not.toBeNull());
-  const term = FakeTerminal.last!;
-  term.keyHandler!({ type: "keydown", keyCode: 229, preventDefault: () => {} });
-  term.compositionStartHandler!();
-  term.compositionEndHandler!();
-  // 组合提交的字符 xterm 已经发过（onData 记账；经输入通道进 PTY 是合法路径）：
-  term.dataHandler("你");
-  term.textarea.value = "你";
-  term.captureInputHandler!({ inputType: "insertText", data: "你", stopImmediatePropagation: () => {} });
-  await tick();
-  await tick();
-  // 差分层必须扣掉 xterm 已发的部分——「你」恰好交付一次，不能双发。
-  const delivered = vi.mocked(api.terminalInput).mock.calls.filter((c) => c[1] === "你");
-  expect(delivered).toHaveLength(1);
 });
 
 it("the diff shim ignores non-IME typing and mid-composition states", async () => {

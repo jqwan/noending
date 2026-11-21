@@ -41,53 +41,29 @@ fn no_override_resolves_to_no_exec_options_at_all() {
             "{agent:?} with no stored override must pass no runtime argument"
         );
     }
-}
-
-#[test]
-fn a_missing_row_and_an_empty_blob_mean_the_same_thing() {
-    let db = temp_db();
-    assert!(get_runtime_overrides(&db, Agent::Codex)
-        .expect("read")
-        .is_default());
     db.set_setting("agent.runtime.codex", "{}").unwrap();
-    assert!(get_runtime_overrides(&db, Agent::Codex)
-        .expect("read")
-        .is_default());
-}
-
-#[test]
-fn codex_model_and_effort_override_roundtrip() {
-    let db = temp_db();
-    set_runtime_overrides(
-        &db,
-        Agent::Codex,
-        &overrides(Some("gpt-5.6-sol"), None, Some("high")),
-    )
-    .expect("codex supports model + effort");
     let opts = runtime_exec_options(&db, Agent::Codex).unwrap();
-    assert_eq!(opts.model.as_deref(), Some("gpt-5.6-sol"));
-    assert_eq!(opts.effort.as_deref(), Some("high"));
-    assert_eq!(opts.provider, None, "provider was never overridden");
+    assert_eq!((opts.model, opts.provider, opts.effort), (None, None, None));
 }
 
-// ClaudeCode shares Codex's override matrix (model/effort overridable,
-// provider unsupported), so one roundtrip pins the shared cell;
-// `unsupported_fields_are_rejected_on_write_and_on_read` covers ClaudeCode's
-// provider refusal.
-
 #[test]
-fn pi_provider_model_and_thinking_override() {
+fn runtime_overrides_roundtrip_for_agents_with_and_without_providers() {
     let db = temp_db();
-    set_runtime_overrides(
-        &db,
-        Agent::Pi,
-        &overrides(Some("qwen/qwen3.8-27b"), Some("lmstudio"), Some("low")),
-    )
-    .expect("pi supports all three fields");
-    let opts = runtime_exec_options(&db, Agent::Pi).unwrap();
-    assert_eq!(opts.provider.as_deref(), Some("lmstudio"));
-    assert_eq!(opts.model.as_deref(), Some("qwen/qwen3.8-27b"));
-    assert_eq!(opts.effort.as_deref(), Some("low"));
+    for (agent, model, provider, effort) in [
+        (Agent::Codex, "gpt-5.6-sol", None, "high"),
+        (Agent::Pi, "qwen/qwen3.8-27b", Some("lmstudio"), "low"),
+    ] {
+        set_runtime_overrides(&db, agent, &overrides(Some(model), provider, Some(effort))).unwrap();
+        let opts = runtime_exec_options(&db, agent).unwrap();
+        assert_eq!(
+            (
+                opts.model.as_deref(),
+                opts.provider.as_deref(),
+                opts.effort.as_deref()
+            ),
+            (Some(model), provider, Some(effort))
+        );
+    }
 }
 
 #[test]

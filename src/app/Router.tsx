@@ -40,8 +40,6 @@ const modules = {
   "project": deferredRoute(() => import("../features/projects/ProjectDetail")),
   "settings": deferredRoute(() => import("../features/settings/SettingsView")),
   "agents": deferredRoute(() => import("../features/agents/AgentsView")),
-  "assistants": deferredRoute(() => import("../features/assistants/AssistantsView")),
-  "assistant": deferredRoute(() => import("../features/assistants/AssistantDetailView")),
   "skills": deferredRoute(() => import("../features/skills/SkillsView")),
   "skill": deferredRoute(() => import("../features/skills/SkillDetailView")),
   "packages": deferredRoute(() => import("../features/packages/PackagesView")),
@@ -59,8 +57,6 @@ const ProjectsView = modules["projects"].View;
 const ProjectDetail = modules["project"].View;
 const SettingsView = modules["settings"].View;
 const AgentsView = modules["agents"].View;
-const AssistantsView = modules["assistants"].View;
-const AssistantDetailView = modules["assistant"].View;
 const SkillsView = modules["skills"].View;
 const SkillDetailView = modules["skill"].View;
 const PackagesView = modules["packages"].View;
@@ -165,31 +161,11 @@ function renderRoute(
         />
       );
     case "projects":
-      return <ProjectsView navigate={navigate} scope={route.scope} />;
+      return <ProjectsView key={route.assistantOnly ? "assistants" : "projects"} navigate={navigate} scope={route.scope} assistantOnly={route.assistantOnly} />;
     case "project":
-      return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} />;
+      return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} entry={route.entry} fromAssistants={route.fromAssistants} />;
     case "agents":
       return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
-    case "assistants":
-      return (
-        <AssistantsView
-          action={route.action}
-          scope={route.scope}
-          navigate={navigate}
-          actionSeq={actionSeq}
-        />
-      );
-    case "assistant":
-      return (
-        <AssistantDetailView
-          key={route.assistantId}
-          assistantId={route.assistantId}
-          initialTitle={route.initialTitle}
-          entry={route.entry}
-          navigate={navigate}
-          goBack={goBack}
-        />
-      );
     case "skills":
       return <SkillsView key={route.projectId ?? "user"} initialProjectId={route.projectId} navigate={navigate} />;
     case "skill":

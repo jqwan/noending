@@ -121,19 +121,8 @@ fn codex_reads_the_config_registry_and_resolves_single_version_roots() {
 
     let unset = entry(&inventory, "codex", "no-flag");
     assert_eq!(unset.scopes[0].state, packages::ToggleState::Unset);
-}
-
-#[test]
-fn codex_ambiguous_cache_versions_report_no_root() {
-    let f = Fixture::new();
-    f.dir("home/.codex/plugins/cache/openai-curated/review/1.0.0");
     f.dir("home/.codex/plugins/cache/openai-curated/review/2.0.0");
-    f.write(
-        "home/.codex/config.toml",
-        "[plugins.\"review@openai-curated\"]\nenabled = true\n",
-    );
-    let inventory = f.discover();
-    assert_eq!(entry(&inventory, "codex", "review").install_path, None);
+    assert_eq!(entry(&f.discover(), "codex", "review").install_path, None);
 }
 
 #[test]
@@ -149,7 +138,9 @@ fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
                 {"scope": "user", "installPath": "CLAUDE_INSTALL", "version": "5.1.0",
                  "installedAt": "2026-05-31T14:58:21.246Z", "lastUpdated": "2026-06-01T10:00:00.000Z"},
                 {"scope": "local", "projectPath": "/tmp/team-repo", "installPath": "CLAUDE_LOCAL", "version": "5.1.0"}
-            ]}}"#,
+            ],
+            "quiet@claude-plugins-official": [{"scope": "user", "installPath": "P", "version": "1.0"}]
+        }}"#,
     );
     f.write(
         "home/.claude/settings.json",
@@ -166,6 +157,10 @@ fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
     assert_eq!(user.install_path.as_deref(), Some("CLAUDE_INSTALL"));
     assert_eq!(user.scopes[0].state, packages::ToggleState::Enabled);
     assert!(user.capabilities.toggle);
+    assert_eq!(
+        entry(&inventory, "claude_code", "quiet").scopes[0].state,
+        packages::ToggleState::Unset
+    );
 
     // Project/local installs stay Agent-managed and are not discovered.
     assert!(inventory
@@ -173,21 +168,6 @@ fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
         .iter()
         .all(|entry| entry.scopes[0].scope == packages::Scope::User));
     assert!(inventory.packages.iter().all(|entry| entry.name != "ghost"));
-}
-
-#[test]
-fn claude_unset_toggle_reports_unset_not_disabled() {
-    let f = Fixture::new();
-    f.write(
-        "home/.claude/plugins/installed_plugins.json",
-        r#"{"version": 2, "plugins": {"quiet@claude-plugins-official": [
-            {"scope": "user", "installPath": "P", "version": "1.0"}]}}"#,
-    );
-    let inventory = f.discover();
-    assert_eq!(
-        entry(&inventory, "claude_code", "quiet").scopes[0].state,
-        packages::ToggleState::Unset
-    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { Modal, submitsOnEnter } from "./common";
 import CustomSelect from "./CustomSelect";
@@ -14,18 +15,26 @@ it("takes Enter as submit only when no IME is mid-composition", () => {
   expect(press("Enter", false, 229)).toBe(false);
   expect(press("Escape", false, 27)).toBe(false);
 });
-it("keeps keyboard focus inside the dialog and restores the opener", () => {
-  const opener = document.createElement("button");
-  document.body.append(opener);
+it("keeps keyboard focus inside the dialog and restores the opener after closing it", () => {
+  function DialogExample() {
+    const [open, setOpen] = useState(false);
+    return <>
+      <button onClick={() => setOpen(true)}>打开编辑</button>
+      {open && <Modal title="编辑" onClose={() => setOpen(false)}><button>取消</button><button>保存</button></Modal>}
+    </>;
+  }
+  render(<DialogExample />);
+  const opener = screen.getByRole("button", { name: "打开编辑" });
   opener.focus();
-  const view = render(<Modal title="编辑" onClose={() => {}}><button>取消</button><button>保存</button></Modal>);
+  fireEvent.click(opener);
+  const close = screen.getByRole("button", { name: "关闭弹窗" });
   fireEvent.keyDown(document, { key: "Tab" });
-  expect(document.activeElement).toBe(screen.getByRole("button", { name: "关闭弹窗" }));
+  expect(document.activeElement).toBe(close);
   fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
   expect(document.activeElement).toBe(screen.getByText("保存"));
-  view.unmount();
+  fireEvent.click(close);
+  expect(screen.queryByRole("dialog", { name: "编辑" })).toBeNull();
   expect(document.activeElement).toBe(opener);
-  opener.remove();
 });
 it("only closes the topmost dialog on Escape", () => {
   const outer = vi.fn(); const inner = vi.fn();
@@ -33,13 +42,6 @@ it("only closes the topmost dialog on Escape", () => {
   fireEvent.keyDown(document, { key: "Escape" });
   expect(inner).toHaveBeenCalledOnce();
   expect(outer).not.toHaveBeenCalled();
-});
-
-it("closes from the shared header button", () => {
-  const close = vi.fn();
-  render(<Modal title="编辑" onClose={close}>内容</Modal>);
-  fireEvent.click(screen.getByRole("button", { name: "关闭弹窗" }));
-  expect(close).toHaveBeenCalledOnce();
 });
 
 it("keeps a selector popup inside the dialog keyboard flow without closing its parent", () => {

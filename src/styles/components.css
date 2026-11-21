@@ -253,10 +253,14 @@ p.ws-card-body.muted { color: var(--text-muted); }
   align-items: stretch;
   gap: var(--space-md);
 }
-.project-card,
-button.project-card { font: inherit; text-align: left; color: var(--text-primary); }
 .project-card .ws-card-head { align-items: center; gap: var(--space-sm); }
-.project-card .ws-card-title { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; flex: 1; }
+.project-card-open {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
 .board-stats {
   display: flex;
   flex-wrap: wrap;
@@ -700,6 +704,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 /* 所有看板共用的列表行和内容入口，不依赖会话页样式加载。 */
 
 
+.board-list,
 .session-list,
 .task-list,
 .project-list,
@@ -708,6 +713,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 .package-list {
   border-top: 1px solid var(--border-subtle);
 }
+.board-list-row,
 .session-list-row,
 .task-list-row,
 .project-list-row,
@@ -724,6 +730,8 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   content-visibility: auto;
   contain-intrinsic-size: auto 68px;
 }
+.board-list-row:hover,
+.board-list-row:focus-within,
 .session-list-row:hover,
 .session-list-row:focus-within,
 .task-list-row:hover,
@@ -738,6 +746,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 .package-list-row:focus-within {
   background: var(--bg-hover);
 }
+.board-list-open,
 .session-open,
 .task-open,
 .project-open,
@@ -757,6 +766,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   text-align: left;
   cursor: pointer;
 }
+.board-list-title,
 .session-list-title,
 .task-list-title,
 .project-list-title,
@@ -770,6 +780,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   min-width: 0;
   font-weight: var(--weight-semibold);
 }
+.board-list-title > span,
 .session-list-title > span,
 .task-list-title > span,
 .project-list-title > span,
@@ -781,6 +792,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   white-space: nowrap;
   min-width: 0;
 }
+.board-list-meta,
 .session-list-meta,
 .task-list-meta,
 .project-list-meta,
@@ -794,6 +806,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
 }
+.board-list-description,
 .task-list-summary,
 .skill-list-desc {
   color: var(--text-muted);
@@ -803,6 +816,7 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.board-list-actions,
 .task-list-actions,
 .project-list-actions,
 .agent-list-actions,

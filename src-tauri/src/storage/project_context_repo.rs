@@ -31,6 +31,6 @@ pub fn commit(
     for (sid, revision) in consumed {
         conn.execute("INSERT INTO project_session_frontiers(project_id,session_id,session_context_revision,ingest_generation,processed_through_seq) VALUES (?1,?2,?3,(SELECT ingest_generation FROM session_contexts WHERE session_id=?2 AND revision=?3),(SELECT processed_through_seq FROM session_contexts WHERE session_id=?2 AND revision=?3)) ON CONFLICT(project_id,session_id) DO UPDATE SET session_context_revision=?3,ingest_generation=excluded.ingest_generation,processed_through_seq=excluded.processed_through_seq", params![id,sid,revision])?;
     }
-    conn.execute("DELETE FROM project_session_frontiers WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id=project_session_frontiers.session_id AND wp.project_id=?1)", [id])?;
+    conn.execute("DELETE FROM project_session_frontiers WHERE project_id=?1 AND NOT EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=project_session_frontiers.session_id AND m.project_id=?1)", [id])?;
     Ok(state(conn, id)?.revision)
 }

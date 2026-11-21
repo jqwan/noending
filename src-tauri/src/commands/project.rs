@@ -4,7 +4,7 @@
 //! actions are explicit; task/session lifecycle remains independent.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tauri::State;
 
@@ -12,13 +12,13 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 use crate::workspace::project::{
-    project_detail, project_kind, project_workstreams, ProjectDetail, ProjectWorkstream,
-    WorkspacePolicy,
+    project_detail, project_kind, project_workstreams, ProjectDeletion, ProjectDetail,
+    ProjectWorkstream, WorkspacePolicy,
 };
 use crate::workspace::wiring::WorkspaceLayer;
 
 use super::workstream::later_ts;
-use super::{with_db, AppState};
+use super::{noending_home, with_db, AppState};
 
 // ---------------- Projects: the v0.2 surface ----------------
 
@@ -35,14 +35,13 @@ pub struct ProjectCardData {
     pub visibility: String,
     pub kind: ProjectKind,
     pub purpose: Option<ProjectPurpose>,
+    pub is_assistant: bool,
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
     /// Distinct tasks related through any working path.
     pub workstream_count: i64,
-    /// Sessions through the authoritative
-    /// `workspace_path_id → workspace_paths.project_id` chain,
-    /// Archived sessions are included.
+    /// Associated sessions including archived sessions.
     pub session_count: i64,
     /// Up to two representative paths for display.
     pub representative_paths: Vec<String>,
@@ -118,16 +117,20 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
         }
     }
 
-    // Session reach + activity through the authoritative chain,
-    // Archived sessions are included.
+    let assistant_projects = {
+        let mut st = conn.prepare("SELECT project_id FROM project_assistants")?;
+        let rows = st.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<BTreeSet<_>, _>>()?
+    };
+
+    // Session reach and activity, including archived sessions.
     let mut session_count: BTreeMap<String, i64> = BTreeMap::new();
     let mut session_activity: BTreeMap<String, Option<String>> = BTreeMap::new();
     {
         let mut st = conn.prepare(
-            "SELECT wp.project_id, COUNT(*), MAX(COALESCE(s.last_activity_at, s.started_at))
-             FROM sessions s
-             JOIN workspace_paths wp ON wp.id = s.workspace_path_id
-             GROUP BY wp.project_id",
+            "SELECT m.project_id, COUNT(*), MAX(COALESCE(s.last_activity_at, s.started_at))
+             FROM project_session_membership m JOIN sessions s ON s.id=m.session_id
+             GROUP BY m.project_id",
         )?;
         let rows = st.query_map([], |r| {
             Ok((
@@ -168,6 +171,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
                     policy,
                 ),
+                is_assistant: assistant_projects.contains(&p.id),
                 kind: project_kind(
                     &p,
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
@@ -335,16 +339,22 @@ pub fn restore_project(state: State<AppState>, project_id: String) -> Result<Pro
 }
 
 #[tauri::command]
-pub fn delete_project_permanently(
-    state: State<AppState>,
+pub async fn delete_project_permanently(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
     layer: State<'_, Arc<WorkspaceLayer>>,
     project_id: String,
-) -> Result<()> {
-    with_db(&state, |db| {
+) -> Result<ProjectDeletion> {
+    let db = Arc::clone(&state.db);
+    let layer = Arc::clone(&layer);
+    let home = noending_home(&app);
+    super::run_on_blocking_worker(move || {
         crate::workspace::project::delete_project_permanently(
-            db,
+            &db,
             &project_id,
             layer.projection().policy(),
+            home.as_ref(),
         )
     })
+    .await?
 }

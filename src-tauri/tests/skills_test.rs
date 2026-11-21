@@ -256,7 +256,7 @@ fn skill_scan_skips_plain_file_load_roots_without_following_or_modifying_them() 
 
 #[cfg(unix)]
 #[test]
-fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
+fn a_linked_skill_is_deduplicated_and_can_be_disabled_or_uninstalled_without_losing_its_source() {
     let f = Fixture::new();
     let source = f.source("external", "review");
     let shared = f.roots.home.join(".agents/skills");
@@ -284,28 +284,22 @@ fn physical_skill_is_deduplicated_and_unlink_preserves_the_external_source() {
     assert!(!shared.join("review").exists());
     assert!(source.join("SKILL.md").exists());
     assert!(claude.join("review/SKILL.md").exists());
-}
 
-#[cfg(unix)]
-#[test]
-fn uninstall_skill_removes_all_links_and_keeps_the_external_source() {
-    let f = Fixture::new();
-    let source = f.source("external", "review");
-    let shared = f.roots.home.join(".agents/skills");
-    let claude = f.roots.claude.join("skills");
-    fs::create_dir_all(&shared).unwrap();
-    fs::create_dir_all(&claude).unwrap();
-    let locations = skills::list(&f.roots, None).locations;
-    let shared_loc = locations.iter().find(|l| l.agent.is_none()).unwrap();
-    let claude_loc = locations
-        .iter()
-        .find(|l| l.agent == Some(Agent::ClaudeCode))
-        .unwrap();
-    skills::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
-    skills::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
+    let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
+    skills::enable_skill(
+        &f.roots,
+        None,
+        &row.id,
+        source_file.to_str(),
+        &shared_loc.id,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_link(shared.join("review")).unwrap(),
+        fs::canonicalize(&source).unwrap()
+    );
     let inventory = skills::list(&f.roots, None);
     let row = &inventory.resources[0];
-    assert_eq!(row.entry_links, vec![true, true]);
     skills::uninstall_skill(&f.roots, &[], &row.id, &row.revision, false).unwrap();
     assert!(!shared.join("review").exists());
     assert!(!claude.join("review").exists());
@@ -419,29 +413,6 @@ fn uninstalling_a_registered_physical_source_requires_deleting_it() {
         .iter()
         .next()
         .is_some());
-}
-
-#[cfg(unix)]
-#[test]
-fn enabling_a_source_creates_a_link_without_touching_the_source() {
-    let f = Fixture::new();
-    let source = f.source("external", "review");
-    let source_file = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let source_file = source_file.to_string_lossy().into_owned();
-    let loc = skills::list(&f.roots, None)
-        .locations
-        .into_iter()
-        .find(|l| l.agent == Some(Agent::ClaudeCode))
-        .unwrap();
-    let id = skills::source_id(&source_file);
-    skills::enable_skill(&f.roots, None, &id, Some(&source_file), &loc.id).unwrap();
-    let entry = f.roots.claude.join("skills/review");
-    assert!(entry.is_symlink());
-    assert_eq!(
-        fs::read_link(&entry).unwrap(),
-        fs::canonicalize(&source).unwrap()
-    );
-    assert!(source.join("SKILL.md").exists());
 }
 
 #[cfg(unix)]
@@ -650,6 +621,18 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
         .entries
         .iter()
         .any(|entry| entry.agents.contains(&Agent::Antigravity)));
+    let inventory = skills::merge_inventories(
+        cwds.iter()
+            .map(|cwd| skills::list(&f.roots, Some(cwd)))
+            .collect(),
+    );
+    let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
+    assert_eq!(row.entry_paths.len(), 6);
+    assert!(row.entry_links.iter().all(|link| *link));
+    assert!(skills::detail_project(&f.roots, &cwds, &id)
+        .unwrap()
+        .content
+        .contains("# Instructions"));
 
     skills::disable_skill_project(&f.roots, &cwds, &id).unwrap();
     assert!(source.join("SKILL.md").exists());
@@ -685,28 +668,6 @@ fn a_new_project_directory_inherits_enabled_skills() {
     .unwrap();
     assert!(second.join(".agents/skills/review/SKILL.md").is_file());
     assert!(second.join(".claude/skills/review/SKILL.md").is_file());
-}
-
-#[test]
-fn project_inventory_merges_entries_from_every_working_directory() {
-    let f = Fixture::new();
-    let source = f.source("input", "review");
-    let second = f.root.join("repo-two");
-    fs::create_dir_all(&second).unwrap();
-    let cwds = vec![f.cwd.clone(), second.clone()];
-    let skill = fs::canonicalize(source.join("SKILL.md")).unwrap();
-    let id = skills::source_id(skill.to_str().unwrap());
-    skills::enable_skill_project(&f.roots, &cwds, &id, Some(skill.to_str().unwrap())).unwrap();
-
-    let inventory = skills::merge_inventories(vec![
-        skills::list(&f.roots, Some(&cwds[0])),
-        skills::list(&f.roots, Some(&cwds[1])),
-    ]);
-    let row = inventory.resources.iter().find(|row| row.id == id).unwrap();
-    assert_eq!(row.entry_paths.len(), 6);
-    assert!(row.entry_links.iter().all(|link| *link));
-    let detail = skills::detail_project(&f.roots, &cwds, &id).unwrap();
-    assert!(detail.content.contains("# Instructions"));
 }
 
 #[cfg(unix)]
@@ -1134,22 +1095,9 @@ fn registering_an_external_source_adopts_it_into_the_library() {
     let adopted = fs::canonicalize(managed.join("review/SKILL.md")).unwrap();
     assert_eq!(outcome.source_path, adopted.to_string_lossy());
     assert_eq!(outcome.name, "review");
-}
-
-#[test]
-fn registering_a_library_source_keeps_it_in_place() {
-    let f = Fixture::new();
-    let managed = f.root.join("managed");
-    let library = f.source("managed/kept", "kept");
-
-    let outcome = skills::adopt_source(&f.roots, &[], &managed, &library).unwrap();
-    assert!(library.exists());
-    assert_eq!(
-        outcome.source_path,
-        fs::canonicalize(library.join("SKILL.md"))
-            .unwrap()
-            .to_string_lossy()
-    );
+    let registered_again = skills::adopt_source(&f.roots, &[], &managed, &adopted).unwrap();
+    assert_eq!(registered_again.source_path, outcome.source_path);
+    assert!(adopted.is_file());
 }
 
 #[test]

@@ -85,9 +85,6 @@ pub(crate) enum Command {
         run: String,
         connection: String,
     },
-    Assistant {
-        command: crate::assistant::AssistantCommand,
-    },
     Status,
     SessionControl {
         command: crate::session_control::ControlCommand,
@@ -237,9 +234,6 @@ pub(crate) enum Command {
 }
 impl Command {
     pub(crate) fn is_write(&self) -> bool {
-        if let Self::Assistant { command } = self {
-            return command.is_write();
-        }
         if let Self::SessionControl { command } = self {
             return command.is_write();
         }
@@ -334,12 +328,6 @@ impl Service {
                 request_id,
                 command,
             } => self.execute_once(&request_id, *command),
-            Command::Assistant { command } => Ok(crate::assistant::dispatch_command(
-                &self.db,
-                &self.home,
-                &self.layer,
-                command,
-            )?),
             Command::Receipt { id } => super::receipts::show(&self.home, &id),
             Command::SessionControl { command } => {
                 if command.is_write() {
@@ -493,7 +481,7 @@ impl Service {
                 Ok(json!({"listening":false,"exit":code}))
             }
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","room","assistant"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","room"]}),
             ),
             Command::Freshness { kind, id } => {
                 if kind.is_some() != id.is_some() {
@@ -983,7 +971,7 @@ impl Service {
             .transpose()?;
         let agent = parse_agent(agent)?;
         let sql=match kind {
-            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR wp.project_id=?2) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3)) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
+            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2)) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3)) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
             Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p WHERE p.workstream_id=s.id AND p.project_id=?2)) AND (?5='all' OR (?5='archived' AND s.visibility='archived') OR (?5='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND ?4 IS NULL AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=s.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY s.id LIMIT ?6",
             Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND ?4 IS NULL AND (?5='all' OR (?5='archived' AND visibility='archived') OR (?5='unarchived' AND visibility='normal')) AND (?7 IS NULL OR instr(lower(name),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY id LIMIT ?6",
         };

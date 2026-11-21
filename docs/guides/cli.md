@@ -90,7 +90,7 @@ ne project summary <id>
 
 `ne project resolve` 使用命令进程的当前目录，`--path` 可指定其他已存在的绝对目录。依次匹配当前目录和最近的已登记父目录；相同物理目录的路径别名也可识别，不修改数据库里的路径标识。遇到独立 Git 仓库边界时不继续归入外层项目；未登记的 worktree 可通过已有 Git common dir 身份找到项目，不按项目名称或远程 URL 猜测。
 
-返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。助手目录默认定位到助手项目，操作其他项目时应明确指定路径。
+返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。档案目录默认定位到对应的智能体项目，操作其他项目时应明确指定路径。
 
 ## Agent 可用性与提取配置
 
@@ -133,7 +133,7 @@ ne task project list <任务id>
 ne task project set <任务id> --project <项目id1> --project <项目id2>
 ```
 
-任务创建可重复传入 `--project` 关联多个已有项目。一个会话可跟踪多个任务，attach 只增加该任务的跟踪，不替换其他任务；普通会话新增跟踪限于当前项目的未归档任务。准确关联有效、未归档智能体档案的管理会话，还可跟踪该档案明确负责的未归档任务，见下文「智能体档案」，无需改写任务的项目集合。detach 只取消指定任务的跟踪。
+任务创建可重复传入 `--project` 关联多个已有项目。一个会话可跟踪多个任务，attach 只增加该任务的跟踪，不替换其他任务；新增跟踪限于会话所属项目的未归档任务。detach 只取消指定任务的跟踪。
 
 task update 只更改提供的字段，保留归档状态及关联。至少提供 title 或 description，可同时提供；标题不能为空，`--description ""` 清空说明。任务及项目改名同步更新搜索索引，项目名称会标记为用户自定义，不被后续自动命名覆盖。
 
@@ -157,30 +157,6 @@ ne session terminals --session SESSION_ID
 `--task` 可重复；可用 `--model`、`--provider`、`--effort` 覆盖运行参数。省略消息只打开 TUI。新建先返回终端 ID、`session_id=null` 和 `binding=pending`；原生会话被摄入后通过 terminals 查询实际绑定，不猜测 ID。一个会话最多一个有效的 NoEnding 运行终端。
 
 `ne session identity` 只查询当前命令继承的 NoEnding 终端身份，返回 `data.session_id`，不接收显式身份参数，不需要自行读取环境变量或筛选终端列表。缺少终端上下文返回 `terminal_context_missing`，外部会话再用宿主提供的原生 ID 执行 `session resolve`；尚未绑定返回 `sender_unbound`，等待摄入后重试。桌面不可用返回 `desktop_unavailable`，终端失效返回 `sender_unavailable`，不回退到其他会话。此查询不启动、同步或修改会话，也不需要请求编号。
-
-## 智能体档案
-
-智能体档案对应独立的主目录项目，角色、运行默认值和负责范围由 NoEnding 保存；工程执行仍使用工程项目的普通会话。档案数据操作无需桌面，新建管理终端需要同 Home 桌面运行。
-
-```sh
-ne assistant list --scope all
-ne assistant create --file profile.json
-ne assistant show ASSISTANT_ID
-ne assistant update ASSISTANT_ID --revision N --file patch.json
-ne assistant assign ASSISTANT_ID --revision N --project PROJECT_ID --task TASK_ID
-ne assistant new ASSISTANT_ID --task TASK_ID --message "核对进展"
-ne assistant current --session SESSION_ID
-ne assistant sessions ASSISTANT_ID --scope all
-ne assistant archive ASSISTANT_ID --revision N
-ne assistant unarchive ASSISTANT_ID --revision N
-ne assistant prepare ASSISTANT_ID --revision N
-```
-
-profile.json 至少包含 `name` 和 `agent`。可选 `avatar`、`description`、`instructions` 和 `runtime_override`。patch 省略字段保持原值；`runtime_override:null` 继承运行工具保存配置，`{}` 使用 CLI 原生默认。新建管理会话用档案配置，`--runtime JSON` 可以临时整份覆盖。新建返回终端和待绑定事实，继续会话使用已有会话入口。
-
-`assign` 完整替换两组 ID，`--project` 和 `--task` 均可重复；二者分别显式选择，不要求交集，支持无项目任务。已确认属于该档案且明确分配任务的管理会话可以跟踪跨项目任务，不改写任务项目集合。普通会话继续遵循项目资格。取消责任保留既有跟踪历史，活动协作成员解除责任会被拒绝。
-
-列表、会话列表支持 `--cursor`、`--limit`；只读返回不能证明模型执行或消息已送达。档案完整修改和范围替换要求当前 revision，写入可使用 `--request-id`。归档保留目录、资料和原生会话；不提供永久删除档案。生成的角色入口遇到用户修改时明确冲突并保留原文件。
 
 ## 会话信箱
 

@@ -19,30 +19,25 @@ const member = (patch: Partial<CollaborationMemberState> = {}): CollaborationMem
   ...patch,
 });
 
-it("flags a listening member as unresponsive only after the earliest unread waited past two minutes", () => {
+it("only marks listening members with old unread messages as unresponsive", () => {
   expect(memberStatus(member(), NOW).label).toBe("暂未响应");
   expect(memberStatus(member({ awaiting_since: "2026-10-27T03:59:30Z" }), NOW).label).toBe("等待消息");
-  // 没有待查收的消息时，久未活动也不该被判为无回应。
   expect(memberStatus(member({ awaiting_since: null, unread_count: 0 }), NOW).label).toBe("等待消息");
-});
-
-it("keeps processing independent of the two-minute rule", () => {
   expect(memberStatus(member({ phase: "processing" }), NOW).label).toBe("处理中");
 });
 
-it("does not read a live heartbeat as the model being ready to answer", () => {
-  // 连接有效但没有进入等待：只说「仅连接」，不写成在听也不写工作正常。
-  expect(memberStatus(member({ phase: null }), NOW).label).toBe("仅连接");
-  expect(memberStatus(member({ connection_state: "disconnected" }), NOW).label).toBe("连接中断");
-  expect(memberStatus(member({ connection_state: "pending", wake_status: "pending" }), NOW).label).toBe("等待加入");
-  expect(memberStatus(member({ connection_state: "pending", wake_status: "failed" }), NOW).label).toBe("唤醒失败");
+it("shows the connection and listening state ahead of an earlier wake result", () => {
+  const cases = [
+    [{ phase: null }, "仅连接"],
+    [{ connection_state: "disconnected" }, "连接中断"],
+    [{ connection_state: "pending", wake_status: "pending" }, "等待加入"],
+    [{ connection_state: "pending", wake_status: "failed" }, "唤醒失败"],
+    [{ wake_status: "failed", awaiting_since: null }, "等待消息"],
+  ] satisfies [Partial<CollaborationMemberState>, string][];
+  for (const [state, label] of cases) expect(memberStatus(member(state), NOW).label).toBe(label);
 });
 
 it("expires the observed connection when no further heartbeat event arrives", () => {
   expect(memberStatus(member({ last_heartbeat_at: new Date(NOW - 30_000).toISOString() }), NOW).label).toBe("暂未响应");
   expect(memberStatus(member({ last_heartbeat_at: new Date(NOW - 31_000).toISOString() }), NOW).label).toBe("连接中断");
-});
-
-it("shows an established connection after a manual join even when the earlier wake failed", () => {
-  expect(memberStatus(member({ wake_status: "failed", awaiting_since: null }), NOW).label).toBe("等待消息");
 });

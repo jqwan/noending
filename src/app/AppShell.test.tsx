@@ -199,6 +199,25 @@ it("restores the last session page and parameters across history navigation", as
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
 });
 
+it("keeps project and assistant views of the same project in navigation history", async () => {
+  const project: Route = { view: "project", projectId: "assistant-dual-view", initialTitle: "评审员", fromAssistants: true };
+  const assistant: Route = { ...project, entry: "assistant" };
+  projectDetailCache.set(project.projectId, { project: { name: "评审员" } } as never);
+  render(<AppShell />);
+
+  const currentRoute = () => JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!);
+  await act(async () => { pageNavigation.navigate!(assistant); });
+  expect(currentRoute()).toEqual(assistant);
+  expect(api.getProjectContextState).not.toHaveBeenCalled();
+  await act(async () => { pageNavigation.navigate!(project); });
+  expect(currentRoute()).toEqual(project);
+  expect(api.getProjectContextState).toHaveBeenCalledWith(project.projectId);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
+  expect(currentRoute()).toEqual(assistant);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
+  expect(currentRoute()).toEqual(project);
+});
+
 it("remembers a background launch result without changing the current section", async () => {
   render(<AppShell />);
   const finishLaunch = sessionNavigation.navigate!;

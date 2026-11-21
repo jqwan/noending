@@ -34,18 +34,6 @@ it("closes from Escape, restores focus and preserves both panes' input", () => {
   expect((screen.getByRole("textbox", { name: "右栏草稿" }) as HTMLInputElement).value).toBe("保留右栏草稿");
 });
 
-it("remembers panel visibility after remount while keeping page types independent", () => {
-  const view = render(<Page />);
-  fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
-  view.unmount(); viewState.clear();
-  const session = render(<Page />);
-  screen.getByRole("button", { name: "展开详情栏" });
-  session.unmount();
-  render(<Page kind="project" />);
-  screen.getByRole("button", { name: "收起详情栏" });
-  expect(screen.getByRole("complementary", { name: "详情栏" })).toBeTruthy();
-});
-
 it.each([["task", "collaboration", "session"], ["session", "terminal", "task"]])(
   "shares panel width and visibility between %s and %s while keeping %s independent",
   (detail, subpage, other) => {

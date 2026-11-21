@@ -235,10 +235,8 @@ fn require_members(c: &Connection, task_id: &str, session_ids: &[String]) -> Res
                 |r| r.get::<_, bool>(0),
             )
             .map_err(crate::error::AppError::from)?;
-        if !ok || !super::assistant_profiles::management_member_eligible(c, id, task_id)? {
-            return Err(other(format!(
-                "成员 {id} 不属于该任务、已删除、已归档或不再负责该任务"
-            )));
+        if !ok {
+            return Err(other(format!("成员 {id} 不属于该任务、已删除或已归档")));
         }
     }
     Ok(())
@@ -385,8 +383,10 @@ impl Db {
         let c = self.read();
         // Archived sessions stay listed so the UI can show them greyed out
         // with a reason; start revalidation rejects them regardless.
-        let sql=format!("SELECT s.id FROM sessions s WHERE EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1) AND s.id>?2 AND {} ORDER BY s.id LIMIT ?3",super::assistant_profiles::member_predicate("s","?1"));
-        let mut stmt = c.prepare(&sql)?;
+        let mut stmt = c.prepare(
+            "SELECT s.id FROM sessions s JOIN session_workstreams sw ON sw.session_id=s.id
+             WHERE sw.workstream_id=?1 AND s.id>?2 ORDER BY s.id LIMIT ?3",
+        )?;
         let rows = stmt
             .query_map(
                 params![task_id, cursor.unwrap_or(""), limit as i64 + 1],

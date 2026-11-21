@@ -15,9 +15,8 @@ pub struct SessionFilter {
 
 const FILTER: &str = "search_index.kind IN ('session','message')
     AND EXISTS (SELECT 1 FROM sessions s
-      LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id
       WHERE s.id=CASE search_index.kind WHEN 'message' THEN search_index.parent_id ELSE search_index.ref_id END
-      AND (?2 IS NULL OR wp.project_id=?2)
+      AND (?2 IS NULL OR EXISTS (SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2))
       AND (?3 IS NULL OR EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3))
       AND (?4 IS NULL OR s.agent=?4)
       AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL)

@@ -84,7 +84,7 @@ export type WorkstreamVisibility = "normal" | "archived";
 export type WorkspaceGitState = "none" | "detected" | "missing";
 export type ProjectKind = "git" | "single_directory" | "directory_group";
 
-export type ProjectPurpose = "chat" | "assistant";
+export type ProjectPurpose = "chat";
 
 export interface Project {
   id: string;
@@ -106,6 +106,7 @@ export interface ProjectCardData {
   visibility: "normal" | "archived";
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
+  is_assistant?: boolean;
   path_count: number;
   missing_path_count: number;
   workstream_count: number;
@@ -186,6 +187,7 @@ export interface ProjectDetailData {
   project: Project;
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
+  assistant?: (ProjectAssistant & { workspace_path_id: string }) | null;
   workspace_paths: WorkspacePath[];
   cleanable_missing_path_ids?: string[];
   workstreams: ProjectWorkstreamRow[];
@@ -877,83 +879,13 @@ export interface CollaborationStartedMember {
   wake_method: CollaborationWakeMethod;
 }
 
-export type AssistantVisibility = "normal" | "archived";
-export type AssistantInstructionsState = "missing" | "current" | "outdated" | "conflict";
-
-export interface AssistantProfile {
-  id: string;
-  name: string;
-  avatar: string;
-  description: string;
-  instructions: string;
-  agent: Agent;
-  runtime_override: AgentRuntimeOverrides | null;
-  workspace_path_id: string;
-  visibility: AssistantVisibility;
-  revision: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AssistantCard {
-  id: string;
-  name: string;
-  avatar: string;
-  description: string;
-  agent: Agent;
-  runtime_override: AgentRuntimeOverrides | null;
-  visibility: AssistantVisibility;
-  revision: number;
-  directory: string;
-  project_id: string;
-  directory_exists: boolean;
-  session_count: number;
-  project_count: number;
-  task_count: number;
-  last_activity_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AssistantDetail {
-  profile: AssistantProfile;
-  project: Project;
-  workspace_path: WorkspacePath;
-  projects: Project[];
-  tasks: Workstream[];
-  session_count: number;
-  last_activity_at: string | null;
-  instructions_state: AssistantInstructionsState;
-}
-
-export interface AssistantPage<T> {
-  items: T[];
-  next_cursor: string | null;
-  end: boolean;
-}
-
-export interface AssistantListQuery {
-  query?: string;
-  scope?: "unarchived" | "archived" | "all";
-  cursor?: string;
-  limit?: number;
+export interface ProjectAssistant {
+  agents_md: string;
+  revision: string | null;
+  agents_md_state: "missing" | "current" | "unavailable";
 }
 
 export interface CreateAssistantInput {
   name: string;
-  agent: Agent;
-  avatar?: string;
-  description?: string;
-  instructions?: string;
-  runtime_override?: AgentRuntimeOverrides | null;
+  agents_md?: string;
 }
-
-export interface UpdateAssistantPatch {
-  name?: string;
-  avatar?: string;
-  description?: string;
-  instructions?: string;
-  agent?: Agent;
-  runtime_override?: AgentRuntimeOverrides | null;
-}
-

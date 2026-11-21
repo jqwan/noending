@@ -24,6 +24,7 @@ export function isRemovedRoute(route: Route): boolean {
     case "terminal": return removedTargets.terminals.has(route.terminalId);
     case "workstream": return removedTargets.workstreams.has(route.workstreamId);
     case "project": return removedTargets.projects.has(route.projectId);
+    case "new-session": return !!route.projectId && removedTargets.projects.has(route.projectId);
     case "skills":
     case "skill": return !!route.projectId && removedTargets.projects.has(route.projectId);
     default: return false;

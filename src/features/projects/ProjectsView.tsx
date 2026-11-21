@@ -11,11 +11,13 @@ import "../workstreams/workstreams.css";
 import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
+import CreateAssistantModal from "../assistants/CreateAssistantModal";
 import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
 import { EVT_SYNCED, type Route } from "../../app/routes";
-import ProjectLifecycleActions, { canDeleteProject, ProjectDeleteModal, type LifecycleProject } from "./ProjectLifecycleActions";
+import NewProjectSessionButton from "../sessions/NewProjectSessionButton";
+import ProjectLifecycleActions, { BulkProjectDeleteAction, invalidateProjectLifecycleCaches, ProjectDeleteModal, type LifecycleProject } from "./ProjectLifecycleActions";
 import type { ProjectCardData, ProjectKind } from "../../types";
 import { projectKindLabels, isDirectoryGroupProject, isProjectAllPathsMissing } from "./projectKind";
 
@@ -47,20 +49,31 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
 import { projectCardsCache, clearProjectCardsCache } from "./projectCardsCache";
 export { clearProjectCardsCache };
 
-export default function ProjectsView({ navigate, scope }: { navigate: (r: Route) => void; scope?: "unarchived" | "archived" }) {
+export default function ProjectsView({ navigate, scope, assistantOnly = false }: {
+  navigate: (r: Route) => void;
+  scope?: "unarchived" | "archived";
+  assistantOnly?: boolean;
+}) {
   const archivedMode = scope === "archived";
-  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
-  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const label = assistantOnly ? "智能体" : "项目";
+  const icon = assistantOnly ? "spark" : "project";
+  const board = assistantOnly ? "assistants" : "projects";
+  const scopeRoute = (scope: "unarchived" | "archived"): Route => ({ view: "projects", scope, ...(assistantOnly && { assistantOnly }) });
+  const openProject = (id: string, name: string) => navigate({
+    view: "project", projectId: id, initialTitle: name,
+    ...(assistantOnly && { entry: "assistant", fromAssistants: true }),
+  });
   const [deleteTarget, setDeleteTarget] = useState<LifecycleProject | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [creatingAssistant, setCreatingAssistant] = useState(false);
   const [cards, setCards] = useState<ProjectCardData[] | null>(projectCardsCache.cards);
   const [listError, setListError] = useState("");
-  const [query, setQuery] = useViewState("projects.query", "");
-  const [filter, setFilter] = useViewPreference<FilterKey>("projects.filter", "all", preferenceValues("all", "ok", "missing"));
-  const [kindFilter, setKindFilter] = useViewPreference<ProjectKindFilter>("projects.kindFilter", "all", preferenceValues("all", "git", "single_directory", "directory_group"));
+  const [query, setQuery] = useViewState(`${board}.query`, "");
+  const [filter, setFilter] = useViewPreference<FilterKey>(`${board}.filter`, "all", preferenceValues("all", "ok", "missing"));
+  const [kindFilter, setKindFilter] = useViewPreference<ProjectKindFilter>(`${board}.kindFilter`, "all", preferenceValues("all", "git", "single_directory", "directory_group"));
   const effectiveKindFilter = kindFilter === "all" || kindFilter in projectKindLabels ? kindFilter : "all";
-  const [sort, setSort] = useViewPreference<SortKey>("projects.sort", "recent", preferenceValues("recent", "name", "paths"));
-  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("projects.viewMode", "cards", preferenceValues("cards", "list"));
+  const [sort, setSort] = useViewPreference<SortKey>(`${board}.sort`, "recent", preferenceValues("recent", "name", "paths"));
+  const [viewMode, setViewMode] = useViewPreference<"cards" | "list">(`${board}.viewMode`, "cards", preferenceValues("cards", "list"));
 
   const refresh = useCallback(() => {
     api
@@ -72,7 +85,6 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
         setListError("");
       })
       .catch((e) => {
-        setCards(null);
         setListError(`读取项目失败：${String(e)}`);
       });
   }, []);
@@ -112,9 +124,10 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
     }
   };
 
-  const candidates = useMemo(() => cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal"))
-      .filter(FILTERS[filter])
-      .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter) ?? null, [cards, filter, effectiveKindFilter, archivedMode]);
+  const scopedCards = useMemo(() => cards?.filter(c => c.visibility === (archivedMode ? "archived" : "normal")
+    && (!assistantOnly || c.is_assistant)) ?? null, [cards, archivedMode, assistantOnly]);
+  const candidates = useMemo(() => scopedCards?.filter(FILTERS[filter])
+      .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter) ?? null, [scopedCards, filter, effectiveKindFilter]);
   const candidateIds = useMemo(() => candidates?.map(item => item.id) ?? [], [candidates]);
   const search = useObjectMatches("project", query, cards, candidateIds);
   const list = useMemo(() => {
@@ -124,34 +137,18 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       .sort(SORTERS[sort]);
   }, [candidates, search, sort]);
 
-  const deletableProjects = cards?.filter(canDeleteProject) ?? [];
-  const bulkDelete = async () => {
-    if (bulkDeleteBusy || deletableProjects.length === 0) return;
-    const targets = [...deletableProjects];
-    setBulkDeleteBusy(true);
-    let deleted = 0;
-    for (const project of targets) {
-      try { await api.deleteProjectPermanently(project.id); deleted += 1; }
-      catch (e) { console.error(e); }
-    }
-    setBulkDeleteBusy(false);
-    setBulkDeleteOpen(false);
-    clearProjectCardsCache();
-    refresh();
-    window.dispatchEvent(new Event(EVT_SYNCED));
-    showToast(`已永久删除 ${deleted} 个项目${deleted < targets.length ? `，${targets.length - deleted} 个删除失败` : ""}`);
-  };
-
   const handleDeleteTarget = async (p: LifecycleProject) => {
     if (deleteBusy) return;
     setDeleteBusy(true);
     try {
-      await api.deleteProjectPermanently(p.id);
+      const result = assistantOnly
+        ? await api.deleteProjectPermanently(p.id, scopeRoute("archived"))
+        : await api.deleteProjectPermanently(p.id);
       setDeleteTarget(null);
-      clearProjectCardsCache();
+      invalidateProjectLifecycleCaches();
       refresh();
       window.dispatchEvent(new Event(EVT_SYNCED));
-      showToast("项目已永久删除");
+      showToast(result.warnings.length ? result.warnings.join("。") : "项目已永久删除");
     } catch (e) {
       showToast(`操作失败：${String(e)}`);
     } finally {
@@ -159,22 +156,26 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
     }
   };
 
-  const scrollRef = useViewScroll("projects.scroll", cards !== null);
+  const scrollRef = useViewScroll(`${board}.scroll`, scopedCards !== null);
 
   return (
     <div className="main board-page">
       <PageHeader
-        title="项目" icon={<Icon name="project" />}
-        navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label="项目列表范围">
+        title={label} icon={<Icon name={icon} />}
+        navigation={<div className="settings-seg icon-seg archive-scope" role="group" aria-label={`${label}列表范围`}>
               <button className={archivedMode ? "" : "on"} aria-pressed={!archivedMode} aria-label="未归档" title="未归档"
-                onClick={() => navigate({ view: "projects", scope: "unarchived" })}><Icon name="project" /></button>
+                onClick={() => navigate(scopeRoute("unarchived"))}><Icon name={icon} /></button>
               <button className={archivedMode ? "on" : ""} aria-pressed={archivedMode} aria-label="已归档" title="已归档"
-                onClick={() => navigate({ view: "projects", scope: "archived" })}><Icon name="archive" /></button>
+                onClick={() => navigate(scopeRoute("archived"))}><Icon name="archive" /></button>
             </div>}
         actions={<>
             {archivedMode ? (
-              <button className="btn ghost icon-button danger" aria-label="删除全部" title="删除全部可删除的已归档项目"
-                disabled={deletableProjects.length === 0 || bulkDeleteBusy} onClick={() => setBulkDeleteOpen(true)}><Icon name="trash" /></button>
+              <BulkProjectDeleteAction projects={scopedCards ?? []} label={assistantOnly ? "智能体项目" : "项目"}
+                replacement={assistantOnly ? scopeRoute("archived") : undefined} />
+            ) : assistantOnly ? (
+              <button className="btn ghost icon-button" aria-label="新建智能体" title="新建智能体" onClick={() => setCreatingAssistant(true)}>
+                <Icon name="plus" />
+              </button>
             ) : (
               <button className="btn ghost icon-button" disabled={addingProject} aria-label="新增项目" title="新增项目" onClick={handleAddProject}>
                 <Icon name="plus" />
@@ -185,7 +186,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       />
 
       <div className="board-scroll" ref={scrollRef}>
-        <BoardToolbar searchLabel="搜索项目" placeholder="搜索项目…（名称或工作目录）" query={query} onQueryChange={setQuery}>
+        <BoardToolbar searchLabel={`搜索${label}`} placeholder={`搜索${label}…（名称或工作目录）`} query={query} onQueryChange={setQuery}>
         <div className="toolbar ws-controls">
           <div className="ws-controls-group">
             <div className="ws-control">
@@ -247,7 +248,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
             {list !== null && (
               <span className="muted small">
                 {(query || filter !== "all" || effectiveKindFilter !== "all")
-                  ? `显示 ${list.length} / 共 ${cards?.filter((c) => c.visibility === (archivedMode ? "archived" : "normal")).length ?? 0} 项`
+                  ? `显示 ${list.length} / 共 ${scopedCards?.length ?? 0} 项`
                   : `共 ${list.length} 项`}
               </span>
             )}
@@ -284,16 +285,16 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
             <button className="btn small" style={{ marginTop: 8 }} onClick={refresh}>重试</button>
           </div>
         )}
-        {list !== null && list.length === 0 && cards !== null && cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
+        {list !== null && list.length === 0 && !!scopedCards?.length && (
           <EmptyState
-            title="没有匹配的项目"
+            title={`没有匹配的${label}`}
             hint="换个关键词，或把筛选切回「全部」。"
           />
         )}
-        {cards !== null && !cards.some((c) => c.visibility === (archivedMode ? "archived" : "normal")) && (
+        {scopedCards?.length === 0 && (
           <EmptyState
-            title={archivedMode ? "没有已归档项目" : "还没有项目"}
-            hint={archivedMode ? "归档的项目会显示在这里。" : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
+            title={archivedMode ? `没有已归档${label}` : `还没有${label}`}
+            hint={archivedMode ? `归档的${label}会显示在这里。` : assistantOnly ? undefined : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
           />
         )}
 
@@ -304,6 +305,7 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 key={c.id}
                 card={c}
                 navigate={navigate}
+                onOpen={() => openProject(c.id, c.name)}
                 onChanged={refresh}
                 onRequestDelete={setDeleteTarget}
               />
@@ -316,11 +318,12 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                 <button
                   type="button"
                   className="project-open"
-                  onClick={() => navigate({ view: "project", projectId: c.id, initialTitle: c.name })}
+                  onClick={() => openProject(c.id, c.name)}
                 >
                   <div className="project-list-title" title={c.name}>
-                    <Icon name="project" />
+                    <Icon name={c.is_assistant ? "spark" : "project"} />
                     <span>{c.name}</span>
+                    {c.is_assistant && <span className="badge accent">智能体</span>}
                     {c.missing_path_count > 0 && isProjectAllPathsMissing(c) && (
                       <span className="badge warn">全部目录缺失</span>
                     )}
@@ -343,18 +346,10 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
                     </div>
                   )}
                 </button>
-                <div className="project-list-actions" onClick={(e) => e.stopPropagation()}>
+                <div className="project-list-actions">
                   <ProjectLifecycleActions project={c} onChanged={refresh} onRequestDelete={setDeleteTarget} />
-                  {(c.purpose === "assistant" || !isDirectoryGroupProject(c)) && (
-                    <button
-                      type="button"
-                      className="btn small ghost icon-button"
-                      aria-label="新建会话"
-                      title="新建会话"
-                      onClick={() => navigate(isProjectAllPathsMissing(c) ? { view: "new-session" } : { view: "new-session", projectId: c.id })}
-                    >
-                      <Icon name="plus" />
-                    </button>
+                  {c.visibility !== "archived" && !isDirectoryGroupProject(c) && (
+                    <NewProjectSessionButton projectId={c.id} navigate={navigate} />
                   )}
                 </div>
               </article>
@@ -365,44 +360,46 @@ export default function ProjectsView({ navigate, scope }: { navigate: (r: Route)
       {deleteTarget && (
         <ProjectDeleteModal
           names={[deleteTarget.name]}
+          removesAssistantDirectories={deleteTarget.is_assistant}
           busy={deleteBusy}
           onClose={() => { if (!deleteBusy) setDeleteTarget(null); }}
           onConfirm={() => void handleDeleteTarget(deleteTarget)}
         />
       )}
-      {bulkDeleteOpen && <ProjectDeleteModal names={deletableProjects.map((p) => p.name)} busy={bulkDeleteBusy}
-        onClose={() => setBulkDeleteOpen(false)} onConfirm={() => void bulkDelete()} />}
+      {creatingAssistant && !archivedMode && <CreateAssistantModal open onClose={() => setCreatingAssistant(false)}
+        onCreated={(id, name) => {
+          setCreatingAssistant(false);
+          clearProjectCardsCache();
+          refresh();
+          openProject(id, name);
+        }} />}
 
     </div>
   );
 }
 
-/** 信息密度受控的卡片：名字、可用性、两条代表路径、计数、最近活动。 */
-function ProjectCard({ card, navigate, onChanged, onRequestDelete }: {
+/** 信息密度受控的卡片：名字、可用性、计数、最近活动。 */
+function ProjectCard({ card, navigate, onOpen, onChanged, onRequestDelete }: {
   card: ProjectCardData;
   onChanged: () => void;
   navigate: (r: Route) => void;
+  onOpen: () => void;
   onRequestDelete?: (p: LifecycleProject) => void;
 }) {
   return (
     <article
       className="ws-card full project-card"
-      tabIndex={0}
-      role="button"
-      onClick={() => navigate({ view: "project", projectId: card.id, initialTitle: card.name })}
-      onKeyDown={(e) => {
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          navigate({ view: "project", projectId: card.id, initialTitle: card.name });
-        }
+      onClick={(event) => {
+        if (event.target instanceof Element && !event.target.closest("button, a")) onOpen();
       }}
     >
       <div className="ws-card-head">
-        <div className="ws-card-title" title={card.name}>
-          <Icon name="project" />
+        <button type="button" className="ws-card-title project-card-open" title={card.name}
+          aria-label={card.name} onClick={onOpen}>
+          <Icon name={card.is_assistant ? "spark" : "project"} />
           <span className="truncate">{card.name}</span>
-        </div>
+          {card.is_assistant && <span className="badge accent">智能体</span>}
+        </button>
         {card.missing_path_count > 0 && isProjectAllPathsMissing(card) && (
           <div className="ws-card-side">
             <span className="badge warn">全部目录缺失</span>
@@ -421,16 +418,8 @@ function ProjectCard({ card, navigate, onChanged, onRequestDelete }: {
         <span className="muted small">{timeAgo(card.last_activity_at ?? card.updated_at)}</span>
         <div className="ws-card-actions" onClick={(e) => e.stopPropagation()}>
           <ProjectLifecycleActions project={card} onChanged={onChanged} onRequestDelete={onRequestDelete} />
-          {(card.purpose === "assistant" || !isDirectoryGroupProject(card)) && (
-            <button
-              type="button"
-              className="btn small ghost icon-button"
-              aria-label="新建会话"
-              title="新建会话"
-              onClick={() => navigate(isProjectAllPathsMissing(card) ? { view: "new-session" } : { view: "new-session", projectId: card.id })}
-            >
-              <Icon name="plus" />
-            </button>
+          {card.visibility !== "archived" && !isDirectoryGroupProject(card) && (
+            <NewProjectSessionButton projectId={card.id} navigate={navigate} />
           )}
         </div>
       </div>

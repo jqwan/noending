@@ -31,33 +31,13 @@ describe("useLoadingDelay", () => {
     expect(result.current).toBe(false);
   });
 
-  it("shows skeleton if loading takes longer than delay", () => {
-    const { result } = renderHook(() => useLoadingDelay(true, 150));
-
+  it("shows a skeleton after the threshold and hides it when loading finishes", () => {
+    const { result, rerender } = renderHook((loading: boolean) => useLoadingDelay(loading, 150), { initialProps: true });
+    act(() => vi.advanceTimersByTime(149));
     expect(result.current).toBe(false);
-
-    act(() => {
-      vi.advanceTimersByTime(149);
-    });
-    expect(result.current).toBe(false);
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
+    act(() => vi.advanceTimersByTime(1));
     expect(result.current).toBe(true);
-  });
-
-  it("hides skeleton when loading finishes after having shown it", () => {
-    let loading = true;
-    const { result, rerender } = renderHook(() => useLoadingDelay(loading, 150));
-
-    act(() => {
-      vi.advanceTimersByTime(160);
-    });
-    expect(result.current).toBe(true);
-
-    loading = false;
-    rerender();
+    rerender(false);
     expect(result.current).toBe(false);
   });
 });

@@ -13,7 +13,6 @@ import { workstreamCardsCache } from "../features/workstreams/useWorkstreamCards
 import { sessionsCache } from "../features/sessions/sessionsCache";
 import { skillDetailCache, skillProjectsCache, setSkillProjectsCache } from "../features/skills/skillDetailCache";
 import { packageDetailCache } from "../features/packages/packageDetailCache";
-import { assistantCardsCache, assistantDetailCache } from "../features/assistants/assistantsCache";
 import { projectSummaryCache } from "../features/projects/projectSummaryCache";
 import { taskItemsResource, taskSummaryResource } from "../features/workstreams/taskResources";
 import { prepareCollaborationMembers } from "../features/collaboration/collaborationResources";
@@ -96,22 +95,6 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
       return route;
     });
   }
-  if (route.view === "assistants" && (route.scope === "archived" ? assistantCardsCache.archived : assistantCardsCache.unarchived) === null) {
-    return api.listAssistantProfiles({ scope: route.scope, limit: 50 }).then(page => {
-      if (route.scope === "archived") assistantCardsCache.archived = page.items;
-      else if (route.scope === "all") assistantCardsCache.all = page.items;
-      else assistantCardsCache.unarchived = page.items;
-      return route;
-    });
-  }
-  if (route.view === "assistant") {
-    const initialTitle = route.initialTitle ?? assistantDetailCache.get(route.assistantId)?.profile.name;
-    if (assistantDetailCache.has(route.assistantId)) return { ...route, initialTitle };
-    return api.getAssistantProfile(route.assistantId).then(detail => {
-      if (!isRemovedRoute(route)) assistantDetailCache.set(route.assistantId, detail);
-      return { ...route, initialTitle: detail.profile.name };
-    });
-  }
   return route;
 }
 
@@ -140,7 +123,7 @@ export function prepareSupportingData(route: Route): Promise<void> | undefined {
       add(taskSummaryResource.ensure(route.workstreamId));
     }
   }
-  if (route.view === "project" && !projectSummaryCache.has(route.projectId)) {
+  if (route.view === "project" && route.entry !== "assistant" && !projectSummaryCache.has(route.projectId)) {
     add(Promise.resolve().then(() => api.getProjectContextState(route.projectId)).then(summary => {
       if (!isRemovedRoute(route)) projectSummaryCache.set(route.projectId, summary);
     }));

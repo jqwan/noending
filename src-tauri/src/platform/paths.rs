@@ -588,8 +588,11 @@ mod tests {
         );
         // A `~` that is not leading is data, not an instruction.
         assert_eq!(expand_tilde("/opt/a~b"), PathBuf::from("/opt/a~b"));
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expand_tilde("~"), home);
+            assert_eq!(expand_tilde("~/project"), home.join("project"));
+        }
         if cfg!(windows) {
-            assert_ne!(expand_tilde("~"), PathBuf::from("~"));
             assert!(expand_tilde("~\\.noending")
                 .to_string_lossy()
                 .ends_with(".noending"));

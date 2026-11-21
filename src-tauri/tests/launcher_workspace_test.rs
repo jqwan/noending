@@ -299,34 +299,6 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     assert!(result.command_line.ends_with(&moved));
 }
 
-/// "resume with missing directory refused": a Session whose recorded directory
-/// is gone is refused with an explicit error, rather than falling back to an
-/// unrelated default workspace.
-#[test]
-fn a_resume_with_missing_working_directory_is_refused() {
-    let db = open_db("resume-missing-dir");
-    seed_installation(&db, Agent::Codex);
-    let lost = missing_dir("resume-missing-dir", "deleted-repo");
-    let primary = real_dir("resume-missing-dir", "ws-primary");
-    let s = session_row(&db, Some(&lost), None);
-    let w = ws_with_paths(&db, "carries on", &[primary]);
-    support::track(&db, &s.id, Some(&w)).unwrap();
-
-    let workspace = LaunchWorkspace {
-        default_workspace: Some(real_dir("resume-missing-dir", "default")),
-    };
-    let launcher = launcher_in("resume-missing-dir");
-    let err = launcher
-        .prepare_resume_in(&db, &s.id, &workspace)
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("工作目录不存在") || msg.contains("不可用"),
-        "the error must explain that the working directory is unusable, got: {msg}"
-    );
-    assert!(msg.contains(&lost));
-}
-
 /// A session with no recorded cwd at all uses NoEnding's default workspace.
 #[test]
 fn a_resume_with_no_recorded_cwd_uses_default_workspace() {
@@ -450,7 +422,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     let db = open_db("payload");
     seed_installation(&db, Agent::Codex);
     let primary = real_dir("payload", "primary");
-    let default_ws = real_dir("payload", "workspace");
+    let default_ws = missing_dir("payload", "workspace");
     let w = ws_with_paths(&db, "payload ws", &[primary.clone()]);
     let lost = missing_dir("payload", "unmounted");
     let unmounted = ws_with_paths(&db, "unmounted ws", &[lost]);
@@ -459,23 +431,29 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     let no_home = LaunchWorkspace::default();
 
     let alias = format!("{primary}/.");
-    let cases = vec![
+    let cases = [
         (
             &home,
             Some(w.clone()),
             Some(primary.as_str()),
             CwdSource::Explicit,
-            false,
+            Some(primary.as_str()),
         ),
         (
             &home,
             Some(w.clone()),
             Some(alias.as_str()),
             CwdSource::Explicit,
-            false,
+            Some(alias.as_str()),
         ),
-        (&home, None, None, CwdSource::DefaultWorkspace, false),
-        (&no_home, None, None, CwdSource::Unresolved, false),
+        (
+            &home,
+            None,
+            None,
+            CwdSource::DefaultWorkspace,
+            Some(default_ws.as_str()),
+        ),
+        (&no_home, None, None, CwdSource::Unresolved, None),
     ];
     assert!(launcher
         .prepare_new_in(&db, Agent::Codex, Some(&unmounted), None, &home)
@@ -483,14 +461,25 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     assert!(launcher
         .prepare_new_in(&db, Agent::Codex, Some(&w), Some("/typed/dir"), &home)
         .is_err());
+    let missing = missing_dir("explicit", "unavailable");
+    let prepared = launcher
+        .prepare_new_in(&db, Agent::Codex, None, Some(&missing), &home)
+        .unwrap();
+    assert_eq!(prepared.cwd.as_deref(), Some(missing.as_str()));
+    assert_eq!(prepared.cwd_resolution.source, CwdSource::Explicit);
+    assert!(prepared.cwd_resolution.note.is_some());
 
-    for (at_launch, owner, explicit, source, fallback) in cases {
+    for (at_launch, owner, explicit, source, expected_cwd) in cases {
         let prepared = launcher
             .prepare_new_in(&db, Agent::Codex, owner.as_deref(), explicit, at_launch)
             .unwrap();
         assert_eq!(prepared.cwd_resolution.source, source);
-        assert_eq!(prepared.cwd_resolution.fallback, fallback);
-        assert_eq!(prepared.cwd, prepared.cwd_resolution.cwd);
+        assert!(!prepared.cwd_resolution.fallback);
+        assert_eq!(prepared.cwd.as_deref(), expected_cwd);
+        assert_eq!(prepared.cwd_resolution.cwd.as_deref(), expected_cwd);
+        if source == CwdSource::Unresolved {
+            assert!(prepared.cwd_resolution.note.is_some());
+        }
         assert_eq!(
             prepared.initial_workstream_ids,
             owner.into_iter().collect::<Vec<_>>()
@@ -498,7 +487,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
         let result = launcher
             .launch_prepared_with_in(&db, &prepared, at_launch, fake_spawn, fake_open, None)
             .unwrap_or_else(|e| panic!("{source:?} preview must launch: {e}"));
-        match prepared.cwd.as_deref() {
+        match expected_cwd {
             Some(dir) => assert!(
                 result.command_line.ends_with(dir),
                 "the spawn must receive the previewed directory, got {}",
@@ -507,6 +496,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
             None => assert!(result.command_line.ends_with("<none>")),
         }
     }
+    assert!(std::path::Path::new(&default_ws).is_dir());
 }
 
 #[test]
@@ -702,6 +692,7 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
         &session.source_path,
     );
     let launcher = launcher_in("availability");
+    let workspace = workspace(Some(&real_dir("availability", "default")));
     let probe = || {
         terminal_resume_states(&db, &[session.id.clone()])
             .unwrap()
@@ -710,13 +701,18 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
     };
     assert!(probe().available);
     assert!(launcher
-        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
+        .prepare_resume_in(&db, &session.id, &workspace)
         .is_ok());
     std::fs::remove_dir(&cwd).unwrap();
     assert!(!probe().available);
-    assert!(launcher
-        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
-        .is_err());
+    let error = launcher
+        .prepare_resume_in(&db, &session.id, &workspace)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("工作目录不存在") && error.contains(&cwd),
+        "{error}"
+    );
     std::fs::create_dir(&cwd).unwrap();
     assert!(probe().available);
     std::fs::remove_file(&session.source_path).unwrap();
@@ -746,9 +742,10 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
         )
         .unwrap();
     assert!(!probe().available);
-    assert!(launcher
-        .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
-        .is_err());
+    let error = launcher
+        .prepare_resume_in(&db, &session.id, &workspace)
+        .unwrap_err();
+    assert!(error.to_string().contains("已归档"), "{error}");
     let desktop = support::ensure_session(&db, new_id(), Agent::WorkBuddy, "desktop-only");
     assert!(!terminal_resume_states(&db, &[desktop.id.clone()]).unwrap()[&desktop.id].available);
 }

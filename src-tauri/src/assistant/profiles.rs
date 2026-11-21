@@ -1,37 +1,28 @@
 use super::*;
 use crate::{
-    agent_runtime::{self, AgentRuntimeOverrides},
     domain::*,
-    storage::{assistant_profiles as repo, new_id, now},
-    workspace::project,
+    error::{other, Result},
+    storage::{assistant_profiles as repo, new_id, Db},
+    workspace::{project, wiring::WorkspaceLayer},
 };
-use base64::Engine;
-use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-fn lock(home: &NoEndingHome) -> Result<std::fs::File> {
+pub(crate) fn lock(home: &NoEndingHome) -> Result<std::fs::File> {
     fs::create_dir_all(&home.runtime_dir)?;
     Ok(crate::platform::file_lock::exclusive_wait(
         &home.runtime_dir.join("assistant-profiles.lock"),
         std::time::Duration::from_secs(10),
     )?)
 }
-fn validated_agent(agent: &str, runtime: Option<&AgentRuntimeOverrides>) -> Result<Agent> {
-    let agent = Agent::parse(agent).ok_or_else(|| other("未知运行工具"))?;
-    if !crate::adapters::adapter_for(agent).has_terminal_cli() {
-        return Err(other("此运行工具不支持智能体终端"));
-    }
-    if let Some(runtime) = runtime {
-        agent_runtime::validate_runtime_overrides(agent, runtime)?;
-    }
-    Ok(agent)
-}
-fn directory_of(db: &Db, p: &AssistantProfile) -> Result<WorkspacePath> {
-    db.get_workspace_path(&p.workspace_path_id)?
-        .ok_or_else(|| other("智能体主目录未登记"))
+fn registered_path(db: &Db, project_id: &str) -> Result<WorkspacePath> {
+    let conn = db.read();
+    let path_id =
+        repo::path_for_project(&conn, project_id)?.ok_or_else(|| other("项目没有智能体设置"))?;
+    crate::storage::workspace::get_workspace_path_conn(&conn, &path_id)?
+        .ok_or_else(|| other("智能体档案目录未登记"))
 }
 fn ensure_profile_parent(home: &NoEndingHome) -> Result<()> {
     fs::create_dir_all(directory(home))?;
@@ -44,32 +35,88 @@ fn ensure_profile_parent(home: &NoEndingHome) -> Result<()> {
     }
     Ok(())
 }
-fn validate_directory(
-    home: &NoEndingHome,
-    path: &WorkspacePath,
-    p: &AssistantProfile,
-) -> Result<PathBuf> {
-    let expected = directory(home).join(&p.id);
-    if !expected.is_dir() {
-        return Err(other("智能体主目录不存在，请先恢复目录"));
+fn expected_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathBuf> {
+    let name = Path::new(&path.canonical_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| uuid::Uuid::parse_str(name).is_ok())
+        .ok_or_else(|| other("智能体档案目录名称无效"))?;
+    let expected = directory(home).join(name);
+    if crate::workspace::path_identity_of(&expected.to_string_lossy()).as_deref() != Some(&path.id)
+    {
+        return Err(other("智能体档案目录位置已变化"));
+    }
+    Ok(expected)
+}
+
+fn validate_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathBuf> {
+    let expected = expected_directory(home, path)?;
+    let metadata = fs::symlink_metadata(&expected)?;
+    if !metadata.is_dir() {
+        return Err(other("智能体档案目录已被替换"));
     }
     let canonical = fs::canonicalize(&expected)?;
     let parent = fs::canonicalize(directory(home))?;
     let home_parent = fs::canonicalize(&home.root)?.join("assistant");
     if crate::workspace::path_identity_of(&parent.to_string_lossy())
         != crate::workspace::path_identity_of(&home_parent.to_string_lossy())
+        || canonical.parent() != Some(parent.as_path())
     {
-        return Err(other("智能体空间目录指向其他位置"));
-    }
-    let registered = fs::canonicalize(&path.canonical_path)?;
-    if canonical.parent() != Some(parent.as_path())
-        || crate::workspace::path_identity_of(&canonical.to_string_lossy())
-            != crate::workspace::path_identity_of(&registered.to_string_lossy())
-    {
-        return Err(other("智能体目录位置已变化或不属于当前 Home"));
+        return Err(other("智能体档案目录位置已变化或不属于当前 Home"));
     }
     Ok(canonical)
 }
+
+pub(crate) struct StagedProfileDirectory {
+    original: PathBuf,
+    staged: PathBuf,
+}
+
+impl StagedProfileDirectory {
+    pub(crate) fn restore(self) -> Result<()> {
+        if fs::symlink_metadata(&self.original).is_ok() {
+            return Err(other(format!(
+                "原目录已被占用，智能体文件保留在 {}",
+                self.staged.display()
+            )));
+        }
+        fs::rename(&self.staged, &self.original).map_err(|error| {
+            other(format!(
+                "无法恢复智能体档案目录 {}：{error}",
+                self.staged.display()
+            ))
+        })
+    }
+
+    pub(crate) fn delete(self) -> Result<()> {
+        fs::remove_dir_all(&self.staged).map_err(|error| {
+            other(format!(
+                "智能体档案目录未能完全删除，请检查 {}：{error}",
+                self.staged.display()
+            ))
+        })
+    }
+}
+
+pub(crate) fn stage_profile_directory(
+    home: &NoEndingHome,
+    path: &WorkspacePath,
+) -> Result<Option<StagedProfileDirectory>> {
+    let expected = expected_directory(home, path)?;
+    match fs::symlink_metadata(&expected) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() => {
+            return Err(other("智能体档案目录已被替换，无法删除目录"));
+        }
+        Ok(_) => {}
+    }
+    let original = validate_directory(home, path)?;
+    let staged = original.with_file_name(format!(".deleting-{}", new_id()));
+    fs::rename(&original, &staged)?;
+    Ok(Some(StagedProfileDirectory { original, staged }))
+}
+
 fn prepare_default_skill(
     db: &Db,
     home: &NoEndingHome,
@@ -97,7 +144,7 @@ pub fn create_profile(
     home: &NoEndingHome,
     layer: &WorkspaceLayer,
     input: AssistantCreate,
-) -> Result<AssistantDetail> {
+) -> Result<Project> {
     create_profile_with_roots(db, home, layer, input, &crate::skills::Roots::current()?)
 }
 /// Explicit roots keep native loading locations isolated in tests and local QA.
@@ -107,33 +154,17 @@ pub fn create_profile_with_roots(
     layer: &WorkspaceLayer,
     input: AssistantCreate,
     roots: &crate::skills::Roots,
-) -> Result<AssistantDetail> {
+) -> Result<Project> {
     let _access = home.acquire_access()?;
     let _lock = lock(home)?;
     crate::storage::ensure_not_empty("智能体名称", &input.name)?;
-    let agent = validated_agent(&input.agent, input.runtime_override.as_ref())?;
     let id = new_id();
     ensure_profile_parent(home)?;
     let root = directory(home).join(&id);
     let staging = home.runtime_dir.join(format!("assistant-create-{id}"));
     fs::create_dir(&staging)?;
-    let stamp = now();
-    let mut p = AssistantProfile {
-        id,
-        name: input.name.trim().into(),
-        avatar: input.avatar,
-        description: input.description,
-        instructions: input.instructions,
-        agent,
-        runtime_override: input.runtime_override.map(|r| r.normalized()),
-        workspace_path_id: String::new(),
-        visibility: "normal".into(),
-        revision: 1,
-        created_at: stamp.clone(),
-        updated_at: stamp,
-    };
     let preparation = (|| {
-        files::prepare(&staging, &p)?;
+        files::initialize(&staging, &input.agents_md)?;
         prepare_default_skill(db, home, roots, &staging)
     })();
     if let Err(error) = preparation {
@@ -144,7 +175,7 @@ pub fn create_profile_with_roots(
     }
     if root.exists() {
         let _ = fs::remove_dir_all(&staging);
-        return Err(other("智能体目录已存在，未覆盖原内容"));
+        return Err(other("智能体档案目录已存在，未覆盖原内容"));
     }
     if let Err(error) = fs::rename(&staging, &root) {
         let _ = fs::remove_dir_all(&staging);
@@ -152,346 +183,65 @@ pub fn create_profile_with_roots(
     }
     let projection = layer.projection();
     let observation = projection.observer().observe(&root.to_string_lossy());
-    db.tx(|tx|{
-        let path=project::ensure_workspace_path_conn(tx,&observation,projection.policy())?.path;
-        p.workspace_path_id=path.id;
-        crate::storage::workspace::set_project_name_conn(tx,&path.project_id,&p.name,false)?;
-        repo::save(tx,&p,None)?;
-        // Exact matches can already exist after a recovered source scan.
-        tx.execute("INSERT OR IGNORE INTO assistant_sessions(session_id,assistant_id) SELECT id,?1 FROM sessions WHERE workspace_path_id=?2",rusqlite::params![p.id,p.workspace_path_id])?;
-        Ok(())
-    })?;
-    detail(db, &p.id)
-}
-pub fn detail(db: &Db, id: &str) -> Result<AssistantDetail> {
-    let (profile, projects, tasks, session_count, last_activity_at) = {
-        let conn = db.read();
-        let p = repo::get(&conn, id)?;
-        let projects = repo::project_ids(&conn, id)?
-            .iter()
-            .map(|id| {
-                crate::storage::workspace::get_project_conn(&conn, id)?
-                    .ok_or_else(|| other("负责项目已不存在"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let tasks = repo::task_ids(&conn, id)?
-            .iter()
-            .map(|id| {
-                crate::storage::get_workstream_conn(&conn, id)?
-                    .ok_or_else(|| other("负责任务已不存在"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (count, activity) = repo::counts(&conn, id)?;
-        (p, projects, tasks, count, activity)
-    };
-    let path = directory_of(db, &profile)?;
-    let project = db
-        .get_project(&path.project_id)?
-        .ok_or_else(|| other("智能体项目不存在"))?;
-    let state = files::state(Path::new(&path.canonical_path), &profile)?;
-    Ok(AssistantDetail {
-        profile,
-        project,
-        workspace_path: path,
-        projects,
-        tasks,
-        session_count,
-        last_activity_at,
-        instructions_state: state,
+    db.tx(|tx| {
+        let path = project::ensure_workspace_path_conn(tx, &observation, projection.policy())?.path;
+        let project =
+            crate::storage::workspace::rename_project_conn(tx, &path.project_id, &input.name)?;
+        repo::register(tx, &path)?;
+        Ok(project)
     })
 }
+
+pub(crate) fn project_assistant(
+    db: &Db,
+    project_id: &str,
+    paths: &[WorkspacePath],
+) -> Result<Option<ProjectAssistantDetail>> {
+    let path_id = repo::path_for_project(&db.read(), project_id)?;
+    path_id
+        .map(|id| {
+            let path = paths
+                .iter()
+                .find(|path| path.id == id)
+                .ok_or_else(|| other("智能体档案目录未登记"))?;
+            Ok(ProjectAssistantDetail {
+                file: files::inspect(Path::new(&path.canonical_path)),
+                workspace_path_id: id,
+            })
+        })
+        .transpose()
+}
+
 pub fn update_profile(
     db: &Db,
     home: &NoEndingHome,
-    id: &str,
-    revision: i64,
+    project_id: &str,
+    revision: &str,
     patch: AssistantPatch,
-) -> Result<AssistantDetail> {
+) -> Result<ProjectAssistant> {
     let _lock = lock(home)?;
-    db.tx(|tx| {
-        let mut p = repo::get(tx, id)?;
-        repo::check_revision(&p, revision)?;
-        if let Some(name) = patch.name {
-            crate::storage::ensure_not_empty("智能体名称", &name)?;
-            p.name = name.trim().into();
-        }
-        if let Some(value) = patch.avatar {
-            p.avatar = value;
-        }
-        if let Some(value) = patch.description {
-            p.description = value;
-        }
-        if let Some(value) = patch.instructions {
-            p.instructions = value;
-        }
-        if let Some(agent) = patch.agent {
-            if agent != p.agent.as_str() {
-                p.runtime_override = None;
-            }
-            p.agent = validated_agent(&agent, None)?;
-        }
-        if let Some(value) = patch.runtime_override {
-            p.runtime_override = value.map(|r| r.normalized());
-        }
-        validated_agent(p.agent.as_str(), p.runtime_override.as_ref())?;
-        p.revision += 1;
-        p.updated_at = now();
-        repo::save(tx, &p, Some(revision))
-    })?;
-    detail(db, id)
+    let path = registered_path(db, project_id)?;
+    let root = validate_directory(home, &path)?;
+    files::save(&root, revision, &patch.agents_md)?;
+    Ok(files::inspect(&root))
 }
-pub fn set_responsibilities(
-    db: &Db,
-    home: &NoEndingHome,
-    id: &str,
-    revision: i64,
-    projects: &[String],
-    tasks: &[String],
-) -> Result<AssistantDetail> {
-    let _lock = lock(home)?;
-    db.tx(|tx| {
-        let mut p = repo::get(tx, id)?;
-        repo::check_revision(&p, revision)?;
-        if p.visibility != "normal" {
-            return Err(other("请先恢复智能体再调整责任范围"));
-        }
-        repo::set_responsibilities(tx, id, projects, tasks)?;
-        p.revision += 1;
-        p.updated_at = now();
-        repo::save(tx, &p, Some(revision))
-    })?;
-    detail(db, id)
-}
-pub fn set_archived(
-    db: &Db,
-    home: &NoEndingHome,
-    id: &str,
-    revision: i64,
-    archived: bool,
-) -> Result<AssistantDetail> {
-    let _lock = lock(home)?;
-    db.tx(|tx| {
-        let mut p = repo::get(tx, id)?;
-        repo::check_revision(&p, revision)?;
-        p.visibility = if archived { "archived" } else { "normal" }.into();
-        p.revision += 1;
-        p.updated_at = now();
-        repo::save(tx, &p, Some(revision))
-    })?;
-    detail(db, id)
-}
+
 pub fn prepare_profile_files(
     db: &Db,
     home: &NoEndingHome,
-    id: &str,
-    revision: i64,
-) -> Result<AssistantDetail> {
+    project_id: &str,
+) -> Result<ProjectAssistant> {
     let _lock = lock(home)?;
-    let p = repo::get(&db.read(), id)?;
-    repo::check_revision(&p, revision)?;
-    let path = directory_of(db, &p)?;
-    let expected = directory(home).join(&p.id);
-    if !expected.exists() {
-        if crate::workspace::path_identity_of(&expected.to_string_lossy()).as_deref()
-            != Some(path.id.as_str())
-            || fs::symlink_metadata(&expected).is_ok()
-        {
-            return Err(other("智能体目录位置已变化，未重新创建"));
+    let path = registered_path(db, project_id)?;
+    let expected = expected_directory(home, &path)?;
+    if let Err(error) = fs::symlink_metadata(&expected) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.into());
         }
         ensure_profile_parent(home)?;
         fs::create_dir(&expected)?;
     }
-    let root = validate_directory(home, &path, &p)?;
-    files::prepare(&root, &p)?;
-    detail(db, id)
-}
-#[derive(Serialize, Deserialize)]
-struct Cursor {
-    query: Option<String>,
-    scope: String,
-    after: String,
-    id: String,
-    kind: String,
-}
-fn page<T>(
-    mut rows: Vec<(String, String, T)>,
-    query: AssistantListQuery,
-    kind: &str,
-) -> Result<AssistantPage<T>> {
-    let scope = query.scope.as_deref().unwrap_or("unarchived");
-    if !["all", "unarchived", "archived"].contains(&scope) {
-        return Err(other("scope 无效"));
-    }
-    let limit = query.limit.unwrap_or(20);
-    if limit == 0 || limit > 50 {
-        return Err(other("limit 必须在 1～50 之间"));
-    }
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    if let Some(cursor) = query.cursor {
-        let cursor: Cursor = serde_json::from_slice(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(cursor)
-                .map_err(|_| other("游标无效"))?,
-        )?;
-        if cursor.kind != kind || cursor.query != query.query || cursor.scope != scope {
-            return Err(other("游标与查询范围不匹配"));
-        }
-        rows.retain(|r| r.0 < cursor.after || (r.0 == cursor.after && r.1 > cursor.id));
-    }
-    let more = rows.len() > limit;
-    rows.truncate(limit);
-    let next_cursor = if more {
-        rows.last().map(|r| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-                serde_json::to_vec(&Cursor {
-                    query: query.query,
-                    scope: scope.into(),
-                    after: r.0.clone(),
-                    id: r.1.clone(),
-                    kind: kind.into(),
-                })
-                .unwrap(),
-            )
-        })
-    } else {
-        None
-    };
-    Ok(AssistantPage {
-        items: rows.into_iter().map(|r| r.2).collect(),
-        next_cursor,
-        end: !more,
-    })
-}
-pub fn list_profiles(db: &Db, query: AssistantListQuery) -> Result<AssistantPage<AssistantCard>> {
-    let scope = query.scope.as_deref().unwrap_or("unarchived");
-    if !["all", "archived", "unarchived"].contains(&scope) {
-        return Err(other("scope 无效"));
-    }
-    let limit = query.limit.unwrap_or(20);
-    if limit == 0 || limit > 50 {
-        return Err(other("limit 必须在 1～50 之间"));
-    }
-    let cursor = if let Some(raw) = query.cursor.as_deref() {
-        let cursor: Cursor = serde_json::from_slice(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(raw)
-                .map_err(|_| other("游标无效"))?,
-        )?;
-        if cursor.kind != "profiles" || cursor.scope != scope || cursor.query != query.query {
-            return Err(other("游标与查询范围不匹配"));
-        }
-        Some(cursor)
-    } else {
-        None
-    };
-    let rows = repo::card_page(
-        &db.read(),
-        scope,
-        query.query.as_deref().unwrap_or(""),
-        cursor.as_ref().map(|c| (c.after.as_str(), c.id.as_str())),
-        limit + 1,
-    )?;
-    page(rows, query, "profiles")
-}
-pub fn list_profile_sessions(
-    db: &Db,
-    id: &str,
-    query: AssistantListQuery,
-) -> Result<AssistantPage<SessionListItem>> {
-    if query.query.is_some() {
-        return Err(other("智能体会话列表不支持 query 筛选"));
-    }
-    repo::get(&db.read(), id)?;
-    let scope = match query.scope.as_deref().unwrap_or("unarchived") {
-        "all" => SessionListScope::All,
-        "archived" => SessionListScope::Archived,
-        "unarchived" => SessionListScope::Unarchived,
-        _ => return Err(other("scope 无效")),
-    };
-    let kind = format!("sessions:{id}");
-    let cursor = if let Some(raw) = query.cursor.as_deref() {
-        let cursor: Cursor = serde_json::from_slice(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(raw)
-                .map_err(|_| other("游标无效"))?,
-        )?;
-        if cursor.kind != kind
-            || cursor.scope != query.scope.as_deref().unwrap_or("unarchived")
-            || cursor.query != query.query
-        {
-            return Err(other("游标与查询范围不匹配"));
-        }
-        Some(cursor)
-    } else {
-        None
-    };
-    let limit = query.limit.unwrap_or(20);
-    if limit == 0 || limit > 50 {
-        return Err(other("limit 必须在 1～50 之间"));
-    }
-    let scope_name = match scope {
-        SessionListScope::All => "all",
-        SessionListScope::Archived => "archived",
-        SessionListScope::Unarchived => "unarchived",
-    };
-    let rows = repo::session_page(
-        &db.read(),
-        id,
-        scope_name,
-        cursor.as_ref().map(|c| (c.after.as_str(), c.id.as_str())),
-        limit + 1,
-    )?
-    .into_iter()
-    .map(|s| {
-        (
-            s.last_conversation_at
-                .clone()
-                .or(s.last_activity_at.clone())
-                .or(s.started_at.clone())
-                .unwrap_or_default(),
-            s.id.clone(),
-            s,
-        )
-    })
-    .collect();
-    page(rows, query, &format!("sessions:{id}"))
-}
-/// All launch paths share this validation; the authoritative cwd is never client supplied.
-pub fn profile_launch(
-    db: &Db,
-    home: &NoEndingHome,
-    id: &str,
-    tasks: &[String],
-    runtime: Option<&AgentRuntimeOverrides>,
-) -> Result<(
-    AssistantProfile,
-    WorkspacePath,
-    Option<AgentRuntimeOverrides>,
-)> {
-    let _lock = lock(home)?;
-    let p = repo::get(&db.read(), id)?;
-    if p.visibility != "normal" {
-        return Err(other("已归档智能体不能开始新会话"));
-    }
-    let path = directory_of(db, &p)?;
-    let root = validate_directory(home, &path, &p)?;
-    let project = db
-        .get_project(&path.project_id)?
-        .ok_or_else(|| other("智能体项目不存在"))?;
-    if project.visibility != "normal" {
-        return Err(other("智能体项目已归档，请先恢复项目"));
-    }
-    for task in tasks {
-        let conn = db.read();
-        let assigned = repo::task_ids(&conn, id)?;
-        let record =
-            crate::storage::get_workstream_conn(&conn, task)?.ok_or_else(|| other("任务不存在"))?;
-        if !assigned.contains(task) || record.visibility != "normal" {
-            return Err(other("智能体未负责该任务或任务已归档"));
-        }
-    }
-    let runtime = runtime.cloned().or_else(|| p.runtime_override.clone());
-    validated_agent(p.agent.as_str(), runtime.as_ref())?;
-    files::prepare(&root, &p)?;
-    Ok((p, path, runtime))
+    let root = validate_directory(home, &path)?;
+    files::initialize(&root, "")?;
+    Ok(files::inspect(&root))
 }

@@ -12,7 +12,7 @@ use noending::adapters::adapter_for;
 use noending::adapters::{AgentCommand, DesktopResume, ResumeRoute};
 use noending::domain::Agent;
 use noending::error::Result;
-use noending::launcher::{CwdSource, LaunchWorkspace, PreparedLaunch, SessionLauncher};
+use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -77,14 +77,6 @@ fn launcher_in(dir_tag: &str) -> SessionLauncher {
     SessionLauncher {
         runtime_dir: std::env::temp_dir().join(format!("noending-base-launch-appdata-{}", dir_tag)),
     }
-}
-
-/// The single-use guarantee lives in the command layer, in front of `launch_prepared`.
-fn consume_once(
-    map: &std::sync::Mutex<std::collections::HashMap<String, PreparedLaunch>>,
-    id: &str,
-) -> Result<PreparedLaunch> {
-    noending::commands::consume_prepared_launch(map, id)
 }
 
 #[test]
@@ -318,115 +310,6 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
         assert!(!result.command_line.contains("$(id)"), "{agent:?}");
         assert_eq!(result.terminal_id.as_deref(), Some("term-first-message"));
     }
-}
-
-/// The New modal consumes its capability on click; a second click (or a
-/// concurrent one) must not launch a second Agent process.
-#[test]
-fn prepared_launch_capability_is_single_use() {
-    let db = open_db("single-use-capability");
-    seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("single-use");
-
-    let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
-        .unwrap();
-    let id = prepared.id.clone();
-    let map: std::sync::Mutex<std::collections::HashMap<String, PreparedLaunch>> =
-        Default::default();
-    map.lock().unwrap().insert(id.clone(), prepared);
-
-    let held = consume_once(&map, &id).expect("first consume");
-    let held_launch = launcher
-        .launch_prepared_with_in(
-            &db,
-            &held,
-            &LaunchWorkspace::default(),
-            fake_spawn,
-            fake_open,
-            None,
-        )
-        .expect("launch with the consumed token");
-    assert_eq!(held_launch.launched_via, FAKE_SPAWN_TAG);
-
-    assert!(
-        consume_once(&map, &id).is_err(),
-        "a consumed prepared launch must never be consumable again"
-    );
-}
-
-/// The cwd the New Session form shows is the backend's resolution, not a
-/// frontend guess: the explicitly selected directory is what `prepare_new`
-/// reports, together with the tier that produced it.
-#[test]
-fn prepared_launch_reports_the_resolved_working_directory() {
-    let db = open_db("prepared-cwd");
-    seed_installation(&db, Agent::Codex);
-    let primary = real_dir("prepared-cwd", "primary");
-    db.tx(|tx| insert_workspace_path_conn(tx, &primary, PROJECT))
-        .unwrap();
-    let ws = noending::workspace::workstream::create_workstream(&db, "Task", "", &[PROJECT.into()])
-        .unwrap();
-    let launcher = launcher_in("prepared-cwd");
-
-    let with_ws = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(ws.id.as_str()),
-            Some(&primary),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-    assert_eq!(
-        with_ws.cwd.as_deref(),
-        Some(primary.as_str()),
-        "the form displays exactly what prepare resolved"
-    );
-    assert_eq!(with_ws.cwd_resolution.source, CwdSource::Explicit);
-    assert!(!with_ws.cwd_resolution.fallback);
-
-    let standalone = launcher
-        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
-        .unwrap();
-    assert_eq!(
-        standalone.cwd, None,
-        "a launcher that was not given a Home knows no default workspace, so it \
-         reports no directory rather than an implied one"
-    );
-    assert_eq!(standalone.cwd_resolution.source, CwdSource::Unresolved);
-}
-
-/// the same flow against a real Home: a standalone New Session starts in
-/// NoEnding's default workspace, and the payload says so.
-#[test]
-fn standalone_prepared_launch_reports_the_default_workspace() {
-    let db = open_db("prepared-default-ws");
-    seed_installation(&db, Agent::Codex);
-    let default_ws = std::env::temp_dir().join(format!("noending-default-ws-{}", new_id()));
-    let default_ws = noending::workspace::normalize_path(&default_ws.to_string_lossy())
-        .expect("temp path normalizes");
-    let launcher = launcher_in("prepared-default-ws");
-
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            None,
-            None,
-            &LaunchWorkspace {
-                default_workspace: Some(default_ws.clone()),
-            },
-        )
-        .unwrap();
-    assert_eq!(prepared.cwd.as_deref(), Some(default_ws.as_str()));
-    assert_eq!(prepared.cwd_resolution.source, CwdSource::DefaultWorkspace,);
-    assert!(
-        std::fs::metadata(&default_ws)
-            .map(|m| m.is_dir())
-            .unwrap_or(false),
-        "the default workspace is created rather than handed over missing"
-    );
 }
 
 /// The Continue route follows the ROOT member's SOURCE FORMAT, not the

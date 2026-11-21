@@ -616,76 +616,41 @@ describe("Sidebar 最近活动", () => {
     expect(titles[3]).toContain("Qoder");
   });
 
-  it("sorts agent groups dynamically by createdAt or updatedAt", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({
-        id: "s-codex",
-        title: "Codex 会话",
-        agent: "codex",
-        started_at: "2026-10-01T10:00:00.000Z",
-        last_conversation_at: "2026-10-10T12:00:00.000Z",
-      }),
-      session({
-        id: "s-claude",
-        title: "Claude 会话",
-        agent: "claude_code",
-        started_at: "2026-10-05T10:00:00.000Z",
-        last_conversation_at: "2026-10-06T12:00:00.000Z",
-      }),
-    ]);
-
-    renderSidebar();
-    switchGroupBy("按 Agent 归类");
-
-    await screen.findByRole("button", { name: /Claude Code/ });
-
-    // Default sortBy is createdAt: claude_code was created 2026-10-05, codex 2026-10-01
-    let groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
-    let titles = groupHeaders.map(h => h.textContent);
-    expect(titles[0]).toContain("Claude Code");
-    expect(titles[1]).toContain("Codex");
-
-    // Switch to 最近更新
-    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
-    fireEvent.click(filterBtn);
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
-
-    // Under updatedAt: codex was updated 2026-10-10, claude 2026-10-06
-    groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
-    titles = groupHeaders.map(h => h.textContent);
-    expect(titles[0]).toContain("Codex");
-    expect(titles[1]).toContain("Claude Code");
-  });
-
-  it("sorts project groups dynamically by createdAt or updatedAt", async () => {
+  it("sorts project groups, agent groups and ungrouped sessions by creation or activity", async () => {
+    const aDates = { started_at: "2026-10-01T10:00:00.000Z", last_conversation_at: "2026-10-10T12:00:00.000Z" };
+    const bDates = { started_at: "2026-10-05T10:00:00.000Z", last_conversation_at: "2026-10-06T12:00:00.000Z" };
     vi.mocked(api.listProjectCards).mockResolvedValue([
-      projectCard({ id: "p-a", name: "项目甲", created_at: "2026-10-01T10:00:00.000Z", updated_at: "2026-10-10T12:00:00.000Z", last_activity_at: "2026-10-10T12:00:00.000Z" }),
-      projectCard({ id: "p-b", name: "项目乙", created_at: "2026-10-05T10:00:00.000Z", updated_at: "2026-10-06T12:00:00.000Z", last_activity_at: "2026-10-06T12:00:00.000Z" }),
+      projectCard({ id: "p-a", name: "项目甲", created_at: aDates.started_at, last_activity_at: aDates.last_conversation_at }),
+      projectCard({ id: "p-b", name: "项目乙", created_at: bDates.started_at, last_activity_at: bDates.last_conversation_at }),
     ]);
     vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-a", project_id: "p-a", title: "会话甲", started_at: "2026-10-01T10:00:00.000Z", last_conversation_at: "2026-10-10T12:00:00.000Z" }),
-      session({ id: "s-b", project_id: "p-b", title: "会话乙", started_at: "2026-10-05T10:00:00.000Z", last_conversation_at: "2026-10-06T12:00:00.000Z" }),
+      session({ id: "s-a", project_id: "p-a", title: "会话甲", agent: "codex", ...aDates }),
+      session({ id: "s-b", project_id: "p-b", title: "会话乙", agent: "claude_code", ...bDates }),
     ]);
-
     renderSidebar();
     await screen.findByText("项目甲");
 
-    // Default sortBy is createdAt: Project B was created 2026-10-05, Project A 2026-10-01
-    let groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
-    let titles = groupHeaders.map(h => h.textContent);
-    expect(titles[0]).toContain("项目乙");
-    expect(titles[1]).toContain("项目甲");
-
-    // Switch to 最近更新
-    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
-    fireEvent.click(filterBtn);
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "最近更新" }));
-
-    // Under updatedAt: Project A was updated 2026-10-10, Project B 2026-10-06
-    groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
-    titles = groupHeaders.map(h => h.textContent);
-    expect(titles[0]).toContain("项目甲");
-    expect(titles[1]).toContain("项目乙");
+    const cases = [
+      { mode: "按项目归类", names: ["项目乙", "项目甲"] },
+      { mode: "按 Agent 归类", names: ["Claude Code", "Codex"] },
+      { mode: "不分组（全部会话）", names: ["会话乙", "会话甲"] },
+    ] as const;
+    for (const [sort, newestFirst] of [["创建时间", false], ["最近更新", true], ["创建时间", false]] as const) {
+      fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
+      const choice = screen.getByRole("menuitemradio", { name: sort });
+      fireEvent.click(choice);
+      expect(choice.getAttribute("aria-checked")).toBe("true");
+      fireEvent.keyDown(choice, { key: "Escape" });
+      for (const { mode, names } of cases) {
+        switchGroupBy(mode);
+        const buttons = screen.getAllByRole("button").filter(button =>
+          button.classList.contains(mode === "不分组（全部会话）" ? "sidebar-session-link" : "sidebar-recent-group-header"),
+        );
+        const [first, second] = newestFirst ? [...names].reverse() : names;
+        expect(buttons[0].textContent).toContain(first);
+        expect(buttons[1].textContent).toContain(second);
+      }
+    }
   });
 
   it("moves pinned sessions out of the regular list and restores them on unpin", async () => {
@@ -843,55 +808,7 @@ describe("Sidebar 最近活动", () => {
     // Group trigger now shows "会话"
     expect(screen.getByRole("button", { name: "会话归类：不分组（全部会话）" })).toBeTruthy();
     expect(screen.getByText("会话")).toBeTruthy();
-  });
-
-  it("switches sorting between 创建时间 and 最近更新 via combined menu", async () => {
-    const olderCreatedRecentUpdated = session({
-      id: "s-1",
-      title: "老创建新聊天",
-      started_at: "2026-10-01T10:00:00.000Z",
-      last_conversation_at: "2026-10-10T12:00:00.000Z",
-    });
-    const newerCreatedOldUpdated = session({
-      id: "s-2",
-      title: "新创建老聊天",
-      started_at: "2026-10-05T10:00:00.000Z",
-      last_conversation_at: "2026-10-06T12:00:00.000Z",
-    });
-
-    vi.mocked(api.listSessions).mockResolvedValue([olderCreatedRecentUpdated, newerCreatedOldUpdated]);
-
-    renderSidebar();
-    await screen.findByText("老创建新聊天");
-
-    // By default, sorted by createdAt desc: newerCreated first
-    let sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
-    expect(sessionLinks[0].textContent).toContain("新创建老聊天");
-    expect(sessionLinks[1].textContent).toContain("老创建新聊天");
-
-    // Open combined filter & sort menu
-    const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
-    fireEvent.click(filterBtn);
-
-    const sortCreatedRadio = screen.getByRole("menuitemradio", { name: "创建时间" });
-    const sortUpdatedRadio = screen.getByRole("menuitemradio", { name: "最近更新" });
-    expect(sortCreatedRadio.getAttribute("aria-checked")).toBe("true");
-    expect(sortUpdatedRadio.getAttribute("aria-checked")).toBe("false");
-
-    // Switch to 最近更新
-    fireEvent.click(sortUpdatedRadio);
-    expect(sortUpdatedRadio.getAttribute("aria-checked")).toBe("true");
-
-    // Sessions now ordered by updatedAt desc: olderCreatedRecentUpdated first
-    sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
-    expect(sessionLinks[0].textContent).toContain("老创建新聊天");
-    expect(sessionLinks[1].textContent).toContain("新创建老聊天");
-
-    // Switch back to 创建时间
-    fireEvent.click(sortCreatedRadio);
-    sessionLinks = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-session-link"));
-    expect(sessionLinks[0].textContent).toContain("新创建老聊天");
-    expect(sessionLinks[1].textContent).toContain("老创建新聊天");
+    expect(screen.getByRole("button", { name: "收起全部" })).toHaveProperty("disabled", true);
   });
 
   it("limits group to 5 sessions with 展开显示 button and resets on collapse", async () => {
@@ -1017,44 +934,8 @@ describe("Sidebar 最近活动", () => {
     expect(toggleIconBtn.getAttribute("aria-checked")).toBe("true");
   });
 
-  it("disables one-click collapse button in ungrouped mode", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "s-1", title: "平铺会话" }),
-    ]);
 
-    renderSidebar();
-    await screen.findByText("平铺会话");
-
-    switchGroupBy("不分组（全部会话）");
-
-    const collapseBtn = screen.getByRole("button", { name: "收起全部" });
-    expect(collapseBtn.hasAttribute("disabled")).toBe(true);
-  });
 });
-
-it("shows assistant and ordinary project sessions together with their terminals", async () => {
-  vi.mocked(api.listProjectCards).mockResolvedValue([
-    projectCard({ id: "assistant-project", name: "我的助手", purpose: "assistant", search_paths: ["/home/app/assistant"] }),
-    projectCard(),
-  ]);
-  vi.mocked(api.listSessions).mockResolvedValue([
-    session({ id: "assistant-session", title: "助手原生会话", project_id: "assistant-project" }),
-    session({ id: "regular-session", title: "普通会话" }),
-  ]);
-  vi.mocked(api.terminalList).mockResolvedValue([
-    terminal({ terminal_id: "assistant-bound", session_id: "assistant-session", session_title: "助手原生会话" }),
-    terminal({ terminal_id: "assistant-pending", cwd: "/home/app/assistant", session_title: "待绑定助手" }),
-    terminal({ terminal_id: "regular-bound", session_id: "regular-session", session_title: "普通会话" }),
-  ]);
-  const navigate = renderSidebar({ view: "sessions" });
-  await screen.findByText("助手原生会话");
-  expect(screen.getByText("我的助手")).toBeTruthy();
-  expect(screen.getByText("待绑定助手")).toBeTruthy();
-  expect(screen.getByText("普通会话")).toBeTruthy();
-  fireEvent.click(screen.getByText("助手原生会话"));
-  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "assistant-bound", initialSessionId: "assistant-session" }));
-});
-
 
 it("restores sidebar grouping, filters, running-only, sorting and display preferences after a restart", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([
@@ -1085,19 +966,6 @@ it("restores sidebar grouping, filters, running-only, sorting and display prefer
   expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemradio", { name: "最近更新" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("menuitemcheckbox", { name: "显示会话图标" }).getAttribute("aria-checked")).toBe("false");
-});
-
-it("immediately removes a deleted pinned session and all its terminals even while an old list refresh returns", async () => {
-  localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["deleted", "kept"]));
-  vi.mocked(api.listSessions).mockResolvedValue([session({ id: "deleted", title: "待删除" }), session({ id: "kept", title: "保留" })]);
-  vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "closed", session_id: "deleted", live: false })]);
-  renderSidebar();
-  await screen.findByText("待删除");
-  act(() => invalidateTargets({ sessionIds: ["deleted"], terminalIds: ["closed"] }));
-  expect(screen.queryByText("待删除")).toBeNull();
-  await act(async () => {});
-  expect(screen.queryByText("待删除")).toBeNull();
-  expect(screen.getByText("保留")).toBeTruthy();
 });
 
 it("follows the selected terminal without aggregating peers or reloading all sessions", async () => {
@@ -1175,10 +1043,12 @@ describe("Sidebar 事件读取", () => {
     expect(api.listProjectCards).toHaveBeenCalledTimes(1);
   });
 
-  it("defers hidden reads, catches up on reveal, and keeps deleted rows out of late snapshots", async () => {
+  it("defers hidden reads and removes a deleted pin and terminal even when stale data returns", async () => {
+    localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["s-1"]));
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "closed", session_id: "s-1", live: false })]);
     vi.mocked(api.listSessions).mockResolvedValue([session()]);
     const view = render(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} />);
-    await screen.findByText("修复侧栏问题");
+    await screen.findByRole("button", { name: "终端 · 已退出：修复侧栏问题" });
     view.rerender(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} collapsed />);
     vi.mocked(api.listSessions).mockResolvedValue([session(), session({ id: "new", title: "隐藏期间的新会话" })]);
     act(() => { window.dispatchEvent(new Event(EVT_SYNCED)); window.dispatchEvent(new Event(EVT_TERMINALS)); });
@@ -1186,11 +1056,12 @@ describe("Sidebar 事件读取", () => {
     expect(api.listSessions).toHaveBeenCalledTimes(1);
     expect(api.listProjectCards).toHaveBeenCalledTimes(1);
     expect(api.terminalList).toHaveBeenCalledTimes(1);
-    act(() => invalidateTargets({ sessionIds: ["s-1"] }));
+    act(() => invalidateTargets({ sessionIds: ["s-1"], terminalIds: ["closed"] }));
     view.rerender(<Sidebar route={{ view: "new-session" }} navigate={vi.fn()} />);
     expect(screen.queryByText("修复侧栏问题")).toBeNull();
     expect(await screen.findByText("隐藏期间的新会话")).toBeTruthy();
     expect(screen.queryByText("修复侧栏问题")).toBeNull();
+    expect(screen.queryByRole("button", { name: "终端 · 已退出：修复侧栏问题" })).toBeNull();
     expect(api.listSessions).toHaveBeenCalledTimes(2);
   });
 

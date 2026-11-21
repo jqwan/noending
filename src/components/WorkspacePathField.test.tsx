@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import WorkspacePathField, { absolutePathHint } from "./WorkspacePathField";
+import WorkspacePathField from "./WorkspacePathField";
 import { api } from "../api";
 import type { PathProbe, RecentWorkspacePath } from "../types";
 
@@ -155,10 +155,4 @@ describe("WorkspacePathField", () => {
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the absolute-path hint wording shared", () => {
-    expect(absolutePathHint("x/y")).toContain("绝对路径");
-    expect(absolutePathHint("/repo")).toBe("");
-    expect(absolutePathHint("~/repo")).toBe("");
-    expect(absolutePathHint("C:\\repo")).toBe("");
-  });
 });

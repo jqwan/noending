@@ -8,55 +8,36 @@ afterEach(cleanup);
 it("opens the existing primary pages", () => {
   const sections = [
     ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-    ["智能体", "assistants"], ["运行工具", "agents"], ["技能", "skills"], ["设置", "settings"],
+    ["智能体", "projects"], ["运行工具", "agents"], ["技能", "skills"], ["设置", "settings"],
   ] as const;
 
   for (const [label, view] of sections) {
     const navigate = vi.fn();
     const { unmount } = render(<NavigationRail route={{ view: "new-session" }} navigate={navigate} />);
     fireEvent.click(screen.getByRole("button", { name: label }));
-    expect(navigate).toHaveBeenCalledWith({ view });
+    expect(navigate).toHaveBeenCalledWith(label === "智能体" ? { view, assistantOnly: true } : { view });
     unmount();
   }
 });
 
-it("highlights the owning section for routes", () => {
-  const cases: [Route, string][] = [
-    [{ view: "terminal", terminalId: "t1" }, "会话"],
-    [{ view: "session", sessionId: "s1" }, "会话"],
-    [{ view: "sessions" }, "会话"],
-    [{ view: "workstream", workstreamId: "w1" }, "任务"],
-    [{ view: "project", projectId: "p1" }, "项目"],
-    [{ view: "assistants" }, "智能体"],
-    [{ view: "assistant", assistantId: "a1" }, "智能体"],
-    [{ view: "agents" }, "运行工具"],
-    [{ view: "skills", projectId: "p1" }, "技能"],
-    [{ view: "skill", resourceId: "skill1", }, "技能"],
-  ];
-
-  for (const [route, label] of cases) {
-    const { unmount } = render(<NavigationRail route={route} navigate={vi.fn()} />);
-    expect(screen.getByRole("button", { name: label }).getAttribute("aria-current")).toBe("page");
-    unmount();
-  }
-});
-
-it("jumps to its root board interface when clicking the active section icon", () => {
+it("highlights the section that owns the route and returns to its board when clicked", () => {
   const cases: [Route, string, Route][] = [
+    [{ view: "terminal", terminalId: "t1" }, "会话", { view: "sessions" }],
     [{ view: "session", sessionId: "s1" }, "会话", { view: "sessions" }],
     [{ view: "workstream", workstreamId: "w1" }, "任务", { view: "workstreams" }],
     [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
-    [{ view: "assistant", assistantId: "a1" }, "智能体", { view: "assistants" }],
-    [{ view: "skill", resourceId: "skill1", }, "技能", { view: "skills" }],
+    [{ view: "project", projectId: "p1", fromAssistants: true }, "智能体", { view: "projects", assistantOnly: true }],
+    [{ view: "skill", resourceId: "skill1" }, "技能", { view: "skills" }],
     [{ view: "settings", section: "appearance" }, "设置", { view: "settings" }],
   ];
-
-  for (const [route, label, expected] of cases) {
-    const navigate = vi.fn();
-    const { unmount } = render(<NavigationRail route={route} navigate={navigate} />);
-    fireEvent.click(screen.getByRole("button", { name: label }));
-    expect(navigate).toHaveBeenCalledWith(expected);
-    unmount();
+  const navigate = vi.fn();
+  const { rerender } = render(<NavigationRail route={cases[0][0]} navigate={navigate} />);
+  for (const [route, label, board] of cases) {
+    rerender(<NavigationRail route={route} navigate={navigate} />);
+    const section = screen.getByRole("button", { name: label });
+    expect(section.getAttribute("aria-current")).toBe("page");
+    fireEvent.click(section);
+    expect(navigate).toHaveBeenLastCalledWith(board);
   }
 });
 

@@ -11,7 +11,7 @@
 //! The decision table, in one place:
 //!
 //! * known ordinary path, no Git now → keep Project + `git_id`; `detected → missing`
-//! * confirmed Git removal in built-in chat/assistant directories → return to application grouping
+//! * confirmed Git removal in chat directories → return to application grouping
 //! * new path, no Git → create a path-backed Project (`git_id = NULL`)
 //!   (default chat directories instead join their app's shared Project)
 //! * new path, Git `G` known to Project B → join B
@@ -29,8 +29,9 @@
 //! * Projects and registered paths are never automatically garbage-collected.
 //!   Explicit cleanup may remove missing paths without session references.
 //!   Users can archive any project independently of its tasks and sessions.
-//! * Permanent deletion requires archive state, no associated sessions and no
-//!   chat/assistant purpose; it detaches task projects and never deletes directories.
+//! * Permanent deletion requires archive state and no associated sessions.
+//!   Chat projects keep their shared directory registration. Deleting a project
+//!   that owns profiles also deletes those profiles and their managed directories.
 //! * `name_customized` wins over every automatic rename, and automatic naming
 //!   happens at Project creation only: no reconcile, worktree discovery or merge
 //!   renames an existing row (a merge may only carry a `name_customized` name
@@ -86,9 +87,6 @@ pub trait WorkspacePolicy {
     fn default_workspace(&self) -> Option<String> {
         None
     }
-    fn assistant_workspace(&self) -> Option<String> {
-        None
-    }
     /// Is this directory actually on this machine right now?
     ///
     /// Existence is an *observation*, and this layer never reads the
@@ -119,16 +117,8 @@ pub fn directory_group_label(
     }
 }
 
-fn is_assistant_directory(canonical: &str, policy: &dyn WorkspacePolicy) -> bool {
-    policy
-        .assistant_workspace()
-        .is_some_and(|root| same_location(canonical, &root))
-}
-
 pub fn project_purpose(paths: &[String], policy: &dyn WorkspacePolicy) -> Option<ProjectPurpose> {
-    if paths.iter().any(|p| is_assistant_directory(p, policy)) {
-        Some(ProjectPurpose::Assistant)
-    } else if paths
+    if paths
         .iter()
         .any(|p| directory_group_label(p, policy).is_some())
     {
@@ -295,9 +285,7 @@ pub fn ensure_workspace_path_conn(
                         Some(label) => {
                             directory_group_project(conn, label, &canonical, policy, "normal")?.id
                         }
-                        None => {
-                            create_single_directory_project(conn, &canonical, policy, "normal")?.id
-                        }
+                        None => create_project_row(conn, &canonical, None, "normal")?.id,
                     }
                 }
             };
@@ -311,15 +299,12 @@ pub fn ensure_workspace_path_conn(
             match &family {
                 None => {
                     let group = directory_group_label(&canonical, policy);
-                    let assistant = is_assistant_directory(&canonical, policy);
                     let confirmed_plain = observation.exists
                         && matches!(observation.git, GitDetection::None | GitDetection::Missing);
-                    if confirmed_plain && mine.git_id.is_some() && (group.is_some() || assistant) {
+                    if let Some(label) = group.filter(|_| confirmed_plain && mine.git_id.is_some())
+                    {
                         let paths = list_workspace_paths_for_project_conn(conn, &mine.id)?;
-                        let existing = group
-                            .map(|label| find_directory_group_project_conn(conn, label, policy))
-                            .transpose()?
-                            .flatten();
+                        let existing = find_directory_group_project_conn(conn, label, policy)?;
                         if paths.len() == 1 {
                             // Preserve this project's name and summary. If
                             // its directory group exists, fold the two non-Git projects.
@@ -331,39 +316,16 @@ pub fn ensure_workspace_path_conn(
                         } else {
                             // Other worktrees remain in their family; only this plain
                             // built-in directory returns to its application grouping.
-                            let destination = match group {
-                                Some(label) => directory_group_project(
-                                    conn,
-                                    label,
-                                    &canonical,
-                                    policy,
-                                    &mine.visibility,
-                                )?,
-                                None => create_single_directory_project(
-                                    conn,
-                                    &canonical,
-                                    policy,
-                                    &mine.visibility,
-                                )?,
-                            };
-                            reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
-                        }
-                        state = git_state::NONE.to_string();
-                    } else if mine.git_id.is_none() && !assistant {
-                        let paths = list_workspace_paths_for_project_conn(conn, &mine.id)?;
-                        if paths
-                            .iter()
-                            .any(|p| is_assistant_directory(&p.canonical_path, policy))
-                        {
-                            // Assistant is a single directory, not a parent tree.
-                            let destination = create_single_directory_project(
+                            let destination = directory_group_project(
                                 conn,
+                                label,
                                 &canonical,
                                 policy,
                                 &mine.visibility,
                             )?;
                             reassign_workspace_path_project_conn(conn, &id, &destination.id)?;
                         }
+                        state = git_state::NONE.to_string();
                     }
                 }
                 Some(f) => {
@@ -457,18 +419,27 @@ pub fn rename_project(db: &Db, id: &str, name: &str) -> Result<Project> {
 
 /// Project archive state is independent of its tasks and sessions.
 pub fn set_project_archived(db: &Db, id: &str, archived: bool) -> Result<Project> {
-    db.tx(|tx| {
-        let project =
-            get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))?;
-        let visibility = if archived { "archived" } else { "normal" };
-        if project.visibility != visibility {
-            tx.execute(
-                "UPDATE projects SET visibility=?2, updated_at=?3 WHERE id=?1",
-                rusqlite::params![id, visibility, now()],
-            )?;
-        }
-        get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))
-    })
+    db.tx(|tx| set_project_archived_conn(tx, id, archived))
+}
+
+pub(crate) fn set_project_archived_conn(
+    conn: &Connection,
+    id: &str,
+    archived: bool,
+) -> Result<Project> {
+    let mut project =
+        get_project_conn(conn, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))?;
+    let visibility = if archived { "archived" } else { "normal" };
+    let stamp = now();
+    if project.visibility != visibility {
+        conn.execute(
+            "UPDATE projects SET visibility=?2, updated_at=?3 WHERE id=?1",
+            rusqlite::params![id, visibility, stamp],
+        )?;
+        project.visibility = visibility.into();
+        project.updated_at = stamp;
+    }
+    Ok(project)
 }
 
 /// Shared cleanup projection. Physical checks run outside a database lock;
@@ -479,7 +450,7 @@ fn cleanable_missing_paths(db: &Db, project_id: &str) -> Result<Vec<(String, Str
         let mut statement = conn.prepare(
             "SELECT id,canonical_path FROM workspace_paths WHERE project_id=?1 AND exists_on_disk=0
              AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=workspace_paths.id)
-             AND NOT EXISTS(SELECT 1 FROM assistant_profiles WHERE workspace_path_id=workspace_paths.id) ORDER BY id",
+             AND NOT EXISTS(SELECT 1 FROM project_assistants WHERE workspace_path_id=workspace_paths.id) ORDER BY id",
         )?;
         let rows = statement.query_map([project_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -511,7 +482,7 @@ pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
                 "DELETE FROM workspace_paths WHERE id=?1 AND project_id=?2
                  AND canonical_path=?3 AND exists_on_disk=0
                  AND NOT EXISTS(SELECT 1 FROM sessions WHERE workspace_path_id=?1)
-                 AND NOT EXISTS(SELECT 1 FROM assistant_profiles WHERE workspace_path_id=?1)",
+                 AND NOT EXISTS(SELECT 1 FROM project_assistants WHERE workspace_path_id=?1)",
                 rusqlite::params![id, project_id, path],
             )?;
         }
@@ -525,49 +496,88 @@ pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
     })
 }
 
-/// Delete only archived, non-built-in projects with no sessions (including
-/// archived sessions). Check and unlink in one transaction to prevent races.
-pub fn delete_project_permanently(db: &Db, id: &str, policy: &dyn WorkspacePolicy) -> Result<()> {
-    db.tx(|tx| {
-        let project = get_project_conn(tx, id)?
-            .ok_or_else(|| other(format!("Project {id} 不存在")))?;
+#[derive(Debug, Default, Serialize)]
+pub struct ProjectDeletion {
+    pub warnings: Vec<String>,
+}
+
+/// Validate, stage owned directories, and remove the records in one transaction.
+pub fn delete_project_permanently(
+    db: &Db,
+    id: &str,
+    policy: &dyn WorkspacePolicy,
+    home: Option<&super::home::NoEndingHome>,
+) -> Result<ProjectDeletion> {
+    let _profile_lock = home.map(crate::assistant::lock).transpose()?;
+    let mut staged = Vec::new();
+    let removed = db.tx(|tx| {
+        let project =
+            get_project_conn(tx, id)?.ok_or_else(|| other(format!("Project {id} 不存在")))?;
         if project.visibility != "archived" {
             return Err(other("只能永久删除已归档的项目"));
         }
-        let owns_assistant:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM assistant_profiles a JOIN workspace_paths wp ON wp.id=a.workspace_path_id WHERE wp.project_id=?1)",[id],|r|r.get(0))?;
-        if owns_assistant{return Err(other("项目仍承载智能体档案，不能永久删除"));}
         let paths = list_workspace_paths_for_project_conn(tx, id)?;
         let canonical: Vec<String> = paths.iter().map(|p| p.canonical_path.clone()).collect();
         if project_purpose(&canonical, policy).is_some() {
-            return Err(other("聊天和助手项目不能永久删除"));
+            return Err(other("聊天项目不能永久删除"));
         }
-        let sessions: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM sessions s JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE wp.project_id=?1",
-            [id], |row| row.get(0),
+        let has_sessions: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_session_membership WHERE project_id=?1)",
+            [id],
+            |row| row.get(0),
         )?;
-        if sessions > 0 {
+        if has_sessions {
             return Err(other("项目仍有关联会话，不能永久删除（包括已归档会话）"));
         }
         let tasks: Vec<String> = {
-            let mut st = tx.prepare(
-                "SELECT workstream_id FROM workstream_projects WHERE project_id=?1",
-            )?;
+            let mut st =
+                tx.prepare("SELECT workstream_id FROM workstream_projects WHERE project_id=?1")?;
             let rows = st.query_map([id], |row| row.get(0))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        tx.execute(
-            "DELETE FROM workstream_projects WHERE project_id=?1",
-            [id],
-        )?;
+        tx.execute("DELETE FROM workstream_projects WHERE project_id=?1", [id])?;
         for task in tasks {
-            crate::storage::bump_input_revision_conn(tx,&task)?;
-            tx.execute("UPDATE workstreams SET updated_at=?2 WHERE id=?1", rusqlite::params![task, now()])?;
-
+            crate::storage::bump_input_revision_conn(tx, &task)?;
+            tx.execute(
+                "UPDATE workstreams SET updated_at=?2 WHERE id=?1",
+                rusqlite::params![task, now()],
+            )?;
+        }
+        if let Some(path_id) = crate::storage::assistant_profiles::path_for_project(tx, id)? {
+            let home = home.ok_or_else(|| other("NoEnding Home 未初始化"))?;
+            let path = paths
+                .iter()
+                .find(|path| path.id == path_id)
+                .ok_or_else(|| other("智能体档案目录未登记"))?;
+            if let Some(directory) = crate::assistant::stage_profile_directory(home, path)? {
+                staged.push(directory);
+            }
+            tx.execute("DELETE FROM project_assistants WHERE project_id=?1", [id])?;
         }
         tx.execute("DELETE FROM workspace_paths WHERE project_id=?1", [id])?;
         tx.execute("DELETE FROM projects WHERE id=?1", [id])?;
         Ok(())
-    })
+    });
+    match removed {
+        Ok(()) => Ok(ProjectDeletion {
+            warnings: staged
+                .into_iter()
+                .filter_map(|dir| dir.delete().err().map(|error| error.to_string()))
+                .collect(),
+        }),
+        Err(error) => {
+            let failures: Vec<_> = staged
+                .into_iter()
+                .rev()
+                .filter_map(|dir| dir.restore().err())
+                .collect();
+            if !failures.is_empty() {
+                let details: Vec<_> = failures.iter().map(ToString::to_string).collect();
+                return Err(other(format!("{error}。{}", details.join("。"))));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// The self-transacting form. Use this when you are not already inside a
@@ -789,19 +799,6 @@ pub(crate) fn find_directory_group_project_conn(
     Ok(None)
 }
 
-fn create_single_directory_project(
-    conn: &Connection,
-    path: &str,
-    policy: &dyn WorkspacePolicy,
-    visibility: &str,
-) -> Result<Project> {
-    let project = create_project_row(conn, path, None, visibility)?;
-    if is_assistant_directory(path, policy) {
-        set_project_name_conn(conn, &project.id, "NoEnding Assistant", false)?;
-    }
-    Ok(project)
-}
-
 /// A Git family's worktree list becomes WorkspacePaths, and only that.
 ///
 /// Nothing here may touch task project associations (discovering a WorkspacePath ≠
@@ -920,6 +917,14 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
             adopted_name: None,
         });
     }
+    let assistant_count: usize = conn.query_row(
+        "SELECT COUNT(*) FROM project_assistants WHERE project_id IN (?1,?2)",
+        [&left.id, &right.id],
+        |row| row.get(0),
+    )?;
+    if assistant_count > 1 {
+        return Err(other("两个项目各有独立的智能体属性，不能自动合并"));
+    }
 
     let (survivor, loser) = pick_canonical(&left, &right);
     let mut moved = Vec::new();
@@ -954,7 +959,6 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
         crate::storage::bump_input_revision_conn(conn, task)?;
     }
     conn.execute("INSERT OR IGNORE INTO workstream_projects(workstream_id,project_id) SELECT workstream_id,?1 FROM workstream_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
-    conn.execute("INSERT OR IGNORE INTO assistant_projects(assistant_id,project_id) SELECT assistant_id,?1 FROM assistant_projects WHERE project_id=?2",rusqlite::params![survivor.id,loser.id])?;
     let old = crate::storage::project_context_repo::state(conn, &loser.id)?;
     let current = crate::storage::project_context_repo::state(conn, &survivor.id)?;
     if current.summary.is_empty() && !old.summary.is_empty() {
@@ -1128,6 +1132,7 @@ pub struct ProjectDetail {
     pub project: Project,
     pub kind: ProjectKind,
     pub purpose: Option<ProjectPurpose>,
+    pub assistant: Option<crate::assistant::ProjectAssistantDetail>,
     pub workspace_paths: Vec<WorkspacePath>,
     /// Missing, physically absent paths with neither Session nor Assistant references.
     pub cleanable_missing_path_ids: Vec<String>,
@@ -1141,10 +1146,7 @@ pub struct ProjectDetail {
 
 /// Project detail as one read, derived entirely through the registry: the paths
 /// it owns, the Workstreams that reach it through any of them, and the Sessions
-/// whose cwd is one of them.
-///
-/// Sessions come through their `workspace_path_id`, the same membership chain
-/// used by Session list and detail projections.
+/// whose working directories belong to the project.
 pub fn project_detail(
     db: &Db,
     project_id: &str,
@@ -1167,20 +1169,14 @@ pub fn project_detail(
             .into_iter()
             .map(|workstream| ProjectWorkstream { workstream })
             .collect();
-    let sessions = db.list_session_items(
-        crate::storage::SessionFilter {
-            project_id: Some(project_id.to_string()),
-            scope: crate::domain::SessionListScope::All,
-            ..Default::default()
-        },
-        None,
-    )?;
+    let sessions = db.project_session_items(project_id)?;
     let remote_url = match project.git_id.as_deref() {
         Some(git_id) => {
             crate::storage::workspace::git_identity_remote_url_conn(&db.read(), git_id)?
         }
         None => None,
     };
+    let assistant = crate::assistant::project_assistant(db, project_id, &workspace_paths)?;
     let purpose = project_purpose(
         &workspace_paths
             .iter()
@@ -1195,6 +1191,7 @@ pub fn project_detail(
     Ok(Some(ProjectDetail {
         cleanable_missing_path_ids,
         purpose,
+        assistant,
         project,
         kind,
         workspace_paths,

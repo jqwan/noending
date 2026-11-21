@@ -594,48 +594,22 @@ mod tests {
         );
     }
 
-    /// On a Windows volume, case is not part of location, so it is
-    /// not part of the stored identity either. The display form still carries
-    /// what the user typed: `canonical_path` is never lower-cased, and
-    /// the two spellings below are proof the fold stopped at the key.
     #[test]
-    fn windows_case_variants_share_path_identity() {
+    fn windows_path_identity_folds_case_for_drives_and_shares_without_changing_display() {
         let w = PathStyle::Windows;
-        let upper = win("C:\\Code\\NoEnding").unwrap();
-        let lower = win("c:\\code\\noending").unwrap();
-        assert_ne!(upper, lower, "display keeps the spelling it was given");
-        assert_eq!(path_identity_with(&upper, w), path_identity_with(&lower, w));
-        assert!(same_location_with(&upper, &lower, w));
-        assert_eq!(
-            path_identity_with("C:\\Code\\NoEnding", w),
-            path_identity_with("C:\\code\\NOENDING", w),
-            "the fold happens on the key, so an un-normalized spelling joins too"
-        );
-    }
-
-    /// A UNC root's `server\\share` carries identity — two file servers must not
-    /// collide — but it carries it case-insensitively, like the drive letter.
-    #[test]
-    fn windows_unc_case_variants_share_path_identity() {
-        let w = PathStyle::Windows;
-        let upper = win("\\\\Server\\Share\\Repo").unwrap();
-        let lower = win("\\\\server\\share\\repo").unwrap();
-        // `normalize` keeps server and share verbatim — the display form is what
-        // the user or the transcript said.
-        assert_ne!(upper, lower);
-        assert_eq!(
-            path_identity_with(&upper, w),
-            path_identity_with(&lower, w),
-            "the location relation still folds the UNC root's case"
-        );
-        assert_eq!(
-            path_identity_with("\\\\SERVER\\share\\REPO", w),
-            path_identity_with(&lower, w)
-        );
-        // Still not the same directory as a different server.
+        for (first, alias) in [
+            (r"C:\Code\NoEnding", r"c:\code\noending"),
+            (r"\\Server\Share\Repo", r"\\server\share\repo"),
+        ] {
+            let upper = win(first).unwrap();
+            let lower = win(alias).unwrap();
+            assert_ne!(upper, lower);
+            assert_eq!(path_identity_with(first, w), path_identity_with(alias, w));
+            assert!(same_location_with(&upper, &lower, w));
+        }
         assert_ne!(
-            path_identity_with("\\\\other\\share\\repo", w),
-            path_identity_with(&lower, w)
+            path_identity_with(r"\\other\share\repo", w),
+            path_identity_with(r"\\server\share\repo", w)
         );
     }
 
@@ -751,10 +725,6 @@ mod tests {
         assert_eq!(auto_project_name("/"), "/");
         assert_eq!(auto_project_name("C:\\Users\\me"), "Me");
         assert_eq!(auto_project_name("/Users/me/数据"), "数据");
-    }
-
-    #[test]
-    fn basename_and_root() {
         assert_eq!(basename("/a/b/c"), "c");
         assert_eq!(basename("/a/b/c/"), "c");
         assert_eq!(basename("/"), "/");

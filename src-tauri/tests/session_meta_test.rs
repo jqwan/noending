@@ -5,8 +5,7 @@
 //! - cwd / workspace / activity follow the ROOT (child facts never reach here);
 //! - the title is write-once: a later pass may fill an absent title but never
 //!   overwrite one (the authority is the root's title chain);
-//! - `project_id` is derived from `workspace_path_id` inside the statement, so
-//!   the cache can never drift from its source.
+//! - project membership is derived from the registered workspace path.
 
 use noending::domain::Agent;
 use noending::storage::workspace::insert_workspace_path_conn;
@@ -148,17 +147,26 @@ fn a_later_upsert_refreshes_cwd_and_activity() {
 }
 
 #[test]
-fn upsert_without_cwd_keeps_stored_value() {
+fn upsert_without_cwd_keeps_the_original_directory_and_project() {
     let database = db("keep");
     let root_id = format!("meta-{}", new_id());
-
-    ensure(
-        &database,
-        Agent::ClaudeCode,
-        &root_id,
-        Some("/Users/jqk/projects/r/stock_quant"),
-        "2026-08-18T14:30:00Z",
-    );
+    let cwd = "/repo/meta";
+    database
+        .upsert_project(&support::project("p-meta".into(), "Meta"))
+        .unwrap();
+    let path_id = insert_workspace_path_conn(&database.write(), cwd, "p-meta").unwrap();
+    database
+        .upsert_logical_session_unchecked(
+            Agent::ClaudeCode,
+            &root_id,
+            None,
+            Some(cwd),
+            Some(&path_id),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // A later scan that fails to read cwd (parse gap) must not wipe the
     // stored value — the absence of a fact is not a new fact.
@@ -179,10 +187,9 @@ fn upsert_without_cwd_keeps_stored_value() {
         .find_session_by_root_agent_id(Agent::ClaudeCode, &root_id)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        stored.cwd.as_deref(),
-        Some("/Users/jqk/projects/r/stock_quant")
-    );
+    assert_eq!(stored.cwd.as_deref(), Some(cwd));
+    assert_eq!(stored.workspace_path_id.as_deref(), Some(path_id.as_str()));
+    assert_eq!(stored.project_id.as_deref(), Some("p-meta"));
 }
 
 /// the title is write-once: a discovery that finds a title source
@@ -243,57 +250,4 @@ fn title_is_write_once() {
         Some("帮我看看这个量化脚本"),
         "an existing title is the authority — write-once"
     );
-}
-
-/// The derived Project cache: `project_id` is read off
-/// `workspace_paths.project_id` inside the upsert statement, so a Session is a
-/// Project member exactly while its own path says so.
-#[test]
-fn project_cache_follows_workspace_path() {
-    let database = db("project-cache");
-    database
-        .upsert_project(&support::project("p-meta".into(), "Meta"))
-        .unwrap();
-    let path_id = {
-        let conn = database.write();
-        insert_workspace_path_conn(&conn, "/repo/meta", "p-meta").unwrap()
-    };
-    let root_id = format!("meta-{}", new_id());
-
-    let (row_id, _) = database
-        .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
-            &root_id,
-            Some("t"),
-            Some("/repo/meta"),
-            Some(&path_id),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    let stored = database.get_session(&row_id).unwrap().unwrap();
-    assert_eq!(stored.workspace_path_id.as_deref(), Some(path_id.as_str()));
-    assert_eq!(
-        stored.project_id.as_deref(),
-        Some("p-meta"),
-        "the cache is derived in the same statement, never set apart"
-    );
-
-    // A later upsert with no path leaves the attachment alone.
-    database
-        .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
-            &root_id,
-            Some("t"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-    let after = database.get_session(&row_id).unwrap().unwrap();
-    assert_eq!(after.workspace_path_id.as_deref(), Some(path_id.as_str()));
-    assert_eq!(after.project_id.as_deref(), Some("p-meta"));
 }

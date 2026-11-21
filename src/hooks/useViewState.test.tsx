@@ -43,10 +43,16 @@ it("restores opted-in preferences after a restart without persisting searches or
   expect(screen.getByTestId("scroll").scrollTop).toBe(0);
 });
 
-it.each(["{broken", '"obsolete"'])("uses the default for invalid stored preferences: %s", saved => {
-  localStorage.setItem("noending.view.test.mode", saved);
-  render(<Preferences />);
-  screen.getByRole("button", { name: "cards" });
+it("uses the default for malformed or unknown stored preferences", () => {
+  function Choice({ keyName }: { keyName: string }) {
+    const [mode] = useViewPreference(keyName, "cards", preferenceValues("cards", "list"));
+    return <output aria-label={keyName}>{mode}</output>;
+  }
+  localStorage.setItem("noending.view.invalid", "{broken");
+  localStorage.setItem("noending.view.unknown", '"obsolete"');
+  render(<><Choice keyName="invalid" /><Choice keyName="unknown" /></>);
+  expect(screen.getByLabelText("invalid").textContent).toBe("cards");
+  expect(screen.getByLabelText("unknown").textContent).toBe("cards");
 });
 
 it("keeps preferences usable when reading or writing storage fails", () => {

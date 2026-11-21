@@ -188,7 +188,7 @@ pub fn reassign_workspace_path_project_conn(
         params![path_id, new_project_id],
     )?;
     let ids = {
-        let mut st = conn.prepare("SELECT id FROM sessions WHERE workspace_path_id = ?1")?;
+        let mut st = conn.prepare("SELECT id FROM sessions WHERE workspace_path_id=?1")?;
         let rows = st.query_map(params![path_id], |r| r.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };

@@ -85,7 +85,7 @@ fn object_lookup_matches_substrings_and_literal_wildcards() {
 /// length filter: a short message is as findable as a long one. Every
 /// stored message IS the curated conversation.
 #[test]
-fn a_root_message_is_searchable_regardless_of_length() {
+fn search_finds_long_and_short_messages_and_session_titles_after_reopen() {
     let mut db = open_db("message");
     let long = "决定使用 SQLite 作为本地存储，因为它是单文件、零配置且可嵌入的。";
     let short = "先做迁移";
@@ -98,6 +98,32 @@ fn a_root_message_is_searchable_regardless_of_length() {
             support::parsed_message("m2", SessionMessageRole::User, short),
         ],
     );
+    let (session, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "root-doc-1",
+            Some("quant script debug"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    // An untitled session is still documented, under the agent's name.
+    let (untitled, _) = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "root-doc-2",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     // Search must survive a restart using only the ingestion transaction;
     // startup performs no global document backfill.
     drop(db.db.take());
@@ -119,26 +145,6 @@ fn a_root_message_is_searchable_regardless_of_length() {
             .any(|h| h.kind == "message" && h.ref_id == stored[1].id),
         "a short message must be searchable: {hits:?}"
     );
-}
-
-/// The Logical Session's own document (`kind = 'session'`) carries the title
-/// and is searchable — this is how a session without a matching message body
-/// is still found.
-#[test]
-fn a_session_is_searchable_by_its_document() {
-    let db = open_db("session-doc");
-    let (session, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "root-doc-1",
-            Some("quant script debug"),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
 
     let hits = search(&db, "quant", 20).unwrap();
     let session_hits: Vec<_> = hits.iter().filter(|h| h.kind == "session").collect();
@@ -146,19 +152,6 @@ fn a_session_is_searchable_by_its_document() {
     assert_eq!(session_hits[0].ref_id, session);
     assert_eq!(session_hits[0].title, "quant script debug");
 
-    // An untitled session is still documented, under the agent's name.
-    let (untitled, _) = db
-        .upsert_logical_session_unchecked(
-            Agent::Codex,
-            "root-doc-2",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
     let hits = search(&db, "codex", 20).unwrap();
     assert!(
         hits.iter()

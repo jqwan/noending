@@ -355,11 +355,16 @@ describe("AgentsView", () => {
 
   it("displays normalized CLI status, session count and toggles between card and list view", async () => {
     vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({ codex: 602 });
+    vi.mocked(api.getAgentStatus).mockResolvedValue({
+      ...mockAgentStatus,
+      pi: { ...mockAgentStatus.pi, detected: false, version: null },
+    });
     render(<AgentsView navigate={vi.fn()} />);
     await screen.findByText("Claude Code");
     expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
     expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
     expect(screen.getByText("602 个会话")).toBeTruthy();
+    expect(within(screen.getByRole("button", { name: "查看 Pi Agent 详情" })).getByText("未检测到CLI")).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(screen.queryByText(/仅同步历史/)).toBeNull();
 
@@ -380,16 +385,6 @@ describe("AgentsView", () => {
     expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();
   });
 
-  it("displays 未检测到CLI when an agent with terminal CLI is not detected", async () => {
-    const statusCopy = {
-      ...mockAgentStatus,
-      codex: { ...mockAgentStatus.codex, detected: false, version: null },
-    };
-    vi.mocked(api.getAgentStatus).mockResolvedValue(statusCopy);
-    render(<AgentsView navigate={vi.fn()} />);
-    const codexCard = await screen.findByRole("button", { name: "查看 Codex Agent 详情" });
-    expect(within(codexCard).getByText("未检测到CLI")).toBeTruthy();
-  });
 });
 
 it("uses lookup aliases while keeping the selected capability filter", async () => {

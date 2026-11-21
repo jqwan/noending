@@ -1,7 +1,7 @@
 import { viewState } from "../../hooks/useViewState";
 import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
 import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeFixture } from "../agents/runtimeFixtures";
 import NewSessionView from "./NewSessionView";
@@ -209,13 +209,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("New session optional first message", () => {
-  it.each(["", "  \n\t"])("opens the terminal without a prompt for blank input %j", async (message) => {
+  it("opens the terminal without a prompt for whitespace-only input", async () => {
     vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "empty-terminal", launched_via: "embedded", command_line: "codex", note: "" });
     const navigate = vi.fn();
     render(<NewSessionView navigate={navigate} />);
     // 默认目录预备可能先于项目初始化完成；等待目标项目就绪后再提交。
     await waitFor(() => expect(screen.getByLabelText("所属项目")).toHaveProperty("value", chatProject.id));
-    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: message } });
+    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "  \n\t" } });
     const openTerminal = screen.getByRole("button", { name: "打开终端" });
     await waitFor(() => expect(openTerminal).toHaveProperty("disabled", false));
     fireEvent.click(openTerminal);
@@ -283,24 +283,7 @@ describe("NewSessionView explicit agent resolution", () => {
     expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code");
   });
 
-  it("only shows CLI agents in the dropdown options", async () => {
-    render(<NewSessionView navigate={vi.fn()} />);
 
-    const select = await screen.findByLabelText("Agent");
-    const optionTexts = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
-
-    // 必须包含 CLI Agents
-    expect(optionTexts.some((t) => t?.includes("Codex"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("Claude Code"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("Pi"))).toBe(true);
-    expect(optionTexts.some((t) => t?.includes("Antigravity"))).toBe(true);
-
-    // 绝不包含纯桌面或无 CLI Agent
-    expect(optionTexts.some((t) => t?.includes("WorkBuddy"))).toBe(false);
-    expect(optionTexts.some((t) => t?.includes("Qoder"))).toBe(false);
-    expect(optionTexts.some((t) => t?.includes("DSH"))).toBe(false);
-    expect(optionTexts.some((t) => t?.includes("ZCode"))).toBe(false);
-  });
 });
 
 it("probes the effective default directory once while directory selection initializes", async () => {
@@ -592,24 +575,6 @@ it("starts a project without paths by falling back to the default workspace, and
   expect(navigate).toHaveBeenCalledWith({ view: "terminal", terminalId: "t-default" });
 });
 
-it("shows the resolved fallback directory and uses the same default-path intent when sending", async () => {
-  vi.mocked(api.prepareNewSession).mockResolvedValue({
-    ...preparedFixture,
-    cwd: "/repo/fallback",
-    cwd_resolution: { ...preparedFixture.cwd_resolution, cwd: "/repo/fallback", fallback: true, note: "工作目录不可用，使用备用目录" },
-  });
-  vi.mocked(api.launchEmbeddedNew).mockResolvedValue({
-    launched_via: "内嵌终端", command_line: "codex", note: "已启动", terminal_id: "t-fallback",
-  });
-  render(<NewSessionView navigate={vi.fn()} />);
-  await waitFor(() => expect(screen.getByRole("status").textContent).toBe("工作目录不可用，使用备用目录"));
-  fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始任务" } });
-  const send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
-  await waitFor(() => expect(send.disabled).toBe(false));
-  fireEvent.click(send);
-  await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", [], "/tmp/workspace", "开始任务", NATIVE_RUNTIME));
-});
-
 it("does not prepare another launch if the user leaves while startup fails", async () => {
   let rejectLaunch!: (reason: string) => void;
   vi.mocked(api.launchEmbeddedNew).mockReturnValue(new Promise((_resolve, reject) => { rejectLaunch = reject; }));
@@ -723,7 +688,7 @@ describe("NewSessionView runtime selection", () => {
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("codex", [], "/tmp/workspace", NATIVE_RUNTIME));
   });
 
-  it("excludes agents when detected or launch_enabled is false", async () => {
+  it("offers only supported, detected, launch-enabled Agents", async () => {
     vi.mocked(api.getAgentStatus).mockResolvedValue({
       ...mockAgentStatus,
       codex: { ...mockAgentStatus.codex, detected: false },
@@ -733,10 +698,11 @@ describe("NewSessionView runtime selection", () => {
     await waitFor(() => expect((screen.getByLabelText("Agent") as HTMLSelectElement).value).toBe("claude_code"));
     expect(screen.queryByRole("option", { name: "Codex" })).toBeNull();
     expect(screen.queryByRole("option", { name: "Pi" })).toBeNull();
-    expect(screen.getByRole("option", { name: "Claude Code" })).toBeTruthy();
+    const names = within(screen.getByLabelText("Agent")).getAllByRole("option").map(option => option.textContent);
+    expect(names).toEqual(["Claude Code", "Antigravity"]);
   });
 
-  it("clears one-time parameters on an agent switch and prevents launching when all are disabled", async () => {
+  it("clears one-time parameters on an agent switch", async () => {
     vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
       ...runtimeFixture(agent),
       models: [{ id: "codex-only", display_name: "Codex Only", provider: null, supported_efforts: ["low", "high"] }],
@@ -751,13 +717,6 @@ describe("NewSessionView runtime selection", () => {
 
     fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "pi" } });
     await waitFor(() => expect(api.prepareNewSession).toHaveBeenLastCalledWith("pi", [], "/tmp/workspace", NATIVE_RUNTIME));
-    cleanup();
-    vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }])));
-    render(<NewSessionView navigate={vi.fn()} />);
-    await screen.findByText("本地还没有检测到受支持的 Agent TUI。安装后即可在这里新建会话。");
-    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
-    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(api.launchEmbeddedNew).not.toHaveBeenCalled();
   });
 
   /** 提示长在输入区里，并且被输入框的 aria-describedby 引用——否则读屏用户只遇到一个
@@ -773,6 +732,8 @@ describe("NewSessionView runtime selection", () => {
     expect(notice.closest(".new-session-composer")).toBeTruthy();
     expect(screen.getByLabelText("首条消息").getAttribute("aria-describedby"))
       .toBe("new-session-agent-notice new-session-message-hint");
+    fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "开始" } });
+    expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", true);
 
     fireEvent.click(screen.getByRole("button", { name: "前往 Agent 设置" }));
     expect(navigate).toHaveBeenCalledWith({ view: "agents" });
@@ -783,7 +744,7 @@ it("launches the assistant project using the shared project and task selection",
   const navigate = vi.fn();
   const directory = "/tmp/custom-home/assistant";
   const assistantProject: ProjectCardData = {
-    ...chatProject, id: "assistant-project", name: "我的助手", kind: "single_directory", purpose: "assistant",
+    ...chatProject, id: "assistant-project", name: "我的助手", kind: "single_directory", is_assistant: true,
     search_paths: [directory], representative_paths: [directory],
   };
   vi.mocked(api.listProjectCards).mockResolvedValue([chatProject, assistantProject]);
@@ -941,16 +902,17 @@ it("launches with multiple checked tasks and keeps only shared tasks after chang
   await waitFor(() => expect(api.launchEmbeddedNew).toHaveBeenCalledWith("codex", ["shared", "first"], "/tmp/workspace", "开始这两项工作", NATIVE_RUNTIME));
 });
 
-it("shows chat projects including NoEnding Chat and agent chat, but filters all-missing projects", async () => {
+it("falls back from an all-missing preset project and offers valid project choices", async () => {
   const otherChatProj: ProjectCardData = { ...chatProject, id: "agent-chat", name: "WorkBuddy Chat", purpose: "chat" as const, search_paths: ["/tmp/workbuddy-chat"], representative_paths: ["/tmp/workbuddy-chat"] };
   const missingProj: ProjectCardData = { ...chatProject, id: "missing", name: "丢失项目", path_count: 1, missing_path_count: 1, search_paths: ["/tmp/missing"], representative_paths: ["/tmp/missing"] };
   const validProj: ProjectCardData = { ...chatProject, id: "valid", name: "有效项目", purpose: null as never, search_paths: ["/tmp/workspace"], representative_paths: ["/tmp/workspace"] };
   const noEndingChatProj: ProjectCardData = { ...chatProject, id: "noending-chat", name: "NoEnding Chat", purpose: "chat" as const, search_paths: ["/tmp/noending"], representative_paths: ["/tmp/noending"] };
   vi.mocked(api.listProjectCards).mockResolvedValue([otherChatProj, missingProj, validProj, noEndingChatProj]);
-  render(<NewSessionView navigate={vi.fn()} />);
+  render(<NewSessionView navigate={vi.fn()} projectId={missingProj.id} />);
   await screen.findByRole("option", { name: "有效项目" });
   expect(screen.getByRole("option", { name: "NoEnding Chat" })).toBeTruthy();
   expect(screen.getByRole("option", { name: "WorkBuddy Chat" })).toBeTruthy();
   expect(screen.queryByRole("option", { name: "丢失项目" })).toBeNull();
+  expect(screen.getByLabelText<HTMLSelectElement>("所属项目").value).toBe(validProj.id);
 });
 

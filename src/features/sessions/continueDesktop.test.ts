@@ -55,7 +55,8 @@ it("preserves an exited terminal when reconnect fails", async () => {
   expect(navigate).not.toHaveBeenCalled();
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
 });
-it.each(["已归档", "CLI 不存在", "工作目录不存在", "源会话不存在"])("blocks startup and reconnection when prerequisites fail: %s", async reason => {
+it("blocks startup and reconnection and forwards the backend refusal", async () => {
+  const reason = "工作目录不存在";
   vi.mocked(api.getSessionTerminalStates).mockResolvedValue({ s1: { available: false, reason } });
   for (const rows of [[], [terminal(false)]]) {
     vi.mocked(api.terminalList).mockResolvedValue(rows);

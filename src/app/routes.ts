@@ -25,6 +25,9 @@ export type SessionEntry = "conversation";
 /** 任务详情的子页：详情与协作室共用标题栏，省略即详情。 */
 export type WorkstreamEntry = "detail" | "collaboration";
 
+/** 智能体项目的子页，省略即项目详情。 */
+export type ProjectEntry = "assistant";
+
 export type Route =
   | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
@@ -44,15 +47,13 @@ export type Route =
    *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），
    *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
   | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
-  | { view: "assistants"; action?: ViewAction; scope?: "unarchived" | "archived" | "all" }
-  | { view: "assistant"; assistantId: string; initialTitle?: string; entry?: "detail" | "sessions" }
   | { view: "agents"; agent?: Agent }
   | { view: "skills"; projectId?: string }
   | { view: "skill"; resourceId: string; initialTitle?: string; projectId?: string; workspacePathId?: string }
   | { view: "packages" }
   | { view: "package"; packageId: string; initialTitle?: string; agent?: Agent }
-  | { view: "projects"; scope?: "unarchived" | "archived" }
-  | { view: "project"; projectId: string; initialTitle?: string }
+  | { view: "projects"; scope?: "unarchived" | "archived"; assistantOnly?: boolean }
+  | { view: "project"; projectId: string; initialTitle?: string; entry?: ProjectEntry; fromAssistants?: boolean }
   | { view: "settings"; section?: SettingsSection | LegacySettingsSection };
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */

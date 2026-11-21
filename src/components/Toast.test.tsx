@@ -28,26 +28,21 @@ describe("Toast", () => {
     expect(onClick).toHaveBeenCalledOnce();
   });
 
-  it("deduplicates identical toasts without stacking duplicate elements", () => {
-    render(<ToastHost />);
-
-    act(() => {
-      showToast("已复制到剪贴板");
-      showToast("已复制到剪贴板");
-      showToast("已复制到剪贴板");
-    });
-
-    const elements = screen.getAllByText("已复制到剪贴板");
-    expect(elements).toHaveLength(1);
-  });
-
-  it("automatically removes toast after 5000ms", () => {
+  it("shows one copy of a repeated toast and dismisses it after the latest occurrence", () => {
     render(<ToastHost />);
 
     act(() => {
       showToast("已复制到剪贴板");
     });
-    expect(screen.getByText("已复制到剪贴板")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    act(() => {
+      showToast("已复制到剪贴板");
+    });
+    expect(screen.getAllByText("已复制到剪贴板")).toHaveLength(1);
 
     act(() => {
       vi.advanceTimersByTime(4999);
@@ -56,36 +51,6 @@ describe("Toast", () => {
 
     act(() => {
       vi.advanceTimersByTime(1);
-    });
-    expect(screen.queryByText("已复制到剪贴板")).toBeNull();
-  });
-
-  it("resets auto-dismiss timer when duplicate toast is triggered", () => {
-    render(<ToastHost />);
-
-    act(() => {
-      showToast("已复制到剪贴板");
-    });
-
-    // Advance 3000ms
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
-
-    // Retrigger same toast, timer should reset to 5000ms
-    act(() => {
-      showToast("已复制到剪贴板");
-    });
-
-    // Another 3000ms passes (total 6000ms since first call, but only 3000ms since retrigger)
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
-    expect(screen.getByText("已复制到剪贴板")).toBeTruthy();
-
-    // Remaining 2000ms passes
-    act(() => {
-      vi.advanceTimersByTime(2000);
     });
     expect(screen.queryByText("已复制到剪贴板")).toBeNull();
   });

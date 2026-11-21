@@ -79,6 +79,7 @@
   pointer-events: none;
 }
 .picker-control select:disabled {
+  opacity: 0;
   cursor: default;
 }
 .picker-control:has(:disabled) {

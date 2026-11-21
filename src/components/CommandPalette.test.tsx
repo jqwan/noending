@@ -19,16 +19,18 @@ const cases: { entry: NavigationItem; route: Route }[] = [
   { entry: item({ kind: "session", ref_id: "s", title: "Conversation", hint: "/repo" }), route: { view: "session", sessionId: "s", initialTitle: "Conversation", initialAgent: "codex" } },
   { entry: item({ kind: "skill", ref_id: "review", title: "Review Skill", hint: "Code review helper", agent: null }), route: { view: "skill", resourceId: "review", initialTitle: "Review Skill" } },
 ];
-it.each(cases)("opens the corresponding detail for $entry.kind", async ({ entry, route }) => {
-  vi.mocked(api.lookupNavigation).mockResolvedValue({ items: [entry], has_more: false });
+it("opens the appropriate detail for each kind in a mixed result list", async () => {
+  vi.mocked(api.lookupNavigation).mockResolvedValue({ items: cases.map(({ entry }) => entry), has_more: false });
   const navigate = vi.fn();
   const onClose = vi.fn();
   render(<CommandPalette navigate={navigate} onClose={onClose} />);
-  const option = await screen.findByRole("option", { name: new RegExp(entry.title) });
-  if (entry.archived) expect(screen.getByText("已归档")).toBeTruthy();
-  fireEvent.click(option);
-  expect(navigate).toHaveBeenCalledWith(route);
-  expect(onClose).toHaveBeenCalledTimes(1);
+  await screen.findByRole("option", { name: /Codex/ });
+  expect(screen.getByText("已归档")).toBeTruthy();
+  for (const { entry, route } of cases) {
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(entry.title) }));
+    expect(navigate).toHaveBeenLastCalledWith(route);
+  }
+  expect(onClose).toHaveBeenCalledTimes(cases.length);
 });
 
 it("discards superseded lookup responses and never opens a stale result while typing", async () => {

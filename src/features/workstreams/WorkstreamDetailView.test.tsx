@@ -209,7 +209,7 @@ it("renders the returned task sessions and navigates to the selected session", a
   expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
 });
 
-it("opens the 新建任务 form, prefilled with the current task", async () => {
+it("prefills the edit form with the current task and its linked project", async () => {
   await renderDetail();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "编辑任务" })); });
 
@@ -244,11 +244,6 @@ it("shows 更新摘要 with the pending collaboration message count and calls th
   await waitFor(() => expect(api.updateWorkstreamContext).toHaveBeenCalledWith("w1"));
 });
 
-it("hides 更新摘要 when the Context is already up to date", async () => {
-  await renderDetail();
-  expect(screen.queryByRole("button", { name: "更新摘要" })).toBeNull();
-});
-
 it("offers a copyable operation id after a structured Context update failure", async () => {
   vi.mocked(api.getWorkstreamContext).mockResolvedValue(context());
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_messages: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, }));
@@ -275,8 +270,12 @@ it("offers a copyable operation id after a structured Context update failure", a
 it("renders structured topics and regenerates through the separate action even when up to date", async () => {
   vi.mocked(api.regenerateWorkstreamContext).mockResolvedValue({ workstream_id: "w1", status: "updated", context_revision: 2, processed_through_seq: 1, remaining_pending: 0 });
   await renderDetail();
-  expect(screen.getByText("当前进展").tagName).toBe("STRONG");
-  fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
+  const summary = within(screen.getByRole("heading", { name: /协作摘要/ }).closest("section")!);
+  expect(summary.getByText("当前进展")).toBeTruthy();
+  expect(summary.getByRole("button", { name: "复制摘要" })).toBeTruthy();
+  expect(summary.queryByRole("button", { name: /编辑事项|新增事项|删除事项|更新摘要/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "新增事项" })).toBeTruthy();
+  fireEvent.click(summary.getByRole("button", { name: "重新生成" }));
   await waitFor(() => expect(api.regenerateWorkstreamContext).toHaveBeenCalledWith("w1"));
   expect(api.updateWorkstreamContext).not.toHaveBeenCalled();
 });
@@ -336,16 +335,6 @@ it("allows associating projects directly from task detail page", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "确定" }));
   await waitFor(() => expect(api.setWorkstreamProjects).toHaveBeenCalledWith("w1", ["pr", "p2"]));
   expect(screen.queryByRole("dialog", { name: "选择关联项目" })).toBeNull();
-});
-
-it("keeps the task summary readable while execution items remain separate", async () => {
-  await renderDetail();
-  const section = screen.getByRole("heading", {name:/协作摘要（1）/}).closest("section")!;
-  within(section).getByText("当前进展");
-  within(section).getByRole("button", {name:"复制摘要"});
-  within(section).getByRole("button", {name:"重新生成"});
-  expect(within(section).queryByRole("button", {name:/编辑事项|新增事项|删除事项/})).toBeNull();
-  screen.getByRole("button", {name:"新增事项"});
 });
 
 it("lets unrelated sessions be removed while active collaboration members remain linked", async () => {
