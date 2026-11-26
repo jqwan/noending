@@ -19,8 +19,12 @@ impl Fixture {
                    ('a','codex','na','jsonl','/a'),('b','codex','nb','jsonl','/b'),
                    ('c','codex','nc','jsonl','/c'),('x','codex','nx','jsonl','/x'),
                    ('archived','codex','narch','jsonl','/arch');
-                 INSERT INTO session_workstreams(session_id,workstream_id) VALUES
-                   ('a','t'),('b','t'),('c','t'),('archived','t');
+                 INSERT INTO projects(id,name,created_at,updated_at) VALUES ('p1','First','now','now'),('p2','Second','now','now'),('outside','Outside','now','now');
+                 INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('w1','/first','p1'),('w2','/second','p2'),('w3','/outside','outside');
+                 UPDATE sessions SET workspace_path_id='w1' WHERE id IN ('a','archived');
+                 UPDATE sessions SET workspace_path_id='w2' WHERE id IN ('b','c');
+                 UPDATE sessions SET workspace_path_id='w3' WHERE id='x';
+                 INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('t','p1'),('t','p2');
                  UPDATE sessions SET archived_at='2026-01-01T00:00:00Z' WHERE id='archived';",
             )
             .unwrap();
@@ -509,17 +513,44 @@ fn ack_tracks_positions_per_member_and_rejects_out_of_range_or_backward() {
 fn candidate_sessions_are_task_scoped_stably_paged_and_include_archived() {
     let f = Fixture::new();
     let db = f.db();
-    let first = db.collaboration_candidate_sessions("t", None, 2).unwrap();
+    let first = db
+        .collaboration_candidate_sessions("t", None, 2, None, None)
+        .unwrap();
     assert_eq!(first.items, vec!["a", "archived"]);
-    assert_eq!(first.next_cursor.as_deref(), Some("archived"));
+    assert!(first.next_cursor.is_some());
     let second = db
-        .collaboration_candidate_sessions("t", first.next_cursor.as_deref(), 2)
+        .collaboration_candidate_sessions("t", first.next_cursor.as_deref(), 2, None, None)
         .unwrap();
     // Archived sessions stay listed so the UI can grey them out with a reason.
     assert_eq!(second.items, vec!["b", "c"]);
     assert!(second.next_cursor.is_none());
+    db.write().execute_batch(
+        "UPDATE sessions SET title='Release review', last_activity_at='2026-10-09' WHERE id='c';
+         UPDATE sessions SET title='Release plan', last_activity_at='2026-10-08' WHERE id='a';
+         UPDATE sessions SET title='Release outside', last_activity_at='2026-10-10' WHERE id='x';"
+    ).unwrap();
+    let matches = db
+        .collaboration_candidate_sessions("t", None, 1, None, Some("RELEASE"))
+        .unwrap();
+    assert_eq!(matches.items, ["c"]);
+    let following = db
+        .collaboration_candidate_sessions(
+            "t",
+            matches.next_cursor.as_deref(),
+            1,
+            None,
+            Some("RELEASE"),
+        )
+        .unwrap();
+    assert_eq!(following.items, ["a"]);
+    assert!(following.next_cursor.is_none());
+    let project = db
+        .collaboration_candidate_sessions("t", None, 10, Some("p2"), Some("codex"))
+        .unwrap();
+    assert_eq!(project.items, ["c", "b"]);
+
     let unrelated = db
-        .collaboration_candidate_sessions("missing", None, 10)
+        .collaboration_candidate_sessions("missing", None, 10, None, None)
         .unwrap();
     assert!(unrelated.items.is_empty());
 }
@@ -592,7 +623,7 @@ fn start_rejects_a_request_id_reused_for_a_different_configuration() {
     db.write()
         .execute_batch(
             "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('t2','第二任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','t2'),('b','t2');",
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('t2','p1'),('t2','p2');",
         )
         .unwrap();
     let conflict = db
@@ -1201,52 +1232,73 @@ fn clearing_a_pending_coordinator_activates_ready_members_and_rejects_stale_run_
 }
 
 #[test]
-fn active_run_members_cannot_be_unlinked_until_the_run_stops() {
+fn changing_projects_keeps_the_current_run_and_changes_the_next_run_candidates() {
+    use noending_lib::workspace::workstream::set_workstream_projects;
+
     let f = Fixture::new();
     let db = f.db();
+    let members = Fixture::members("a", "b");
     let started = db
-        .collaboration_start(
-            "t",
-            &Fixture::members("a", "b"),
-            None,
-            None,
-            None,
-            "tracking-start",
-        )
+        .collaboration_start("t", &members, None, None, None, "start")
         .unwrap();
-    let room = &started.room.id;
-    let run = &started.run.id;
-    assert_eq!(started.run.status, "starting");
-    assert!(db
-        .set_session_tracking("a", "t", false)
-        .unwrap_err()
-        .to_string()
-        .contains("先停止协作"));
-    assert!(db
-        .sessions_for_workstream("t")
-        .unwrap()
-        .iter()
-        .any(|s| s.id == "a"));
+    set_workstream_projects(&db, "t", &["p2".into()]).unwrap();
+    let candidates = db
+        .collaboration_candidate_sessions("t", None, 10, None, None)
+        .unwrap();
+    assert_eq!(candidates.items, ["b", "c"]);
 
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
+    let room = &started.room.id;
+    let run = &started.run.id;
     db.collaboration_join(room, run, "a", "cli", "cli-a", &cutoff)
         .unwrap();
     db.collaboration_join(room, run, "b", "cli", "cli-b", &cutoff)
         .unwrap();
-    assert!(db.set_session_tracking("b", "t", false).is_err());
-    // Non-members and links to a different task remain removable.
-    db.set_session_tracking("c", "t", false).unwrap();
-    db.write().execute_batch("INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('other','其他任务','2026-01-01','2026-01-01'); INSERT INTO session_workstreams(session_id,workstream_id) VALUES('a','other');").unwrap();
-    db.set_session_tracking("a", "other", false).unwrap();
-    assert!(db.sessions_for_workstream("other").unwrap().is_empty());
-    assert_eq!(db.sessions_for_workstream("t").unwrap().len(), 3);
+    assert_eq!(
+        db.collaboration_room_by_task("t")
+            .unwrap()
+            .unwrap()
+            .1
+            .unwrap()
+            .status,
+        "active"
+    );
 
-    db.collaboration_stop(room, run, None, "tracking-stop")
+    db.write()
+        .execute(
+            "UPDATE sessions SET title='First project session' WHERE id='a'",
+            [],
+        )
         .unwrap();
-    db.set_session_tracking("a", "t", false).unwrap();
-    assert!(!db
-        .sessions_for_workstream("t")
-        .unwrap()
+    let message = db
+        .collaboration_send(room, run, Some("a"), "Existing run report", "report")
+        .unwrap();
+
+    db.collaboration_stop(room, run, None, "stop").unwrap();
+    let error = db
+        .collaboration_start("t", &members, None, None, None, "restart")
+        .unwrap_err();
+    assert!(error.to_string().contains("不在任务关联项目中"));
+    assert!(db
+        .collaboration_start(
+            "t",
+            &Fixture::members("b", "c"),
+            None,
+            None,
+            None,
+            "restart-valid"
+        )
+        .is_ok());
+    let history = db
+        .collaboration_messages_page(room, Some(run), None, 10)
+        .unwrap();
+    let previous = history
+        .items
         .iter()
-        .any(|s| s.id == "a"));
+        .find(|item| item.id == message.id)
+        .unwrap();
+    assert_eq!(
+        previous.sender_title.as_deref(),
+        Some("First project session")
+    );
 }

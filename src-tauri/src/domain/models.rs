@@ -174,7 +174,7 @@ pub struct Workstream {
 
 pub mod workstream_visibility {
     pub const NORMAL: &str = "normal";
-    /// Archived tasks cannot be used to create sessions; other data stays live.
+    /// Archiving a task stops its active collaboration.
     pub const ARCHIVED: &str = "archived";
 }
 
@@ -284,15 +284,12 @@ pub struct Session {
     /// terminal binding and `resume`.
     pub root_agent_session_id: String,
     pub title: Option<String>,
-    /// Explicit task tracking, independent of project membership.
-    pub tracked_workstream_ids: Vec<Id>,
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
     /// When this Session is an independently continuable fork, the Logical
-    /// Session its source forked from. Lifecycle, tracking, Conversation and
-    /// Context stay fully independent of that source; this is a
-    /// provenance note; it does not control lifecycle or tracking.
+    /// Session its source forked from. Lifecycle, Conversation and
+    /// Context stay independent of that source.
     pub forked_from_session_id: Option<Id>,
     pub started_at: Option<String>,
     /// Last activity observed on the source.
@@ -349,7 +346,6 @@ pub struct SessionListItem {
     pub cwd: Option<String>,
     pub workspace_path_id: Option<Id>,
     pub project_id: Option<Id>,
-    pub tracked_workstream_ids: Vec<Id>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
     pub last_conversation_at: Option<String>,

@@ -157,8 +157,6 @@ struct List {
     kind: Kind,
     /// Project ID. Supported for sessions and tasks only.
     project: Option<String>,
-    /// Task ID. Supported for sessions only.
-    task: Option<String>,
     /// Agent identifier. Supported for sessions only; see agent_list.
     agent: Option<String>,
     #[serde(default)]
@@ -178,7 +176,6 @@ struct List {
 struct Search {
     query: String,
     project: Option<String>,
-    task: Option<String>,
     agent: Option<String>,
     #[serde(default)]
     scope: Scope,
@@ -374,13 +371,6 @@ struct TaskProjects {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Tracking {
-    task: String,
-    session: String,
-    tracked: bool,
-}
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct Archive {
     kind: Kind,
     id: String,
@@ -432,11 +422,11 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("freshness", "Read persisted source/session sync checks and summary coverage for an optional kind+id. pending_messages is null for rewritten or unknown history; zero only describes ingested messages. Does not scan or extract.", false, false, |p: Freshness| Command::Freshness {kind:p.kind,id:p.id}),
         Spec::new("agent_list", "Query local Agent CLI availability and extraction capabilities. Does not verify login or model access.", false, false, |_: Empty| Command::Agents),
         Spec::new("project_resolve", "Resolve an existing absolute directory to a registered project, without registration or synchronization. Always pass the target path explicitly.", false, false, |p: Directory| Command::ResolveProject { path:p.path }),
-        Spec::new("session_resolve", "Resolve an exact Agent + native session/thread ID to an ingested NoEnding Session, including archived sessions. Returns id (NoEnding ID), native_id and session metadata including project_id and task_ids. Independent of the desktop app; does not scan, sync or launch. Returns not_found when absent from this Home. Use caller-provided native identity, never the MCP server's own session/environment or a rollout version ID. Only use the resolved id for NoEnding operations and from_session.", false, false, |p: NativeSession| Command::ResolveSession {agent:p.agent,native_id:p.native_id}),
-        Spec::new("object_list", "List sessions, tasks or projects with filters and pagination. Returns metadata; read summaries separately.", false, false, |p: List| Command::List {kind:p.kind,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,title:p.title,path:p.path,cursor:p.cursor,limit:p.limit}),
+        Spec::new("session_resolve", "Resolve an exact Agent + native session/thread ID to an ingested NoEnding Session, including archived sessions. Returns id (NoEnding ID), native_id and session metadata including project_id. Independent of the desktop app; does not scan, sync or launch. Returns not_found when absent from this Home. Use caller-provided native identity, never the MCP server's own session/environment or a rollout version ID. Only use the resolved id for NoEnding operations and from_session.", false, false, |p: NativeSession| Command::ResolveSession {agent:p.agent,native_id:p.native_id}),
+        Spec::new("object_list", "List sessions, tasks or projects with filters and pagination. Returns metadata; read summaries separately.", false, false, |p: List| Command::List {kind:p.kind,project:p.project,scope:p.scope.name(),agent:p.agent,title:p.title,path:p.path,cursor:p.cursor,limit:p.limit}),
         Spec::new("object_get", "Read one session, task or project by NoEnding ID. Project details include paths; task details include associated projects.", false, false, |p: Target| Command::Show {kind:p.kind,id:p.id}),
         Spec::new("session_terminals", "List desktop terminals and exact identity revisions, lifecycle state and queue status. Requires the desktop app running on this Home; does not launch or send.", false, false, |p: SessionTerminals| Command::SessionControl {command: crate::session_control::ControlCommand::List {session:p.session}}),
-        Spec::new("session_start", "Start a new embedded Agent session. Use cwd to specify the working directory. Requires the desktop app on this Home. Messages over 2000 UTF-16 units use a private UTF-8 text file. Returns terminal ID with pending binding, not a fabricated session ID. Optional tasks are tracked after native binding. Initial text is an ordinary startup prompt; subsequent cross-session messages use mailbox_send.", true, true, |p: crate::session_control::StartSession| Command::SessionControl {command: crate::session_control::ControlCommand::Start(p)}),
+        Spec::new("session_start", "Start a new embedded Agent session. Use cwd to specify the working directory. Requires the desktop app on this Home. Messages over 2000 UTF-16 units use a private UTF-8 text file. Returns terminal ID with pending binding, not a fabricated session ID. Initial text is an ordinary startup prompt; subsequent cross-session messages use mailbox_send.", true, true, |p: crate::session_control::StartSession| Command::SessionControl {command: crate::session_control::ControlCommand::Start(p)}),
         Spec::new("mailbox_list", "List a Session mailbox. Reading never marks messages read. Persistent; works without desktop. Use next_cursor for more pages.",false,false,Command::MailboxList),
         Spec::new("mailbox_read", "Read one persistent mailbox message and its revision. Does not change read state. Sender is user when sender_session_id is null; otherwise reply to that Session only within authorized collaboration.",false,false,Command::MailboxRead),
         Spec::new("mailbox_send", "Persist a message in another Session mailbox. Requires explicit from_session with a valid sender Session ID, including embedded terminals; never user/external. Inherited terminal identity overrides the supplied sender; external callers use the supplied existing Session ID. Success means stored, not read or completed; desktop may wake/remind independently. Optional notify_immediately (default false) requests a merged mailbox reminder using the same native steering shortcut as manual reminders. Requires user-enabled automatic notifications and Idle/Completed/Unknown/Working; Waiting is excluded, Interrupted/Failed disable automatic notifications. Unknown permits best-effort notification but does not prove chat input readiness. Never changes mailbox message order or selects a particular message.",true,false,Command::MailboxSend),
@@ -447,11 +437,11 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("room_join", "Join a collaboration run as your own member session and establish the participation lease (renewed automatically for MCP across wait requests; CLI spawns a resident listener). Returns role, processing start position and the beat cadence. Re-joining replaces the previous connection; only the current run accepts joins.", true, false, |p: RoomJoin| Command::RoomJoin {room:p.room,run:p.run,from_session:p.from_session,holder:"mcp".to_string()}),
         Spec::new("room_wait", "Wait for your unread batch in the collaboration run (join first). Returns immediately when unread exists (status=messages, forward next_cursor continues the batch); otherwise keeps waiting server-side with no periodic empty output until new mail, cancellation, the run stopping (status=stopped) or timeout_seconds elapsing (status=timeout). Entry marks you listening; the delivered batch marks you processing. Never auto-acknowledges; page on with room_messages and ack the handled position.", false, false, |p: RoomWait| Command::RoomWait {room:p.room,run:p.run,from_session:p.from_session,timeout_seconds:p.timeout_seconds,limit:p.limit}),
         Spec::new("room_ack", "Acknowledge your processed position through one per-room seq after handling the batch. Forward-only within the current run; does not change your phase. Requires an earlier room_join.", true, false, |p: RoomAck| Command::RoomAck {room:p.room,run:p.run,from_session:p.from_session,through_seq:p.through_seq}),
-        Spec::new("room_leave", "End your own participation in this run's room. Idempotent, allowed on a stopped run, never touches other runs. Does not untrack the task.", true, false, |p: RoomLeave| Command::RoomLeave {room:p.room,run:p.run,from_session:p.from_session}),
+        Spec::new("room_leave", "End your own participation in this run's room. Idempotent, allowed on a stopped run, never touches other runs.", true, false, |p: RoomLeave| Command::RoomLeave {room:p.room,run:p.run,from_session:p.from_session}),
         Spec::new("room_send", "Send one message to a collaboration room's current run as your own member session (from_session follows the mailbox rules; terminal binding wins). Only run members may write. The run must not be stopped; retries reuse the request envelope.", true, false, Command::RoomSend),
         Spec::new("room_stop", "Stop a collaboration run. Only the room's current coordinator session may call this; the desktop user always can. Appends a stop notice with the real initiator and ends every waiter.", true, false, Command::RoomStop),
         Spec::new("mailbox_wait", "Wait for unread mail in one mailbox instead of re-polling mailbox_list. Returns immediately when unread mail exists with the mailbox_list page contract plus status=messages; otherwise keeps waiting server-side with no periodic empty output until unread mail arrives, the request is cancelled or the connection drops, the recipient session is deleted (not_found), or the optional timeout_seconds (default none) elapses with status=timeout. Never marks anything read; continue paging with mailbox_list next_cursor and mark with mailbox_mark. Works across processes and without the desktop app. Host tool timeouts are client limits: pass a timeout_seconds that fits the host, treat status=timeout as keep-waiting, and call again.",false,false,Command::MailboxWait),
-        Spec::new("session_search", "Search ingested session titles and message bodies. Returns evidence locations; use session_messages for full text and context.", false, false, |p: Search| Command::Search {query:p.query,project:p.project,task:p.task,scope:p.scope.name(),agent:p.agent,cursor:p.cursor,limit:p.limit}),
+        Spec::new("session_search", "Search ingested session titles and message bodies. Returns evidence locations; use session_messages for full text and context.", false, false, |p: Search| Command::Search {query:p.query,project:p.project,scope:p.scope.name(),agent:p.agent,cursor:p.cursor,limit:p.limit}),
         Spec::new("session_messages", "Read the newest page of stored session messages, ordered oldest to newest within the page. Pass only id and cursor for the next page. Use from/to for an inclusive ordinal range, query for matching snippets, or content_cursor to continue one long message. Does not synchronize source files.", false, false, |p: messages::Request| Command::Messages(p)),
         Spec::new("summary_get", "Read a structured summary and its revision, or one item using item_id (preferred) or item plus revision. Does not trigger extraction.", false, false, |p: Summary| Command::Summary {kind:p.kind,id:p.id,item:p.item,item_id:p.item_id,revision:p.revision}),
         Spec::new("summary_search", "Search summary items across sessions, tasks and projects. Results include kind, object ID, item number and revision for summary_get.", false, false, |p: SummarySearch| Command::SearchSummaries {query:p.query,kind:p.kind.map(|k| serde_json::to_value(k).unwrap().as_str().unwrap().to_owned()),project:p.project,scope:p.scope.name(),cursor:p.cursor,limit:p.limit}),
@@ -467,7 +457,6 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("task_create", "Create a task with optional description and project associations. Does not launch a session.", true, false, |p: TaskCreate| Command::CreateTask {title:p.title,description:p.description,projects:p.projects}),
         Spec::new("task_update", "Edit a task title or description. Supply at least one field; omitted fields are preserved.", true, false, |p: TaskUpdate| Command::UpdateTask {id:p.id,title:p.title,description:p.description}),
         Spec::new("task_projects_set", "Replace all project associations of a task. An empty projects list removes all associations.", true, false, |p: TaskProjects| Command::SetTaskProjects {id:p.id,projects:p.projects}),
-        Spec::new("task_session_set", "Enable or disable a task's tracking of an existing session. Does not launch or message an Agent.", true, false, |p: Tracking| if p.tracked { Command::Attach {task:p.task,session:p.session} } else { Command::Detach {task:p.task,session:p.session} }),
         Spec::new("object_archive", "Archive or restore a session, task or project. Does not permanently delete it.", true, false, |p: Archive| Command::Archive {kind:p.kind,id:p.id,archived:p.archived}),
         Spec::new("project_rename", "Rename a registered project without moving its directories.", true, false, |p: Rename| Command::RenameProject {id:p.id,name:p.name}),
         Spec::new("path_register", "Register an existing absolute workspace directory and resolve/create its project using NoEnding's workspace rules.", true, false, |p: Directory| Command::RegisterPath {path:p.path}),

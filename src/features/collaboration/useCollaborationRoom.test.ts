@@ -40,6 +40,7 @@ const message = (seq: number, patch: Partial<CollaborationMessage> = {}): Collab
   run_id: "run",
   seq,
   sender_session_id: "s1",
+  sender_title: "会话一",
   body: `body ${seq}`,
   kind: "text",
   created_at: `2026-10-27T03:${String(seq).padStart(2, "0")}:00Z`,

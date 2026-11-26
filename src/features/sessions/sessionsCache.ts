@@ -5,7 +5,6 @@ export interface SessionsCache {
   archivedSessions: SessionListItem[] | null;
   projects: Project[];
   sources: IngestSource[] | null;
-  workstreamTitleById: Map<string, string>;
 }
 
 export const sessionsCache: SessionsCache = {
@@ -13,7 +12,6 @@ export const sessionsCache: SessionsCache = {
   archivedSessions: null,
   projects: [],
   sources: null,
-  workstreamTitleById: new Map(),
 };
 
 export function clearSessionsCache() {
@@ -21,5 +19,4 @@ export function clearSessionsCache() {
   sessionsCache.archivedSessions = null;
   sessionsCache.projects = [];
   sessionsCache.sources = null;
-  sessionsCache.workstreamTitleById = new Map();
 }

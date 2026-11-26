@@ -23,24 +23,20 @@ import {
   type AgentRuntimeOverrides,
   type PreparedLaunch,
   type ProjectCardData,
-  type WorkstreamCardData,
 } from "../../types";
-import WorkstreamFormModal from "../workstreams/WorkstreamFormModal";
 import { isSelectableProject } from "../projects/projectKind";
 import PageHeader from "../../layout/PageHeader";
 
 /** 新会话页：预览启动目录，打开终端时可携带首条消息。 */
 export type NewSessionViewProps = {
-  /** 预置选中的跟踪任务；省略或 "none" = standalone。 */
-  workstreamId?: string | null;
   /** 单次指定 Agent，不修改全局默认设置。 */
   agent?: Agent | null;
   /** 预置选中的项目 ID；省略时恢复手动选择，首次使用选择默认工作目录所属项目。 */
   projectId?: string | null;
+  archivePathId?: string;
   navigate: (r: Route) => void;
 };
 
-const STANDALONE = "none";
 // Match the launcher's UTF-16 limit (String.length); keep long drafts intact.
 const INLINE_MESSAGE_LIMIT = 2000;
 
@@ -48,19 +44,15 @@ const INLINE_MESSAGE_LIMIT = 2000;
 const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
 
 export default function NewSessionView({
-  workstreamId,
   agent: initialAgent,
   projectId: initialProjectId,
+  archivePathId,
   navigate,
 }: NewSessionViewProps) {
   const allowedAgents = CLI_AGENTS;
   const [savedPreferences] = useState(readNewSessionPreferences);
   const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
-  const [workstreams, setWorkstreams] = useState<WorkstreamCardData[]>([]);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
-  const [trackedWorkstreamIds, setTrackedWorkstreamIds] = useState<string[]>(
-    workstreamId && workstreamId !== STANDALONE ? [workstreamId] : savedPreferences.workstreamIds
-  );
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
   );
@@ -81,15 +73,12 @@ export default function NewSessionView({
   const runtime = useAgentRuntime(selectedAgent, true);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showNewWorkstreamModal, setShowNewWorkstreamModal] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [dirMenuOpen, setDirMenuOpen] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const projectRef = useRef<HTMLDivElement>(null);
   const dirRef = useRef<HTMLDivElement>(null);
   const agentRef = useRef<HTMLDivElement>(null);
-  const taskRef = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const launching = useRef(false);
   const agentChanged = useRef(false);
@@ -97,11 +86,7 @@ export default function NewSessionView({
   const messageChanged = useRef(false);
   const [projectError, setProjectError] = useState("");
   const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
-
-  const selectWorkstreams = (next: string[]) => {
-    setTrackedWorkstreamIds(next);
-    updateNewSessionPreferences(current => ({ ...current, workstreamIds: next }));
-  };
+  const [archiveDirectory, setArchiveDirectory] = useState<string>();
 
   useEffect(() => {
     mounted.current = true;
@@ -109,7 +94,7 @@ export default function NewSessionView({
   }, []);
 
   useEffect(() => {
-    if (!projectMenuOpen && !dirMenuOpen && !agentMenuOpen && !taskMenuOpen) return;
+    if (!projectMenuOpen && !dirMenuOpen && !agentMenuOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (projectMenuOpen && !projectRef.current?.contains(e.target as Node)) {
         setProjectMenuOpen(false);
@@ -120,16 +105,12 @@ export default function NewSessionView({
       if (agentMenuOpen && !agentRef.current?.contains(e.target as Node)) {
         setAgentMenuOpen(false);
       }
-      if (taskMenuOpen && !taskRef.current?.contains(e.target as Node)) {
-        setTaskMenuOpen(false);
-      }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setProjectMenuOpen(false);
         setDirMenuOpen(false);
         setAgentMenuOpen(false);
-        setTaskMenuOpen(false);
       }
     };
     window.addEventListener("mousedown", handleClickOutside);
@@ -138,30 +119,37 @@ export default function NewSessionView({
       window.removeEventListener("mousedown", handleClickOutside);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [projectMenuOpen, dirMenuOpen, agentMenuOpen, taskMenuOpen]);
+  }, [projectMenuOpen, dirMenuOpen, agentMenuOpen]);
 
   useEffect(() => {
     let cancelled = false;
     setProjectError("");
-    void Promise.all([api.listWorkstreamCards(), api.listProjectCards(), api.getWorkspaceSettings()])
-      .then(async ([ws, cards, settings]) => {
+    if (archivePathId) setArchiveDirectory(undefined);
+    void Promise.all([
+      api.listProjectCards(),
+      archivePathId ? Promise.resolve(null) : api.getWorkspaceSettings(),
+      archivePathId && initialProjectId ? api.getProjectDetail(initialProjectId) : Promise.resolve(null),
+    ])
+      .then(async ([cards, settings, archiveProject]) => {
         if (cancelled) return;
         cards = cards.filter(p => p.visibility !== "archived");
         const preferences = readNewSessionPreferences();
-        const normal = ws.filter((w) => w.visibility === "normal");
-        const targetWs = normal.find((w) => w.id === workstreamId);
         const entryProject = cards.find(p => p.id === initialProjectId && isSelectableProject(p));
         let projectId = entryProject?.id ?? "";
         let defaultDir = "";
-        if (!projectId && targetWs?.projects.length) {
-          projectId = targetWs.projects[0].id;
+        if (archivePathId) {
+          const path = archiveProject?.workspace_paths.find(path => path.id === archivePathId && path.exists);
+          if (!entryProject || archiveProject?.project.visibility !== "normal"
+            || archiveProject.assistant?.workspace_path_id !== archivePathId || !path) {
+            throw new Error("智能体档案目录不可用，请先在详情页修复");
+          }
+          setArchiveDirectory(path.canonical_path);
         }
-        if (projectId && !cards.some(p => p.id === projectId)) projectId = "";
-        if (!projectId && initialProjectId !== "none" && (!workstreamId || workstreamId === STANDALONE)
+        if (!projectId && !archivePathId && initialProjectId !== "none"
           && cards.some(p => p.id === preferences.projectId && isSelectableProject(p))) {
           projectId = preferences.projectId;
         }
-        if (!projectId) {
+        if (!projectId && settings) {
           defaultDir = settings.default_workspace;
           // 使用目录身份而非名称；聊天项目可以改名或转为 Git 项目。
           projectId = cards.find((p) => [...p.search_paths, ...p.representative_paths].includes(defaultDir))?.id ?? "";
@@ -178,26 +166,14 @@ export default function NewSessionView({
         }
         if (cancelled) return;
         setProjects(cards);
-        setWorkstreams(normal);
-        const presetProject = Boolean(
-          entryProject
-          || (targetWs && targetWs.projects.some(p => p.id === projectId)),
-        );
-        // An entry preset must stay selected even when it belongs to another
-        // project, so the page can ask the user to pick one of its projects.
-        const presetWorkstreams = workstreamId && workstreamId !== STANDALONE ? [workstreamId] : null;
-        const tracked = presetWorkstreams ?? preferences.workstreamIds
-          .filter(id => normal.some(w => w.id === id && w.projects.some(p => p.id === projectId)));
         if (initialAgent && allowedAgents.includes(initialAgent) && !agentChanged.current) {
           updateNewSessionPreferences(current => ({ ...current, agent: initialAgent }));
         }
         if (!projectChanged.current) {
           setSelectedProjectId(projectId);
-          setTrackedWorkstreamIds(tracked);
           updateNewSessionPreferences(current => ({
             ...current,
-            workstreamIds: tracked,
-            projectId: presetProject ? projectId : current.projectId,
+            projectId: entryProject && !archivePathId ? projectId : current.projectId,
           }));
           const project = cards.find(p => p.id === projectId);
           const directories = project?.search_paths.length ? project.search_paths : (project?.representative_paths ?? []);
@@ -239,7 +215,7 @@ export default function NewSessionView({
         .catch(console.error);
     }
     return () => { cancelled = true; };
-  }, [initialAgent, workstreamId, initialProjectId, projectLoadAttempt]);
+  }, [initialAgent, initialProjectId, archivePathId, projectLoadAttempt]);
 
   const cliAgents = agentStatus
     ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
@@ -277,7 +253,7 @@ export default function NewSessionView({
   const [projectDetailPaths, setProjectDetailPaths] = useState<Record<string, { canonical_path: string; exists: boolean }[]>>({});
 
   useEffect(() => {
-    if (!selectedProjectId || !api.getProjectDetail) return;
+    if (archivePathId || !selectedProjectId || !api.getProjectDetail) return;
     let cancelled = false;
     api
       .getProjectDetail(selectedProjectId)
@@ -296,7 +272,7 @@ export default function NewSessionView({
     return () => {
       cancelled = true;
     };
-  }, [selectedProjectId]);
+  }, [archivePathId, selectedProjectId]);
 
   const projectDirs: string[] = useMemo(() => {
     if (!selectedProject) return [];
@@ -323,7 +299,8 @@ export default function NewSessionView({
     }
   }, [projectDirs, selectedDirPath]);
 
-  const probeTarget = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
+  const projectDirectory = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
+  const probeTarget = archivePathId ? undefined : projectDirectory;
   useEffect(() => {
     const target = probeTarget;
     if (!target || selectedProject?.kind === "git" || dirGitStates[target] !== undefined) return;
@@ -345,36 +322,24 @@ export default function NewSessionView({
     };
   }, [probeTarget, selectedProject?.kind, dirGitStates]);
 
-  const launchCwd = projectDirs.includes(selectedDirPath) ? selectedDirPath : projectDirs[0];
-
-  const canCreateTask = Boolean(selectedProject && isSelectableProject(selectedProject));
-  const availableTasks = workstreams.filter(task => task.visibility === "normal"
-    && task.projects.some(project => project.id === selectedProjectId));
-  const eligibleTask = trackedWorkstreamIds.every(id => availableTasks.some(w => w.id === id));
+  const launchCwd = archivePathId ? archiveDirectory : projectDirectory;
+  const archiveReady = !archivePathId || Boolean(archiveDirectory);
 
   // 没有目录不是错误：后端 `resolve_new_cwd` 会回落到 NoEnding 默认工作目录
   // （`CwdSource::DefaultWorkspace`，不存在时还有 `Unresolved`），并且这个决定本来就
   // 要向用户说明。前端再拦一道就等于否定了标签里那句「默认工作目录」——所以这里不拦。
   const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
-    if (!selectedAgent || !agentAvailable || !eligibleTask) return null;
-    return api.prepareNewSession(selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride);
-  }, [selectedAgent, trackedWorkstreamIds, launchCwd, runtimeOverride, agentAvailable, eligibleTask]);
+    if (!selectedAgent || !agentAvailable || !archiveReady) return null;
+    return api.prepareNewSession(selectedAgent, launchCwd, runtimeOverride);
+  }, [selectedAgent, launchCwd, runtimeOverride, agentAvailable, archiveReady]);
 
   const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
     usePreparedLaunch(prepareLaunch);
-
-  const toggleTask = (id: string) => {
-    releasePrepared();
-    selectWorkstreams(trackedWorkstreamIds.includes(id)
-      ? trackedWorkstreamIds.filter(task => task !== id)
-      : [...trackedWorkstreamIds, id]);
-  };
 
   const handleProjectChange = (next: string) => {
     if (next === selectedProjectId) return;
     projectChanged.current = true;
     setProjectError("");
-    setTaskMenuOpen(false);
     releasePrepared();
     setSelectedProjectId(next);
     // 用户亲手挑过之后，项目就不再是"默认"的了。
@@ -383,9 +348,7 @@ export default function NewSessionView({
     setSelectedDirPath(preferences.directories[next] ?? "");
     setMessage(preferences.drafts[next] ?? "");
     messageChanged.current = false;
-    const tracked = trackedWorkstreamIds.filter(id => workstreams.find(w => w.id === id)?.projects.some(p => p.id === next));
-    updateNewSessionPreferences(current => ({ ...current, projectId: next, workstreamIds: tracked }));
-    setTrackedWorkstreamIds(tracked);
+    updateNewSessionPreferences(current => ({ ...current, projectId: next }));
   };
 
   const handleDirChange = (next: string) => {
@@ -446,7 +409,7 @@ export default function NewSessionView({
   const hasMessage = Boolean(message.trim());
   const messageUsesFile = message.length > INLINE_MESSAGE_LIMIT;
   const launchLabel = hasMessage ? "发送" : "打开终端";
-  const canSend = Boolean(selectedAgent && agentAvailable && prepared && eligibleTask && !preparing && !busy);
+  const canSend = Boolean(selectedAgent && agentAvailable && archiveReady && prepared && !preparing && !busy);
 
   /** 这一发落在哪个目录，必须说出来。后端 `CwdResolution` 分四档并备好 note，
    *  但对 New 流程而言 `default_workspace` 那档 `fallback` 是 false、`note` 是空——
@@ -471,7 +434,7 @@ export default function NewSessionView({
     setBusy(true);
     setError("");
     try {
-      const r = await api.launchEmbeddedNew(selectedAgent, trackedWorkstreamIds, launchCwd, hasMessage ? message : undefined, runtimeOverride);
+      const r = await api.launchEmbeddedNew(selectedAgent, launchCwd, hasMessage ? message : undefined, runtimeOverride);
       announceLaunch("启动", r);
       if (r.terminal_id) {
         updateNewSessionPreferences(current => {
@@ -507,16 +470,6 @@ export default function NewSessionView({
 
   const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
 
-  // 任务数量没有上限，顶栏只显示摘要：没选=「任务」，选一个=标题，多个=计数。
-  const trackedTasks = availableTasks.filter(task => trackedWorkstreamIds.includes(task.id));
-  const taskLabel = trackedTasks.length === 0
-    ? "任务"
-    : trackedTasks.length === 1 ? trackedTasks[0].title : `任务 · ${trackedTasks.length}`;
-  const noTasks = "该项目下还没有跟踪任务";
-  const taskTitle = trackedTasks.length > 0
-    ? trackedTasks.map(task => task.title).join("、")
-    : availableTasks.length > 0 ? "选择跟踪任务" : noTasks;
-
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
       <PageHeader title="新建会话" icon={<Icon name="chatPlus" />} />
@@ -526,12 +479,21 @@ export default function NewSessionView({
           {/* 没选项目是合法起点（会话会落在默认工作目录），所以不能再拿「这里」填空——
               那读起来像指代不明。无项目时就直接问要做什么。 */}
           <h1 id="new-session-title">
-            {selectedProject ? `你想在 ${selectedProject.name} 中构建什么？` : "你想构建什么？"}
+            {selectedProject && archivePathId ? `你想和 ${selectedProject.name} 处理什么？`
+              : selectedProject ? `你想在 ${selectedProject.name} 中构建什么？` : "你想构建什么？"}
           </h1>
         </div>
 
         <form className="new-session-form" onSubmit={(e) => { e.preventDefault(); void start(); }}>
           <div className="new-session-context">
+            {archivePathId ? (
+              <div className="picker-control new-session-dir" title={archiveDirectory}>
+                <Icon name="folder" />
+                <span className="picker-control-label truncate">
+                  {archiveDirectory ? `档案目录 · ${dirLabel}` : "档案目录"}
+                </span>
+              </div>
+            ) : <>
             <div
               className={`picker-control new-session-project has-custom-menu${projectMenuOpen ? " open" : ""}`}
               ref={projectRef}
@@ -704,88 +666,8 @@ export default function NewSessionView({
                 </div>
               );
             })()}
+            </>}
 
-            <section className="new-session-tasks" aria-label="跟踪任务（可选）">
-              {/* 菜单必须挂在 role=button 外面：按钮的子节点对辅助技术是隐藏的，
-                  勾选框藏在里面键盘和读屏都够不到。 */}
-              <div className="new-session-task-picker" ref={taskRef}>
-                <div
-                  className={`picker-control has-custom-menu${taskMenuOpen ? " open" : ""}${trackedTasks.length > 0 ? " is-set" : ""}`}
-                  onClick={() => {
-                    if (busy) return;
-                    setTaskMenuOpen((v) => !v);
-                    setProjectMenuOpen(false);
-                    setDirMenuOpen(false);
-                    setAgentMenuOpen(false);
-                  }}
-                  onKeyDown={(e) => {
-                    if (busy) return;
-                    if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
-                      if (!taskMenuOpen) {
-                        e.preventDefault();
-                        setTaskMenuOpen(true);
-                        setProjectMenuOpen(false);
-                        setDirMenuOpen(false);
-                        setAgentMenuOpen(false);
-                      }
-                    }
-                  }}
-                  tabIndex={busy ? -1 : 0}
-                  role="button"
-                  aria-haspopup="menu"
-                  aria-expanded={taskMenuOpen}
-                  aria-label={`跟踪任务：${taskLabel}`}
-                  title={taskTitle}
-                >
-                  <Icon name="tasks" />
-                  <span className="picker-control-label truncate">{taskLabel}</span>
-                  <Icon name="chevronDown" className="picker-control-chevron" />
-                </div>
-
-                {taskMenuOpen && (
-                  <PopupMenu className="picker-menu" role="group" aria-label="跟踪任务列表" onDismiss={() => setTaskMenuOpen(false)}>
-                    {availableTasks.length === 0 ? (
-                      <p className="picker-menu-empty">{noTasks}</p>
-                    ) : (
-                      <div className="picker-menu-list">
-                        {availableTasks.map(task => {
-                          const selected = trackedWorkstreamIds.includes(task.id);
-                          return (
-                            <label
-                              key={task.id}
-                              className="popup-menu-item new-session-task-option"
-                              data-selected={selected || undefined}
-                              title={task.title}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={selected}
-                                disabled={busy}
-                                onChange={() => toggleTask(task.id)}
-                              />
-                              <span className="truncate">{task.title}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                    <div className="popup-menu-divider" />
-                    <PopupMenuItem
-                      type="button"
-                      className="picker-menu-action"
-                      disabled={busy || !canCreateTask}
-                      onClick={() => {
-                        setTaskMenuOpen(false);
-                        setShowNewWorkstreamModal(true);
-                      }}
-                    >
-                      <span className="action-icon"><Icon name="plus" /></span>
-                      <span>新建任务</span>
-                    </PopupMenuItem>
-                  </PopupMenu>
-                )}
-              </div>
-            </section>
           </div>
 
           <div className="new-session-composer" aria-busy={busy}>
@@ -934,13 +816,6 @@ export default function NewSessionView({
             </div>
           </div>
 
-          {!eligibleTask && (
-            <p className="new-session-note">
-              {trackedWorkstreamIds.some(id => workstreams.find(w => w.id === id)?.projects.length === 0)
-                ? "该任务未关联项目，无法新建会话；请先在任务中关联项目。"
-                : "请先选择该任务关联的项目。"}
-            </p>
-          )}
           {cwdNote && (
             <p className="new-session-note" role="status">{cwdNote}</p>
           )}
@@ -958,24 +833,6 @@ export default function NewSessionView({
         </form>
       </div>
 
-      {showNewWorkstreamModal && (
-        <WorkstreamFormModal
-          onClose={() => setShowNewWorkstreamModal(false)}
-          onCreated={async (newWs) => {
-            try {
-              const cards=await api.listWorkstreamCards();
-              setWorkstreams(cards);
-              const created=cards.find(w=>w.id===newWs.id);
-              if(created?.visibility==="normal" && created.projects.some(p=>p.id===selectedProjectId)) {
-                releasePrepared();
-                selectWorkstreams([...new Set([...trackedWorkstreamIds, created.id])]);
-              }
-            } catch(e) { showToast(`读取任务失败：${String(e)}`); }
-            setShowNewWorkstreamModal(false);
-          }}
-          initialProjectId={canCreateTask ? selectedProjectId : undefined}
-        />
-      )}
     </main>
   );
 }

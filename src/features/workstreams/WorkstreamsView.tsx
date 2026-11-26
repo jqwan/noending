@@ -16,7 +16,7 @@ import { showToast } from "../../components/Toast";
 import WorkstreamCard, { cardSummaryLine } from "./WorkstreamCard";
 import WorkstreamFormModal from "./WorkstreamFormModal";
 import { useWorkstreamCards } from "./useWorkstreamCards";
-import { AGENT_LABELS, type WorkstreamCardData } from "../../types";
+import { type WorkstreamCardData } from "../../types";
 import type { Route, ViewAction, WorkstreamScope } from "../../app/routes";
 
 type SortKey = "recent" | "created" | "name";
@@ -35,7 +35,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
   scope?: WorkstreamScope;
   actionSeq: number;
 }) {
-  const { cards, defaultAgent, refresh, loadError } = useWorkstreamCards();
+  const { cards, refresh, loadError } = useWorkstreamCards();
   const [query, setQuery] = useViewState("workstreams.query", "");
   const [sort, setSort] = useViewPreference<SortKey>("workstreams.sort", "recent", preferenceValues("recent", "created", "name"));
   const [projectId, setProjectId] = useViewState("workstreams.projectId", "all");
@@ -297,7 +297,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
           {viewMode === "cards" ? (
             <div className="ws-grid board-grid">
               {list?.map((c) => (
-                <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} defaultAgent={defaultAgent} onArchive={archiveTask} onRestore={restoreTask} onDelete={setPurgeTarget} busy={Boolean(taskActionId) || bulkPurgeBusy} />
+                <WorkstreamCard key={c.id} card={c} mode="full" navigate={navigate} onArchive={archiveTask} onRestore={restoreTask} onDelete={setPurgeTarget} busy={Boolean(taskActionId) || bulkPurgeBusy} />
               ))}
             </div>
           ) : (
@@ -323,7 +323,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                             <span>{p.name}</span>
                           </span>
                         ))}
-                        <span>{c.session_count === 0 ? "暂无会话" : `${c.session_count} 个会话`}</span>
                         <span title={c.last_activity_at ?? c.updated_at}>
                           {timeAgo(c.last_activity_at ?? c.updated_at)}
                         </span>
@@ -336,14 +335,6 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
                     </button>
                     {(
                       <div className="task-list-actions" onClick={(e) => e.stopPropagation()}>
-                        {c.visibility !== "archived" && c.projects.length > 0 && <button
-                          className="btn small ws-btn ghost icon-button"
-                          aria-label="新建会话"
-                          title={defaultAgent ? `用 ${AGENT_LABELS[defaultAgent]} 新建会话` : "新建会话"}
-                          onClick={() => navigate({ view: "new-session", workstreamId: c.id })}
-                        >
-                          <Icon name="plus" />
-                        </button>}
                         {c.visibility === "archived" ? <>
                           <button className="btn small ghost icon-button" aria-label={`取消归档${c.title}`} title="取消归档" disabled={Boolean(taskActionId) || bulkPurgeBusy} onClick={() => void restoreTask(c)}><Icon name="unarchive" /></button>
                           <button className="btn small ghost icon-button danger" aria-label={`永久删除${c.title}`} title="永久删除" disabled={Boolean(taskActionId) || bulkPurgeBusy} onClick={() => setPurgeTarget(c)}><Icon name="trash" /></button>
@@ -361,7 +352,7 @@ export default function WorkstreamsView({ navigate, action, scope, actionSeq }: 
         <Modal title="永久删除这项任务？" onClose={() => { if (!taskActionId) setPurgeTarget(null); }}>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>不可撤销</div>
           <p style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
-            确定要永久删除 <b>{purgeTarget.title}</b> 吗？任务本身、工作路径列表、Context 和审阅数据会被删除，关联会话及其事件历史会保留。
+            确定要永久删除 <b>{purgeTarget.title}</b> 吗？任务本身、项目关联、任务条目和协作数据会被删除，会话及其历史会保留。
           </p>
           <DialogActions>
             <button className="btn" onClick={() => setPurgeTarget(null)} disabled={Boolean(taskActionId)}>取消</button>

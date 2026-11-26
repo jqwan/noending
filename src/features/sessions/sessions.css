@@ -1,4 +1,4 @@
-/* NoEnding - Sessions Feature Styles (Cards, Table, Conversation, Messages, Tracking) */
+/* NoEnding - Sessions Feature Styles (Cards, Table, Conversation, Messages) */
 
 /* ---------- Session cards and lists ---------- */
 .session-card-body {
@@ -447,7 +447,7 @@ button.btn.conversation-jump:active {
 .path-draft-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
 .path-add-actions { gap: var(--space-sm); margin-bottom: 8px; flex-wrap: wrap; }
 .path-list-editor .workspace-path-field > .row { flex-wrap: wrap; }
-/* 迷你列表行（项目/任务详情的会话与任务）：图标 + 标题同行，标题截断。 */
+/* 迷你列表行（项目详情的会话与任务）：图标 + 标题同行，标题截断。 */
 
 
 
@@ -511,60 +511,6 @@ button.btn.ghost.terminal-exited,
   .terminal-connecting > .ui-icon { animation: none; }
 }
 
-
-.session-tracking-modal-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
-  max-height: 360px;
-  overflow-y: auto;
-  margin: 12px 0 6px;
-}
-.session-tracking-modal-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  padding: 6px 10px;
-  min-height: 34px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--duration-fast) ease;
-  user-select: none;
-}
-.session-tracking-modal-row:hover {
-  background: var(--bg-hover);
-}
-.session-tracking-modal-row.tracked {
-  background: var(--bg-panel);
-}
-.session-tracking-modal-row input[type="checkbox"] {
-  cursor: pointer;
-  margin: 0;
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
-  flex-shrink: 0;
-}
-.session-tracking-modal-title {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--font-size-base);
-  line-height: 1.4;
-  font-weight: var(--weight-medium);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.session-tracking-error {
-  margin: 4px 0 0;
-  font-size: var(--font-size-sm);
-  color: var(--danger);
-  padding: 4px 8px;
-  background: var(--danger-wash, rgba(220, 38, 38, 0.08));
-  border-radius: var(--radius-sm);
-}
 
 /* Runtime controls remain mounted when collapsed; visibility never changes ownership. */
 .mailbox-actions { display:flex; align-items:center; gap:var(--space-icon); flex-wrap:wrap; }

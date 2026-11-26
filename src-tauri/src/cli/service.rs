@@ -129,7 +129,6 @@ pub(crate) enum Command {
     List {
         kind: Kind,
         project: Option<String>,
-        task: Option<String>,
         scope: String,
         agent: Option<String>,
         title: Option<String>,
@@ -140,7 +139,6 @@ pub(crate) enum Command {
     Search {
         query: String,
         project: Option<String>,
-        task: Option<String>,
         scope: String,
         agent: Option<String>,
         cursor: Option<String>,
@@ -223,14 +221,6 @@ pub(crate) enum Command {
         id: String,
         projects: Vec<String>,
     },
-    Attach {
-        task: String,
-        session: String,
-    },
-    Detach {
-        task: String,
-        session: String,
-    },
 }
 impl Command {
     pub(crate) fn is_write(&self) -> bool {
@@ -260,8 +250,6 @@ impl Command {
                 | Self::RenameProject { .. }
                 | Self::RegisterPath { .. }
                 | Self::SetTaskProjects { .. }
-                | Self::Attach { .. }
-                | Self::Detach { .. }
         )
     }
 }
@@ -551,14 +539,25 @@ impl Service {
             Command::ResolveProject { path } => {
                 existing_directory(&path)?;
                 let projection = self.layer.projection();
-                Ok(serde_json::to_value(
-                    crate::workspace::probe::resolve_project(
-                        &self.db,
-                        projection.observer(),
-                        projection.policy(),
-                        &path,
-                    )?,
-                )?)
+                let resolution = crate::workspace::probe::resolve_project(
+                    &self.db,
+                    projection.observer(),
+                    projection.policy(),
+                    &path,
+                )?;
+                let mut result = serde_json::to_value(&resolution)?;
+                if let (Some("exact_path" | "physical_path"), Some(project), Some(path)) = (
+                    resolution.matched_by,
+                    resolution.project.as_ref(),
+                    resolution.matched_path.as_deref(),
+                ) {
+                    if let Some(id) =
+                        crate::assistant::resolve_archive(&self.db, &self.home, &project.id, path)?
+                    {
+                        result["assistant"] = json!({"id": id, "archive_directory":path});
+                    }
+                }
+                Ok(result)
             }
             Command::Sources => Ok(json!({"items":self.db.list_ingest_sources()?})),
             Command::Sync { source, session } => {
@@ -584,20 +583,16 @@ impl Service {
             Command::List {
                 kind,
                 project,
-                task,
                 scope,
                 agent,
                 title,
                 path,
                 cursor,
                 limit,
-            } => self.list(
-                kind, project, task, scope, agent, title, path, cursor, limit,
-            ),
+            } => self.list(kind, project, scope, agent, title, path, cursor, limit),
             Command::Search {
                 query,
                 project,
-                task,
                 scope,
                 agent,
                 cursor,
@@ -609,15 +604,11 @@ impl Service {
                 if let Some(id) = &project {
                     self.require(Kind::Project, id)?;
                 }
-                if let Some(id) = &task {
-                    self.require(Kind::Task, id)?;
-                }
                 super::search::page(
                     &self.db,
                     &query,
                     crate::search::sessions::SessionFilter {
                         project,
-                        task,
                         scope,
                         agent: parse_agent(agent)?,
                     },
@@ -630,7 +621,7 @@ impl Service {
                 match kind {
                     Kind::Session => Ok(session_value(&self.db.get_session(&id)?.unwrap())),
                     Kind::Task => Ok(
-                        json!({"task":self.db.get_workstream(&id)?,"projects":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?,"sessions_command":format!("ne session list --task {id} --scope all")}),
+                        json!({"task":self.db.get_workstream(&id)?,"projects":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?}),
                     ),
                     Kind::Project => {
                         let project = self.db.get_project(&id)?.unwrap();
@@ -823,20 +814,6 @@ impl Service {
                     json!({"items":crate::workspace::workstream::projects_for_workstream(&self.db,&id)?}),
                 )
             }
-            Command::Attach { task, session } => {
-                self.require(Kind::Task, &task)?;
-                self.require(Kind::Session, &session)?;
-                let session = crate::workspace::session::set_session_tracking(
-                    &self.db, &session, &task, true,
-                )?;
-                Ok(session_value(&session))
-            }
-            Command::Detach { task, session } => {
-                self.require(Kind::Task, &task)?;
-                self.require(Kind::Session, &session)?;
-                crate::workspace::session::set_session_tracking(&self.db, &session, &task, false)?;
-                Ok(json!({"session_id":session,"task_id":task,"tracked":false}))
-            }
         }
     }
     fn register_path(&self, path: &str) -> CliResult<crate::domain::WorkspacePath> {
@@ -930,7 +907,6 @@ impl Service {
         &self,
         kind: Kind,
         project: Option<String>,
-        task: Option<String>,
         scope: String,
         agent: Option<String>,
         title: Option<String>,
@@ -946,8 +922,8 @@ impl Service {
                 "无效的范围或分页大小（1～50）",
             ));
         }
-        if kind == Kind::Project && (project.is_some() || task.is_some() || agent.is_some())
-            || kind == Kind::Task && (task.is_some() || agent.is_some())
+        if kind == Kind::Project && (project.is_some() || agent.is_some())
+            || kind == Kind::Task && agent.is_some()
         {
             return Err(CliError::new(
                 "invalid_arguments",
@@ -956,9 +932,6 @@ impl Service {
         }
         if let Some(id) = &project {
             self.require(Kind::Project, id)?;
-        }
-        if let Some(id) = &task {
-            self.require(Kind::Task, id)?;
         }
         if title.as_ref().is_some_and(|s| s.trim().is_empty()) {
             return Err(CliError::new("invalid_arguments", "标题筛选不能为空"));
@@ -971,9 +944,9 @@ impl Service {
             .transpose()?;
         let agent = parse_agent(agent)?;
         let sql=match kind {
-            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2)) AND (?3 IS NULL OR EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3)) AND (?4 IS NULL OR s.agent=?4) AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL) OR (?5='unarchived' AND s.archived_at IS NULL)) AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?8 COLLATE NOCASE) ORDER BY s.id LIMIT ?6",
-            Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p WHERE p.workstream_id=s.id AND p.project_id=?2)) AND (?5='all' OR (?5='archived' AND s.visibility='archived') OR (?5='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND ?4 IS NULL AND (?7 IS NULL OR instr(lower(s.title),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=s.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY s.id LIMIT ?6",
-            Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND ?4 IS NULL AND (?5='all' OR (?5='archived' AND visibility='archived') OR (?5='unarchived' AND visibility='normal')) AND (?7 IS NULL OR instr(lower(name),lower(?7))>0) AND (?8 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?8 COLLATE NOCASE)) ORDER BY id LIMIT ?6",
+            Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2)) AND (?3 IS NULL OR s.agent=?3) AND (?4='all' OR (?4='archived' AND s.archived_at IS NOT NULL) OR (?4='unarchived' AND s.archived_at IS NULL)) AND (?6 IS NULL OR instr(lower(s.title),lower(?6))>0) AND (?7 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?7 COLLATE NOCASE) ORDER BY s.id LIMIT ?5",
+            Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p WHERE p.workstream_id=s.id AND p.project_id=?2)) AND (?4='all' OR (?4='archived' AND s.visibility='archived') OR (?4='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND (?6 IS NULL OR instr(lower(s.title),lower(?6))>0) AND (?7 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=s.id AND wp.canonical_path=?7 COLLATE NOCASE)) ORDER BY s.id LIMIT ?5",
+            Kind::Project=>"SELECT id FROM projects WHERE id>?1 AND ?2 IS NULL AND ?3 IS NULL AND (?4='all' OR (?4='archived' AND visibility='archived') OR (?4='unarchived' AND visibility='normal')) AND (?6 IS NULL OR instr(lower(name),lower(?6))>0) AND (?7 IS NULL OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=projects.id AND wp.canonical_path=?7 COLLATE NOCASE)) ORDER BY id LIMIT ?5",
         };
         let sql = sql.replace(
             "COLLATE NOCASE",
@@ -990,7 +963,6 @@ impl Service {
                 params![
                     cursor.as_deref().unwrap_or(""),
                     project,
-                    task,
                     agent,
                     scope,
                     (limit + 1) as i64,
@@ -1128,5 +1100,5 @@ fn parse_agent(agent: Option<String>) -> CliResult<Option<String>> {
         .transpose()
 }
 fn session_value(s: &crate::domain::Session) -> Value {
-    json!({"id":s.id,"title":s.title,"agent":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"task_ids":s.tracked_workstream_ids,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
+    json!({"id":s.id,"title":s.title,"agent":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
 }

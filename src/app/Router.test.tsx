@@ -15,9 +15,9 @@ vi.mock("../features/sessions/SessionTerminalView", () => ({ default: terminal }
 vi.mock("../features/skills/SkillDetailView", () => ({ default: skill }));
 vi.mock("../features/packages/PackageDetailView", () => ({ default: () => <div>已预载的插件包详情</div> }));
 vi.mock("../features/sessions/NewSessionView", () => ({
-  default: ({ workstreamId, agent, projectId }: { workstreamId?: string; agent?: Agent; projectId?: string }) => (
+  default: ({ agent, projectId, archivePathId }: { agent?: Agent; projectId?: string; archivePathId?: string }) => (
     <div>
-      <output aria-label="新会话预置">{`${workstreamId ?? ""}:${agent ?? ""}:${projectId ?? ""}`}</output>
+      <output aria-label="新会话预置">{`${agent ?? ""}:${projectId ?? ""}:${archivePathId ?? ""}`}</output>
       <input aria-label="首条消息" defaultValue="" />
     </div>
   ),
@@ -29,16 +29,16 @@ afterEach(cleanup);
 it("routes new-session presets and resets the draft when any preset changes", async () => {
   const navigate = vi.fn();
   const goBack = vi.fn();
-  const { rerender } = render(<Router route={{ view: "new-session", workstreamId: "w1", agent: "codex" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-  expect((await screen.findByLabelText("新会话预置")).textContent).toBe("w1:codex:");
+  const { rerender } = render(<Router route={{ view: "new-session", agent: "codex" }} navigate={navigate} goBack={goBack} actionSeq={0} />);
+  expect((await screen.findByLabelText("新会话预置")).textContent).toBe("codex::");
   for (const preset of [
-    { workstreamId: "w2", agent: "codex" as const },
-    { workstreamId: "w2", agent: "claude_code" as const },
-    { workstreamId: "w2", agent: "claude_code" as const, projectId: "p1" },
+    { agent: "claude_code" as const },
+    { agent: "claude_code" as const, projectId: "p1" },
+    { agent: "claude_code" as const, projectId: "p1", archivePathId: "wp-archive" },
   ]) {
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "之前的草稿" } });
     rerender(<Router route={{ view: "new-session", ...preset }} navigate={navigate} goBack={goBack} actionSeq={0} />);
-    await waitFor(() => expect(screen.getByLabelText("新会话预置").textContent).toBe(`${preset.workstreamId}:${preset.agent}:${"projectId" in preset ? preset.projectId : ""}`));
+    await waitFor(() => expect(screen.getByLabelText("新会话预置").textContent).toBe(`${preset.agent}:${preset.projectId ?? ""}:${preset.archivePathId ?? ""}`));
     expect((screen.getByLabelText("首条消息") as HTMLInputElement).value).toBe("");
   }
 });

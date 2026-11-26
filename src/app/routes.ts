@@ -29,7 +29,7 @@ export type WorkstreamEntry = "detail" | "collaboration";
 export type ProjectEntry = "assistant";
 
 export type Route =
-  | { view: "new-session"; workstreamId?: string; agent?: Agent; projectId?: string }
+  | { view: "new-session"; agent?: Agent; projectId?: string; archivePathId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; initialTitle?: string; entry?: WorkstreamEntry }
   | { view: "sessions"; action?: ViewAction; scope?: SessionScope }

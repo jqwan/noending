@@ -78,7 +78,7 @@ ne project summary <id>
 
 三个列表的 --title 按标题或项目名称作不区分 ASCII 大小写的子串匹配，`%` 和 `_` 按原文匹配。--path 为绝对工作路径，匹配会话工作目录、任务关联目录或项目任一目录；不递归包含子目录。
 
-`ne search` 跨会话搜索标题、关联背景和当前历史消息，复用 FTS5 及无匹配时的字面子串回退。支持 --project、--task、--agent 和 --scope（默认 unarchived）。返回 session_id，消息命中还包含 message_id 对应的 ref_id 和当前 sequence，可用 session messages --from/--to 读取上下文。分页按相关度及稳定 ID 排序，使用 next_cursor 时保持过滤条件。搜索结果随数据库变化，不是固定快照；阅读固定消息历史仍使用下面的消息分页。
+`ne search` 跨会话搜索标题、关联背景和当前历史消息，复用 FTS5 及无匹配时的字面子串回退。支持 --project、--agent 和 --scope（默认 unarchived）。返回 session_id，消息命中还包含 message_id 对应的 ref_id 和当前 sequence，可用 session messages --from/--to 读取上下文。分页按相关度及稳定 ID 排序，使用 next_cursor 时保持过滤条件。搜索结果随数据库变化，不是固定快照；阅读固定消息历史仍使用下面的消息分页。
 
 `session messages` 默认返回最近 8 条已同步消息，可用 `--limit` 指定每页条数（1～50）。每页内按消息编号从旧到新排列，下一页是更早的消息。指定 `--from` 或 `--to` 时，按编号范围从旧到新分页，包含指定端点。未指定的起点和终点分别是 1 和查询时的最新编号。提供当前 Home 中的 NoEnding 会话 ID 即可查询。
 
@@ -90,7 +90,7 @@ ne project summary <id>
 
 `ne project resolve` 使用命令进程的当前目录，`--path` 可指定其他已存在的绝对目录。依次匹配当前目录和最近的已登记父目录；相同物理目录的路径别名也可识别，不修改数据库里的路径标识。遇到独立 Git 仓库边界时不继续归入外层项目；未登记的 worktree 可通过已有 Git common dir 身份找到项目，不按项目名称或远程 URL 猜测。
 
-返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。档案目录默认定位到对应的智能体项目，操作其他项目时应明确指定路径。
+返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。命中登记的智能体档案目录时，返回 `assistant.id` 和 `assistant.archive_directory`。智能体标识来自档案目录 UUID，项目和任务操作仍使用各自的 ID。
 
 ## Agent 可用性与提取配置
 
@@ -109,7 +109,7 @@ ne summary config set --agent none
 
 Antigravity 后台提取使用已登录的 `agy`，通过其终端沙箱调用 NoEnding CLI。平台要求见 [Antigravity CLI 沙箱说明](https://antigravity.google/docs/sandbox?tab=cli)。
 
-`session resolve --agent AGENT --native-id NATIVE_ID` 按 Agent 与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`agent`、标题、项目 `project_id`、跟踪任务 `task_ids` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。Agent 名称与 `agent list` 一致，接受已有别名，例如 `claude`。
+`session resolve --agent AGENT --native-id NATIVE_ID` 按 Agent 与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`agent`、标题、项目 `project_id` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。Agent 名称与 `agent list` 一致，接受已有别名，例如 `claude`。
 
 此查询无需桌面在线，不扫描、不启动终端，也不自动同步；尚未摄入或 Home 不匹配时返回 `not_found`。应由调用方明确传入自己的原生身份，不读取 MCP 服务进程的会话环境来猜测调用者，也不按目录、标题或最新活动推断。Codex 使用线程 ID，文件名中回退版本的后缀 ID 不是独立会话身份；内部子 Agent 的 ID 不自动映射为主会话。
 
@@ -119,8 +119,6 @@ Antigravity 后台提取使用已登录的 `agy`，通过其终端沙箱调用 N
 ne task create --title "任务名称" --description "说明" --project <项目id>
 ne task update <任务id> --title "新标题"
 ne task update <任务id> --description "新说明"
-ne task attach <任务id> --session <会话id>
-ne task detach <任务id> --session <会话id>
 ne task archive <任务id>
 ne task unarchive <任务id>
 ne session archive <会话id>
@@ -133,13 +131,13 @@ ne task project list <任务id>
 ne task project set <任务id> --project <项目id1> --project <项目id2>
 ```
 
-任务创建可重复传入 `--project` 关联多个已有项目。一个会话可跟踪多个任务，attach 只增加该任务的跟踪，不替换其他任务；新增跟踪限于会话所属项目的未归档任务。detach 只取消指定任务的跟踪。
+任务创建可重复传入 `--project` 关联多个已有项目。
 
 task update 只更改提供的字段，保留归档状态及关联。至少提供 title 或 description，可同时提供；标题不能为空，`--description ""` 清空说明。任务及项目改名同步更新搜索索引，项目名称会标记为用户自定义，不被后续自动命名覆盖。
 
-archive/unarchive 复用界面的归档规则，保留摘要、历史消息和目录关联。归档任务不能新建会话，归档会话不能通过应用继续。归档任务不会连带归档其会话。会话重复执行相同状态的转换会被拒绝；脚本重试使用同一个 request_id 获取原结果。
+archive/unarchive 复用界面的归档规则，保留摘要、历史消息和目录关联。归档任务会停止正在进行的协作。归档会话不能通过应用继续。会话重复执行相同状态的转换会被拒绝；脚本重试使用同一个 request_id 获取原结果。
 
-path register 要求目录已存在且为绝对路径，不创建磁盘目录，也不扫描摄入目录下的会话。项目按目录和 Git/worktree 规则派生。task project set 替换任务的完整项目列表，空列表解除所有项目关联；不会移动目录或会话，也不会清除现有任务跟踪。任务的 --path 查询匹配其关联项目当前的所有目录。
+path register 要求目录已存在且为绝对路径，不创建磁盘目录，也不扫描摄入目录下的会话。项目按目录和 Git/worktree 规则派生。task project set 替换任务的完整项目列表，空列表解除所有项目关联。任务的 --path 查询匹配其关联项目当前的所有目录。
 
 桌面应用运行时会观察这些写操作的数据库提交并刷新。CLI 不提供原始消息编辑、原生会话标题改写、项目身份修改或永久删除。
 
@@ -148,13 +146,13 @@ path register 要求目录已存在且为绝对路径，不创建磁盘目录，
 这些命令需要同一 Home 的桌面应用运行，只控制 NoEnding 内嵌终端：
 
 ```sh
-ne session new --agent codex --cwd /absolute/project --message "开始工作" --task TASK_ID
+ne session new --agent codex --cwd /absolute/project --message "开始工作"
 ne session new --agent pi --cwd /absolute/project --file prompt.txt
 ne session identity
 ne session terminals --session SESSION_ID
 ```
 
-`--task` 可重复；可用 `--model`、`--provider`、`--effort` 覆盖运行参数。省略消息只打开 TUI。新建先返回终端 ID、`session_id=null` 和 `binding=pending`；原生会话被摄入后通过 terminals 查询实际绑定，不猜测 ID。一个会话最多一个有效的 NoEnding 运行终端。
+可用 `--model`、`--provider`、`--effort` 覆盖运行参数。省略消息只打开 TUI。新建先返回终端 ID、`session_id=null` 和 `binding=pending`；原生会话被摄入后通过 terminals 查询实际绑定，不猜测 ID。一个会话最多一个有效的 NoEnding 运行终端。
 
 `ne session identity` 只查询当前命令继承的 NoEnding 终端身份，返回 `data.session_id`，不接收显式身份参数，不需要自行读取环境变量或筛选终端列表。缺少终端上下文返回 `terminal_context_missing`，外部会话再用宿主提供的原生 ID 执行 `session resolve`；尚未绑定返回 `sender_unbound`，等待摄入后重试。桌面不可用返回 `desktop_unavailable`，终端失效返回 `sender_unavailable`，不回退到其他会话。此查询不启动、同步或修改会话，也不需要请求编号。
 
@@ -203,7 +201,7 @@ ne room leave ROOM --run RUN --from-session SELF
 ne room stop ROOM --run RUN --from-session SELF
 ```
 
-开启、成员选择、负责人更换和单独重试唤醒是桌面用户入口，模型没有开启或配置协作室的接口。成员模型在收到加入提示后用 `join` 建立参与连接（CLI 自动拉起驻留监听进程，每 10 秒续租；30 秒无续租显示连接中断），随后循环 `wait` → 完整查阅批次 → 按需发言 → `ack` 已读部分 → 继续 `wait`；空闲或超时不得提交宿主最终回复。`join` 与 `wait` 回包附带 `notice` 操作提示；`wait` 进入时标记 listening，交付批次标记 processing；不自动已读，`ack` 回执返回实际生效位置且仅向前。`send` 要求成员有效参与，已退场成员发言被拒（用户入口除外）。自己的发言不计入自己的未读。停止后的 run 返回 `status=stopped`，旧 run 报 `run_inactive`；`stop` 仅当前负责人可用。`leave` 是本人参与的清理，可重复调用，不解除任务跟踪。
+开启、成员选择、负责人更换和单独重试唤醒是桌面用户入口，模型没有开启或配置协作室的接口。成员模型在收到加入提示后用 `join` 建立参与连接（CLI 自动拉起驻留监听进程，每 10 秒续租；30 秒无续租显示连接中断），随后循环 `wait` → 完整查阅批次 → 按需发言 → `ack` 已读部分 → 继续 `wait`；空闲或超时不得提交宿主最终回复。`join` 与 `wait` 回包附带 `notice` 操作提示；`wait` 进入时标记 listening，交付批次标记 processing；不自动已读，`ack` 回执返回实际生效位置且仅向前。`send` 要求成员有效参与，已退场成员发言被拒（用户入口除外）。自己的发言不计入自己的未读。停止后的 run 返回 `status=stopped`，旧 run 报 `run_inactive`；`stop` 仅当前负责人可用。`leave` 是本人参与的清理，可重复调用。
 
 ## 摘要
 
@@ -255,7 +253,7 @@ ne task item delete TASK_ID --item-id ITEM_ID --revision 3
 
 ## 记忆更新状态
 
-`ne freshness` 读取全部已登记来源和本机已入库会话的检查状态；`--session`、`--task`、`--project` 三选一，查询对应范围及摘要覆盖。查询不扫描文件、不调用模型，包含已归档会话。项目返回所有来源的扫描状态，因为新会话可能来自尚无该项目记录的 Agent；任务和会话返回已知关联会话所属来源。未登记来源的会话仍可查询单会话状态。
+`ne freshness` 读取全部已登记来源和本机已入库会话的检查状态；`--session`、`--task`、`--project` 三选一，查询对应范围及摘要覆盖。查询不扫描文件、不调用模型，包含已归档会话。项目返回所有来源的扫描状态，因为新会话可能来自尚无该项目记录的 Agent；会话返回自身所属来源。任务范围返回协作摘要覆盖。未登记来源的会话仍可查询单会话状态。
 
 - `all_sources` 是最近一次全部来源同步的观察；`sources[].check` 是各来源扫描状态；`session_check` 只在单会话查询中提供。单会话同步不更新来源或全部来源时间，单来源同步不更新全部来源时间。
 - `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装 Agent 的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。

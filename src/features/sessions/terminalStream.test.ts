@@ -37,7 +37,7 @@ function output(offset: number, data: string) {
 }
 function snapshot(scrollback: string): TerminalSnapshot {
   return {
-    terminal_id: "t-1", session_id: null, initial_workstream_ids: [], identity_revision: 0,
+    terminal_id: "t-1", session_id: null, identity_revision: 0,
     agent: "codex", cwd: null, created_at: "", live: true, exit_code: null, session_title: null,
     scrollback: btoa(scrollback), output_offset: scrollback.length, cols: 80, rows: 24,
   };

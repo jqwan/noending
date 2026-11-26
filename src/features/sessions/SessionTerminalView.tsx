@@ -8,7 +8,6 @@ import "@xterm/xterm/css/xterm.css";
 import "./sessions.css";
 import PageHeader from "../../layout/PageHeader";
 import SessionSubpageTabs from "./SessionSubpageTabs";
-import SessionTaskTracking from "./SessionTaskTracking";
 import TerminalMailbox from "./TerminalMailbox";
 import { useMailbox, isTerminalReply } from "./useMailbox";
 import { DesktopContinueButton } from "./SessionHeaderActions";
@@ -465,7 +464,6 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
             </div>
           )}
           <DetailLayout mainClassName="detail-main-terminal" label="终端详情栏" panel={<>
-              <SessionTaskTracking key={boundSessionId} sessionId={boundSessionId} navigate={navigate} />
               <TerminalMailbox key={`mailbox:${mailboxSessionId ?? terminalId}`} terminalId={terminalId} sessionId={mailboxSessionId} notification={mailboxNotification} error={mailboxError}
                 apply={applyNotification} refresh={refreshMailbox} inputRef={notificationInputRef} navigate={navigate} />
             </>}><div className={`terminal-host${isMacTerminal() ? " terminal-mac" : ""}`} data-platform={isWindowsTerminal() ? "windows" : isMacTerminal() ? "mac" : "other"} ref={containerRef} /></DetailLayout>

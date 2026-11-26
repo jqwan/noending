@@ -178,7 +178,7 @@ fn reverted_history_retains_only_the_referenced_prefix_and_then_appends_incremen
     }
 }
 #[test]
-fn an_independent_fork_inherits_history_without_sharing_identity_or_task_tracking() {
+fn an_independent_fork_inherits_history_without_sharing_identity() {
     let f = Fixture::new();
     f.write(
         THREAD,
@@ -362,7 +362,7 @@ fn invalid_byte_boundaries_and_changed_ancestor_prefixes_cannot_silently_reuse_a
     assert!(old.is_file());
 }
 #[test]
-fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summaries_or_tasks() {
+fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summaries() {
     let f = Fixture::new();
     let old = f.write(
         THREAD,
@@ -417,9 +417,6 @@ fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summarie
         Summary::single("新版本的人工摘要"),
     )
     .unwrap();
-    let task = support::workstream("task-merge".into(), "跟踪任务");
-    f.db.upsert_workstream(&task).unwrap();
-    support::track(&f.db, &alias, Some(&task.id)).unwrap();
     let complete = std::fs::read(&active).unwrap();
     std::fs::OpenOptions::new()
         .append(true)
@@ -436,7 +433,6 @@ fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summarie
     f.sync().unwrap();
     assert_eq!(f.session(THREAD).id, canonical.id);
     assert!(f.db.get_session(&alias).unwrap().is_none());
-    assert_eq!(f.session(THREAD).tracked_workstream_ids, [task.id]);
     assert_eq!(f.texts(THREAD), ["保留的历史", "当前消息"]);
     let summary = f.db.get_session_context(&canonical.id).unwrap().unwrap();
     assert_eq!(
@@ -564,20 +560,9 @@ fn failed_alias_absorption_rolls_back_app_owned_content_and_succeeds_on_retry() 
     .unwrap();
     support::summary::seed_summary(&f.db, "session", &alias, 1, Summary::single("版本摘要"))
         .unwrap();
-    let task = support::workstream("rollback-task".into(), "保留任务");
-    f.db.upsert_workstream(&task).unwrap();
-    support::track(&f.db, &alias, Some(&task.id)).unwrap();
     f.db.write().execute_batch("CREATE TRIGGER prevent_alias_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END;").unwrap();
     assert!(f.sync().is_err());
     assert!(f.db.get_session(&alias).unwrap().is_some());
-    assert!(f.session(THREAD).tracked_workstream_ids.is_empty());
-    assert_eq!(
-        f.db.get_session(&alias)
-            .unwrap()
-            .unwrap()
-            .tracked_workstream_ids,
-        [task.id.clone()]
-    );
     assert_eq!(
         f.db.get_session_context(&canonical.id)
             .unwrap()
@@ -603,7 +588,6 @@ fn failed_alias_absorption_rolls_back_app_owned_content_and_succeeds_on_retry() 
         .unwrap();
     f.sync().unwrap();
     assert!(f.db.get_session(&alias).unwrap().is_none());
-    assert_eq!(f.session(THREAD).tracked_workstream_ids, [task.id]);
     assert_eq!(
         f.db.get_session_context(&canonical.id)
             .unwrap()

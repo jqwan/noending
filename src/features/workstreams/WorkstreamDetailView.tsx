@@ -17,9 +17,7 @@ import {
   type WorkstreamContext as WorkstreamContextData,
 } from "../../types";
 import type { Route, WorkstreamEntry } from "../../app/routes";
-import { notifyDataChanged } from "../../app/routes";
 import CollaborationSummary from "../collaboration/CollaborationSummary";
-import WorkstreamSessionPickerModal from "./WorkstreamSessionPickerModal";
 import TaskItems from "./TaskItems";
 import TaskSubpageTabs from "./TaskSubpageTabs";
 import CollaborationRoomView from "../collaboration/CollaborationRoomView";
@@ -27,7 +25,6 @@ import CollaborationRoomView from "../collaboration/CollaborationRoomView";
 /** Task organization. All background reads are pure. */
 import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
-import { collaborationRoomResource } from "../collaboration/collaborationResources";
 export { workstreamDetailCache, clearWorkstreamDetailCache };
 
 
@@ -56,10 +53,6 @@ export default function WorkstreamDetailView({
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
-  const collaboration = collaborationRoomResource.useValue(workstreamId);
-  const lockedSessionIds = collaboration?.run?.status === "active" || collaboration?.run?.status === "starting"
-    ? collaboration.members.map(member => member.session_id) : [];
   const [actionError, setActionError] = useState("");
   const [confirmArchive, setConfirmArchive] = useState(false);
   const [confirmPurge, setConfirmPurge] = useState(false);
@@ -139,7 +132,7 @@ export default function WorkstreamDetailView({
       </div>
     );
   }
-  const { workstream, sessions } = ctx;
+  const { workstream } = ctx;
 
   /** 一条命令返回新 Workstream 时立刻就地替换：`update_workstream` 是整对象写，
    *  留着旧的 visibility，下一次整对象保存会被后端拒绝。 */
@@ -243,7 +236,7 @@ export default function WorkstreamDetailView({
             </button>
             {!archived ? (
               <button className="btn ghost icon-button" aria-label="归档"
-                title="归档：保留项目关联、会话跟踪与摘要，归档后不能新建会话。"
+                title="归档任务并停止正在进行的协作"
                 onClick={() => setConfirmArchive(true)}>
                 <Icon name="archive" />
               </button>
@@ -283,11 +276,10 @@ export default function WorkstreamDetailView({
         <CollaborationRoomView
           taskId={workstream.id}
           taskTitle={workstream.title}
-          sessions={sessions}
+          projects={projectRows}
           archived={archived}
           navigate={navigate}
           showChat={entry === "collaboration"}
-          onManageSessions={archived || (!projectRows.length && !sessions.length) ? undefined : () => setSessionPickerOpen(true)}
           detailsPanel={<><DetailSection sectionId="properties" label="任务信息" title={<>
               <Icon name="info" />
               <span>任务信息</span>
@@ -348,15 +340,6 @@ export default function WorkstreamDetailView({
 <CollaborationSummary key={`summary-${workstream.id}`} taskId={workstream.id} />
         </CollaborationRoomView>
 
-      {sessionPickerOpen && <WorkstreamSessionPickerModal projectIds={projectRows.map(project => project.id)} linkedSessions={sessions} lockedIds={lockedSessionIds}
-        onClose={() => setSessionPickerOpen(false)} onConfirm={async changes => {
-          try { for (const change of changes) await api.setSessionTaskTracking(change.sessionId, workstream.id, change.tracked); }
-          finally {
-            await Promise.all([refresh(), collaborationRoomResource.refresh(workstream.id).catch(() => {})]);
-            notifyDataChanged([]);
-          }
-        }} />}
-
       {projectPickerOpen && (
         <WorkstreamProjectPickerModal
           initialSelectedIds={projectRows.map((p) => p.id)}
@@ -380,10 +363,10 @@ export default function WorkstreamDetailView({
       {confirmArchive && (
         <Modal title="归档" onClose={() => setConfirmArchive(false)}>
           <p style={{ margin: "0 0 8px", maxWidth: "72ch" }}>
-            <b>{workstream.title}</b> 会移至任务页的「已归档」，归档后不能用于新建会话。
+            <b>{workstream.title}</b> 会移至任务页的「已归档」，归档会停止正在进行的协作。
           </p>
           <p className="small muted" style={{ marginBottom: 8 }}>
-            路径、会话归属和上下文都会保留，可取消归档。
+            归档保留项目关联、任务事项和协作历史。
           </p>
 
           <DialogActions>
@@ -399,7 +382,7 @@ export default function WorkstreamDetailView({
         <Modal title="永久删除这项任务？" onClose={() => { if (!busy) setConfirmPurge(false); }}>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>不可撤销</div>
           <p style={{ margin: "0 0 12px", maxWidth: "72ch" }}>
-            确定要永久删除 <b>{workstream.title}</b> 吗？任务本身、工作路径列表、Context 和审阅数据会被删除，关联会话及其事件历史会保留。
+            确定要永久删除 <b>{workstream.title}</b> 吗？任务本身、项目关联、任务条目和协作数据会被删除，会话及其历史会保留。
           </p>
           <DialogActions>
             <button className="btn" onClick={() => setConfirmPurge(false)} disabled={busy}>取消</button>

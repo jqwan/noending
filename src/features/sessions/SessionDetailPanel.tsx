@@ -1,30 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api";
-import { notifyDataChanged, type Route } from "../../app/routes";
+import type { Route } from "../../app/routes";
 import { Field, openPath, timeAgo } from "../../components/common";
 import { DetailFields, DetailSection } from "../../components/DetailSection";
 import Icon from "../../components/Icon";
 import { showToast } from "../../components/Toast";
 import type { Project, SessionDetail } from "../../types";
 import { agentDisplayLabel, formatDateTime, projectCellFor, sessionDisplayTitle, NO_CWD, UNTITLED_SESSION } from "./SessionTable";
-import SessionTrackedTasks from "./SessionTrackedTasks";
-import SessionTaskTrackingModal from "./SessionTaskTrackingModal";
 
-/** 会话详情与历史消息共用信息、跟踪任务及其操作。 */
+/** 会话详情与历史消息共用会话信息及操作。 */
 export default function SessionDetailPanel({ detail, navigate }: {
   detail: SessionDetail;
   navigate: (route: Route) => void;
 }) {
   const { session } = detail;
   const sessionId = session.id;
-  const [trackingBusy, setTrackingBusy] = useState(false);
-  const [trackingError, setTrackingError] = useState("");
-  const trackingPending = useRef(false);
-  const trackingTarget = useRef<string | null>(sessionId);
-  useEffect(() => {
-    trackingTarget.current = sessionId; setTrackingError(""); setTrackingBusy(false);
-    return () => { trackingTarget.current = null; };
-  }, [sessionId]);
   /**
    * 只有在「缓存列里有 Project、却没有任何工作路径可解析」时才需要名字；
    * 派生链自带名字，正常情况下不多这一次读取。
@@ -41,7 +31,6 @@ export default function SessionDetailPanel({ detail, navigate }: {
     [projects],
   );
 
-  const [trackModalOpen, setTrackModalOpen] = useState(false);
   const title = sessionDisplayTitle(session.title);
   const untitled = title === UNTITLED_SESSION;
   const cwd = (session.cwd ?? "").trim();
@@ -50,19 +39,6 @@ export default function SessionDetailPanel({ detail, navigate }: {
   const projectIdOnlyCell = projectCellFor(session, projectNameById);
   const derivedProjectName = workspacePath && workspacePath.project_name.trim() !== ""
     ? workspacePath.project_name : null;
-  const removeTracking = async (taskId: string) => {
-    if (trackingPending.current) return;
-    trackingPending.current = true; setTrackingBusy(true); setTrackingError("");
-    try {
-      await api.setSessionTaskTracking(sessionId, taskId, false);
-      notifyDataChanged([]);
-    } catch (reason) {
-      if (trackingTarget.current === sessionId) setTrackingError(String(reason));
-    } finally {
-      trackingPending.current = false;
-      if (trackingTarget.current === sessionId) setTrackingBusy(false);
-    }
-  };
   /** 源会话：会话自己的源文件 + 详情加载时的新鲜结论。 */
   const sourceMissing = detail.source_status === "missing";
   const sourceUnavailable = detail.source_status === "unavailable";
@@ -292,14 +268,5 @@ export default function SessionDetailPanel({ detail, navigate }: {
     )}
   </DetailFields>
 </DetailSection>
-<SessionTrackedTasks tasks={detail.tracked_workstreams} navigate={navigate}
-  busy={trackingBusy} error={trackingError} onAdd={() => setTrackModalOpen(true)}
-  onRemove={id => void removeTracking(id)} />
-      {trackModalOpen && (
-        <SessionTaskTrackingModal
-          sessionId={sessionId}
-          onClose={() => setTrackModalOpen(false)}
-        />
-      )}
   </>;
 }

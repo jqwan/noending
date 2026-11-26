@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
-import type { SessionListItem, WorkstreamContext, WorkstreamContextView } from "../../types";
+import type { WorkstreamContext, WorkstreamContextView } from "../../types";
 
 // 只覆盖「页面把编辑入口收敛到弹窗」；命令怎么走由 WorkstreamFormModal.test.tsx 覆盖。
 vi.mock("../../api", () => ({
@@ -32,8 +32,6 @@ vi.mock("../../api", () => ({
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
     listProjectCards: vi.fn().mockResolvedValue([]),
     setWorkstreamProjects: vi.fn().mockResolvedValue(undefined),
-    listSessions: vi.fn().mockResolvedValue([]),
-    setSessionTaskTracking: vi.fn(),
     restoreWorkstream: vi.fn().mockResolvedValue({ id: "w1", visibility: "normal" }),
     deleteWorkstreamPermanently: vi.fn().mockResolvedValue(undefined),
   },
@@ -46,8 +44,6 @@ beforeEach(() => {
   vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [], next_cursor: null });
   vi.mocked(api.getWorkstreamContext).mockReset().mockResolvedValue(context());
   vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(contextState());
-  vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
-  vi.mocked(api.setSessionTaskTracking).mockReset();
 });
 afterEach(() => {
   clearWorkstreamDetailCache();
@@ -66,7 +62,6 @@ function context(): WorkstreamContext {
       updated_at: "2026-09-21T00:00:00+00:00",
     },
     projects: [{id:"pr",name:"Main"}],
-    sessions: [],
   };
 }
 
@@ -101,32 +96,12 @@ it("restores collaboration summary immediately while the refreshed summary is st
   expect(screen.queryByText("正在读取摘要…")).toBeNull();
 });
 
-it("adds an existing session from an associated project without creating a new session", async () => {
-  const session = { id: "existing", title: "项目中的已有会话", agent: "codex", project_id: "pr", tracked_workstream_ids: [], archived_at: null } as unknown as SessionListItem;
-  vi.mocked(api.listSessions).mockResolvedValue([session]);
-  const navigate = await renderDetail();
-  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => {
-    vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [session] });
-    vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [{ session_id: session.id, title: session.title, agent: "codex", wake_modes: ["terminal"], unavailable_reason: null }], next_cursor: null });
-    return session as never;
-  });
-  fireEvent.click(screen.getByRole("button", { name: "管理关联会话" }));
-  const dialog = screen.getByRole("dialog", { name: "管理关联会话" });
-  fireEvent.click(await within(dialog).findByRole("checkbox", { name: session.title! }));
-  fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(api.listSessions).toHaveBeenCalledWith("pr", undefined, "all");
-  expect(api.setSessionTaskTracking).toHaveBeenCalledWith("existing", "w1", true);
-  expect(screen.getByRole("heading", { name: "关联会话（1）" })).toBeTruthy();
-  expect(navigate).not.toHaveBeenCalled();
-});
-
 it("keeps the header and shared right-hand cards mounted and collapsed across task subpages", async () => {
   const props = { workstreamId: "w1", navigate: vi.fn(), goBack: vi.fn() };
   const page = render(<WorkstreamDetailView {...props} />);
   await screen.findByRole("heading", { name: "任务描述" });
   const panel = screen.getByRole("complementary", { name: "任务详情栏" });
-  const cards = ["任务信息", /^关联项目（/, /^关联会话（/];
+  const cards = ["任务信息", /^关联项目（/, /^协作成员/];
   for (const name of cards) fireEvent.click(within(panel).getByRole("button", { name }));
   const edit = screen.getByRole("button", { name: "编辑任务" });
   edit.focus();
@@ -158,55 +133,16 @@ it("shows the task identity and copies its full ID", async () => {
   }
 });
 
-it("hides the add-session entry when the task has no associated projects", async () => {
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), projects: [] });
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByText("任务描述");
-  expect(screen.queryByRole("button", { name: "管理关联会话" })).toBeNull();
-});
-
-it.each(["room", "candidates"])("keeps linked sessions accessible when collaboration %s cannot be read", async failedRead => {
-  const session = { id: "linked", title: "已关联的会话", agent: "codex", archived_at: null } as SessionListItem;
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [session] });
-  if (failedRead === "room") vi.mocked(api.collaborationRoomGet).mockRejectedValue(new Error("协作状态读取失败"));
-  else vi.mocked(api.collaborationCandidates).mockRejectedValue(new Error("候选状态读取失败"));
-  const navigate = vi.fn();
-  render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
-  await screen.findByRole("alert");
-  fireEvent.click(screen.getByRole("button", { name: /^已关联的会话/ }));
-  expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "linked" }));
-});
-
-it("renders the returned task sessions and navigates to the selected session", async () => {
-  const ctx = context();
-  ctx.sessions = [{
-    id: "s1",
-    agent: "codex",
-    root_agent_session_id: "s1-agent",
-    title: "归属于本任务的会话",
-    cwd: "/repo/main",
-    project_id: "pr",
-    workspace_path_id: "p-main",
-    tracked_workstream_ids: ["w1"],
-    started_at: "2026-09-21T00:00:00+00:00",
-    last_activity_at: "2026-09-21T00:00:00+00:00",
-    last_conversation_at: null,
-    archived_at: null,
-        source_kind: "codex_rollout",
-        latest_message_seq: 2,
-
-  }];
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue(ctx);
-  vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [{ session_id: "s1", title: "归属于本任务的会话", agent: "codex", wake_modes: ["terminal"], unavailable_reason: null }], next_cursor: null });
+it("shows project session candidates and opens the chosen session's details", async () => {
+  vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [{ session_id: "s1", title: "项目中的会话", project_id: "pr", agent: "codex", wake_modes: ["terminal"], unavailable_reason: null }], next_cursor: null });
   const navigate = vi.fn();
   render(<WorkstreamDetailView workstreamId="w1" navigate={navigate} goBack={vi.fn()} />);
 
   await screen.findByText("任务描述");
-  // 只有跟踪此任务的会话会出现在这里。
-  screen.getByRole("heading", { name: "关联会话（1）" });
-  fireEvent.click(await screen.findByRole("button", { name: "归属于本任务的会话" }));
+  screen.getByRole("heading", { name: "协作成员" });
+  fireEvent.click(screen.getByRole("button", { name: "选择成员" }));
+  fireEvent.click(await screen.findByRole("button", { name: "项目中的会话" }));
   expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s1" }));
-  expect(screen.queryByText("还没有会话归属到这项任务。")).toBeNull();
 });
 
 it("prefills the edit form with the current task and its linked project", async () => {
@@ -335,32 +271,4 @@ it("allows associating projects directly from task detail page", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "确定" }));
   await waitFor(() => expect(api.setWorkstreamProjects).toHaveBeenCalledWith("w1", ["pr", "p2"]));
   expect(screen.queryByRole("dialog", { name: "选择关联项目" })).toBeNull();
-});
-
-it("lets unrelated sessions be removed while active collaboration members remain linked", async () => {
-  const member = { id: "member", title: "正在协作的会话", agent: "codex", project_id: "pr" } as SessionListItem;
-  const other = { id: "other", title: "未参与的会话", agent: "codex", project_id: "pr" } as SessionListItem;
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [member, other] });
-  vi.mocked(api.listSessions).mockResolvedValue([member, other]);
-  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "w1", title: "接口设计",
-    room: { id: "room", revision: 1, coordinator_session_id: null, selected_members: [{ session_id: "member", wake_method: "terminal" }] },
-    run: { id: "run", status: "active", started_at: null, stopped_at: null },
-    members: [{ session_id: "member", wake_method: "terminal", wake_status: "opened", connection_state: "pending", phase: "idle", unread_count: 0 }],
-  } as never);
-  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => {
-    vi.mocked(api.getWorkstreamContext).mockResolvedValue({ ...context(), sessions: [member] });
-    return other as never;
-  });
-  render(<WorkstreamDetailView workstreamId="w1" navigate={vi.fn()} goBack={vi.fn()} />);
-  await screen.findByRole("button", { name: "停止协作" });
-  fireEvent.click(screen.getByRole("button", { name: "管理关联会话" }));
-  const dialog = within(screen.getByRole("dialog", { name: "管理关联会话" }));
-  await dialog.findByRole("checkbox", { name: "未参与的会话" });
-  expect(dialog.getByRole("checkbox", { name: "正在协作的会话" })).toHaveProperty("disabled", true);
-  fireEvent.click(dialog.getByRole("checkbox", { name: "未参与的会话" }));
-  fireEvent.click(dialog.getByRole("button", { name: "保存" }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(api.setSessionTaskTracking).toHaveBeenCalledWith("other", "w1", false);
-  expect(screen.getByRole("heading", { name: "关联会话（1）" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "停止协作" })).toBeTruthy();
 });

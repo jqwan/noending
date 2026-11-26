@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct SessionFilter {
     pub project: Option<String>,
-    pub task: Option<String>,
     pub agent: Option<String>,
     pub scope: String,
 }
@@ -17,10 +16,9 @@ const FILTER: &str = "search_index.kind IN ('session','message')
     AND EXISTS (SELECT 1 FROM sessions s
       WHERE s.id=CASE search_index.kind WHEN 'message' THEN search_index.parent_id ELSE search_index.ref_id END
       AND (?2 IS NULL OR EXISTS (SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2))
-      AND (?3 IS NULL OR EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?3))
-      AND (?4 IS NULL OR s.agent=?4)
-      AND (?5='all' OR (?5='archived' AND s.archived_at IS NOT NULL)
-        OR (?5='unarchived' AND s.archived_at IS NULL)))";
+      AND (?3 IS NULL OR s.agent=?3)
+      AND (?4='all' OR (?4='archived' AND s.archived_at IS NOT NULL)
+        OR (?4='unarchived' AND s.archived_at IS NULL)))";
 
 pub struct SessionHit {
     pub hit: SearchHit,
@@ -44,7 +42,7 @@ pub fn page(
         Some(mode) => mode,
         None => tx.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM search_index WHERE search_index MATCH ?1 AND {FILTER} AND {CURRENT_MESSAGE_GUARD})"),
-            params![fts_query, filter.project, filter.task, filter.agent, filter.scope],
+            params![fts_query, filter.project, filter.agent, filter.scope],
             |row| row.get::<_, bool>(0),
         )?,
     };
@@ -74,14 +72,13 @@ pub fn page(
     };
     let sql = format!("SELECT kind,ref_id,parent_id,title,{snippet},{rank},
         CASE WHEN kind='message' THEN (SELECT ordinal FROM session_message_projection p WHERE p.session_id=search_index.parent_id AND p.session_message_id=search_index.ref_id) END
-        FROM search_index WHERE {predicate} AND {FILTER} AND {CURRENT_MESSAGE_GUARD} ORDER BY {order} LIMIT ?6 OFFSET ?7");
+        FROM search_index WHERE {predicate} AND {FILTER} AND {CURRENT_MESSAGE_GUARD} ORDER BY {order} LIMIT ?5 OFFSET ?6");
     let hits = {
         let mut stmt = tx.prepare(&sql)?;
         let rows = stmt.query_map(
             params![
                 value,
                 filter.project,
-                filter.task,
                 filter.agent,
                 filter.scope,
                 limit as i64,

@@ -1,14 +1,9 @@
 import Icon from "../../components/Icon";
 import { copyToClipboard, timeAgo } from "../../components/common";
 import { showToast } from "../../components/Toast";
-import type { CollaborationRoomView, SessionListItem } from "../../types";
+import type { CollaborationRoomView } from "../../types";
 import { WAKE_LABEL, memberStatus } from "./collaborationState";
 import type { Route } from "../../app/routes";
-
-function memberName(sessionId: string, sessions: SessionListItem[]): string {
-  const local = sessions.find(s => s.id === sessionId);
-  return local?.title || sessionId.slice(0, 8);
-}
 
 async function copySessionId(sessionId: string) {
   showToast(await copyToClipboard(`NoEnding ID：${sessionId}`) ? "已复制会话 ID" : "复制失败");
@@ -32,7 +27,6 @@ function elapsed(since: string | null, now: number): string | null {
  */
 export default function CollaborationMembers({
   room,
-  sessions,
   now,
   busySessionId,
   onWake,
@@ -40,7 +34,6 @@ export default function CollaborationMembers({
   navigate,
 }: {
   room: CollaborationRoomView;
-  sessions: SessionListItem[];
   now: number;
   busySessionId: string | null;
   onWake: (sessionId: string) => void;
@@ -55,7 +48,7 @@ export default function CollaborationMembers({
     <ul className="collab-member-list" aria-label="成员状态">
       {room.members.map(member => {
         const status = memberStatus(member, now);
-        const name = memberName(member.session_id, sessions);
+        const name = member.title || `会话 ${member.session_id.slice(0, 8)}`;
         const busy = busySessionId === member.session_id;
         const processingTime = status.tone === "processing" ? elapsed(member.phase_since, now) : null;
         const retry = status.tone === "failed";
@@ -70,7 +63,7 @@ export default function CollaborationMembers({
                 <Icon name={member.wake_method} />
               </span>
               <button type="button" className="link collab-member-name truncate" title={name}
-                onClick={() => navigate({ view: "session", sessionId: member.session_id, initialTitle: name, initialAgent: sessions.find(session => session.id === member.session_id)?.agent })}>{name}</button>
+                onClick={() => navigate({ view: "session", sessionId: member.session_id, initialTitle: name, initialAgent: member.agent ?? undefined })}>{name}</button>
               {coordinator === member.session_id && <span className="collab-member-coordinator" role="img" aria-label="负责人" title="负责人"><Icon name="spark" /></span>}
               <div className="collab-member-actions">
                 {canWake && (

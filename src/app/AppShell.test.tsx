@@ -109,17 +109,17 @@ it("keeps the current page until Agent header prerequisites are ready", async ()
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
 });
 
-it("prepares collaboration members and stopped-room candidates before changing pages", async () => {
+it("prepares collaboration status before navigation and leaves candidate reads to the dialog", async () => {
   workstreamDetailCache.set("task", { ctx: { workstream: { id: "task", title: "协作任务" } } } as never);
-  vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "task", title: "协作任务", room: null, run: null, members: [] });
-  let finish!: (page: Awaited<ReturnType<typeof api.collaborationCandidates>>) => void;
-  vi.mocked(api.collaborationCandidates).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  let finish!: (room: Awaited<ReturnType<typeof api.collaborationRoomGet>>) => void;
+  vi.mocked(api.collaborationRoomGet).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   render(<AppShell />);
   await act(async () => { pageNavigation.navigate!({ view: "workstream", workstreamId: "task", entry: "collaboration" }); });
   await waitFor(() => expect(finish).toBeTypeOf("function"));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
-  await act(async () => { finish({ items: [], next_cursor: null }); });
+  await act(async () => { finish({ task_id: "task", title: "协作任务", room: null, run: null, members: [] }); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("workstream");
+  expect(api.collaborationCandidates).not.toHaveBeenCalled();
 });
 
 it("refreshes visible data when a CLI business operation completes", async () => {

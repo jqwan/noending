@@ -15,7 +15,7 @@ import { skillDetailCache, skillProjectsCache, setSkillProjectsCache } from "../
 import { packageDetailCache } from "../features/packages/packageDetailCache";
 import { projectSummaryCache } from "../features/projects/projectSummaryCache";
 import { taskItemsResource, taskSummaryResource } from "../features/workstreams/taskResources";
-import { prepareCollaborationMembers } from "../features/collaboration/collaborationResources";
+import { collaborationRoomResource } from "../features/collaboration/collaborationResources";
 import { mailboxes } from "../features/sessions/mailboxResources";
 import { liveTerminals } from "../features/sessions/terminalCache";
 import { extractionSettingsResource, workspaceSettingsResource } from "../features/settings/settingsResources";
@@ -30,22 +30,20 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
     });
   }
   if (route.view === "workstreams" && workstreamCardsCache.cards === null) {
-    return Promise.all([api.listWorkstreamCards(), api.getDefaultAgent().catch(() => null)]).then(([cards, agent]) => {
+    return api.listWorkstreamCards().then(cards => {
       workstreamCardsCache.cards = cards.filter(card => !removedTargets.workstreams.has(card.id));
-      workstreamCardsCache.defaultAgent = agent;
       return route;
     });
   }
   if (route.view === "sessions" && (route.scope === "archived" ? sessionsCache.archivedSessions : sessionsCache.normalSessions) === null) {
     return Promise.all([
       route.scope === "archived" ? api.listSessions(undefined, undefined, "archived") : api.listSessions(),
-      api.listProjects(), api.listWorkstreams(),
-    ]).then(([sessions, projects, tasks]) => {
+      api.listProjects(),
+    ]).then(([sessions, projects]) => {
       const rows = sessions.filter(session => !removedTargets.sessions.has(session.id));
       if (route.scope === "archived") sessionsCache.archivedSessions = rows;
       else sessionsCache.normalSessions = rows;
       sessionsCache.projects = projects.filter(project => !removedTargets.projects.has(project.id));
-      sessionsCache.workstreamTitleById = new Map(tasks.filter(task => !removedTargets.workstreams.has(task.id)).map(task => [task.id, task.title]));
       return route;
     });
   }
@@ -117,7 +115,7 @@ export function prepareSupportingData(route: Route): Promise<void> | undefined {
     if (sessionId) add(mailboxes.unread.ensure(sessionId));
   }
   if (route.view === "workstream") {
-    add(prepareCollaborationMembers(route.workstreamId));
+    add(collaborationRoomResource.ensure(route.workstreamId));
     if (route.entry !== "collaboration") {
       add(taskItemsResource.ensure(route.workstreamId));
       add(taskSummaryResource.ensure(route.workstreamId));

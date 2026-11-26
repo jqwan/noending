@@ -102,7 +102,7 @@ button.link {
 button.link:hover { text-decoration: underline; }
 
 /* 应用表单样式不作用于终端的隐藏输入层，macOS 与 Windows 都保持 TUI 原生输入。 */
-input[type="text"], textarea:where(:not(.terminal-host .xterm-helper-textarea)), select {
+input[type="text"], input[type="search"], textarea:where(:not(.terminal-host .xterm-helper-textarea)), select {
   font-family: inherit;
   font-size: var(--font-size-base);
   line-height: var(--line-height-ui);
@@ -116,7 +116,7 @@ input[type="text"], textarea:where(:not(.terminal-host .xterm-helper-textarea)),
   min-height: var(--control-height);
   transition: border-color var(--duration-normal) ease, box-shadow var(--duration-normal) ease;
 }
-input[type="text"], select { height: var(--control-height); }
+input[type="text"], input[type="search"], select { height: var(--control-height); }
 input:focus, textarea:where(:not(.terminal-host .xterm-helper-textarea)):focus, select:focus {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);

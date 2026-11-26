@@ -124,10 +124,6 @@ fn workstream(db: &Db, title: &str) -> noending::domain::Workstream {
     w
 }
 
-fn set_owner(db: &Db, session_id: &str, ws_id: &str) {
-    support::track(db, session_id, Some(ws_id)).unwrap();
-}
-
 /// Commit the Session Context frontier through the v1 commit path — what an
 /// explicit "更新摘要" writes. Only the frontier is asserted here, so the
 /// summary fields stay at their defaults.
@@ -163,8 +159,6 @@ fn archive_keeps_every_fact_and_never_touches_the_source() {
     let s = seeded_session(&db, &dir, SourceKind::File);
     let source_file = PathBuf::from(&s.source_path);
     commit_message(&db, &s.id, "决定使用 SQLite 存储", 100);
-    let ws = workstream(&db, "WS");
-    set_owner(&db, &s.id, &ws.id);
     set_context_frontier(&db, &s.id, 1);
 
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
@@ -181,17 +175,9 @@ fn archive_keeps_every_fact_and_never_touches_the_source() {
         "trash must never touch the Agent source"
     );
 
-    // The flip itself rewrites nothing: messages, owner, cursor and frontier
+    // The flip itself rewrites nothing: messages, cursor and frontier
     // are all exactly as they were.
     assert_eq!(db.message_count(&s.id).unwrap(), 1);
-    assert_eq!(
-        db.get_session(&s.id)
-            .unwrap()
-            .unwrap()
-            .tracked_workstream_ids,
-        vec![ws.id.clone()],
-        "Trash keeps the Owner Workstream (Trash Session → Owner 保留)"
-    );
     let cursor_after = db.get_session(&s.id).unwrap().unwrap().source_cursor();
     assert_eq!(
         cursor_before.byte_offset, cursor_after.byte_offset,
@@ -209,12 +195,10 @@ fn archive_keeps_every_fact_and_never_touches_the_source() {
 }
 
 #[test]
-fn archive_filters_board_but_preserves_task_projections() {
+fn archive_filters_session_board() {
     let db = open_db("list-scope");
     let dir = TempDir::new("list-scope-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
-    let ws = workstream(&db, "WS");
-    set_owner(&db, &s.id, &ws.id);
 
     let active = |db: &Db, scope| {
         db.list_sessions(noending::storage::SessionFilter {
@@ -226,10 +210,6 @@ fn archive_filters_board_but_preserves_task_projections() {
     use noending::domain::SessionListScope as Scope;
     assert!(active(&db, Scope::Unarchived).iter().any(|x| x.id == s.id));
 
-    let (count_before, latest_before, _) = db.workstream_session_stats(&ws.id).unwrap();
-    assert_eq!(count_before, 1);
-    assert!(latest_before.is_some());
-
     lifecycle::archive_session(&db, &s.id).unwrap();
 
     assert!(
@@ -240,16 +220,6 @@ fn archive_filters_board_but_preserves_task_projections() {
     assert!(trash.iter().any(|x| x.id == s.id));
     let all = active(&db, Scope::All);
     assert!(all.iter().any(|x| x.id == s.id));
-
-    // Workstream cards do not count the trashed session.
-    let (count_after, latest_after, _) = db.workstream_session_stats(&ws.id).unwrap();
-    assert_eq!(count_after, count_before);
-    assert_eq!(latest_after, latest_before);
-    assert!(db
-        .sessions_for_workstream(&ws.id)
-        .unwrap()
-        .iter()
-        .any(|row| row.id == s.id));
 }
 
 /// Trash does not stop a commit: an in-flight batch that lands after a Trash
@@ -281,7 +251,7 @@ fn inflight_ingest_commits_after_archive() {
     assert_eq!(db.message_count(&s.id).unwrap(), 2);
 }
 
-/// Restore keeps the same id/Owner/messages/cursors/frontier. Trash is a thin
+/// Restore keeps the same id/messages/cursors/frontier. Trash is a thin
 /// filter: search was never disabled, so nothing needs reindexing.
 #[test]
 fn unarchive_keeps_identity_data_and_search() {
@@ -289,8 +259,6 @@ fn unarchive_keeps_identity_data_and_search() {
     let dir = TempDir::new("restore-src");
     let s = seeded_session(&db, &dir, SourceKind::File);
     let stored = commit_message(&db, &s.id, "the sqlite decision message", 100);
-    let ws = workstream(&db, "WS");
-    set_owner(&db, &s.id, &ws.id);
     set_context_frontier(&db, &s.id, 1);
     let cursor_before = db.get_session(&s.id).unwrap().unwrap().source_cursor();
 
@@ -299,7 +267,6 @@ fn unarchive_keeps_identity_data_and_search() {
 
     assert_eq!(restored.id, s.id);
     assert!(restored.archived_at.is_none());
-    assert_eq!(restored.tracked_workstream_ids, vec![ws.id]);
     let messages = db.get_messages(&s.id, None, 100).unwrap();
     assert_eq!(
         messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
@@ -392,7 +359,6 @@ fn permanent_delete_purges_local_rows_only() {
     let s = seeded_session(&db, &dir, SourceKind::File);
     commit_message(&db, &s.id, "决定使用 SQLite 存储", 100);
     let ws = workstream(&db, "Surviving WS");
-    set_owner(&db, &s.id, &ws.id);
     set_context_frontier(&db, &s.id, 1);
     let other_dir = TempDir::new("purge-other");
     let other = seeded_session(&db, &other_dir, SourceKind::File);
@@ -470,8 +436,6 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     let root_id = s.root_agent_session_id.clone();
     let source_file = PathBuf::from(&s.source_path);
     commit_message(&db, &s.id, "the original conversation", 100);
-    let ws = workstream(&db, "WS");
-    set_owner(&db, &s.id, &ws.id);
 
     lifecycle::archive_session(&db, &s.id).unwrap();
     lifecycle::permanently_delete_session(&db, &s.id).unwrap();
@@ -488,7 +452,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     );
 
     // Discovery re-reads the same source: a brand-new Logical Session, no
-    // Owner, no Context, no launch history.
+    // Context or launch history.
     let (s2, is_new) = db
         .upsert_logical_session_unchecked(
             Agent::Codex,
@@ -503,11 +467,6 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
         .unwrap();
     assert!(is_new, "rediscovery creates a fresh lifecycle");
     assert_ne!(s2, s.id);
-    let stored = db.get_session(&s2).unwrap().unwrap();
-    assert!(
-        stored.tracked_workstream_ids.is_empty(),
-        "no old Owner resurrects"
-    );
 }
 
 // Search repair stays lifecycle-authoritative

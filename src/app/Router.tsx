@@ -96,11 +96,11 @@ function renderRoute(
     case "new-session":
       return (
         <NewSessionView
-          key={`${route.workstreamId ?? ""}:${route.agent ?? ""}:${route.projectId ?? ""}`}
+          key={`${route.agent ?? ""}:${route.projectId ?? ""}:${route.archivePathId ?? ""}`}
           navigate={navigate}
-          workstreamId={route.workstreamId}
           agent={route.agent}
           projectId={route.projectId}
+          archivePathId={route.archivePathId}
         />
       );
     case "workstreams":

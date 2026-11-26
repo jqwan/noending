@@ -56,7 +56,7 @@ fn profile_roots(f: &Fixture) -> noending::skills::Roots {
 struct Profile {
     project: Project,
     workspace_path: WorkspacePath,
-    file: assistant::ProjectAssistant,
+    files: assistant::ProjectAssistant,
 }
 
 fn create_profile(f: &Fixture, name: &str) -> Profile {
@@ -66,7 +66,8 @@ fn create_profile(f: &Fixture, name: &str) -> Profile {
         &f.layer,
         noending::assistant::AssistantCreate {
             name: name.into(),
-            agents_md: format!("角色代号：{name}"),
+            soul_md: Some(format!("角色代号：{name}")),
+            role_md: None,
         },
         &profile_roots(f),
     )
@@ -81,7 +82,7 @@ fn create_profile(f: &Fixture, name: &str) -> Profile {
     Profile {
         project,
         workspace_path,
-        file: assistant.file,
+        files: assistant.files,
     }
 }
 
@@ -157,7 +158,7 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     let reopened = f.project_detail(&first.project.id).unwrap();
     assert_eq!(reopened.project.name, "Atlas 改名");
     let assistant = reopened.assistant.unwrap();
-    assert_eq!(assistant.file.agents_md, "角色代号：Atlas");
+    assert_eq!(assistant.files.soul.content, "角色代号：Atlas");
     assert_eq!(assistant.workspace_path_id, first.workspace_path.id);
     assert_eq!(
         std::fs::read_to_string(root.join("notes.txt")).unwrap(),
@@ -190,57 +191,107 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     );
 }
 #[test]
-fn assistant_generated_files_preserve_user_edits() {
+fn assistant_role_is_optional_and_repair_restores_only_the_managed_guide() {
     let f = Fixture::new();
-    let p = create_profile(&f, "Curator");
-    let root = PathBuf::from(&p.workspace_path.canonical_path);
-    std::fs::write(root.join("AGENTS.md"), "用户手动修改的文件").unwrap();
-    let external = f.project_detail(&p.project.id).unwrap().assistant.unwrap();
-    assert_eq!(external.file.agents_md, "用户手动修改的文件");
-    assert_ne!(external.file.revision, p.file.revision);
-    assert!(assistant::update_profile(
-        f.db(),
-        &f.home,
-        &p.project.id,
-        p.file.revision.as_deref().unwrap(),
-        assistant::AssistantPatch {
-            agents_md: "过期草稿".into()
-        },
-    )
-    .is_err());
-    let prepared = assistant::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
-    assert_eq!(prepared.agents_md, "用户手动修改的文件");
-    let updated = assistant::update_profile(
-        f.db(),
-        &f.home,
-        &p.project.id,
-        external.file.revision.as_deref().unwrap(),
-        assistant::AssistantPatch {
-            agents_md: "在 NoEnding 编辑\n".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(updated.agents_md, "在 NoEnding 编辑\n");
+    let profile = create_profile(&f, "Curator");
+    let peer = create_profile(&f, "Reviewer");
+    let root = PathBuf::from(&profile.workspace_path.canonical_path);
+    let guide = root.join("AGENTS.md");
+    let guide_template = std::fs::read_to_string(&guide).unwrap();
+    assert_eq!(profile.files.guide_state, "current");
     assert_eq!(
-        std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),
-        "在 NoEnding 编辑\n"
+        guide_template,
+        std::fs::read_to_string(
+            PathBuf::from(&peer.workspace_path.canonical_path).join("AGENTS.md")
+        )
+        .unwrap()
     );
+    assert_eq!(profile.files.soul.content, "角色代号：Curator");
+    assert_eq!(profile.files.role.state, "current");
+    assert_eq!(std::fs::read_to_string(root.join("ROLE.md")).unwrap(), "");
     assert_eq!(
         std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
         "@AGENTS.md\n"
     );
+
+    std::fs::write(&guide, "测试档案中的非标准入口").unwrap();
+    std::fs::remove_file(root.join("ROLE.md")).unwrap();
+    let external = f
+        .project_detail(&profile.project.id)
+        .unwrap()
+        .assistant
+        .unwrap()
+        .files;
+    assert_eq!(external.guide_state, "outdated");
+    assert_eq!(external.role.state, "missing");
+    let prepared = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
+    assert_eq!(prepared.guide_state, "current");
+    assert_eq!(std::fs::read_to_string(&guide).unwrap(), guide_template);
+    assert_eq!(prepared.role.state, "current");
+    assert!(prepared.role.content.is_empty());
+    assert_eq!(prepared.soul.revision, profile.files.soul.revision);
+
+    std::fs::write(root.join("SOUL.md"), "外部更新自我定义").unwrap();
+    assert!(assistant::update_profile(
+        f.db(),
+        &f.home,
+        &profile.project.id,
+        prepared.soul.revision.as_deref().unwrap(),
+        assistant::AssistantPatch::Soul {
+            content: "过期草稿".into()
+        },
+    )
+    .is_err());
+    let edited = assistant::update_profile(
+        f.db(),
+        &f.home,
+        &profile.project.id,
+        prepared.role.revision.as_deref().unwrap(),
+        assistant::AssistantPatch::Role {
+            content: "接手后核对交付\n".into(),
+        },
+    )
+    .unwrap();
+    let repaired = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
+    assert_eq!(repaired.role.content, "接手后核对交付\n");
+    assert_eq!(repaired.soul.content, "外部更新自我定义");
+    assert_eq!(repaired.role.revision, edited.role.revision);
+
+    let cleared = assistant::update_profile(
+        f.db(),
+        &f.home,
+        &profile.project.id,
+        edited.role.revision.as_deref().unwrap(),
+        assistant::AssistantPatch::Role {
+            content: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(cleared.role.state, "current");
+    assert_eq!(std::fs::read_to_string(root.join("ROLE.md")).unwrap(), "");
 }
 #[test]
-fn assistant_project_lists_sessions_by_workspace_and_keeps_existing_task_tracking() {
-    use noending::{
-        domain::Agent,
-        launcher::{LaunchWorkspace, SessionLauncher},
-        workspace::workstream,
-    };
+fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_candidates() {
+    use noending::{domain::Agent, workspace::workstream};
 
     let f = Fixture::new();
     let profile = create_profile(&f, "Coordinator");
     let sid = profile_session(&f, &profile, "project-session");
+    let alternate_session = f
+        .db()
+        .upsert_logical_session_unchecked(
+            Agent::Pi,
+            "second-archive-session",
+            None,
+            Some(&profile.workspace_path.canonical_path),
+            Some(&profile.workspace_path.id),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .0;
+    assert_ne!(sid, alternate_session);
     let additional_dir = f.root.join("additional-workspace");
     std::fs::create_dir(&additional_dir).unwrap();
     let projection = f.layer.projection();
@@ -255,6 +306,33 @@ fn assistant_project_lists_sessions_by_workspace_and_keeps_existing_task_trackin
     let merged =
         project::merge_projects(f.db(), &profile.project.id, &additional_path.project_id).unwrap();
     assert_eq!(merged.survivor, profile.project.id);
+    let archive = f
+        .project_detail(&profile.project.id)
+        .unwrap()
+        .assistant
+        .unwrap();
+    let resolve = |path: &str| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ne"))
+            .env("NOENDING_HOME", &f.home.root)
+            .args(["project", "resolve", "--path", path])
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(output.status.success(), "{value}");
+        assert_eq!(value["data"]["project"]["id"], profile.project.id);
+        value["data"].clone()
+    };
+    let resolved = resolve(&profile.workspace_path.canonical_path);
+    assert_eq!(resolved["assistant"]["id"], archive.id.to_string());
+    assert_ne!(resolved["assistant"]["id"], profile.project.id);
+    assert_eq!(
+        resolved["assistant"]["archive_directory"],
+        profile.workspace_path.canonical_path
+    );
+    assert!(resolve(&additional_path.canonical_path)
+        .get("assistant")
+        .is_none());
+
     let other_session = f
         .db()
         .upsert_logical_session_unchecked(
@@ -271,40 +349,6 @@ fn assistant_project_lists_sessions_by_workspace_and_keeps_existing_task_trackin
         .0;
     let task = workstream::create_workstream(f.db(), "项目任务", "", &[profile.project.id.clone()])
         .unwrap();
-    let other_task = workstream::create_workstream(f.db(), "无项目任务", "", &[]).unwrap();
-
-    let path = &profile.workspace_path;
-    let launcher = SessionLauncher {
-        runtime_dir: f.home.runtime_dir.clone(),
-    };
-    let workspace = LaunchWorkspace::from_home(&f.home);
-    let prepare = |id: &str| {
-        launcher.prepare_new_with_runtime_in(
-            f.db(),
-            Agent::Codex,
-            &[id.to_owned()],
-            Some(&path.canonical_path),
-            &workspace,
-            None,
-        )
-    };
-    assert_eq!(
-        prepare(&task.id).unwrap().initial_workstream_ids,
-        [task.id.clone()]
-    );
-    assert!(prepare(&other_task.id)
-        .unwrap_err()
-        .to_string()
-        .contains("未关联"));
-    assert!(f
-        .db()
-        .set_session_tracking(&sid, &other_task.id, true)
-        .is_err());
-    let session = f.db().get_session(&sid).unwrap().unwrap();
-    f.db()
-        .inherit_terminal_tracking(&session, &[task.id.clone(), other_task.id.clone()])
-        .unwrap();
-
     let no_cwd = f
         .db()
         .upsert_logical_session_unchecked(
@@ -319,13 +363,8 @@ fn assistant_project_lists_sessions_by_workspace_and_keeps_existing_task_trackin
         )
         .unwrap()
         .0;
-    let session = f.db().get_session(&no_cwd).unwrap().unwrap();
-    f.db()
-        .inherit_terminal_tracking(&session, &[task.id.clone()])
-        .unwrap();
     let unassigned = f.db().get_session(&no_cwd).unwrap().unwrap();
     assert!(unassigned.project_id.is_none());
-    assert!(unassigned.tracked_workstream_ids.is_empty());
     assert_eq!(
         f.project_detail(&profile.project.id)
             .unwrap()
@@ -333,25 +372,32 @@ fn assistant_project_lists_sessions_by_workspace_and_keeps_existing_task_trackin
             .into_iter()
             .map(|s| s.id)
             .collect::<std::collections::BTreeSet<_>>(),
-        [sid.clone(), other_session].into_iter().collect()
+        [
+            sid.clone(),
+            alternate_session.clone(),
+            other_session.clone()
+        ]
+        .into_iter()
+        .collect()
     );
 
-    workstream::set_workstream_projects(f.db(), &task.id, &[]).unwrap();
-    let candidates = f
+    let mut candidates = f
         .db()
-        .collaboration_candidate_sessions(&task.id, None, 50)
+        .collaboration_candidate_sessions(&task.id, None, 50, None, None)
         .unwrap()
         .items;
-    assert!(candidates.contains(&sid));
-    assert!(!candidates.contains(&no_cwd));
-    assert_eq!(
-        f.db()
-            .get_session(&sid)
-            .unwrap()
-            .unwrap()
-            .tracked_workstream_ids,
-        [task.id]
-    );
+    candidates.sort();
+    let mut expected = [sid, alternate_session, other_session];
+    expected.sort();
+    assert_eq!(candidates, expected);
+
+    workstream::set_workstream_projects(f.db(), &task.id, &[]).unwrap();
+    assert!(f
+        .db()
+        .collaboration_candidate_sessions(&task.id, None, 50, None, None)
+        .unwrap()
+        .items
+        .is_empty());
 }
 
 #[test]
@@ -433,7 +479,8 @@ fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
         &f.layer,
         assistant::AssistantCreate {
             name: "Unpublished".into(),
-            agents_md: String::new(),
+            soul_md: None,
+            role_md: None,
         },
         &profile_roots(&f),
     );
@@ -487,7 +534,7 @@ fn missing_generated_working_directory_can_be_recovered_while_the_profile_exists
         .unwrap()
         .is_some());
     let restored = assistant::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
-    assert_eq!(restored.agents_md_state, "current");
+    assert_eq!(restored.guide_state, "current");
     assert!(std::path::Path::new(&p.workspace_path.canonical_path).is_dir());
 }
 

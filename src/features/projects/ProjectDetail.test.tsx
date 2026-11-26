@@ -27,6 +27,7 @@ vi.mock("../../api", () => ({
     getAgentStatus: vi.fn(),
     continueSessionDesktop: vi.fn(),
     updateAssistantProfile: vi.fn(),
+    prepareAssistantFiles: vi.fn(),
     archiveProject: vi.fn(),
     deleteProjectPermanently: vi.fn(),
   },
@@ -64,6 +65,7 @@ beforeEach(() => {
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
   vi.mocked(api.updateAssistantProfile).mockReset();
+  vi.mocked(api.prepareAssistantFiles).mockReset();
   vi.mocked(api.archiveProject).mockReset();
   vi.mocked(api.deleteProjectPermanently).mockReset();
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
@@ -128,7 +130,6 @@ function mockDetail(): ProjectDetailData {
         cwd: "/z/main/worktree",
         project_id: "p1",
         workspace_path_id: "wp-main",
-        tracked_workstream_ids: [],
         started_at: "2026-10-01T00:00:00Z",
         last_activity_at: "2026-10-01T01:00:00Z",
         last_conversation_at: null,
@@ -143,9 +144,14 @@ function mockDetail(): ProjectDetailData {
 
 function assistantProject(): ProjectDetailData & { assistant: NonNullable<ProjectDetailData["assistant"]> } {
   const detail = mockDetail();
-  return { ...detail, assistant: {
-    agents_md: "核对交付", revision: "hash-1",
-    agents_md_state: "current",
+  return { ...detail, sessions: [...detail.sessions, {
+    ...detail.sessions[0], id: "archive-session", title: "档案会话", workspace_path_id: "wp-linked",
+    cwd: "/a/linked/worktree",
+  }], assistant: {
+    id: "archive-id",
+    guide_state: "current",
+    soul: { content: "价值观", revision: "soul-hash", state: "current" },
+    role: { content: "核对交付", revision: "hash-1", state: "current" },
     workspace_path_id: "wp-linked",
   } };
 }
@@ -163,7 +169,7 @@ describe("ProjectDetail", () => {
     expect(screen.getByText("Git 项目")).toBeTruthy();
     expect(screen.getByRole("region", { name: "项目摘要" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "关联任务" })).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "AGENTS.md" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "长期职责" })).toBeNull();
     const workingDirectories = screen.getByRole("region", { name: "工作目录" });
     expect(within(workingDirectories).getByTitle("/z/main/worktree")).toBeTruthy();
     const tabs = within(screen.getByRole("group", { name: "项目子页" }));
@@ -172,7 +178,7 @@ describe("ProjectDetail", () => {
     fireEvent.click(assistantTab);
     expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", entry: "assistant" });
 
-    rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
     expect(tabs.getByRole("button", { name: "智能体详情", pressed: true })).toBe(assistantTab);
     expect(screen.getByText("核对交付")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "项目摘要" })).toBeNull();
@@ -182,43 +188,71 @@ describe("ProjectDetail", () => {
     expect(within(archiveDirectory).getByTitle("/a/linked/worktree")).toBeTruthy();
     expect(screen.queryByTitle("/z/main/worktree")).toBeNull();
     expect(screen.getByRole("region", { name: "技能" })).toBe(skills);
-    expect(screen.getByRole("button", { name: "Session 1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "档案会话" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Session 1" })).toBeNull();
+    expect(screen.getByRole("region", { name: "行为与交流" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "长期职责" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "AGENTS.md" })).toBeNull();
     expect(screen.queryByRole("region", { name: "所属项目" })).toBeNull();
+    fireEvent.click(newSessionBtn);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1", archivePathId: "wp-linked" });
     fireEvent.click(projectTab);
     expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project" });
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} />));
     expect(screen.getByRole("button", { name: "新建会话" })).toBe(newSessionBtn);
     fireEvent.click(newSessionBtn);
     expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1" });
   });
 
-  it("keeps the AGENTS.md draft across subpages and detects external writes", async () => {
+  it("keeps the ROLE.md draft across subpages and detects external writes", async () => {
     const detail = assistantProject();
-    const remote = { ...detail, assistant: { ...detail.assistant, agents_md: "外部修改", revision: "hash-2" } };
+    const remote = { ...detail, assistant: { ...detail.assistant, role: { ...detail.assistant.role, content: "外部修改", revision: "hash-2" } } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     vi.mocked(api.updateAssistantProfile).mockRejectedValueOnce(new Error("版本冲突"));
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
-    fireEvent.click(await screen.findByRole("button", { name: "编辑 AGENTS.md" }));
-    const input = screen.getByRole("textbox", { name: "AGENTS.md" });
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 ROLE.md" }));
+    const input = screen.getByRole("textbox", { name: "ROLE.md" });
     fireEvent.change(input, { target: { value: "本地草稿" } });
     fireEvent.click(screen.getByRole("button", { name: "项目详情" }));
     expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", fromAssistants: true });
     rerender(<ProjectDetail projectId="p1" navigate={navigate} fromAssistants />);
-    expect(screen.queryByRole("textbox", { name: "AGENTS.md" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "ROLE.md" })).toBeNull();
     vi.mocked(api.getProjectDetail).mockResolvedValue(remote);
     await act(async () => notifyDataChanged(["projects"]));
     rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
-    expect(await screen.findByText(/AGENTS.md 已在外部修改/)).toBeTruthy();
-    expect(screen.getByRole("textbox", { name: "AGENTS.md" })).toHaveProperty("value", "本地草稿");
+    expect(await screen.findByText(/ROLE.md 已在外部修改/)).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "本地草稿");
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
-    expect(await screen.findByText(/保存 AGENTS.md 失败/)).toBeTruthy();
-    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-1", { agents_md: "本地草稿" });
-    const saved = { agents_md: "本地草稿", revision: "hash-3", agents_md_state: "current" as const };
+    expect(await screen.findByText(/保存 ROLE.md 失败/)).toBeTruthy();
+    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-1", { file: "role", content: "本地草稿" });
+    const saved = { ...detail.assistant, role: { ...detail.assistant.role, content: "本地草稿", revision: "hash-3" } };
     vi.mocked(api.updateAssistantProfile).mockResolvedValue(saved);
     vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...remote.assistant, ...saved } });
     fireEvent.click(screen.getByRole("button", { name: "覆盖文件修改" }));
     expect(await screen.findByText("本地草稿")).toBeTruthy();
     expect(screen.getByTitle("/a/linked/worktree")).toBeTruthy();
-    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-2", { agents_md: "本地草稿" });
+    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-2", { file: "role", content: "本地草稿" });
+  });
+
+  it("repairs the managed guide and keeps an empty role editable", async () => {
+    const detail = assistantProject();
+    const emptyRole = { ...detail.assistant, role: { ...detail.assistant.role, content: "" } };
+    vi.mocked(api.getProjectDetail).mockResolvedValue({
+      ...detail, assistant: { ...emptyRole, guide_state: "outdated" },
+    });
+    vi.mocked(api.prepareAssistantFiles).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: emptyRole });
+      return emptyRole;
+    });
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+
+    const repair = await screen.findByRole("button", { name: "修复运行指南" });
+    expect(screen.getByText("尚未设定长期职责。")).toBeTruthy();
+    fireEvent.click(repair);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "修复运行指南" })).toBeNull());
+    expect(api.prepareAssistantFiles).toHaveBeenCalledWith("p1");
+    fireEvent.click(screen.getByRole("button", { name: "编辑 ROLE.md" }));
+    expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "");
   });
 
   it("uses project deletion and returns to the originating archive filter", async () => {

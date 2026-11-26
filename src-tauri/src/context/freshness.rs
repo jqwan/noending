@@ -137,10 +137,10 @@ pub fn view(db: &Db, kind: Option<&str>, id: Option<&str>) -> Result<FreshnessVi
     let conn = db.read();
     let tx = conn.unchecked_transaction()?;
     let scope = match (kind,id) {
-        (None,None) => "1=1",
-        (Some("session"),Some(_)) => "s.id=?1",
-        (Some("task"),Some(_)) => "EXISTS(SELECT 1 FROM session_workstreams sw WHERE sw.session_id=s.id AND sw.workstream_id=?1)",
-        (Some("project"),Some(_)) => "EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?1)",
+        (None,None) => Some("1=1"),
+        (Some("session"),Some(_)) => Some("s.id=?1"),
+        (Some("task"),Some(_)) => None,
+        (Some("project"),Some(_)) => Some("EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?1)"),
         _ => return Err(other("kind 与 id 必须同时提供，kind 为 session/task/project")),
     };
     if let (Some(kind), Some(id)) = (kind, id) {
@@ -160,41 +160,41 @@ pub fn view(db: &Db, kind: Option<&str>, id: Option<&str>) -> Result<FreshnessVi
     }
     let mut stats = SessionChecks::default();
     let mut source_paths = Vec::new();
-    let sql = format!("SELECT s.agent,s.source_path,c.started_at,c.finished_at,c.outcome,c.checked_at FROM sessions s LEFT JOIN sync_checks c ON c.scope='session' AND c.target_id=s.id WHERE {scope}");
-    let mut stmt = tx.prepare(&sql)?;
-    let mut rows = if kind.is_some() {
-        stmt.query(params![id])?
-    } else {
-        stmt.query([])?
-    };
-    while let Some(r) = rows.next()? {
-        stats.total += 1;
-        let check = repo::SyncCheck {
-            started_at: r.get(2)?,
-            finished_at: r.get(3)?,
-            outcome: r.get(4)?,
-            checked_at: r.get(5)?,
-        };
-        if let Some(at) = &check.checked_at {
-            stats.checked += 1;
-            if stats.oldest_checked_at.as_ref().is_none_or(|old| at < old) {
-                stats.oldest_checked_at = Some(at.clone());
-            }
-            if stats.latest_checked_at.as_ref().is_none_or(|old| at > old) {
-                stats.latest_checked_at = Some(at.clone());
-            }
+    if let Some(scope) = scope {
+        let sql = format!("SELECT s.agent,s.source_path,c.started_at,c.finished_at,c.outcome,c.checked_at FROM sessions s LEFT JOIN sync_checks c ON c.scope='session' AND c.target_id=s.id WHERE {scope}");
+        let mut stmt = tx.prepare(&sql)?;
+        let mut rows = if kind.is_some() {
+            stmt.query(params![id])?
         } else {
-            stats.unknown += 1;
+            stmt.query([])?
+        };
+        while let Some(r) = rows.next()? {
+            stats.total += 1;
+            let check = repo::SyncCheck {
+                started_at: r.get(2)?,
+                finished_at: r.get(3)?,
+                outcome: r.get(4)?,
+                checked_at: r.get(5)?,
+            };
+            if let Some(at) = &check.checked_at {
+                stats.checked += 1;
+                if stats.oldest_checked_at.as_ref().is_none_or(|old| at < old) {
+                    stats.oldest_checked_at = Some(at.clone());
+                }
+                if stats.latest_checked_at.as_ref().is_none_or(|old| at > old) {
+                    stats.latest_checked_at = Some(at.clone());
+                }
+            } else {
+                stats.unknown += 1;
+            }
+            match check.outcome.as_deref() {
+                Some("missing") => stats.missing += 1,
+                Some("failed" | "partial" | "cancelled") => stats.failed += 1,
+                _ => {}
+            }
+            source_paths.push((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
         }
-        match check.outcome.as_deref() {
-            Some("missing") => stats.missing += 1,
-            Some("failed" | "partial" | "cancelled") => stats.failed += 1,
-            _ => {}
-        }
-        source_paths.push((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
     }
-    drop(rows);
-    drop(stmt);
     let mut stmt = tx.prepare("SELECT id,agent,path,origin FROM ingest_sources ORDER BY id")?;
     let sources = stmt
         .query_map([], |r| {

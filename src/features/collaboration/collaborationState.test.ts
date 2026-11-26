@@ -4,6 +4,7 @@ import type { CollaborationMemberState } from "../../types";
 
 const NOW = Date.parse("2026-10-27T04:00:00Z");
 const member = (patch: Partial<CollaborationMemberState> = {}): CollaborationMemberState => ({
+  title: null, agent: null, project_id: null,
   session_id: "s1",
   wake_method: "terminal",
   wake_status: "opened",

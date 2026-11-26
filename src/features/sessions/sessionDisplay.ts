@@ -14,7 +14,6 @@ export const NO_CWD = "未设置";
 export const UNKNOWN_AGENT = "未知 Agent";
 
 /** Workstream 标题为空串时的兜底（Session 可以未归属，但不能显示成空白格）。 */
-export const UNNAMED_WORKSTREAM = "未命名任务";
 
 /** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
 export const PROJECT_PENDING = "待解析";

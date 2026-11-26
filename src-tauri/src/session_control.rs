@@ -25,8 +25,6 @@ pub(crate) const CALLER_TERMINAL_ENV: &str = "NOENDING_TERMINAL_ID";
 pub struct StartSession {
     pub agent: String,
     pub cwd: Option<String>,
-    #[serde(default)]
-    pub tasks: Vec<String>,
     pub message: Option<String>,
     pub runtime: Option<AgentRuntimeOverrides>,
 }
@@ -266,7 +264,6 @@ pub(crate) fn dispatch(
                 state,
                 registry,
                 options.agent,
-                options.tasks,
                 options.cwd,
                 message,
                 options.runtime,

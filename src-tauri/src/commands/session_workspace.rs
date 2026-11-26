@@ -1,10 +1,4 @@
-//! Session listing, detail, message projections and task tracking commands.
-//!
-//! Sessions may track multiple tasks. Tracking never changes cwd or physical
-//! project membership. New tracking is limited to unarchived tasks associated
-//! with the session's current project; existing links remain removable.
-//! The detail projection includes source availability; the tracking projection
-//! reads database associations only.
+//! Session listing, detail and message projections.
 
 use serde::Serialize;
 use tauri::State;
@@ -13,48 +7,6 @@ use crate::domain::*;
 use crate::error::{other, Result};
 
 use super::{with_db, AppState};
-
-#[derive(Serialize)]
-pub struct SessionTracking {
-    pub session: Session,
-    pub tracked_workstreams: Vec<Workstream>,
-    pub available_workstreams: Vec<Workstream>,
-}
-
-#[tauri::command]
-pub fn get_session_tracking(state: State<AppState>, session_id: String) -> Result<SessionTracking> {
-    with_db(&state, |db| {
-        let session = db
-            .get_session(&session_id)?
-            .ok_or_else(|| other("会话不存在"))?;
-        let tracked_workstreams = session
-            .tracked_workstream_ids
-            .iter()
-            .map(|id| db.get_workstream(id))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        let available_workstreams = match session.project_id.as_deref() {
-            Some(project) => {
-                crate::storage::workstream_projects::workstreams_for_project(&db.read(), project)?
-                    .into_iter()
-                    .filter(|w| {
-                        w.visibility == "normal" && !session.tracked_workstream_ids.contains(&w.id)
-                    })
-                    .collect()
-            }
-            None => Vec::new(),
-        };
-        Ok(SessionTracking {
-            session,
-            tracked_workstreams,
-            available_workstreams,
-        })
-    })
-}
-
-// ---------------- Sessions ----------------
 
 /// How many Conversation messages the detail page previews. The conversation
 /// itself is read through `get_session_messages`, never wholesale.
@@ -73,8 +25,6 @@ pub struct SessionDetail {
     pub messages: Vec<SessionWindowMessage>,
     /// Message count statistics (user messages vs agent replies).
     pub message_stats: SessionMessageStats,
-    /// The one Workstream this Session belongs to, or `None`.
-    pub tracked_workstreams: Vec<Workstream>,
     /// Session Detail shows the WorkspacePath and the Project behind it,
     /// read-only. They travel as display strings because `workspace_path_id`
     /// alone would make the UI join a table it has no command for — and the
@@ -190,14 +140,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             .get_session_context(&session_id)?
             .map(|c| c.processed_through_seq)
             .unwrap_or(0);
-        let tracked_workstreams = session
-            .tracked_workstream_ids
-            .iter()
-            .map(|id| db.get_workstream(id))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect();
         let cwd_usable = session
             .cwd
             .as_deref()
@@ -231,7 +173,6 @@ pub fn get_session_detail(state: State<AppState>, session_id: String) -> Result<
             session,
             messages,
             message_stats,
-            tracked_workstreams,
             workspace_path: workspace_path.transpose()?,
             ingested_message_sequence,
             processed_message_sequence,
@@ -406,21 +347,5 @@ pub fn get_session_user_message_marks(
                 preview: mark.preview,
             })
             .collect())
-    })
-}
-
-/// Add or remove one task tracking relation.
-///
-/// `workstream_id = None` clears ownership. This is the ONLY write path for
-/// semantic ownership; it changes one column and nothing else.
-#[tauri::command]
-pub fn set_session_task_tracking(
-    state: State<AppState>,
-    session_id: String,
-    workstream_id: String,
-    tracked: bool,
-) -> Result<Session> {
-    with_db(&state, |db| {
-        crate::workspace::session::set_session_tracking(db, &session_id, &workstream_id, tracked)
     })
 }

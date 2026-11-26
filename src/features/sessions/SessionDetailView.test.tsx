@@ -1,5 +1,5 @@
 import { clearReadResources } from "../../hooks/readResource";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionDetailView, { sessionDetailCache, sessionContextCache } from "./SessionDetailView";
 import { api } from "../../api";
@@ -45,10 +45,8 @@ vi.mock("../../api", () => ({
       revision: 1,
     }),
     listProjects: vi.fn().mockResolvedValue([]),
-    listWorkstreams: vi.fn().mockResolvedValue([]),
     archiveSession: vi.fn(),
     restoreSession: vi.fn(),
-    setSessionTaskTracking: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
     refreshSession: vi.fn().mockResolvedValue({ queued: true }),
@@ -68,7 +66,6 @@ beforeEach(() => {
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
   vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2 });
   vi.mocked(api.listProjects).mockResolvedValue([]);
-  vi.mocked(api.listWorkstreams).mockResolvedValue([]);
   vi.mocked(api.refreshSession).mockResolvedValue({ queued: true });
 });
 
@@ -91,7 +88,6 @@ function session(id: string, over: Partial<Session> = {}): Session {
     cwd: null,
     project_id: null,
     workspace_path_id: null,
-    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: null,
     last_activity_at: null,
@@ -138,7 +134,6 @@ function detail(me: Session, over: Partial<SessionDetail> = {}): SessionDetail {
   return {
     session: me,
     messages: [],
-    tracked_workstreams: [],
     workspace_path: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
@@ -158,34 +153,14 @@ async function renderDetail(d: SessionDetail) {
 }
 
 
-it("renders session message stats and tracked tasks in aside", async () => {
-  const task1 = {
-    id: "w1",
-    title: "测试任务",
-    description: "任务描述",
-    visibility: "normal" as const,
-    created_at: "2026-10-13T00:00:00Z",
-    updated_at: "2026-10-13T00:00:00Z",
-  };
-  const d = detail(session("s1", { title: "测试统计会话" }), {
+it("renders session message stats in the sidebar", async () => {
+  await renderDetail(detail(session("s1", { title: "测试统计会话" }), {
     message_stats: { user_messages: 5, assistant_messages: 8 },
-    tracked_workstreams: [task1],
-  });
-  const { navigate } = await renderDetail(d);
+  }));
 
   expect(screen.getByText("会话统计")).toBeTruthy();
   expect(screen.getByText("用户消息 5")).toBeTruthy();
   expect(screen.getByText("Agent 回复 8")).toBeTruthy();
-  expect(screen.getByText("跟踪任务（1）")).toBeTruthy();
-  expect(screen.getByText("测试任务")).toBeTruthy();
-  expect(screen.queryByText("任务描述")).toBeNull();
-
-  fireEvent.click(screen.getByText("测试任务"));
-  expect(navigate).toHaveBeenCalledWith({
-    view: "workstream",
-    workstreamId: "w1",
-    initialTitle: "测试任务",
-  });
 });
 
 // 执行信息
@@ -568,21 +543,4 @@ it("shows the physical compressed source and uses it for copy and reveal", async
   await waitFor(() => expect(api.revealSessionSource).toHaveBeenCalledWith("compressed"));
   fireEvent.click(screen.getByRole("button", { name: "复制源会话路径" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(path));
-});
-
-it("orders tracked tasks by their update time without changing the task navigation", async () => {
-  const older = { id: "old", title: "旧任务", description: "", visibility: "normal" as const, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" };
-  const newer = { ...older, id: "new", title: "近期任务", updated_at: "2026-10-29T00:00:00Z" };
-  const { navigate } = await renderDetail(detail(session("s1"), { tracked_workstreams: [older, newer] }));
-  const list = screen.getByRole("region", { name: "跟踪任务列表" });
-  expect(within(list).getAllByRole("button", { name: /^(近期任务|旧任务)$/ }).map(node => node.textContent)).toEqual(["近期任务", "旧任务"]);
-  fireEvent.click(within(list).getByRole("button", { name: "近期任务" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "workstream", workstreamId: "new", initialTitle: "近期任务" });
-  navigate.mockClear();
-  vi.mocked(api.getSessionDetail).mockResolvedValue(detail(session("s1"), { tracked_workstreams: [older] }));
-  fireEvent.click(within(list).getByRole("button", { name: "取消跟踪：近期任务" }));
-  await waitFor(() => expect(api.setSessionTaskTracking).toHaveBeenCalledWith("s1", "new", false));
-  await waitFor(() => expect(within(list).queryByRole("button", { name: "近期任务" })).toBeNull());
-  expect(within(list).getByRole("button", { name: "旧任务" })).toBeTruthy();
-  expect(navigate).not.toHaveBeenCalled();
 });

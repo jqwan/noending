@@ -1056,7 +1056,7 @@ mod tests {
         let prepared = prepare(&original, Agent::Codex, "terminal")
             .unwrap()
             .unwrap();
-        let wrapped = super::super::spawn::wrapped_command(&prepared.command);
+        let wrapped = super::super::spawn::wrapped_command(&prepared.command, false);
         let argv = wrapped.get_argv();
         let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -1145,7 +1145,7 @@ console.log(JSON.stringify({args,status:result.status,output:result.stdout,error
             args: args.clone(),
             cwd: Some(directory.clone()),
         };
-        let wrapped = super::super::spawn::wrapped_command(&cmd);
+        let wrapped = super::super::spawn::wrapped_command(&cmd, false);
         let argv = wrapped.get_argv();
         let input = serde_json::json!({"hook_event_name":"Stop","session_id":"native","last_assistant_message":"完成了\"OK\"，下一行\nC:\\工作\\项目"});
         let output = std::process::Command::new(&argv[0])

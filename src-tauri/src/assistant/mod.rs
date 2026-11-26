@@ -1,6 +1,6 @@
 //! Persistent assistant profiles.
 //! Each profile owns a registered directory; native sessions reuse the shared
-//! launcher, ingestion, task tracking and Skill loading services.
+//! launcher, ingestion, project and Skill loading services.
 mod files;
 mod models;
 mod profiles;

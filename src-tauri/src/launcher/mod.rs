@@ -1,11 +1,8 @@
 //! Session Launcher — New / Resume flows (技术实现).
 //!
-//! New Session: the embedded terminal holds the chosen task in memory and
-//! assigns it once when its native conversation is ingested.
-//!
 //! Resume: starts the Agent in the Session's own directory. Neither flow
 //! synchronizes or injects Context: a launch carries only launch facts (Agent,
-//! cwd, runtime, initial tracking task) and an optional first user turn for New.
+//! cwd, runtime) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
 //! Interactive terminal sessions use each Agent’s full-access launch mode.
 //!
@@ -149,8 +146,6 @@ pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    /// Initial tracking tasks for New; Resume does not carry a task.
-    pub initial_workstream_ids: Vec<String>,
     /// The directory the Agent WILL start in — authoritative: the spawn step
     /// uses this value and nothing else; re-reading `sessions.cwd` let
     /// background discovery move a launch between Preview and Launch.
@@ -236,28 +231,16 @@ impl SessionLauncher {
         &self,
         db: &Db,
         agent: Agent,
-        initial_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
-        self.prepare_new_with_runtime_in(
-            db,
-            agent,
-            &initial_workstream_id
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-            cwd,
-            workspace,
-            None,
-        )
+        self.prepare_new_with_runtime_in(db, agent, cwd, workspace, None)
     }
 
     pub fn prepare_new_with_runtime_in(
         &self,
         db: &Db,
         agent: Agent,
-        initial_workstream_ids: &[String],
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
         runtime_override: Option<&AgentRuntimeOverrides>,
@@ -265,20 +248,12 @@ impl SessionLauncher {
         if !crate::agent_runtime::store::launch_enabled(db, agent)? {
             return Err(other("该 Agent 已关闭用于新建会话，请在 Agent 设置中启用"));
         }
-        let mut initial_workstream_ids = initial_workstream_ids.to_vec();
-        initial_workstream_ids.sort();
-        initial_workstream_ids.dedup();
         let resolution = resolve_new_cwd(cwd, workspace)?;
-        for ws_id in &initial_workstream_ids {
-            require_unarchived_task(db, ws_id)?;
-            validate_initial_task(db, Some(ws_id), resolution.cwd.as_deref(), workspace)?;
-        }
         let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
-        let fingerprint = compute_state_fingerprint_with_runtime(
+        let (fingerprint, _) = compute_state_fingerprint_with_runtime(
             db,
             "new",
             None,
-            &initial_workstream_ids,
             agent,
             workspace,
             &resolution,
@@ -290,7 +265,6 @@ impl SessionLauncher {
             mode: "new".into(),
             agent,
             session_id: None,
-            initial_workstream_ids,
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -303,12 +277,7 @@ impl SessionLauncher {
         })
     }
 
-    /// Prepare Resume Session:
-    /// Preserves the Session's task tracking and captures the
-    /// fingerprint. NO Context is built and NO Source is scanned.
-    ///
-    /// INVARIANT: Zero premature side effects. Does NOT change task tracking and
-    /// does NOT write any file.
+    /// Prepare a resume by capturing the launch fingerprint without side effects.
     ///
     /// The Session's own cwd wins while it is a real directory; when it is gone,
     /// resume is refused with an explicit error rather than falling back to an
@@ -366,7 +335,6 @@ impl SessionLauncher {
             db,
             "resume",
             Some(session_id),
-            None,
             session.agent,
             workspace,
             &resolution,
@@ -377,7 +345,6 @@ impl SessionLauncher {
             mode: "resume".into(),
             agent: session.agent,
             session_id: Some(session_id.to_string()),
-            initial_workstream_ids: Vec::new(),
             cwd: resolution.cwd.clone(),
             cwd_resolution: resolution,
             runtime,
@@ -403,8 +370,7 @@ impl SessionLauncher {
     /// 2. Identity preservation: passes the EXACT prepared runtime overrides
     ///    (NO re-reading Settings) and starts the Agent in `prepared.cwd` (NO
     ///    re-resolving).
-    /// 3. New embedded terminals receive the chosen task in memory. No Context
-    ///    file, no injection, no pre-sync.
+    /// 3. Launching does not write or inject Context or sync history.
     ///
     /// The default workspace is a Home fact the fingerprint has to re-read from
     /// *now*: if the Home moved after Preview, the prepared launch must abort,
@@ -447,11 +413,10 @@ impl SessionLauncher {
         embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
         let resolution = recompute_launch_cwd(db, prepared, workspace)?;
-        let current_fingerprint = compute_state_fingerprint_with_runtime(
+        let (current_fingerprint, require_cwd) = compute_state_fingerprint_with_runtime(
             db,
             &prepared.mode,
             prepared.session_id.as_deref(),
-            &prepared.initial_workstream_ids,
             prepared.agent,
             workspace,
             &resolution,
@@ -474,10 +439,6 @@ impl SessionLauncher {
             .map(message::prepare)
             .transpose()?;
         if prepared.mode == "new" {
-            for task in &prepared.initial_workstream_ids {
-                require_unarchived_task(db, task)?;
-                validate_initial_task(db, Some(task), prepared.cwd.as_deref(), workspace)?;
-            }
             let install = resolve_install(db, prepared.agent)?;
             let adapter = crate::adapters::adapter_for(prepared.agent);
             let cwd_path = prepared.cwd.as_deref().map(PathBuf::from);
@@ -518,7 +479,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: None,
-                        initial_workstream_ids: &prepared.initial_workstream_ids,
+                        require_cwd,
                         root_agent_session_id: expected_root_session_id.as_deref(),
                         agent: prepared.agent,
                     },
@@ -541,13 +502,7 @@ impl SessionLauncher {
             Ok(LaunchResult {
                 launched_via: outcome.launched_via,
                 command_line: public_command_line.unwrap_or(outcome.command_line),
-                note: if !prepared.initial_workstream_ids.is_empty() && prepared.embedded {
-                    "会话摄入并绑定终端后，将跟踪所选任务。".into()
-                } else if !prepared.initial_workstream_ids.is_empty() {
-                    "已在外部终端启动；摄入后请手动添加跟踪任务。".into()
-                } else {
-                    "已直接启动；本次未选择跟踪任务。".into()
-                },
+                note: "已启动会话。".into(),
                 terminal_id: outcome.terminal_id,
             })
         } else {
@@ -631,7 +586,7 @@ impl SessionLauncher {
                     &crate::terminal::EmbeddedTarget {
                         registry: embedded.registry,
                         session_id: Some(session_id),
-                        initial_workstream_ids: &[],
+                        require_cwd: false,
                         root_agent_session_id: Some(&session.root_agent_session_id),
                         agent: session.agent,
                     },
@@ -670,11 +625,10 @@ impl SessionLauncher {
         &self,
         db: &Db,
         agent: Agent,
-        initial_workstream_id: Option<&str>,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<LaunchResult> {
-        let prepared = self.prepare_new_in(db, agent, initial_workstream_id, cwd, workspace)?;
+        let prepared = self.prepare_new_in(db, agent, cwd, workspace)?;
         // One-shot launches have no embedded surface: the terminal subpage
         // attach protocol only exists for prepared resume launches.
         self.launch_prepared_in(db, &prepared, workspace, None)
@@ -684,37 +638,23 @@ impl SessionLauncher {
 /// The full fingerprint. Everything that decides what the Agent receives:
 ///
 /// * the Agent runtime override intent;
-/// * the initially selected task (or none): title / description / `updated_at`;
 /// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all;
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
 ///   its source cursor, its **`workspace_path_id`**, its native identity and
 ///   its launch identity.
 ///
-/// Every added input is labelled and terminated by `|`. Task directory display
-/// order is not a launch input; changing it does not invalidate a preview.
+/// Every added input is labelled and terminated by `|`.
 pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    initial_workstream_id: Option<&str>,
     agent: Agent,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
 ) -> Result<String> {
-    compute_state_fingerprint_with_runtime(
-        db,
-        mode,
-        session_id,
-        &initial_workstream_id
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-        agent,
-        workspace,
-        resolution,
-        None,
-    )
+    compute_state_fingerprint_with_runtime(db, mode, session_id, agent, workspace, resolution, None)
+        .map(|(fingerprint, _)| fingerprint)
 }
 
 fn resolve_launch_runtime(
@@ -731,17 +671,15 @@ fn resolve_launch_runtime(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn compute_state_fingerprint_with_runtime(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    initial_workstream_ids: &[String],
     agent: Agent,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
     runtime_override: Option<&AgentRuntimeOverrides>,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -755,23 +693,15 @@ fn compute_state_fingerprint_with_runtime(
     if mode == "new" && !crate::agent_runtime::store::launch_enabled(db, agent)? {
         return Err(other("该 Agent 已关闭用于新建会话"));
     }
-    if mode == "new" {
-        if let Some(path) = resolution
-            .cwd
-            .as_deref()
-            .and_then(crate::workspace::path_identity_of)
-        {
-            let project_id =
-                crate::storage::assistant_profiles::project_for_path(&db.read(), &path)?;
-            if let Some(id) = project_id {
-                if db
-                    .get_project(&id)?
-                    .is_some_and(|project| project.visibility != "normal")
-                {
-                    return Err(other("已归档智能体不能开始新会话"));
-                }
-            }
-        }
+    let archive_project = if mode == "new" {
+        archive_launch_project(db, resolution.cwd.as_deref())?
+    } else {
+        None
+    };
+    if let Some(id) = &archive_project {
+        hasher.update(b"archive_project:");
+        hasher.update(id.as_bytes());
+        hasher.update(b"|");
     }
     let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
     hasher.update(b"runtime:");
@@ -791,24 +721,6 @@ fn compute_state_fingerprint_with_runtime(
 
     // The directory the Agent will actually start in, and why.
     hasher.update(resolution.fingerprint_input());
-
-    for ws_id in initial_workstream_ids {
-        hasher.update(b"initial_task:");
-        hasher.update(ws_id.as_bytes());
-        hasher.update(b":");
-        if let Some(ws) = db.get_workstream(ws_id)? {
-            hasher.update(b"exists:1:");
-            hasher.update(ws.title.as_bytes());
-            hasher.update(b"|");
-            hasher.update(ws.description.as_bytes());
-            hasher.update(b"|");
-            hasher.update(ws.updated_at.as_bytes());
-            hasher.update(b"|");
-        } else {
-            hasher.update(b"exists:0:");
-            hasher.update(b"|");
-        }
-    }
 
     if mode == "resume" {
         if let Some(sid) = session_id {
@@ -857,7 +769,34 @@ fn compute_state_fingerprint_with_runtime(
     }
 
     let hash = hasher.finalize();
-    Ok(format!("{:x}", hash))
+    Ok((format!("{:x}", hash), archive_project.is_some()))
+}
+
+fn archive_launch_project(db: &Db, cwd: Option<&str>) -> Result<Option<String>> {
+    let Some(cwd) = cwd else {
+        return Ok(None);
+    };
+    let Some(path_id) = crate::workspace::path_identity_of(cwd) else {
+        return Ok(None);
+    };
+    let project_id = crate::storage::assistant_profiles::project_for_path(&db.read(), &path_id)?;
+    let Some(id) = project_id else {
+        return Ok(None);
+    };
+    if db
+        .get_project(&id)?
+        .is_some_and(|project| project.visibility != "normal")
+    {
+        return Err(other("已归档智能体不能开始新会话"));
+    }
+    let directory = std::path::Path::new(cwd);
+    if !directory.parent().is_some_and(|parent| {
+        std::fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.is_dir())
+    }) || !std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.is_dir())
+    {
+        return Err(other("智能体档案目录不可用，请先在详情页修复"));
+    }
+    Ok(Some(id))
 }
 
 fn resolve_install(
@@ -1008,34 +947,4 @@ fn recompute_launch_cwd(
         return Ok(prepared.cwd_resolution.clone());
     }
     resolve_new_cwd(None, workspace)
-}
-
-fn require_unarchived_task(db: &Db, owner: &str) -> Result<()> {
-    let task = db
-        .get_workstream(owner)?
-        .ok_or_else(|| other("所选任务已不存在，请重新选择跟踪任务"))?;
-    if task.visibility == crate::domain::workstream_visibility::ARCHIVED {
-        return Err(other("已归档的任务不能新建会话，请先取消归档"));
-    }
-    Ok(())
-}
-
-fn validate_initial_task(
-    db: &Db,
-    task: Option<&str>,
-    cwd: Option<&str>,
-    _workspace: &LaunchWorkspace,
-) -> Result<()> {
-    let Some(task) = task else {
-        return Ok(());
-    };
-    require_unarchived_task(db, task)?;
-    let cwd = cwd.ok_or_else(|| other("请先选择项目目录"))?;
-    let path_id = crate::workspace::path_identity_of(cwd).ok_or_else(|| other("工作目录无效"))?;
-    let conn = db.read();
-    let eligible:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=?1 AND wp.id=?2)",rusqlite::params![task,path_id],|r|r.get(0))?;
-    if !eligible {
-        return Err(other("所选任务未关联工作目录所属项目"));
-    }
-    Ok(())
 }

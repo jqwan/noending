@@ -1,5 +1,4 @@
 //! Session ↔ WorkspacePath. Project membership is derived at read time.
-//! Physical membership and semantic Workstream ownership are independent.
 
 use rusqlite::{params, Connection};
 
@@ -8,8 +7,7 @@ use crate::error::Result;
 use super::Db;
 
 impl Db {
-    /// Standalone Sessions belong to a Project too, straight from their own path,
-    /// with no Workstream involved. Archive state does not change membership.
+    /// Archive state does not change a Session’s workspace path.
     pub fn list_sessions_for_workspace_path(
         &self,
         path_id: &str,

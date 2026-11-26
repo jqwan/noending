@@ -1,8 +1,7 @@
 import { invalidateTargets, removedTargets } from "../../app/removedTargets";
-// 会话可跟踪多个任务；任务筛选匹配跟踪 ID，无跟踪筛选匹配空列表。
 
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SessionsView, { clearSessionsCache } from "./SessionsView";
 import { api } from "../../api";
 import { listen } from "@tauri-apps/api/event";
@@ -14,7 +13,6 @@ vi.mock("../../api", () => ({
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     listSessions: vi.fn(),
     listProjects: vi.fn(),
-    listWorkstreams: vi.fn(),
     listIngestSources: vi.fn(),
     archiveSession: vi.fn(),
     restoreSession: vi.fn(),
@@ -42,7 +40,6 @@ function session(over: Partial<Session> = {}): Session {
     cwd: "/repo",
     workspace_path_id: null,
     project_id: null,
-    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: "2026-09-01T00:00:00Z",
     last_activity_at: "2026-09-02T00:00:00Z",
@@ -65,11 +62,6 @@ function session(over: Partial<Session> = {}): Session {
   };
 }
 
-function chooseTask(name: string) {
-  fireEvent.click(screen.getByRole("button", { name: /^全部任务：/ }));
-  fireEvent.click(screen.getByRole("option", { name }));
-}
-
 beforeEach(() => {
   Object.values(removedTargets).forEach(ids => ids.clear());
   navigate.mockClear();
@@ -78,35 +70,11 @@ beforeEach(() => {
   viewState.clear(); localStorage.clear();
   vi.mocked(api.listSessions).mockReset();
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
-  vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([
-    { id: "w1", title: "会话与 Workstream 重构", description: "", visibility: "normal", created_at: "", updated_at: "" },
-  ] as never);
   vi.mocked(api.listIngestSources).mockReset().mockResolvedValue([{ id: "src", agent: "codex", path: "/p", origin: "default", created_at: "", exists: true }] as never);
   vi.mocked(listen).mockReset().mockResolvedValue(() => {});
 });
 
 afterEach(cleanup);
-
-describe("Sessions 页按跟踪任务筛选", () => {
-  it("筛选选项来自各 Session 的 owner，未归属是 null 而不是某个任务", async () => {
-    vi.mocked(api.listSessions).mockResolvedValue([
-      session({ id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] }),
-      session({ id: "free", title: "没归属", tracked_workstream_ids: [] }),
-    ]);
-    await act(async () => { render(<SessionsView navigate={navigate} />); });
-
-    await screen.findByText("全部任务");
-    // 选中一个真实任务后，只剩 tracked_workstream_ids 包含它的那一条。
-    chooseTask("会话与 Workstream 重构");
-    screen.getByText("有归属");
-    expect(screen.queryByText("没归属")).toBeNull();
-
-    // 「未归属任务」是 `tracked_workstream_ids.length === 0`，与任何任务 id 都不相等。
-    chooseTask("未跟踪任务");
-    screen.getByText("没归属");
-    expect(screen.queryByText("有归属")).toBeNull();
-  });
-});
 
 it("offers source configuration when a directory is missing and can start an independent session", async () => {
   vi.mocked(api.listSessions).mockResolvedValue([]);
@@ -127,7 +95,7 @@ it("offers source configuration when a directory is missing and can start an ind
 });
 
 it("loads archived sessions and keeps search and archive actions available", async () => {
-  vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08", tracked_workstream_ids: ["w1"] })]);
+  vi.mocked(api.listSessions).mockResolvedValue([session({ title: "归档会话", archived_at: "2026-10-08" })]);
   render(<SessionsView navigate={navigate} scope="archived" />);
   await screen.findByText("归档会话");
   expect(api.listSessions).toHaveBeenCalledWith(undefined, undefined, "archived");
@@ -168,16 +136,15 @@ it("immediately removes a deleted session and ignores a stale board refresh", as
   expect(screen.getByText("保留会话")).toBeTruthy();
 });
 
-it("matches all session identities before the visible card limit and intersects task filters", async () => {
-  const sessions = Array.from({length:125}, (_,n)=>session({id:`s-${n}`, title:`Session ${n}`, tracked_workstream_ids:n===124?["w1"]:[]}));
+it("matches all session identities before the visible card limit", async () => {
+  const sessions = Array.from({length:125}, (_,n)=>session({id:`s-${n}`, title:`Session ${n}`}));
   vi.mocked(api.listSessions).mockResolvedValue(sessions);
-  vi.mocked(api.matchObjects).mockResolvedValue(["s-0","s-124"]);
+  vi.mocked(api.matchObjects).mockResolvedValue(["s-124"]);
   render(<SessionsView navigate={navigate} />);
   await screen.findByText("Session 0");
   expect(screen.queryByText("Session 124")).toBeNull();
-  chooseTask("会话与 Workstream 重构");
   fireEvent.change(screen.getByRole("textbox",{name:"搜索会话"}),{target:{value:"native-id"}});
   await screen.findByText("Session 124");
   expect(screen.queryByText("Session 0")).toBeNull();
-  expect(api.matchObjects).toHaveBeenCalledWith("session","native-id", ["s-124"]);
+  expect(api.matchObjects).toHaveBeenCalledWith("session","native-id", sessions.map(session => session.id));
 });

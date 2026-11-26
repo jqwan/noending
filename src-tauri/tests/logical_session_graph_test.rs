@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use noending::adapters::all_adapters;
 use noending::domain::{Agent, ParsedSessionMessage, Session, SessionMessageRole};
 use noending::ingestion;
-use noending::storage::{new_id, now, Db};
+use noending::storage::{new_id, Db};
 use noending_lib as noending;
 
 fn temp_root(tag: &str) -> PathBuf {
@@ -648,9 +648,8 @@ fn trash_does_not_freeze_discovery() {
 // Fork
 
 /// A forked page becomes its OWN Logical Session with the fork source recorded
-/// — and the source session's Owner is NOT inherited.
 #[test]
-fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
+fn a_fork_root_has_its_own_session_and_preserves_provenance() {
     let root_dir = temp_root("fork");
     write_rollout(
         &root_dir,
@@ -693,30 +692,6 @@ fn a_fork_root_is_a_new_session_that_never_inherits_the_owner() {
         Some(parent.id.as_str()),
         "fork provenance points at the source Logical Session"
     );
-
-    // Now give the PARENT an owner via the explicit user door and re-reconcile:
-    // ownership is decided once, by explicit action or a matched intent —
-    // discovery never copies it onto the fork.
-    let owner = support_workstream("ws-owner");
-    db.upsert_workstream(&owner).unwrap();
-    support::track(&db, &parent.id, Some(&owner.id)).unwrap();
-    reconcile(&db);
-    let fork = db.get_session(&fork.id).unwrap().unwrap();
-    assert!(
-        fork.tracked_workstream_ids.is_empty(),
-        "a fork never inherits the source session's Owner"
-    );
-}
-
-fn support_workstream(id: &str) -> noending::domain::Workstream {
-    noending::domain::Workstream {
-        id: id.into(),
-        title: "所属任务".into(),
-        description: String::new(),
-        visibility: "normal".into(),
-        created_at: now(),
-        updated_at: now(),
-    }
 }
 
 // ingestion atomicity
@@ -920,7 +895,6 @@ fn every_adapter_inspects_sources_without_panicking() {
             agent: adapter.agent(),
             root_agent_session_id: "no-such-source".into(),
             title: None,
-            tracked_workstream_ids: vec![],
             cwd: None,
             workspace_path_id: None,
             project_id: None,

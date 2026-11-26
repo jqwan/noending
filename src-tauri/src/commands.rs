@@ -312,7 +312,6 @@ pub fn open_path(path: String) -> Result<()> {
 pub struct WorkstreamContext {
     pub workstream: Workstream,
     pub projects: Vec<crate::workspace::workstream::WorkstreamProject>,
-    pub sessions: Vec<SessionListItem>,
 }
 
 #[tauri::command]
@@ -326,7 +325,6 @@ pub fn get_workstream_context(
                 .get_workstream(&workstream_id)?
                 .ok_or_else(|| other("任务不存在"))?,
             projects: crate::workspace::workstream::projects_for_workstream(db, &workstream_id)?,
-            sessions: db.workstream_session_list_items(&workstream_id)?,
         })
     })
 }
@@ -338,20 +336,13 @@ pub fn launch_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    initial_workstream_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
     let launcher = launcher_for(&app);
     let workspace = launch_workspace(&app);
     let result = with_db(&state, |db| {
-        launcher.new_session_in(
-            db,
-            agent,
-            initial_workstream_id.as_deref(),
-            cwd.as_deref(),
-            &workspace,
-        )
+        launcher.new_session_in(db, agent, cwd.as_deref(), &workspace)
     })?;
     ingestion::enqueue(&app, ingestion::IngestScope::ReconcileAll);
     Ok(result)
@@ -397,7 +388,6 @@ pub fn prepare_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
-    initial_workstream_ids: Vec<String>,
     cwd: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::PreparedLaunch> {
@@ -408,7 +398,6 @@ pub fn prepare_new_session(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            &initial_workstream_ids,
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),
@@ -549,7 +538,6 @@ pub fn launch_embedded_new(
     state: State<AppState>,
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     agent: String,
-    initial_workstream_ids: Vec<String>,
     cwd: Option<String>,
     initial_message: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
@@ -561,7 +549,6 @@ pub fn launch_embedded_new(
         launcher.prepare_new_with_runtime_in(
             db,
             agent,
-            &initial_workstream_ids,
             cwd.as_deref(),
             &workspace,
             runtime.as_ref(),

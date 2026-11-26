@@ -15,13 +15,6 @@
 
 
 
-.collab-candidates,
-.collab-room {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
 .collab-candidate-list,
 .collab-member-list,
 .collab-message-list {
@@ -31,37 +24,36 @@
   display: flex;
   flex-direction: column;
 }
-
-.collab-candidate {
+.collab-setup-columns {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-md);
-  padding: 6px 4px;
-  border-bottom: 1px solid var(--border-subtle);
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--space-lg);
 }
-.collab-candidate:last-child { border-bottom: 0; }
-.collab-candidate.blocked { opacity: 0.66; }
-.collab-candidate-main {
+.collab-setup-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--space-sm); }
+.collab-setup-pane h3, .collab-setup-pane p { margin: 0; }
+.collab-setup-filters { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.collab-setup-filters input { flex: 1 1 12rem; min-width: 0; }
+.collab-setup-scroll { max-height: min(44dvh, 24rem); overflow-y: auto; padding-inline: var(--space-xs); }
+.collab-candidate, .collab-setup-selected {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
   min-width: 0;
-  cursor: pointer;
+  gap: var(--space-sm);
+  padding-block: var(--space-sm);
+  border-bottom: 1px solid var(--border-subtle);
 }
-.collab-candidate.blocked .collab-candidate-main { cursor: default; }
-.collab-candidate-name { min-width: 0; }
-.collab-candidate-wake {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-icon);
-  flex: 0 0 auto;
-  white-space: nowrap;
-  min-height: var(--control-height-xs);
-}
-.collab-candidate-wake[aria-hidden="true"] { visibility: hidden; pointer-events: none; }
+.collab-candidate:last-child, .collab-setup-selected:last-child { border-bottom: 0; }
+.collab-candidate-copy { display: flex; flex-direction: column; align-items: flex-start; flex: 1; min-width: 0; }
+.collab-candidate-copy > .truncate { max-width: 100%; }
+.collab-candidate-wake { display: flex; flex: none; gap: var(--space-icon); }
 .collab-candidate-wake .btn[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
-.collab-candidate-wake .btn:disabled { opacity: 1; }
+.collab-setup-hint { margin-inline-end: auto; }
+.collab-setup-message { margin-top: var(--space-md); }
+.collab-setup-message p { max-height: 6rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .collab-setup-columns { grid-template-columns: minmax(0, 1fr); }
+  .collab-setup-scroll { max-height: 11rem; }
+}
 
 .collab-coordinator {
   display: flex;
@@ -178,5 +170,4 @@
   .collab-compose-actions .small { font-size: var(--font-size-xs); }
 }
 
-.detail-panel .collab-candidate-list,
 .detail-panel .collab-member-list { max-height: none; overflow: visible; }

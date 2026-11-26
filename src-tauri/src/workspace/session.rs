@@ -10,8 +10,7 @@
 //! Invariants: a Session with no cwd keeps `workspace_path_id = NULL` — never
 //! backfill with the default workspace, which would fabricate a fact the
 //! transcript does not contain. Event ingestion must not re-resolve a Project;
-//! discovery is authoritative for cwd. Task tracking changes only its relation
-//! rows, leaving cwd and `workspace_path_id` untouched.
+//! discovery is authoritative for cwd.
 //!
 //! The WorkspacePath creator is [`WorkspaceAttaching`], injected so these rules
 //! stay testable with a scripted stand-in; [`register_workspace_attacher`] holds
@@ -21,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::error::{other, Result};
+use crate::error::Result;
 use crate::storage::session_paths;
 use crate::storage::Db;
 use crate::workspace::WorkspaceAttaching;
@@ -85,8 +84,7 @@ pub fn resolve_session_path(
     attacher.ensure_path(conn, raw)
 }
 
-/// Move a Session onto a WorkspacePath. Project membership follows at read time;
-/// the Session's task tracking is not involved.
+/// Move a Session onto a WorkspacePath. Project membership follows at read time.
 pub fn move_session_to_path_conn(
     conn: &Connection,
     session_id: &str,
@@ -164,15 +162,4 @@ pub fn attach_sessions_to_registered_paths(db: &Db) -> Result<usize> {
         }
         Ok(attached)
     })
-}
-
-/// Add or remove task tracking without changing physical project membership.
-pub fn set_session_tracking(
-    db: &Db,
-    sid: &str,
-    tid: &str,
-    tracked: bool,
-) -> Result<crate::domain::Session> {
-    db.set_session_tracking(sid, tid, tracked)?;
-    db.get_session(sid)?.ok_or_else(|| other("会话不存在"))
 }

@@ -309,7 +309,7 @@ export default function SessionConversationView({
       });
     return () => { live = false; ++detailRequest.current; };
   }, [sessionId, applyTail, reloadSeq]);
-  // 跟踪任务等元数据刷新不重载消息，保留分页窗口与阅读位置。
+  // 元数据刷新不重载消息，保留分页窗口与阅读位置。
   const refreshDetails = useCallback(() => {
     const request = ++detailRequest.current;
     void api.getSessionDetail(sessionId).then(next => {

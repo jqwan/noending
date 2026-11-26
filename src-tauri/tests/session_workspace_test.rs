@@ -175,7 +175,6 @@ fn discovered_session_gets_a_workspace_path() {
     assert_eq!(after.project_id.as_deref(), Some("p-repo"));
     assert_eq!(after.cwd.as_deref(), Some("/repo/app"));
     assert!(after.title.is_some());
-    assert!(after.tracked_workstream_ids.is_empty());
     assert_eq!(
         db.list_workspace_paths().unwrap().len(),
         1,
@@ -752,7 +751,6 @@ fn the_source_verdict_follows_the_file_on_disk() {
         agent: Agent::Codex,
         root_agent_session_id: "root".into(),
         title: None,
-        tracked_workstream_ids: vec![],
         cwd: None,
         workspace_path_id: None,
         project_id: None,

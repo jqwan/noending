@@ -134,18 +134,27 @@ fn login_shell() -> String {
 }
 
 /// The command the PTY actually runs: the agent CLI inside the user's login
-/// shell. cwd handling mirrors `platform::launcher::render_bash` — a stale
-/// directory falls back to `$HOME` *with a printed notice*, never silently.
+/// shell. Archive launches must enter their directory before the Agent starts.
+/// Other launches report a stale directory and fall back to the user's home.
 #[cfg(unix)]
-pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilder {
+pub(crate) fn wrapped_command(
+    cmd: &AgentCommand,
+    require_cwd: bool,
+) -> portable_pty::CommandBuilder {
     use crate::platform::launcher::shell_quote;
 
     let mut script = String::new();
     if let Some(cwd) = &cmd.cwd {
         let dir = shell_quote(&cwd.to_string_lossy());
-        script.push_str(&format!(
-            "cd {dir} 2>/dev/null || {{ printf 'NoEnding: 工作目录不可用: %s — 已回退到 $HOME\\n' {dir}; cd \"$HOME\"; }} || true\n",
-        ));
+        if require_cwd {
+            script.push_str(&format!(
+                "cd {dir} 2>/dev/null || {{ printf 'NoEnding: 档案目录不可用: %s\\n' {dir}; exit 1; }}\n",
+            ));
+        } else {
+            script.push_str(&format!(
+                "cd {dir} 2>/dev/null || {{ printf 'NoEnding: 工作目录不可用: %s — 已回退到 $HOME\\n' {dir}; cd \"$HOME\"; }} || true\n",
+            ));
+        }
     }
     let mut parts: Vec<String> = vec![shell_quote(&cmd.program)];
     parts.extend(cmd.args.iter().map(|a| shell_quote(a)));
@@ -162,10 +171,12 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
 
 /// Windows wrapper: PowerShell (mirroring `platform::launcher::render_ps`)
 /// so npm-style `.cmd` shims resolve and the user PATH applies. `-NoProfile`
-/// keeps startup fast; the guarded `Set-Location` states a stale directory
-/// instead of failing the spawn.
+/// keeps startup fast. The guarded `Set-Location` reports directory failures.
 #[cfg(target_os = "windows")]
-pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilder {
+pub(crate) fn wrapped_command(
+    cmd: &AgentCommand,
+    require_cwd: bool,
+) -> portable_pty::CommandBuilder {
     use crate::platform::launcher::ps_quote;
 
     let mut script = String::from(
@@ -173,9 +184,15 @@ pub(crate) fn wrapped_command(cmd: &AgentCommand) -> portable_pty::CommandBuilde
     );
     if let Some(cwd) = &cmd.cwd {
         let dir = ps_quote(&cwd.to_string_lossy());
-        script.push_str(&format!(
-            "if (Test-Path -LiteralPath {dir}) {{ Set-Location -LiteralPath {dir} }} else {{ Write-Host ('NoEnding: 工作目录不可用: ' + {dir} + ' — 已回退到默认目录') }}\n",
-        ));
+        if require_cwd {
+            script.push_str(&format!(
+                "try {{ Set-Location -LiteralPath {dir} -ErrorAction Stop }} catch {{ Write-Host ('NoEnding: 档案目录不可用: ' + {dir}); exit 1 }}\n",
+            ));
+        } else {
+            script.push_str(&format!(
+                "if (Test-Path -LiteralPath {dir}) {{ Set-Location -LiteralPath {dir} }} else {{ Write-Host ('NoEnding: 工作目录不可用: ' + {dir} + ' — 已回退到默认目录') }}\n",
+            ));
+        }
     }
     script.push_str(&format!("& {}", ps_quote(&cmd.program)));
     for arg in &cmd.args {
@@ -243,6 +260,40 @@ pub(crate) fn process_tree_killer(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn strict_launch_stops_when_the_archive_directory_disappears() {
+        let directory =
+            std::env::temp_dir().join(format!("noending-archive-{}", crate::storage::new_id()));
+        let (program, content) = if cfg!(windows) {
+            ("Write-Output", "agent-started")
+        } else {
+            ("printf", "agent-started")
+        };
+        let cmd = crate::adapters::AgentCommand {
+            program: program.into(),
+            args: vec![content.into()],
+            cwd: Some(directory.clone()),
+        };
+        let wrapped = super::wrapped_command(&cmd, true);
+        let argv = wrapped.get_argv();
+        let run = || {
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .output()
+                .unwrap()
+        };
+        std::fs::create_dir(&directory).unwrap();
+        let valid = run();
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(valid.status.success());
+        assert!(String::from_utf8_lossy(&valid.stdout).contains(content));
+        let missing = run();
+        assert!(!missing.status.success());
+        let output = String::from_utf8_lossy(&missing.stdout);
+        assert!(output.contains("档案目录不可用"));
+        assert!(!output.contains(content));
+    }
+
+    #[test]
     fn initial_conpty_query_is_answered_once_without_a_frontend() {
         for split in 0..=4 {
             let mut query = super::StartupQuery::default();
@@ -308,7 +359,7 @@ mod tests {
             args: vec!["中文，你好 😀 '$literal'".into()],
             cwd: Some(cwd.clone()),
         };
-        let wrapped = wrapped_command(&cmd);
+        let wrapped = wrapped_command(&cmd, false);
         let argv = wrapped.get_argv();
         let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -324,7 +375,7 @@ mod tests {
             ],
             cwd: Some(cwd.clone()),
         };
-        let wrapped_cwd = wrapped_command(&cwd_cmd);
+        let wrapped_cwd = wrapped_command(&cwd_cmd, false);
         let cwd_argv = wrapped_cwd.get_argv();
         let cwd_output = std::process::Command::new(&cwd_argv[0])
             .args(&cwd_argv[1..])
@@ -368,7 +419,7 @@ mod tests {
                 .collect(),
             cwd: Some(cwd.clone()),
         };
-        let wrapped = wrapped_command(&cmd);
+        let wrapped = wrapped_command(&cmd, false);
         let argv = wrapped.get_argv();
         assert_eq!(argv[0], std::ffi::OsString::from(login_shell()));
         assert_eq!(&argv[1..3], ["-l", "-c"]);

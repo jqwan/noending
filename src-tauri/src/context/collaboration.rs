@@ -261,7 +261,6 @@ mod tests {
         let id = room(&f);
         let other = room(&f);
         let session = f.add_session(1, 10);
-        crate::storage::seed_tracking(f.db(), &session, Some(&id)).unwrap();
         let item = crate::workspace::task_items::create(
             f.db(),
             &id,

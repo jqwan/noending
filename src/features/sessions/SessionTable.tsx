@@ -22,7 +22,6 @@ import {
   UNTITLED_SESSION,
   NO_CWD,
   UNKNOWN_AGENT,
-  UNNAMED_WORKSTREAM,
   PROJECT_PENDING,
   PROJECT_NO_PATH,
   agentDisplayLabel,
@@ -37,7 +36,6 @@ export {
   UNTITLED_SESSION,
   NO_CWD,
   UNKNOWN_AGENT,
-  UNNAMED_WORKSTREAM,
   PROJECT_PENDING,
   PROJECT_NO_PATH,
   agentDisplayLabel,
@@ -114,7 +112,7 @@ function widthOf(s: string): number {
   return w;
 }
 
-/** 尾部省略：用在「靠前更重要」的文本上（标题、Workstream 名）。 */
+/** 尾部省略：用在「靠前更重要」的文本上（标题）。 */
 export function ellipsisTail(text: string, max: number): string {
   if (widthOf(text) <= max) return text;
   const chars = [...text];
@@ -223,11 +221,9 @@ export function activityLabel(iso: string | null | undefined): string {
 
 /**
  * Sessions 卡片：信息按卡片分组，随窗口宽度自适应，点击进入详情。
- * 显示会话跟踪的任务。
  */
 export default function SessionCards({
   sessions,
-  workstreamTitleById,
   projectNameById,
   viewMode = "cards",
   onOpen,
@@ -241,8 +237,6 @@ export default function SessionCards({
   terminals: externalTerminals,
 }: {
   sessions: SessionListItem[];
-  /** Workstream id → 标题；用于解析跟踪任务的标题。 */
-  workstreamTitleById: Map<string, string>;
   projectNameById: Map<string, string>;
   viewMode?: "cards" | "list";
   onOpen: (sessionId: string) => void;
@@ -264,15 +258,12 @@ export default function SessionCards({
     .filter(s => !s.archived_at && resolveSessionContinueMode(s) === "terminal").map(s => s.id));
   const rows = useMemo(
     () => sessions.slice(0, visibleCount).map((s) => {
-      const wsTitle=s.tracked_workstream_ids.map(id=>workstreamTitleById.get(id)?.trim() || UNNAMED_WORKSTREAM).join("、") || null;
       return {
         session: s,
-        workstream: wsTitle,
-        workstreamFull: wsTitle,
         project: projectCellFor(s, projectNameById),
       };
     }),
-    [sessions, visibleCount, workstreamTitleById, projectNameById],
+    [sessions, visibleCount, projectNameById],
   );
 
   const terminalsBySessionId = useMemo(() => {
@@ -289,12 +280,10 @@ export default function SessionCards({
   if (viewMode === "list") {
     return (
       <div className="session-list" key="session-list">
-        {rows.slice(0, visibleCount).map(({ session: s, workstream, workstreamFull, project }) => (
+        {rows.slice(0, visibleCount).map(({ session: s, project }) => (
           <SessionListRowItem
             key={`list-${s.id}`}
             session={s}
-            workstream={workstream}
-            workstreamFull={workstreamFull}
             project={project}
             resumeState={resumeStates[s.id]}
             agentStatus={agentStatus}
@@ -323,11 +312,10 @@ export default function SessionCards({
 
   return (
     <div className="ws-grid board-grid" key="session-cards">
-      {rows.slice(0, visibleCount).map(({ session: s, workstreamFull, project }) => (
+      {rows.slice(0, visibleCount).map(({ session: s, project }) => (
         <SessionCardItem
           key={`card-${s.id}`}
           session={s}
-          workstreamFull={workstreamFull}
           project={project}
           resumeState={resumeStates[s.id]}
           agentStatus={agentStatus}
@@ -356,8 +344,6 @@ export default function SessionCards({
 
 interface SessionRowProps {
   session: SessionListItem;
-  workstream: string | null;
-  workstreamFull: string | null;
   project: ProjectCell;
   resumeState?: TerminalResumeState;
   agentStatus: Record<string, AgentStatusEntry> | null;
@@ -375,8 +361,6 @@ interface SessionRowProps {
 
 const SessionListRowItem = memo(function SessionListRowItem({
   session: s,
-  workstream,
-  workstreamFull,
   project,
   resumeState,
   agentStatus,
@@ -410,12 +394,6 @@ const SessionListRowItem = memo(function SessionListRowItem({
         </span>
         <span className="session-list-meta">
           <span>{agentDisplayLabel(s.agent)}</span>
-          {workstream && (
-            <span title={workstreamFull ?? undefined} className="session-list-tag">
-              <Icon name="tasks" />
-              <span>{workstream}</span>
-            </span>
-          )}
           {!project.dim && (
             <span title={project.hint} className="session-list-tag">
               <Icon name="project" />
@@ -453,7 +431,6 @@ const SessionListRowItem = memo(function SessionListRowItem({
 
 interface SessionCardProps {
   session: SessionListItem;
-  workstreamFull: string | null;
   project: ProjectCell;
   resumeState?: TerminalResumeState;
   agentStatus: Record<string, AgentStatusEntry> | null;
@@ -471,7 +448,6 @@ interface SessionCardProps {
 
 const SessionCardItem = memo(function SessionCardItem({
   session: s,
-  workstreamFull,
   project,
   resumeState,
   agentStatus,
@@ -525,11 +501,6 @@ const SessionCardItem = memo(function SessionCardItem({
             <Icon name="chatLines" />
             {s.latest_message_seq ?? 0}<span>消息</span>
             <span className="sr-only">{s.latest_message_seq ?? 0} 条消息</span>
-          </span>
-          <span title={workstreamFull ? `跟踪任务: ${workstreamFull}` : "跟踪任务"}>
-            <Icon name="tasks" />
-            {s.tracked_workstream_ids.length}<span>任务</span>
-            <span className="sr-only">{s.tracked_workstream_ids.length} 个任务</span>
           </span>
         </div>
 

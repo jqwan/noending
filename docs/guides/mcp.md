@@ -37,7 +37,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | 会话控制（需桌面运行） | `session_terminals`、`session_start` |
 | 历史与证据 | `session_search`、`session_messages` |
 | 事项摘要 | `summary_search`、`summary_get`、`summary_update`、`summary_context`、`summary_input`、`summary_submit` |
-| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_session_set`、`task_items`、`task_item_create`、`task_item_update`、`task_item_note`、`task_item_delete` |
+| 任务 | `task_create`、`task_update`、`task_projects_set`、`task_items`、`task_item_create`、`task_item_update`、`task_item_note`、`task_item_delete` |
 | 项目与归档 | `path_register`、`project_rename`、`object_archive` |
 | 同步与配置 | `source_list`、`sync`、`summary_config_get`、`summary_config_set` |
 | 写请求状态 | `request_get` |
@@ -48,8 +48,8 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 - `freshness` 不带参数查询本机更新状态；同时传 `kind=session|task|project` 和 `id` 查询目标范围。返回全部来源、相关来源、会话检查统计和目标摘要覆盖。普通 `summary_get` 也返回 `freshness`。时间未知为 `null`；`pending_messages=null` 表示历史改写或消费位置未知，不能解释为零条新增。检查结果只覆盖已观察来源和已入库消息，不证明磁盘当前没有新内容。字段及更新规则见 [CLI 记忆更新状态](cli.md#记忆更新状态)。
 
-- `project_resolve` 必须显式传入目标目录 `path`，是已存在的绝对目录。不要把 MCP 服务的启动目录当成 Agent 当前项目。解析不会自动登记项目；登记使用 `path_register`。
-- `session_resolve {agent, native_id}` 按原生主会话／线程身份精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding ID）、`native_id` 和会话元数据（含 `project_id`、`task_ids`）；后续调用及 `from_session` 使用返回的 `id`。未摄入或 Home 不匹配时返回 `not_found`，不扫描或自动同步，无需桌面运行。原生 ID 由调用方提供，不能取 MCP 服务自身环境作为调用者身份；Codex 的转录文件版本后缀、内部子 Agent ID 不作为主会话 ID 解析。
+- `project_resolve` 必须显式传入目标目录 `path`，是已存在的绝对目录。不要把 MCP 服务的启动目录当成 Agent 当前项目。解析不会自动登记项目；登记使用 `path_register`。 命中登记的智能体档案目录时，附带 `assistant.id` 和 `assistant.archive_directory`。
+- `session_resolve {agent, native_id}` 按原生主会话／线程身份精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding ID）、`native_id` 和会话元数据（含 `project_id`）；后续调用及 `from_session` 使用返回的 `id`。未摄入或 Home 不匹配时返回 `not_found`，不扫描或自动同步，无需桌面运行。原生 ID 由调用方提供，不能取 MCP 服务自身环境作为调用者身份；Codex 的转录文件版本后缀、内部子 Agent ID 不作为主会话 ID 解析。
 - `object_list` 的 `kind` 为 `session`、`task` 或 `project`，默认 `scope=unarchived`，也支持 `archived`、`all`。会话支持项目、任务、Agent 筛选；任务支持项目筛选。列表只读取元数据。
 - 优先通过 `summary_search`、`summary_get` 获取事项；需要核对原始依据时，使用 `session_search` 跨会话查找标题和正文，再用 `session_messages` 读取完整内容和前后讨论。
 - `session_messages` 使用当前 Home 中的 NoEnding 会话 ID，默认返回最近 8 条已同步消息，`limit` 按消息计数。每页从旧到新排列。提供 `from` 或 `to` 可从旧到新读取包含端点的编号范围，提供 `query` 可查找本会话中的命中片段。后续页只传 `id` 和 `cursor`（取上一页的 `next_cursor`）。消息的 `truncated` 为 true 时，用 `id` 和 `content_cursor`（取该条的 `next_content_cursor`）继续读正文。

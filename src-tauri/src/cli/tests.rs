@@ -138,12 +138,6 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
         )
         .unwrap()
         .0;
-    let task = f
-        .call(&["task", "create", "--title", "身份关联任务"])
-        .unwrap();
-    let tid = task["task"]["id"].as_str().unwrap();
-    link_project(&f, tid, &sid);
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     let resolve = || {
         f.call(&[
             "session",
@@ -160,7 +154,6 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
     assert_eq!(found["agent"], "codex");
     assert_eq!(found["native_id"], *native);
     assert_eq!(found["project_id"], session.project_id.unwrap());
-    assert_eq!(found["task_ids"], json!([tid]));
     assert!(found["archived_at"].is_null());
     f.call(&["session", "archive", &sid]).unwrap();
     let archived = resolve();
@@ -429,35 +422,10 @@ fn cli_write_retries_reuse_receipts_and_reject_a_different_operation() {
     );
 }
 #[test]
-fn cli_tasks_reuse_ownership_and_lists_paginate_without_losing_sessions() {
+fn cli_lists_paginate_without_losing_sessions() {
     let f = Fixture::new();
     let sid = f.session();
     let other = f.session();
-    let task = f.call(&["task", "create", "--title", "CLI 任务"]).unwrap();
-    let tid = task["task"]["id"].as_str().unwrap();
-    let task2 = f.call(&["task", "create", "--title", "另一任务"]).unwrap();
-    let tid2 = task2["task"]["id"].as_str().unwrap();
-    link_project(&f, tid, &sid);
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
-    let members = f.call(&["session", "list", "--task", tid]).unwrap();
-    assert_eq!(members["items"].as_array().unwrap().len(), 1);
-    assert_eq!(members["items"][0]["id"], sid);
-    link_project(&f, tid2, &sid);
-    f.call(&["task", "attach", tid2, "--session", &sid])
-        .unwrap();
-    f.call(&["task", "detach", tid, "--session", &sid]).unwrap();
-    assert_eq!(
-        f.db()
-            .get_session(&sid)
-            .unwrap()
-            .unwrap()
-            .tracked_workstream_ids
-            .first()
-            .map(String::as_str),
-        Some(tid2)
-    );
-    f.call(&["task", "detach", tid2, "--session", &sid])
-        .unwrap();
     let first = f.call(&["session", "list", "--limit", "1"]).unwrap();
     let cursor = first["next_cursor"].as_str().unwrap();
     let second = f
@@ -548,7 +516,6 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
         })
         .unwrap();
     link_project(&f, tid, &sid);
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     assert_eq!(
         f.call(&["project", "list"]).unwrap()["items"][0]["id"],
         *pid
@@ -676,21 +643,37 @@ fn cli_global_search_filters_before_paging_and_excludes_retired_messages() {
             rusqlite::params![now(), archived],
         )
         .unwrap();
-    let task = f
-        .call(&["task", "create", "--title", "SearchTask"])
-        .unwrap();
-    let tid = task["task"]["id"].as_str().unwrap();
-    link_project(&f, tid, &target);
-    f.call(&["task", "attach", tid, "--session", &target])
+    let project = f
+        .db()
+        .get_session(&target)
+        .unwrap()
+        .unwrap()
+        .project_id
         .unwrap();
     let first = f
-        .call(&["search", "--query", "needle", "--task", tid, "--limit", "1"])
+        .call(&[
+            "search",
+            "--query",
+            "needle",
+            "--project",
+            &project,
+            "--limit",
+            "1",
+        ])
         .unwrap();
     assert_eq!(first["items"][0]["session_id"], target);
     let cursor = first["next_cursor"].as_str().unwrap();
     let second = f
         .call(&[
-            "search", "--query", "needle", "--task", tid, "--limit", "1", "--cursor", cursor,
+            "search",
+            "--query",
+            "needle",
+            "--project",
+            &project,
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
         ])
         .unwrap();
     assert_eq!(second["end"], true);
@@ -712,7 +695,8 @@ fn cli_global_search_filters_before_paging_and_excludes_retired_messages() {
     assert_eq!(archived_hits["items"].as_array().unwrap().len(), 1);
     assert_eq!(archived_hits["items"][0]["session_id"], archived);
     assert_eq!(
-        f.call(&["search", "--query", "%", "--task", tid]).unwrap()["items"]
+        f.call(&["search", "--query", "%", "--project", &project])
+            .unwrap()["items"]
             .as_array()
             .unwrap()
             .len(),
@@ -724,14 +708,14 @@ fn cli_global_search_filters_before_paging_and_excludes_retired_messages() {
     );
     f.ingest(&target, "replacement", "new", 0);
     assert_eq!(
-        f.call(&["search", "--query", "needle", "--task", tid])
+        f.call(&["search", "--query", "needle", "--project", &project])
             .unwrap()["items"],
         json!([])
     );
 }
 
 #[test]
-fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
+fn cli_task_partial_edits_and_archive_preserve_task_and_session_data() {
     let f = Fixture::new();
     let task = f
         .call(&[
@@ -746,7 +730,6 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
     let tid = task["task"]["id"].as_str().unwrap();
     let sid = f.session();
     link_project(&f, tid, &sid);
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     f.call(&["task", "archive", tid]).unwrap();
     let args = [
         "task",
@@ -771,16 +754,6 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
         f.call(&["task", "list", "--scope", "archived"]).unwrap()["items"][0]["id"],
         tid
     );
-    let hits = f
-        .call(&["search", "--query", "NewTaskMarker", "--task", tid])
-        .unwrap();
-    assert_eq!(hits["items"][0]["session_id"], sid);
-    assert!(f
-        .call(&["search", "--query", "OldTaskMarker", "--task", tid])
-        .unwrap()["items"]
-        .as_array()
-        .unwrap()
-        .is_empty());
     assert!(f.call(&["task", "update", tid, "--title", " "]).is_err());
     assert_eq!(
         f.call(&["task", "update", tid]).unwrap_err().code,
@@ -808,15 +781,12 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
     let retry = f.call(&archive).unwrap();
     assert_eq!(retry["archived_at"], archived["archived_at"]);
     assert!(archived["archived_at"].is_string());
-    assert!(
-        f.call(&["session", "list", "--task", tid]).unwrap()["items"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(f.call(&["session", "list"]).unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(
-        f.call(&["session", "list", "--task", tid, "--scope", "archived"])
-            .unwrap()["items"][0]["id"],
+        f.call(&["session", "list", "--scope", "archived"]).unwrap()["items"][0]["id"],
         sid
     );
     assert_eq!(
@@ -827,16 +797,12 @@ fn cli_task_partial_edits_and_archive_preserve_data_and_refresh_search() {
         f.call(&["session", "summary", &sid]).unwrap(),
         original_summary
     );
-    assert_eq!(
-        f.call(&["session", "show", &sid]).unwrap()["task_ids"],
-        json!([tid])
-    );
     f.call(&["session", "unarchive", &sid]).unwrap();
     assert!(f.call(&["session", "show", &sid]).unwrap()["archived_at"].is_null());
 }
 
 #[test]
-fn cli_task_project_edits_and_directory_registration_preserve_session_tracking_and_disk() {
+fn cli_task_project_edits_preserve_session_project_and_directory() {
     let f = Fixture::new();
     let sid = f.session();
     let pid = f
@@ -850,7 +816,6 @@ fn cli_task_project_edits_and_directory_registration_preserve_session_tracking_a
         .call(&["task", "create", "--title", "Scope", "--project", &pid])
         .unwrap();
     let tid = task["task"]["id"].as_str().unwrap();
-    f.call(&["task", "attach", tid, "--session", &sid]).unwrap();
     assert_eq!(
         f.call(&["task", "project", "list", tid]).unwrap()["items"][0]["id"],
         pid
@@ -860,9 +825,10 @@ fn cli_task_project_edits_and_directory_registration_preserve_session_tracking_a
         .as_array()
         .unwrap()
         .is_empty());
-    assert_eq!(f.db().sessions_for_workstream(tid).unwrap().len(), 1);
-    f.call(&["task", "detach", tid, "--session", &sid]).unwrap();
-    assert!(f.call(&["task", "attach", tid, "--session", &sid]).is_err());
+    assert_eq!(
+        f.db().get_session(&sid).unwrap().unwrap().project_id,
+        Some(pid)
+    );
     assert!(f.root.join("fixture-project").is_dir());
 }
 

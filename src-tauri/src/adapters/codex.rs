@@ -986,7 +986,6 @@ mod rollout_tests {
             cwd: None,
             workspace_path_id: None,
             project_id: None,
-            tracked_workstream_ids: vec![],
             forked_from_session_id: None,
             started_at: None,
             last_activity_at: None,

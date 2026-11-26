@@ -89,8 +89,12 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
                 }
                 _ => (Value::Null, Value::Null, json!(0), Value::Null),
             };
+            let session = db.get_session(&selected.session_id)?;
             Ok(json!({
                 "session_id": selected.session_id,
+                "title": session.as_ref().and_then(|s| s.title.as_deref()),
+                "agent": session.as_ref().map(|s| s.agent),
+                "project_id": session.as_ref().and_then(|s| s.project_id.as_deref()),
                 "wake_method": selected.wake_method,
                 "wake_status": wake_status,
                 "connection_state": connection_state(participation, now),
@@ -114,7 +118,7 @@ pub(crate) fn room_view(db: &Db, task_id: &str) -> CliResult<Value> {
     }))
 }
 
-/// Task-associated, unarchived sessions with their actually available wake
+/// Sessions in the task’s projects with their available wake
 /// modes. Terminal capability reuses the launcher's resume validation
 /// (adapter support, source presence, install); desktop capability follows the
 /// adapter's resume route.
@@ -123,18 +127,13 @@ pub(crate) fn candidates(
     task_id: &str,
     cursor: Option<String>,
     limit: usize,
+    project_id: Option<&str>,
+    query: Option<&str>,
 ) -> CliResult<Value> {
-    if !(1..=50).contains(&limit) {
-        return Err(CliError::new(
-            "invalid_arguments",
-            "无效的分页大小（1～50）",
-        ));
-    }
-    let task = db
-        .get_workstream(task_id)?
+    db.get_workstream(task_id)?
         .ok_or_else(|| CliError::new("not_found", format!("task {task_id} 不存在")))?;
-    let _ = task;
-    let page = db.collaboration_candidate_sessions(task_id, cursor.as_deref(), limit)?;
+    let page =
+        db.collaboration_candidate_sessions(task_id, cursor.as_deref(), limit, project_id, query)?;
     let states = crate::launcher::availability::terminal_resume_states(db, &page.items)?;
     let items = page
         .items
@@ -155,7 +154,7 @@ pub(crate) fn candidates(
                 },
             );
             let mut modes = Vec::new();
-            if terminal.available {
+            if !archived && terminal.available {
                 modes.push(json!(store::WAKE_TERMINAL));
             }
             if desktop {
@@ -176,6 +175,7 @@ pub(crate) fn candidates(
                 "session_id": id,
                 "title": session.title,
                 "agent": session.agent.as_str(),
+                "project_id": session.project_id,
                 "wake_modes": modes,
                 "unavailable_reason": reason,
             })
@@ -698,7 +698,10 @@ mod room_wait_tests {
                     "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('t','任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
                      INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
                        ('a','codex','na','jsonl','/a'),('b','codex','nb','jsonl','/b');
-                     INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','t'),('b','t');",
+                     INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+                     INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+                     UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('a','b');
+                     INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('t','room-project');",
                 )
                 .unwrap();
             Self(root, db)

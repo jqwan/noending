@@ -133,24 +133,14 @@ pub fn delete_workstream_permanently(state: State<AppState>, workstream_id: Stri
     })
 }
 
-/// Card view for Home / Workstreams pages: everything a "continue working"
-/// card needs, computed server-side so the UI stays a thin projection.
-#[derive(Serialize)]
-pub struct LatestSessionInfo {
-    pub id: String,
-    pub agent: String,
-}
-
+/// Card view for Home and task lists.
 #[derive(Serialize)]
 pub struct WorkstreamCardView {
     #[serde(flatten)]
     pub workstream: Workstream,
     pub projects: Vec<workstream::WorkstreamProject>,
-    /// max(session activity, context edit, workstream update).
+    /// Latest summary or task item activity.
     pub last_activity_at: Option<String>,
-    pub session_count: i64,
-    /// Most recent bound session — the Resume button's agent + target.
-    pub latest_session: Option<LatestSessionInfo>,
 }
 
 pub(crate) fn later_ts(a: &Option<String>, b: &Option<String>) -> Option<String> {
@@ -189,12 +179,11 @@ pub fn list_workstream_cards(state: State<AppState>) -> Result<Vec<WorkstreamCar
     with_db(&state, workstream_cards)
 }
 
-/// Compose card views from the real sources (sessions, items, workstreams).
+/// Compose card views from tasks, summaries and items.
 /// Also the testable core of `list_workstream_cards`.
 pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
     let mut cards = Vec::new();
     for w in db.list_workstreams(None)? {
-        let (session_count, latest, session_activity) = db.workstream_session_stats(&w.id)?;
         let summary_activity: Option<String> = db
             .read()
             .query_row(
@@ -210,19 +199,11 @@ pub fn workstream_cards(db: &Db) -> Result<Vec<WorkstreamCardView>> {
             [&w.id],
             |r| r.get(0),
         )?;
-        // "Last active" only follows real work signals (session activity,
-        // context edits) — renames or metadata touches must not make a
-        // Workstream look freshly active. Sorting still falls back to
-        // updated_at so a brand-new Workstream surfaces at the top.
-        let mut last_activity_at = None;
-        for candidate in [&session_activity, &summary_activity, &item_activity] {
-            last_activity_at = later_ts(&last_activity_at, candidate);
-        }
+        // The sort falls back to updated_at for tasks without work activity.
+        let last_activity_at = later_ts(&summary_activity, &item_activity);
         cards.push(WorkstreamCardView {
             projects,
             last_activity_at,
-            session_count,
-            latest_session: latest.map(|(id, agent)| LatestSessionInfo { id, agent }),
             workstream: w,
         });
     }

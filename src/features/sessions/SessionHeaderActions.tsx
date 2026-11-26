@@ -89,14 +89,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             <b>{title}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。消息同步、搜索和摘要更新保持可用。
           </p>
-          <div className="card hairline" style={{ marginBottom: 12 }}>
-            <p style={{ margin: "0 0 6px" }}>
-              <b>从任务移除</b> = 只取消这条会话对该任务的跟踪，会话本身留在列表里。
-            </p>
-            <p style={{ margin: 0 }}>
-              <b>归档</b> = 将会话移至「已归档」。Agent 原始会话不会被删除。
-            </p>
-          </div>
+          <p className="small muted">Agent 原始会话会保留。</p>
           <DialogActions>
             <button className="btn" onClick={() => setConfirmArchive(false)} disabled={archiveBusy}>取消</button>
             <button className="btn primary" onClick={doArchive} disabled={archiveBusy}>

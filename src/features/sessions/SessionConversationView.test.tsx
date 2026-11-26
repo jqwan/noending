@@ -1,3 +1,4 @@
+import { notifyDataChanged } from "../../app/routes";
 import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -27,7 +28,6 @@ vi.mock("../../api", () => ({
     getSessionDetail: vi.fn(),
     getSessionContext: vi.fn(),
     mailboxList: vi.fn(),
-    setSessionTaskTracking: vi.fn(),
     getSessionMessages: vi.fn(),
     getSessionTurnIntermediates: vi.fn(),
     getSessionUserMessageMarks: vi.fn(),
@@ -62,7 +62,6 @@ function session(id: string): Session {
     cwd: null,
     project_id: null,
     workspace_path_id: null,
-    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: null,
     last_activity_at: null,
@@ -88,7 +87,6 @@ function detail(me: Session): SessionDetail {
   return {
     session: me,
     messages: [],
-    tracked_workstreams: [],
     workspace_path: null,
     ingested_message_sequence: 0,
     processed_message_sequence: 0,
@@ -150,14 +148,12 @@ it("shares sidebar visibility and width with the session detail page while retai
   fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
   expect(screen.getByRole("separator", { name: "详情栏宽度" }).getAttribute("aria-valuenow")).toBe("480");
   expect(screen.getByRole("region", { name: "会话信息" })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "跟踪任务（0）" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
   expect(screen.getByText("正在阅读的历史消息")).toBeTruthy();
 });
 
-it("refreshes tracked tasks without replacing the loaded message window or moving its reading position", async () => {
-  let current = { ...detail(session("me")), tracked_workstreams: [{ id: "task", title: "正在跟踪的任务", description: "",
-    visibility: "normal" as const, created_at: "2026-11-07T00:00:00Z", updated_at: "2026-11-07T00:00:00Z" }] };
+it("refreshes session metadata without replacing the loaded message window or moving its reading position", async () => {
+  let current = detail({ ...session("me"), title: "原会话标题" });
   vi.mocked(api.getSessionDetail).mockImplementation(async () => current);
   vi.mocked(api.getSessionUserMessageMarks).mockResolvedValue([]);
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({ messages: [message(1, "user", "已加载的历史消息")], total: 1, tail_ordinal: 1 }));
@@ -166,9 +162,9 @@ it("refreshes tracked tasks without replacing the loaded message window or movin
   const scroller = sizeScroller(view.container, 2000, 400, 800);
   fireEvent.scroll(scroller);
   vi.mocked(api.getSessionMessages).mockResolvedValue(page({ messages: [message(2, "user", "刷新后的最新一页")], total: 2, tail_ordinal: 2 }));
-  vi.mocked(api.setSessionTaskTracking).mockImplementation(async () => { current = { ...current, tracked_workstreams: [] }; return current.session; });
-  fireEvent.click(screen.getByRole("button", { name: "取消跟踪：正在跟踪的任务" }));
-  await screen.findByRole("heading", { name: "跟踪任务（0）" });
+  current = detail({ ...current.session, title: "更新后的会话标题" });
+  act(() => notifyDataChanged([]));
+  await screen.findByText("更新后的会话标题");
   expect(screen.getByText("已加载的历史消息")).toBeTruthy();
   expect(screen.queryByText("刷新后的最新一页")).toBeNull();
   expect(scroller.scrollTop).toBe(800);

@@ -850,7 +850,8 @@ mod tests {
         let a = f.add_session(2, 20);
         let b = f.add_session(1, 20);
         let outside = f.add_session(1, 20);
-        let task = crate::context::tests::task(&f, &[&a, &b]);
+        let task =
+            crate::workspace::workstream::create_workstream(f.db(), "task-test", "", &[]).unwrap();
         let (project, _) = crate::context::tests::project_fixture(&f, "direct-scope", &[&a, &b]);
         let target = &project.id;
         let item = crate::workspace::task_items::create(
@@ -927,7 +928,6 @@ mod tests {
         let id = f.add_session(2, 20);
         let task =
             crate::workspace::workstream::create_workstream(f.db(), "scope", "goal", &[]).unwrap();
-        crate::storage::seed_tracking(f.db(), &id, Some(&task.id)).unwrap();
         let c = context(f.db(), &f.home(), "task", &task.id, Mode::Update).unwrap();
         let cid = c["context_id"].as_str().unwrap();
         assert!(read(f.db(), &f.home(), cid, "session-other.jsonl", 0, 8, None).is_err());

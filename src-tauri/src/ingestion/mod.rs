@@ -430,9 +430,8 @@ where
 }
 
 /// Discovery may skip a stored source that is missing, unreadable or no longer
-/// recognized. Retry its facts within the selected roots; task ownership plays
-/// no role in ingestion. Missing sources preserve the cursor, while read errors
-/// remain visible in the reconciliation report.
+/// recognized. Retry within the selected roots. Missing sources preserve the
+/// cursor, while read errors remain visible in the reconciliation report.
 fn retry_undiscovered_sessions<F>(
     db: &Db,
     sessions: &[Session],

@@ -39,8 +39,7 @@ pub use session_lifecycle::PermanentDeletionCounts;
 
 /// Project membership comes from the registered path or a verified terminal binding.
 const SESSION_SELECT: &str = "SELECT sessions.*,
-    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id,
-    (SELECT json_group_array(workstream_id) FROM (SELECT workstream_id FROM session_workstreams WHERE session_id=sessions.id ORDER BY workstream_id)) AS tracked_workstream_ids
+    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id
     FROM sessions";
 
 /// Two connections to one SQLite file so UI reads never queue behind writes:
@@ -335,47 +334,6 @@ impl Db {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
         Ok(rows)
-    }
-
-    /// Card stats for one Workstream: (session_count, latest session as
-    /// (id, agent), that session's activity timestamp). Only Sessions that OWN
-    /// this Workstream count, so a Session is never counted twice. Archived
-    /// sessions are included.
-    pub fn workstream_session_stats(
-        &self,
-        workstream_id: &str,
-    ) -> Result<(i64, Option<(String, String)>, Option<String>)> {
-        let conn = self.read();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions
-             WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)",
-            params![workstream_id],
-            |r| r.get(0),
-        )?;
-        let latest = conn
-            .query_row(
-                "SELECT id, agent, COALESCE(last_activity_at, started_at) AS act
-                 FROM sessions
-                 WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)
-                 ORDER BY act DESC
-                 LIMIT 1",
-                params![workstream_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        Ok((
-            count,
-            latest
-                .as_ref()
-                .map(|(id, agent, _)| (id.clone(), agent.clone())),
-            latest.and_then(|(_, _, act)| act),
-        ))
     }
 
     pub fn get_workstream(&self, id: &str) -> Result<Option<Workstream>> {
@@ -1080,44 +1038,6 @@ impl Db {
         Ok(None)
     }
 
-    pub fn set_session_tracking(&self, sid: &str, tid: &str, tracked: bool) -> Result<()> {
-        self.tx(|tx| workstream_projects::set_tracking_conn(tx, sid, tid, tracked))
-    }
-    /// A launch selection is applied once to its exact native session. A deleted,
-    /// archived or detached task cannot prevent terminal identity binding.
-    pub fn inherit_terminal_tracking(&self, session: &Session, tasks: &[String]) -> Result<()> {
-        self.tx(|tx| {
-            let current = get_session_conn(tx, &session.id)?.ok_or_else(|| other("会话不存在"))?;
-            if current.agent != session.agent
-                || current.root_agent_session_id != session.root_agent_session_id
-            {
-                return Err(other("终端会话身份已变化"));
-            }
-            for tid in tasks {
-                let active =
-                    get_workstream_conn(tx, tid)?.is_some_and(|task| task.visibility == "normal");
-                if active && workstream_projects::session_can_track_task(tx, &current, tid)? {
-                    workstream_projects::set_tracking_conn(tx, &current.id, tid, true)?;
-                }
-            }
-            Ok(())
-        })
-    }
-
-    /// Sessions tracking `workstream_id`, including archived sessions.
-    /// The same session may appear in multiple tasks.
-    pub fn sessions_for_workstream(&self, workstream_id: &str) -> Result<Vec<Session>> {
-        let conn = self.read();
-        let mut st = conn.prepare(&format!(
-            "{SESSION_SELECT} WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)
-             ORDER BY COALESCE(last_activity_at, started_at) DESC"
-        ))?;
-        let rows = st
-            .query_map(params![workstream_id], row_session)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     pub fn list_ingest_sources(&self) -> Result<Vec<IngestSource>> {
         let conn = self.read();
         let mut st = conn
@@ -1379,7 +1299,7 @@ impl Db {
                    SELECT ref_id FROM search_documents WHERE kind = 'message')",
             [],
         )?;
-        // A document whose body can change (title, Project, tracked tasks)
+        // A document whose body can change (title, project name, cwd)
         // is refreshed at the write that changed it, so the backfill only covers
         // rows no write ever touched.
         let ids: Vec<String> = {
@@ -1479,9 +1399,6 @@ pub fn get_workstream_conn(conn: &Connection, id: &str) -> Result<Option<Workstr
 }
 
 pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
-    // A Session's search document carries its tracked task titles, so a rename has
-    // to reach every Session tracking this task. The previous title is
-    // read first: an update that changed nothing else must not rewrite N docs.
     let previous: Option<(String, String)> = conn
         .query_row(
             "SELECT title, description FROM workstreams WHERE id = ?1",
@@ -1514,29 +1431,10 @@ pub fn upsert_workstream_conn(conn: &Connection, w: &Workstream) -> Result<()> {
     if text_changed {
         crate::storage::bump_input_revision_conn(conn, &w.id)?;
     }
-    if text_changed {
-        reindex_tracking_sessions_conn(conn, &w.id)?;
-    }
     Ok(())
 }
 
-/// Rebuild documents for all sessions tracking this task in the caller's transaction.
-pub fn reindex_tracking_sessions_conn(conn: &Connection, workstream_id: &str) -> Result<()> {
-    let mut ids: Vec<String> = Vec::new();
-    {
-        let mut st = conn.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM session_workstreams sw WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)")?;
-        for row in st.query_map(params![workstream_id], |r| r.get(0))? {
-            ids.push(row?);
-        }
-    }
-    for id in ids {
-        index_session_conn(conn, &id)?;
-    }
-    Ok(())
-}
-
-/// Rebuild the search documents of the Sessions projecting onto `project_id` —
-/// the same rule as [`reindex_tracking_sessions_conn`] for the Project name.
+/// Rebuild the search documents of the Sessions projecting onto `project_id`.
 pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) -> Result<()> {
     let mut ids: Vec<String> = Vec::new();
     {
@@ -1553,28 +1451,22 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
 }
 
 /// Write (or refresh) one Session's search document: title is the Session title
-/// (falling back to the Agent name), body is the Project name plus all tracked task titles and the cwd.
+/// (falling back to the Agent name), body is the Project name and the cwd.
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
-    let row: Option<(String, String, Option<String>, Option<String>)> = conn
+    let row: Option<(String, String, Option<String>)> = conn
         .query_row(
             "SELECT COALESCE(s.title, s.agent), COALESCE((SELECT p.name FROM project_session_membership m
-                 JOIN projects p ON p.id=m.project_id WHERE m.session_id=s.id), ''),
-               (SELECT group_concat(title, char(10)) FROM (SELECT w.title FROM session_workstreams sw JOIN workstreams w ON w.id=sw.workstream_id WHERE sw.session_id=s.id ORDER BY w.id)), s.cwd
+                 JOIN projects p ON p.id=m.project_id WHERE m.session_id=s.id), ''), s.cwd
                FROM sessions s
               WHERE s.id = ?1",
             params![session_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((title, project_name, owner_title, cwd)) = row else {
+    let Some((title, project_name, cwd)) = row else {
         return Ok(());
     };
-    let body = format!(
-        "{}\n{}\n{}",
-        project_name,
-        owner_title.unwrap_or_default(),
-        cwd.unwrap_or_default()
-    );
+    let body = format!("{}\n{}", project_name, cwd.unwrap_or_default());
     upsert_search_document_conn(conn, "session", session_id, "", &title, &body)
 }
 
@@ -1864,12 +1756,6 @@ fn row_session(r: &Row) -> rusqlite::Result<Session> {
         cwd: r.get("cwd")?,
         workspace_path_id: r.get("workspace_path_id")?,
         project_id: r.get("project_id")?,
-        tracked_workstream_ids: serde_json::from_str(
-            &r.get::<_, String>("tracked_workstream_ids")?,
-        )
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
         forked_from_session_id: r.get("forked_from_session_id")?,
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
@@ -1931,36 +1817,4 @@ pub fn ensure_not_empty(name: &str, v: &str) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-pub(crate) fn get_session_conn(conn: &Connection, id: &str) -> Result<Option<Session>> {
-    Ok(conn
-        .query_row(
-            &format!("{SESSION_SELECT} WHERE sessions.id=?1"),
-            [id],
-            row_session,
-        )
-        .optional()?)
-}
-
-#[cfg(test)]
-
-pub(crate) fn seed_tracking(
-    db: &crate::storage::Db,
-    sid: &str,
-    task: Option<&str>,
-) -> crate::error::Result<()> {
-    db.tx(|tx| {
-        if let Some(tid)=task {
-            tx.execute("INSERT OR IGNORE INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",rusqlite::params![sid,tid])?;
-            crate::storage::bump_input_revision_conn(tx,tid)?;
-        } else {
-            let mut st=tx.prepare("SELECT workstream_id FROM session_workstreams WHERE session_id=?1")?;
-            let ids=st.query_map([sid],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
-            drop(st);
-            tx.execute("DELETE FROM session_workstreams WHERE session_id=?1",[sid])?;
-            for tid in ids { crate::storage::bump_input_revision_conn(tx,&tid)?; }
-        }
-        crate::storage::index_session_conn(tx,sid)
-    })
 }

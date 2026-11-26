@@ -24,6 +24,7 @@ import { notifyDataChanged } from "../../app/routes";
 import { httpsRemoteUrl } from "./remoteUrl";
 import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
 import {
+  type AssistantFileName,
   type ProjectAssistant,
   type ProjectDetailData,
 } from "../../types";
@@ -99,12 +100,21 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
   const assistantView = entry === "assistant" && Boolean(assistant);
   const icon = (detail ? assistantView : entry === "assistant") ? "spark" : "project";
   const archiveBoard: Route = { view: "projects", scope: "archived", ...(fromAssistants && { assistantOnly: true }) };
-  const onAssistantSaved = (updated: ProjectAssistant) => {
+  const onAssistantSaved = (updated: ProjectAssistant, file?: AssistantFileName) => {
     if (removedTargets.projects.has(projectId)) return;
     ++seqRef.current;
     setData(current => {
       if (!current?.assistant) return current;
-      const next = { ...current, assistant: { ...current.assistant, ...updated } };
+      const assistant = current.assistant;
+      const next = {
+        ...current,
+        assistant: {
+          ...assistant,
+          guide_state: file ? assistant.guide_state : updated.guide_state,
+          soul: file === "soul" || (!file && assistant.soul.state === "missing") ? updated.soul : assistant.soul,
+          role: file === "role" || (!file && assistant.role.state === "missing") ? updated.role : assistant.role,
+        },
+      };
       projectDetailCache.set(projectId, next);
       return next;
     });
@@ -126,6 +136,9 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
     ? sortedWorkspacePaths.filter(path => path.id === assistant?.workspace_path_id)
     : sortedWorkspacePaths;
   const directoryLabel = assistantView ? "档案目录" : "工作目录";
+  const displayedSessions = assistantView
+    ? detail?.sessions.filter(session => session.workspace_path_id === assistant?.workspace_path_id) ?? []
+    : detail?.sessions ?? [];
   const unusedMissingPaths = detail?.workspace_paths.filter(path => {
     if (path.exists) return false;
     if (detail.cleanable_missing_path_ids) {
@@ -374,11 +387,13 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
         </>}
           <DetailSection sectionId="sessions" label="会话" className="project-sessions-section" title={<>
                 <Icon name="chat" />
-                <span>会话（{detail.sessions.length}）</span>
+                <span>会话（{displayedSessions.length}）</span>
               </>} actions={project.visibility !== "archived" && !isDirectoryGroupProject(detail) && (
-                <NewProjectSessionButton projectId={project.id} navigate={navigate} />
+                <NewProjectSessionButton projectId={project.id} navigate={navigate}
+                  archivePathId={assistantView ? assistant?.workspace_path_id : undefined} />
               )}>
-            <SessionMiniList sessions={detail.sessions} emptyText="这个项目下还没有会话。" navigate={navigate} />
+            <SessionMiniList sessions={displayedSessions}
+              emptyText={assistantView ? "档案目录下还没有会话。" : "这个项目下还没有会话。"} navigate={navigate} />
           </DetailSection>
       </DetailLayout>
 

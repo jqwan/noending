@@ -35,6 +35,8 @@ pub fn collaboration_candidates(
     task_id: String,
     cursor: Option<String>,
     limit: Option<usize>,
+    project_id: Option<String>,
+    query: Option<String>,
 ) -> Result<Value> {
     with_db(&state, |db| {
         map_cli(crate::collaboration::candidates(
@@ -42,6 +44,11 @@ pub fn collaboration_candidates(
             &task_id,
             cursor,
             limit.unwrap_or(50),
+            project_id.as_deref(),
+            query
+                .as_deref()
+                .map(str::trim)
+                .filter(|query| !query.is_empty()),
         ))
     })
 }
@@ -422,7 +429,10 @@ mod tests {
               ('empty-task','Not started','2026-01-01','2026-01-01');
              INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
               ('a','codex','a','jsonl','/a'),('b','codex','b','jsonl','/b');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('a','task'),('b','task');
+             INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+             INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+             UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('a','b');
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('task','room-project');
              INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at)
               VALUES ('empty-room','empty-task','[]','2026-01-01','2026-01-01');"
         ).unwrap();

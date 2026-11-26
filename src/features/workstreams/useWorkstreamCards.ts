@@ -2,23 +2,23 @@ import { EVT_REMOVED, removedTargets } from "../../app/removedTargets";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api";
 import { useRefreshSignal } from "../../components/common";
-import type { Agent, WorkstreamCardData } from "../../types";
+import type { WorkstreamCardData } from "../../types";
 
 export const workstreamCardsCache = {
   cards: null as WorkstreamCardData[] | null,
-  defaultAgent: null as Agent | null,
+
 };
 
 export function clearWorkstreamCardsCache() {
   workstreamCardsCache.cards = null;
-  workstreamCardsCache.defaultAgent = null;
+
 }
 
-/** Cards and default agent for the task board. */
+/** Cards for the task board. */
 export function useWorkstreamCards() {
   const [loadError, setLoadError] = useState("");
   const [cards, setCards] = useState<WorkstreamCardData[] | null>(workstreamCardsCache.cards);
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(workstreamCardsCache.defaultAgent);
+
 
   const refresh = useCallback(() => {
     setLoadError("");
@@ -27,11 +27,6 @@ export function useWorkstreamCards() {
       workstreamCardsCache.cards = current;
       setCards(current);
     }).catch(e => setLoadError(String(e)));
-    api.getDefaultAgent().then((a) => {
-      workstreamCardsCache.defaultAgent = a;
-      setDefaultAgent(a);
-    }).catch(console.error);
-
   }, []);
 
   useEffect(() => {
@@ -42,6 +37,6 @@ export function useWorkstreamCards() {
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  return { loadError, cards, defaultAgent, refresh };
+  return { loadError, cards, refresh };
 }
 

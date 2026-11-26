@@ -9,7 +9,7 @@ import type {
   AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
 
-  Session, SessionListItem, SessionContextView, SessionDetail, SessionTracking,
+  Session, SessionListItem, SessionContextView, SessionDetail,
   SessionMessageMark, SessionMessageWindow, TurnIntermediates,
   SessionUpdateOutcome,
   Workstream, WorkstreamCardData, WorkstreamContext, WorkstreamContextView,
@@ -144,7 +144,6 @@ export const api = {
       replacement: { view: "sessions", scope: "archived" } });
     return result;
   },
-  getSessionTracking: (sessionId: string) => invoke<SessionTracking>("get_session_tracking", {sessionId}),
   getSessionDetail: (sessionId: string) => invoke<SessionDetail>("get_session_detail", { sessionId }),
   revealSessionSource: (sessionId: string) => invoke<void>("reveal_session_source", { sessionId }),
   /** 在系统默认浏览器打开 http(s) 链接（后端只放行 http/https）。 */
@@ -169,8 +168,6 @@ export const api = {
   getSessionUserMessageMarks: (sessionId: string) =>
     invoke<SessionMessageMark[]>("get_session_user_message_marks", { sessionId }),
   /** 摄入诊断：Settings 页面专用，默认只看 observation_count >= 2 的。 */  /** 添加或取消任务跟踪，不改变项目及目录。 */
-  setSessionTaskTracking: (sessionId: string,workstreamId: string,tracked: boolean) =>
-    invoke<Session>("set_session_task_tracking",{sessionId,workstreamId,tracked}),
 
   // Ingestion: 两个显式更新按钮 + 纯读取。后台摄入只由三个显式入口排队
   // （高级维护页）与两个自动触发（启动 / 回到前台的 freshness 回落）；普通页面打开从不触发。
@@ -225,12 +222,10 @@ export const api = {
   regenerateWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
 
-  /** 新建 Session 可预选多个跟踪任务（空数组 = 不跟踪）。 */
-  prepareNewSession: (agent: Agent, initialWorkstreamIds: string[], cwd?: string, runtime?: AgentRuntimeOverrides) =>
+  prepareNewSession: (agent: Agent, cwd?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<import("./types").PreparedLaunch>("prepare_new_session", {
       agent,
       runtime: runtime ?? null,
-      initialWorkstreamIds,
       cwd: cwd ?? null,
     }),
   launchPrepared: (preparedId: string) =>
@@ -245,11 +240,10 @@ export const api = {
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
    *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, initialWorkstreamIds: string[], cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
+  launchEmbeddedNew: (agent: Agent, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
       runtime: runtime ?? null,
-      initialWorkstreamIds,
       cwd: cwd ?? null,
       initialMessage: initialMessage ?? null,
     }),
@@ -287,8 +281,8 @@ export const api = {
   // 协作室：读取不隐式创建房间；首次开启前 room=null。
   collaborationRoomGet: (taskId: string) =>
     invoke<import("./types").CollaborationRoomView>("collaboration_room_get", { taskId }),
-  collaborationCandidates: (taskId: string, cursor: string | null = null, limit = 20) =>
-    invoke<import("./types").CollaborationCandidatePage>("collaboration_candidates", { taskId, cursor, limit }),
+  collaborationCandidates: (taskId: string, cursor: string | null = null, limit = 20, projectId: string | null = null, query: string | null = null) =>
+    invoke<import("./types").CollaborationCandidatePage>("collaboration_candidates", { taskId, cursor, limit, projectId, query }),
   collaborationRoomStart: (
     taskId: string,
     members: import("./types").CollaborationStartedMember[],
@@ -359,7 +353,7 @@ export const api = {
 
   createAssistantProfile: (input: import("./types").CreateAssistantInput) =>
     invoke<Project>("create_assistant_profile", { input }),
-  updateAssistantProfile: (id: string, revision: string, patch: { agents_md: string }) =>
+  updateAssistantProfile: (id: string, revision: string, patch: import("./types").AssistantPatch) =>
     invoke<import("./types").ProjectAssistant>("update_assistant_profile", { id, revision, patch }),
   prepareAssistantFiles: (id: string) =>
     invoke<import("./types").ProjectAssistant>("prepare_assistant_files", { id }),

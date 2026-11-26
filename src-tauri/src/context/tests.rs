@@ -158,13 +158,6 @@ fn summary_at(db: &Db, kind: &str, id: &str) -> (i64, crate::domain::Summary) {
     }
 }
 
-pub(super) fn task(f: &ServiceFixture, ids: &[&str]) -> Workstream {
-    let ws = f.add_workstream("task-test");
-    for id in ids {
-        crate::storage::seed_tracking(&f.db(), id, Some(&ws.id)).unwrap();
-    }
-    ws
-}
 pub(super) fn append(f: &ServiceFixture, id: &str, text: &str, rewrite: bool) {
     let old = f.db().get_session(id).unwrap().unwrap().source_cursor();
     f.db()
@@ -573,7 +566,7 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
     let a = f.add_session(1, 10);
     let b = f.add_session(1, 10);
     let outside = f.add_session(1, 10);
-    let ws = task(&f, &[&a, &outside]);
+    let ws = f.add_workstream("task-test");
     seed(&f, &b, "已有 B 摘要");
     append(&f, &b, "新内容", false);
     f.db()

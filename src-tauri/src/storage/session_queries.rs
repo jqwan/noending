@@ -9,9 +9,7 @@ use std::collections::HashMap;
 const LIST_SELECT: &str = "SELECT sessions.id,agent,root_agent_session_id,title,cwd,
     workspace_path_id,started_at,last_activity_at,last_conversation_at,archived_at,
     source_kind,latest_message_seq,
-    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id,
-    (SELECT json_group_array(workstream_id) FROM
-      (SELECT workstream_id FROM session_workstreams WHERE session_id=sessions.id ORDER BY workstream_id)) AS tracked_workstream_ids
+    (SELECT m.project_id FROM project_session_membership m WHERE m.session_id=sessions.id) AS project_id
     FROM sessions";
 
 pub(super) fn query_sessions<T>(
@@ -71,17 +69,6 @@ impl Db {
         query_sessions(&self.read(), LIST_SELECT, &filter, limit, row_list_item)
     }
 
-    pub fn workstream_session_list_items(&self, workstream: &str) -> Result<Vec<SessionListItem>> {
-        let conn = self.read();
-        let mut statement = conn.prepare(&format!(
-            "{LIST_SELECT} WHERE EXISTS (SELECT 1 FROM session_workstreams sw
-               WHERE sw.session_id=sessions.id AND sw.workstream_id=?1)
-             ORDER BY COALESCE(last_conversation_at,last_activity_at,started_at) DESC,id"
-        ))?;
-        let rows = statement.query_map([workstream], row_list_item)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
     /// Counts used by Agent cards. No session bodies/metadata/associations are
     /// loaded, and counts have no preview limit.
     pub fn session_counts_by_agent(&self) -> Result<HashMap<String, i64>> {
@@ -127,12 +114,6 @@ pub(super) fn row_list_item(r: &Row<'_>) -> rusqlite::Result<SessionListItem> {
         cwd: r.get("cwd")?,
         workspace_path_id: r.get("workspace_path_id")?,
         project_id: r.get("project_id")?,
-        tracked_workstream_ids: serde_json::from_str(
-            &r.get::<_, String>("tracked_workstream_ids")?,
-        )
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
         started_at: r.get("started_at")?,
         last_activity_at: r.get("last_activity_at")?,
         last_conversation_at: r.get("last_conversation_at")?,

@@ -1,5 +1,5 @@
-//! AGENTS.md is the source of the content shown in the project.
-use super::ProjectAssistant;
+//! The archive files are the source of the content shown in the project.
+use super::{AssistantFile, AssistantPatch, ProjectAssistant};
 use crate::error::{other, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -8,8 +8,13 @@ use std::{
     path::Path,
 };
 
-fn read_instructions(root: &Path) -> Result<Option<(String, String)>> {
-    let path = root.join("AGENTS.md");
+const AGENTS: &str = "AGENTS.md";
+const SOUL: &str = "SOUL.md";
+const ROLE: &str = "ROLE.md";
+const STANDARD_ENTRY: &str = include_str!("templates/AGENTS.md");
+
+fn read_document(root: &Path, name: &str) -> Result<Option<(String, String)>> {
+    let path = root.join(name);
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -19,7 +24,7 @@ fn read_instructions(root: &Path) -> Result<Option<(String, String)>> {
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
-        Ok(metadata) if !metadata.is_file() => return Err(other("AGENTS.md 必须是普通文件")),
+        Ok(metadata) if !metadata.is_file() => return Err(other(format!("{name} 必须是普通文件"))),
         Ok(_) => {}
     }
     let instructions = fs::read_to_string(&path)?;
@@ -28,16 +33,29 @@ fn read_instructions(root: &Path) -> Result<Option<(String, String)>> {
 }
 
 pub fn inspect(root: &Path) -> ProjectAssistant {
-    match read_instructions(root) {
-        Ok(Some((instructions, revision))) => ProjectAssistant {
-            agents_md: instructions,
-            revision: Some(revision),
-            agents_md_state: "current",
+    ProjectAssistant {
+        guide_state: match read_document(root, AGENTS) {
+            Ok(Some((content, _))) if content == STANDARD_ENTRY => "current",
+            Ok(Some(_)) => "outdated",
+            Ok(None) => "missing",
+            Err(_) => "unavailable",
         },
-        result => ProjectAssistant {
-            agents_md: String::new(),
+        soul: inspect_document(root, SOUL),
+        role: inspect_document(root, ROLE),
+    }
+}
+
+fn inspect_document(root: &Path, name: &str) -> AssistantFile {
+    match read_document(root, name) {
+        Ok(Some((content, revision))) => AssistantFile {
+            content,
+            revision: Some(revision),
+            state: "current",
+        },
+        result => AssistantFile {
+            content: String::new(),
             revision: None,
-            agents_md_state: if result.is_err() {
+            state: if result.is_err() {
                 "unavailable"
             } else {
                 "missing"
@@ -46,9 +64,18 @@ pub fn inspect(root: &Path) -> ProjectAssistant {
     }
 }
 
-pub fn initialize(root: &Path, instructions: &str) -> Result<()> {
-    read_instructions(root)?;
-    for (name, content) in [("AGENTS.md", instructions), ("CLAUDE.md", "@AGENTS.md\n")] {
+pub fn initialize(root: &Path, soul: Option<&str>, role: Option<&str>) -> Result<()> {
+    if let Some((content, revision)) = read_document(root, AGENTS)? {
+        if content != STANDARD_ENTRY {
+            save_document(root, AGENTS, &revision, STANDARD_ENTRY)?;
+        }
+    }
+    for (name, content) in [
+        (AGENTS, STANDARD_ENTRY),
+        (SOUL, soul.unwrap_or(include_str!("templates/SOUL.md"))),
+        (ROLE, role.unwrap_or_default()),
+        ("CLAUDE.md", "@AGENTS.md\n"),
+    ] {
         let path = root.join(name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
@@ -65,19 +92,27 @@ pub fn initialize(root: &Path, instructions: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn save(root: &Path, revision: &str, instructions: &str) -> Result<()> {
-    let path = root.join("AGENTS.md");
-    let temporary = root.join(format!(".AGENTS.md-{}.tmp", crate::storage::new_id()));
+pub fn save(root: &Path, revision: &str, patch: AssistantPatch) -> Result<()> {
+    let (name, content) = match patch {
+        AssistantPatch::Soul { content } => (SOUL, content),
+        AssistantPatch::Role { content } => (ROLE, content),
+    };
+    save_document(root, name, revision, &content)
+}
+
+fn save_document(root: &Path, name: &str, revision: &str, content: &str) -> Result<()> {
+    let path = root.join(name);
+    let temporary = root.join(format!(".{name}-{}.tmp", crate::storage::new_id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)?;
     let result = (|| {
-        file.write_all(instructions.as_bytes())?;
+        file.write_all(content.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        if !read_instructions(root)?.is_some_and(|(_, current)| current == revision) {
-            return Err(other("AGENTS.md 已变化，请重新读取"));
+        if !read_document(root, name)?.is_some_and(|(_, current)| current == revision) {
+            return Err(other(format!("{name} 已变化，请重新读取")));
         }
         fs::set_permissions(&temporary, fs::symlink_metadata(&path)?.permissions())?;
         fs::rename(&temporary, &path)?;

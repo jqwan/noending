@@ -16,7 +16,8 @@ export default function CreateAssistantModal({
 }) {
   const formId = useId();
   const [name, setName] = useState("");
-  const [agentsMd, setAgentsMd] = useState("");
+  const [soul, setSoul] = useState("");
+  const [role, setRole] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -34,7 +35,8 @@ export default function CreateAssistantModal({
     try {
       const input: CreateAssistantInput = {
         name: trimmedName,
-        agents_md: agentsMd,
+        soul_md: soul.trim() ? soul : undefined,
+        role_md: role.trim() ? role : undefined,
       };
       const project = await api.createAssistantProfile(input);
       onCreated(project.id, project.name);
@@ -71,18 +73,23 @@ export default function CreateAssistantModal({
           />
         </div>
 
-        <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
-          <label className="label bold" htmlFor={`${formId}-agents-md`}>AGENTS.md</label>
-          <textarea
-            id={`${formId}-agents-md`}
-            className="input textarea"
-            rows={4}
-            value={agentsMd}
-            onChange={(e) => setAgentsMd(e.target.value)}
-            placeholder="填写 AGENTS.md（可选）"
-            disabled={busy}
-          />
-        </div>
+        {[
+          { id: "soul", label: "SOUL.md", value: soul, setValue: setSoul, placeholder: "描述价值观、行为原则和交流风格（可选）" },
+          { id: "role", label: "ROLE.md", value: role, setValue: setRole, placeholder: "描述长期目标、职责和工作范围（可选）" },
+        ].map(({ id, label, value, setValue, placeholder }) => (
+          <div key={id} className="form-group" style={{ marginBottom: "var(--space-md)" }}>
+            <label className="label bold" htmlFor={`${formId}-${id}`}>{label}</label>
+            <textarea
+              id={`${formId}-${id}`}
+              className="input textarea"
+              rows={3}
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              placeholder={placeholder}
+              disabled={busy}
+            />
+          </div>
+        ))}
 
         <DialogActions>
           <button

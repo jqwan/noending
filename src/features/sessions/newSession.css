@@ -42,46 +42,6 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
-/* 跟踪任务并入 composer 顶栏：和项目、目录一样回答「这次会话挂在哪」。
-   一个项目下的任务没有上限，所以选项收进 picker，顶栏只留一个摘要标签——
-   全部铺开会把输入框挤下去，二十个任务更是没法看。 */
-.new-session-tasks {
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  min-width: 0;
-}
-.new-session-task-picker {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 0 1 auto;
-  min-width: 84px;
-  max-width: 220px;
-}
-.new-session-task-picker > .picker-control {
-  flex: 1;
-  min-width: 0;
-}
-/* 项目、目录总归有值，任务不是——挂上任务这件事本身是「新信息」，值得用强调色标出来。 */
-.new-session-context .picker-control.is-set,
-.new-session-context .picker-control.is-set:hover:not(:has(:disabled)) {
-  color: var(--accent);
-}
-.new-session-context .picker-control.is-set .ui-icon {
-  color: var(--accent);
-}
-.new-session-task-option:has(:disabled) {
-  opacity: var(--disabled-opacity);
-  cursor: default;
-}
-.new-session-task-option input {
-  flex: none;
-  width: 13px;
-  height: 13px;
-  margin: 0;
-  accent-color: var(--accent);
-}
 .new-session-form {
   flex: none;
   margin-bottom: auto;

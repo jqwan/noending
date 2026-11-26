@@ -2,7 +2,7 @@
 
 任务由任务描述、任务事项和协作摘要组成。任务描述按“目标、现状”两段说明任务。任务事项记录实际进展、验证结果和待解决的问题。协作摘要整理协作室的重要讨论、决定和交接背景。执行实际工作，不能用更新记录代替交付。
 
-用户已开启任务协作室时，再读[任务协作](collaboration.md)：负责人归并任务进展，成员围绕分工简要报告。跟踪任务本身不隐含加入协作或持续监听，普通单会话任务仍按本文执行。
+用户已开启任务协作室时，再读[任务协作](collaboration.md)：负责人归并任务进展，成员围绕分工简要报告。
 
 ## 接入与接手
 
@@ -10,7 +10,7 @@
 
 以任务标题表达的核心目标作为工作归属的首要依据，描述用于细化范围、验收要求和现状，可以随工作推进更新，但不能为了容纳已做工作而反向扩大目标。标题宽泛或有歧义时，结合描述与用户明确要求判断，不能只凭标题中的某个关键词认定归属。
 
-会话跟踪任务不代表会话中所有工作都属于该任务；同一项目、代码相关或顺带修复也不足以证明归属。新增事项或追加进展前，判断工作是否直接服务于该任务的核心目标；缺乏明确依据时，完成用户要求的工作，但不写入该任务，不自动另建任务，也不自行改写标题或描述来纳入。用户明确调整任务目标后，再按新范围维护记录。
+新增事项或追加进展前，判断工作是否直接服务于该任务的核心目标；缺乏明确依据时，完成用户要求的工作，但不写入该任务，不自动另建任务，也不自行改写标题或描述来纳入。用户明确调整任务目标后，再按新范围维护记录。
 
 任务描述使用同一个 description 字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符；这是精简建议，不是硬性长度或格式校验。
 
@@ -25,8 +25,6 @@
 现状：公共卡片和可折叠详情栏已接入，前端验证通过；Windows 原生界面尚待验证。
 ```
 
-
-需要关联当前会话时，按[身份发现](identity.md)确认准确 ID，再建立跟踪并核实 task_ids。保留已有项目与会话关系；身份不足时仍可开展指定任务，说明未关联，确认后再补充。不能自行恢复归档任务绕过限制。
 
 ## 任务事项
 
@@ -70,30 +68,27 @@
 | 原生身份转 NoEnding 身份 | `ne session resolve --agent AGENT --native-id NATIVE_ID` | `session_resolve {agent, native_id}`，使用调用方已知的原生主会话 ID |
 | 查询对象详情 | `ne task/session/project show ID`，三者选一 | `object_get {kind, id}` |
 | 项目任务 | `ne task list --project ID --scope all` | `object_list {kind: "task", project, scope: "all"}` |
-| 任务关联会话 | `ne session list --task ID --scope all` | `object_list {kind: "session", task, scope: "all"}` |
 | 项目候选会话 | `ne session list --project ID --scope all` | `object_list {kind: "session", project, scope: "all"}` |
 | 任务关联项目 | `ne task project list ID` | `object_get {kind: "task", id}`，读取关联项目 |
 
-`session resolve` / `session_resolve` 返回 `id`（NoEnding ID）及原生身份、项目和任务元数据，包含已归档记录；后续操作使用该 `id`。未命中返回 `not_found`，不扫描或自动同步；核对 Home，必要时显式同步相应来源。查询身份不要求桌面在线。
+`session resolve` / `session_resolve` 返回 `id`（NoEnding ID）及原生身份、项目和会话元数据，包含已归档记录；后续操作使用该 `id`。未命中返回 `not_found`，不扫描或自动同步；核对 Home，必要时显式同步相应来源。查询身份不要求桌面在线。
 
-会话 `task_ids` 表示跟踪的任务。列表默认每页 20 项、最多 50 项；按 `next_cursor` 继续时保持筛选条件，CLI 用 `--cursor`、MCP 用 `cursor`。不要把第一页当作完整集合。`scope=all` 包含已归档对象；新增跟踪需另行核实任务未归档。
+列表默认每页 20 项、最多 50 项；按 `next_cursor` 继续时保持筛选条件，CLI 用 `--cursor`、MCP 用 `cursor`。不要把第一页当作完整集合。`scope=all` 包含已归档对象。
 
-## 创建、调整与跟踪
+## 创建、编辑与归档
 
 | 目的 | CLI | MCP |
 | --- | --- | --- |
 | 创建任务 | `ne task create --title TEXT --description TEXT --project ID`，`--project` 可重复 | `task_create {title, description, projects: [ID]}` |
 | 编辑标题／描述 | `ne task update ID --title TEXT --description TEXT`，仅传需修改字段 | `task_update {id, title, description}`，仅传需修改字段 |
 | 替换项目关联 | `ne task project set ID --project ID`，`--project` 可重复 | `task_projects_set {id, projects: [ID]}` |
-| 添加会话跟踪 | `ne task attach TASK_ID --session SESSION_ID` | `task_session_set {task, session, tracked: true}` |
-| 取消会话跟踪 | `ne task detach TASK_ID --session SESSION_ID` | `task_session_set {task, session, tracked: false}` |
 | 归档／恢复任务 | `ne task archive ID` / `ne task unarchive ID` | `object_archive {kind: "task", id, archived: true/false}` |
 
-创建可以不关联项目。会话新增跟踪要求任务关联会话所在的项目；工程执行跨项目时，用任务的多项目关联承载，无需为每个项目复制任务。任务标题不能为空，描述传空字符串可清空；未提供字段保持原值。
+创建可以不关联项目。跨项目工作可以用同一任务关联多个项目。任务标题不能为空，描述传空字符串可清空；未提供字段保持原值。
 
 提供 description 会替换整个任务描述，不是追加。更新整体现状前读取最新描述，融合后提交完整文字，保持“目标：”“现状：”两段，保留用户确定的目标及必要的范围、验收要求；具体进展写入对应任务事项。
 
-`task project set` / `task_projects_set` 替换完整项目列表，空列表解除全部项目关联；不会移动会话，也不会清除已有跟踪。`attach` 增加指定关系，保留其他跟踪；`detach` 只移除指定关系。这些命令不向 Agent 发送文字、不触发执行。归档任务不会自动归档关联会话。
+`task project set` / `task_projects_set` 替换完整项目列表，空列表解除全部项目关联。归档会停止任务正在进行的协作。
 
 ## 独立任务事项
 
@@ -118,7 +113,7 @@ FILE 是独立 UTF-8 JSON 文件，用后删除。创建只接受 `{ "title": "�
 | 目的 | CLI | MCP |
 | --- | --- | --- |
 | 读取任务／会话摘要 | `ne task/session summary ID` | `summary_get {kind: "task"/"session", id}` |
-| 检索任务内历史 | `ne search --query TEXT --task ID --scope all` | `session_search {query, task, scope: "all"}` |
+| 检索相关项目历史 | `ne search --query TEXT --project ID --scope all` | `session_search {query, project, scope: "all"}` |
 | 完整消息与前后文 | `ne session messages ID --from ORDINAL --to ORDINAL --limit 8` | `session_messages {id, from, to, limit}` |
 | 覆盖状态 | `ne freshness --task ID` | `freshness {kind: "task", id}` |
 | 同步已知会话 | `ne sync --session ID` | `sync {session: ID}` |

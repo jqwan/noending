@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import Icon from "../../components/Icon";
-import type { CollaborationMessage, SessionListItem } from "../../types";
+import type { CollaborationMessage } from "../../types";
 import SessionMessage from "../sessions/SessionMessage";
 import { formatDateTime } from "../sessions/SessionTable";
 import "../sessions/sessions.css";
@@ -12,11 +12,9 @@ const KIND_LABEL: Record<CollaborationMessage["kind"], string | null> = {
   stop: "停止协作",
 };
 
-function senderName(sender: string | null, sessions: SessionListItem[]): string {
-  if (!sender) return "你";
-  const local = sessions.find(s => s.id === sender);
-  // 会话被永久删除后仍保留真实来源，不转换成「用户」。
-  return local?.title || `会话 ${sender.slice(0, 8)}`;
+function senderName(message: CollaborationMessage): string {
+  if (!message.sender_session_id) return "你";
+  return message.sender_title || `会话 ${message.sender_session_id.slice(0, 8)}`;
 }
 
 /**
@@ -27,22 +25,22 @@ function senderName(sender: string | null, sessions: SessionListItem[]): string 
  */
 export default function RoomMessages({
   messages,
-  sessions,
   sending,
   draft,
   onDraftChange,
   onSend,
+  onSetup,
   sendLabel,
   placeholder,
   disabled = false,
   loading = false,
 }: {
   messages: CollaborationMessage[];
-  sessions: SessionListItem[];
   sending: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
   onSend: () => void;
+  onSetup?: () => void;
   sendLabel: string;
   placeholder: string;
   disabled?: boolean;
@@ -83,7 +81,11 @@ export default function RoomMessages({
             if (following.current) setHasNew(false);
           }}>
           {loading ? (showLoading && <p role="status" className="small muted">正在读取协作室…</p>) : messages.length === 0 ? (
-            <div className="collab-empty muted"><Icon name="chat" /><p>还没有消息，发一句话开始协作。</p></div>
+            <div className="collab-empty muted">
+              <Icon name="chat" />
+              <p>还没有协作消息。</p>
+              {onSetup && <button type="button" className="btn primary" disabled={sending} onClick={onSetup}>开始协作</button>}
+            </div>
           ) : (
             <ol className="collab-message-list" aria-label="协作消息">
               {messages.map(message => (
@@ -96,13 +98,13 @@ export default function RoomMessages({
                         role: message.sender_session_id ? "assistant" : "user",
                         content: message.body,
                         ts: message.created_at,
-                        who: senderName(message.sender_session_id, sessions),
+                        who: senderName(message),
                         turnFinal: true,
                       }}
                     />
                   ) : (
                     <p className="small muted collab-notice" title={message.body}>
-                      {KIND_LABEL[message.kind]} · {senderName(message.sender_session_id, sessions)}
+                      {KIND_LABEL[message.kind]} · {senderName(message)}
                       {" · "}{formatDateTime(message.created_at)}
                     </p>
                   )}
@@ -132,7 +134,7 @@ export default function RoomMessages({
         <div className="collab-compose-actions">
           <div className="collab-compose-hint small muted">
             {!loading && <span>{messages.length} 条消息</span>}
-            <span>Enter 发送，Shift + Enter 换行</span>
+            <span>Enter {onSetup ? "选择成员" : "发送"}，Shift + Enter 换行</span>
           </div>
           <button type="submit" className="btn small primary" disabled={disabled || sending || !draft.trim()}>
             {sending ? "发送中…" : sendLabel}

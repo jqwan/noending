@@ -331,9 +331,7 @@ pub fn ensure_workstream_state_conn(conn: &Connection, workstream_id: &str) -> R
     Ok(())
 }
 
-/// Bump `input_revision` — called by paths that change what the Workstream
-/// has pending inputs: tracking set, projects, title /
-/// description change or Session ownership change.
+/// Bump the Workstream’s input revision when its summary inputs change.
 pub fn bump_input_revision_conn(conn: &Connection, workstream_id: &str) -> Result<i64> {
     ensure_workstream_state_conn(conn, workstream_id)?;
     conn.execute(

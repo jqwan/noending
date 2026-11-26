@@ -262,12 +262,10 @@ pub fn run() {
             commands::session_workspace::get_agent_latest_activities,
             commands::session_workspace::get_session_terminal_states,
             commands::session_workspace::get_session_detail,
-            commands::session_workspace::get_session_tracking,
             commands::session_workspace::reveal_session_source,
             commands::session_workspace::get_session_messages,
             commands::session_workspace::get_turn_intermediates,
             commands::session_workspace::get_session_user_message_marks,
-            commands::session_workspace::set_session_task_tracking,
             // Session Lifecycle: Trash / Restore and the
             // stateless permanent LOCAL deletion. The UI submits ids only.
             commands::session_lifecycle::archive_session,

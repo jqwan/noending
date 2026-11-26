@@ -35,12 +35,17 @@ fn ensure_profile_parent(home: &NoEndingHome) -> Result<()> {
     }
     Ok(())
 }
-fn expected_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathBuf> {
+fn archive_identity(path: &WorkspacePath) -> Result<(&str, uuid::Uuid)> {
     let name = Path::new(&path.canonical_path)
         .file_name()
         .and_then(|name| name.to_str())
-        .filter(|name| uuid::Uuid::parse_str(name).is_ok())
         .ok_or_else(|| other("智能体档案目录名称无效"))?;
+    let id = uuid::Uuid::parse_str(name).map_err(|_| other("智能体档案目录名称无效"))?;
+    Ok((name, id))
+}
+
+fn expected_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathBuf> {
+    let (name, _) = archive_identity(path)?;
     let expected = directory(home).join(name);
     if crate::workspace::path_identity_of(&expected.to_string_lossy()).as_deref() != Some(&path.id)
     {
@@ -164,7 +169,7 @@ pub fn create_profile_with_roots(
     let staging = home.runtime_dir.join(format!("assistant-create-{id}"));
     fs::create_dir(&staging)?;
     let preparation = (|| {
-        files::initialize(&staging, &input.agents_md)?;
+        files::initialize(&staging, input.soul_md.as_deref(), input.role_md.as_deref())?;
         prepare_default_skill(db, home, roots, &staging)
     })();
     if let Err(error) = preparation {
@@ -205,7 +210,8 @@ pub(crate) fn project_assistant(
                 .find(|path| path.id == id)
                 .ok_or_else(|| other("智能体档案目录未登记"))?;
             Ok(ProjectAssistantDetail {
-                file: files::inspect(Path::new(&path.canonical_path)),
+                files: files::inspect(Path::new(&path.canonical_path)),
+                id: archive_identity(path)?.1,
                 workspace_path_id: id,
             })
         })
@@ -222,7 +228,7 @@ pub fn update_profile(
     let _lock = lock(home)?;
     let path = registered_path(db, project_id)?;
     let root = validate_directory(home, &path)?;
-    files::save(&root, revision, &patch.agents_md)?;
+    files::save(&root, revision, patch)?;
     Ok(files::inspect(&root))
 }
 
@@ -242,6 +248,30 @@ pub fn prepare_profile_files(
         fs::create_dir(&expected)?;
     }
     let root = validate_directory(home, &path)?;
-    files::initialize(&root, "")?;
+    files::initialize(&root, None, None)?;
     Ok(files::inspect(&root))
+}
+
+/// Resolve the identity of the registered archive directory in this Home.
+pub(crate) fn resolve_archive(
+    db: &Db,
+    home: &NoEndingHome,
+    project_id: &str,
+    path: &str,
+) -> Result<Option<uuid::Uuid>> {
+    let Some(path_id) = crate::workspace::path_identity_of(path) else {
+        return Ok(None);
+    };
+    let conn = db.read();
+    if repo::project_for_path(&conn, &path_id)?.as_deref() != Some(project_id) {
+        return Ok(None);
+    }
+    let Some(path) = crate::storage::workspace::get_workspace_path_conn(&conn, &path_id)? else {
+        return Ok(None);
+    };
+    drop(conn);
+    if validate_directory(home, &path).is_err() {
+        return Ok(None);
+    }
+    archive_identity(&path).map(|(_, id)| Some(id))
 }

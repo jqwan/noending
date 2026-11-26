@@ -1,5 +1,4 @@
-//! Explicit task/project membership and session tracking. Directories belong to
-//! projects; task associations never expand or follow a directory snapshot.
+//! Project membership for tasks.
 use crate::{
     domain::*,
     error::{other, Result},
@@ -48,67 +47,6 @@ pub fn workstreams_for_project(conn: &Connection, id: &str) -> Result<Vec<Workst
 }
 
 pub fn purge_workstream_data_conn(conn: &Connection, id: &str) -> Result<()> {
-    let sessions = tracked_session_ids(conn, id)?;
     conn.execute("DELETE FROM workstreams WHERE id=?1", [id])?;
-    for sid in sessions {
-        super::index_session_conn(conn, &sid)?;
-    }
-    Ok(())
-}
-pub fn tracked_session_ids(conn: &Connection, id: &str) -> Result<Vec<String>> {
-    let mut st = conn.prepare(
-        "SELECT session_id FROM session_workstreams WHERE workstream_id=?1 ORDER BY session_id",
-    )?;
-    let rows = st.query_map([id], |r| r.get(0))?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-}
-
-pub(super) fn session_can_track_task(
-    conn: &Connection,
-    session: &Session,
-    task_id: &str,
-) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workstream_projects WHERE workstream_id=?1 AND project_id=?2)",
-        params![task_id, session.project_id],
-        |row| row.get(0),
-    )?)
-}
-
-pub fn set_tracking_conn(conn: &Connection, sid: &str, tid: &str, tracked: bool) -> Result<()> {
-    let session = super::get_session_conn(conn, sid)?.ok_or_else(|| other("会话不存在"))?;
-    let task = super::get_workstream_conn(conn, tid)?.ok_or_else(|| other("任务不存在"))?;
-    let changed = if tracked {
-        let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM session_workstreams WHERE session_id=?1 AND workstream_id=?2)",params![sid,tid],|r|r.get(0))?;
-        if exists {
-            return Ok(());
-        }
-        if task.visibility != "normal" {
-            return Err(other("不能新增跟踪已归档任务"));
-        }
-        if !session_can_track_task(conn, &session, tid)? {
-            return Err(other("任务未关联会话所属项目"));
-        }
-        conn.execute(
-            "INSERT INTO session_workstreams(session_id,workstream_id) VALUES (?1,?2)",
-            params![sid, tid],
-        )?
-    } else {
-        let collaborating: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM collaboration_rooms room JOIN collaboration_runs r ON r.room_id=room.id JOIN collaboration_run_members m ON m.run_id=r.id WHERE room.task_id=?2 AND m.session_id=?1 AND r.status IN ('starting','active'))",
-            params![sid, tid], |row| row.get(0),
-        )?;
-        if collaborating {
-            return Err(other("正在协作中的成员不能取消关联，请先停止协作"));
-        }
-        conn.execute(
-            "DELETE FROM session_workstreams WHERE session_id=?1 AND workstream_id=?2",
-            params![sid, tid],
-        )?
-    };
-    if changed > 0 {
-        super::bump_input_revision_conn(conn, tid)?;
-        super::index_session_conn(conn, sid)?;
-    }
     Ok(())
 }

@@ -20,11 +20,11 @@ async function renderCards(element: Parameters<typeof render>[0]) {
   await act(async () => { view = render(element); });
   return view;
 }
-const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", tracked_workstream_ids: [], started_at: "2026-09-21T00:00:00Z" } as unknown as Session;
+const session = { id: "s1", title: "修复布局", agent: "codex", cwd: "/test/project", started_at: "2026-09-21T00:00:00Z" } as unknown as Session;
 it("opens details separately from resume and trash actions", async () => {
   const open = vi.fn(); const resume = vi.fn(); const trash = vi.fn();
   const terminalResume = vi.fn();
-  await renderCards(<SessionCards sessions={[session]} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={open} onResume={resume} onTerminalResume={terminalResume} onArchive={trash} />);
+  await renderCards(<SessionCards sessions={[session]} projectNameById={new Map()} onOpen={open} onResume={resume} onTerminalResume={terminalResume} onArchive={trash} />);
   // Codex supports both routes; the single action prefers terminal.
   const continueBtn = screen.getByLabelText("在终端中继续修复布局");
   fireEvent.click(continueBtn);
@@ -37,7 +37,7 @@ it("opens details separately from resume and trash actions", async () => {
   expect(open).toHaveBeenCalledWith("s1");
 });
 it("limits initial rows and reveals more without losing sessions", async () => {
-  await renderCards(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} workstreamTitleById={new Map()} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
+  await renderCards(<SessionCards sessions={Array.from({ length: 101 }, (_, i) => ({ ...session, id: String(i), title: `会话${i}` }))} projectNameById={new Map()} onOpen={() => {}} onResume={() => {}} onArchive={() => {}} />);
   expect(screen.queryByText("会话100")).toBeNull();
   expect(new Set(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]))
     .toEqual(new Set(Array.from({ length: 100 }, (_, i) => String(i))));
@@ -45,35 +45,13 @@ it("limits initial rows and reveals more without losing sessions", async () => {
   expect(screen.getByText("会话100")).toBeTruthy();
   expect(vi.mocked(api.getSessionTerminalStates).mock.lastCall?.[0]).toContain("100");
 });
-it("shows tracked workstream count statistic on cards and full title in list view", async () => {
-  const longTitle = "这是一个超过十六个字符的非常长的任务标题名称";
-  const props = {
-    sessions: [
-      { ...session, id: "owned", title: "有归属", tracked_workstream_ids: ["w1"] },
-      { ...session, id: "free", title: "没归属", tracked_workstream_ids: [] },
-    ],
-    workstreamTitleById: new Map([["w1", longTitle]]),
-    projectNameById: new Map(),
-    onOpen: () => {}, onResume: () => {}, onArchive: () => {},
-  };
-  const { rerender } = await renderCards(<SessionCards {...props} />);
-
-  expect(screen.getByText("1 个任务")).toBeTruthy();
-  expect(screen.getByText("0 个任务")).toBeTruthy();
-  expect(screen.queryByText("未归属任务")).toBeNull();
-
-  rerender(<SessionCards {...props} viewMode="list" />);
-  expect(screen.getByText(longTitle)).toBeTruthy();
-});
-
-
 it("uses terminal for CLI-capable formats and desktop for desktop-only formats", async () => {
   const onTerminalResume = vi.fn();
   const onResume = vi.fn();
   const { rerender } = await renderCards(
     <SessionCards
       sessions={[{ ...session, id: "claude-1", agent: "claude_code" } as unknown as Session]}
-      workstreamTitleById={new Map()}
+
       projectNameById={new Map()}
       onOpen={() => {}}
       onResume={() => {}}
@@ -84,7 +62,7 @@ it("uses terminal for CLI-capable formats and desktop for desktop-only formats",
   expect(screen.getByLabelText("在终端中继续修复布局")).toBeTruthy();
 
   const desktopSession = { ...session, id: "desktop", agent: "workbuddy" } as unknown as Session;
-  await act(async () => rerender(<SessionCards sessions={[desktopSession]} workstreamTitleById={new Map()} projectNameById={new Map()}
+  await act(async () => rerender(<SessionCards sessions={[desktopSession]} projectNameById={new Map()}
     onOpen={() => {}} onResume={onResume} onArchive={() => {}} onTerminalResume={onTerminalResume} />));
   fireEvent.click(screen.getByRole("button", { name: "在桌面应用中继续修复布局" }));
   expect(onResume).toHaveBeenCalledWith("desktop");
@@ -96,7 +74,7 @@ it("disables archived session continuation in both card and list terminal modes"
   const terminalResume = vi.fn();
   const archived = { ...session, archived_at: "2026-10-08T00:00:00Z" };
   const props = {
-    sessions: [archived], workstreamTitleById: new Map(), projectNameById: new Map(),
+    sessions: [archived], projectNameById: new Map(),
     onOpen: vi.fn(), onResume: resume, onArchive: vi.fn(), onTerminalResume: terminalResume,
   };
   let rerender!: ReturnType<typeof render>["rerender"];
@@ -117,8 +95,8 @@ it("separates Agent activity from the terminal continue action and keeps exited 
   const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
   const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
   const terminals: TerminalSummary[] = [
-    { terminal_id: "t1", session_id: "s-live", live: true, activity: { state: "working", revision: 1, unread: false }, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", initial_workstream_ids: [], identity_revision: 0 },
-    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", initial_workstream_ids: [], identity_revision: 0 },
+    { terminal_id: "t1", session_id: "s-live", live: true, activity: { state: "working", revision: 1, unread: false }, agent: "codex", cwd: "/test", created_at: "", exit_code: null, session_title: "活跃终端会话", identity_revision: 0 },
+    { terminal_id: "t2", session_id: "s-exited", live: false, agent: "codex", cwd: "/test", created_at: "", exit_code: 0, session_title: "退出终端会话", identity_revision: 0 },
   ];
   const onOpen = vi.fn();
   const onTerminalResume = vi.fn();
@@ -126,7 +104,7 @@ it("separates Agent activity from the terminal continue action and keeps exited 
     <SessionCards
       sessions={[sLive, sExited]}
       terminals={terminals}
-      workstreamTitleById={new Map()}
+
       projectNameById={new Map()}
       onOpen={onOpen}
       onResume={vi.fn()}

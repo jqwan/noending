@@ -55,7 +55,7 @@ function terminal(over: Partial<TerminalSummary>): TerminalSummary {
   return {
     terminal_id: "t-1",
     session_id: null,
-    initial_workstream_ids: [], identity_revision: 0,
+    identity_revision: 0,
     agent: "codex",
     cwd: "/repo/x",
     created_at: new Date().toISOString(),
@@ -76,7 +76,6 @@ function session(over: Partial<Session> = {}): Session {
     cwd: "/repo/x",
     project_id: "p-1",
     workspace_path_id: "wp-1",
-    tracked_workstream_ids: [],
     forked_from_session_id: null,
     started_at: baseTime,
     last_activity_at: baseTime,
@@ -727,7 +726,7 @@ describe("Sidebar 最近活动", () => {
 
   it("excludes pinned terminal-only rows from the regular list and restores terminal navigation on unpin", async () => {
     localStorage.setItem("noending.sidebar.pinnedSessions", JSON.stringify(["terminal:t-1"]));
-    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话", initial_workstream_ids: ["ws-1"] })]);
+    vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_title: "待同步会话" })]);
     vi.mocked(api.listProjectCards).mockResolvedValue([projectCard({ name: "启动任务" })]);
     const navigate = renderSidebar({ view: "terminal", terminalId: "t-1" });
 

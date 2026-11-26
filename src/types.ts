@@ -187,7 +187,7 @@ export interface ProjectDetailData {
   project: Project;
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
-  assistant?: (ProjectAssistant & { workspace_path_id: string }) | null;
+  assistant?: (ProjectAssistant & { id: string; workspace_path_id: string }) | null;
   workspace_paths: WorkspacePath[];
   cleanable_missing_path_ids?: string[];
   workstreams: ProjectWorkstreamRow[];
@@ -216,11 +216,6 @@ export interface Workstream {
   updated_at: string;
 }
 
-export interface LatestSessionInfo {
-  id: string;
-  agent: Agent;
-}
-
 /** Card view for Home / Workstreams pages (backend: list_workstream_cards). */
 export interface WorkstreamCardData {
   id: string;
@@ -231,8 +226,6 @@ export interface WorkstreamCardData {
   created_at: string;
   updated_at: string;
   last_activity_at: string | null;
-  session_count: number;
-  latest_session: LatestSessionInfo | null;
 }
 
 /** Global lookup opens existing objects; it never returns message/summary content. */
@@ -264,7 +257,6 @@ export interface Session {
   /** Null for a Session with no cwd — v0.2 never fabricates a path. */
   workspace_path_id: string | null;
   /** 会话可跟踪多个任务，不影响目录和项目归属。 */
-  tracked_workstream_ids: string[];
   /** 若本会话是独立 fork，其来源会话（仅 provenance；生命周期完全独立）。 */
   forked_from_session_id: string | null;
   started_at: string | null;
@@ -294,7 +286,7 @@ export interface Session {
 /** 列表、筛选和导航需要的轻量投影；同步游标及来源元数据仅由详情接口读取。 */
 export type SessionListItem = Pick<Session,
   "id" | "agent" | "root_agent_session_id" | "title" | "cwd" |
-  "project_id" | "workspace_path_id" | "tracked_workstream_ids" |
+  "project_id" | "workspace_path_id" |
   "started_at" | "last_activity_at" | "last_conversation_at" | "archived_at" |
   "source_kind" | "latest_message_seq"
 >;
@@ -349,7 +341,6 @@ export interface IngestSource {
 export interface WorkstreamContext {
   workstream: Workstream;
   projects: WorkstreamProject[];
-  sessions: SessionListItem[];
 }
 
 // Explicit Context update (read + one-click update)
@@ -504,13 +495,6 @@ export interface SessionMessageStats {
   assistant_messages: number;
 }
 
-/** `get_session_detail` — 逻辑会话详情。 */
-export interface SessionTracking {
-  session: Session;
-  tracked_workstreams: Workstream[];
-  available_workstreams: Workstream[];
-}
-
 /** Advisory prerequisites; launching always revalidates current backend state. */
 export interface TerminalResumeState {
   available: boolean;
@@ -523,8 +507,6 @@ export interface SessionDetail {
   messages: SessionWindowMessage[];
   /** 会话消息统计：用户消息与 Agent 回复总数。 */
   message_stats?: SessionMessageStats;
-  /** 会话显式跟踪的任务，包含已归档任务。 */
-  tracked_workstreams: Workstream[];
   workspace_path: SessionWorkspacePath | null;
   ingested_message_sequence: number;
   processed_message_sequence: number;
@@ -611,8 +593,6 @@ export interface PreparedLaunch {
   mode: "new" | "resume";
   agent: Agent;
   session_id?: string | null;
-  /** 新建时预选的跟踪任务；首次原生绑定后消费。 */
-  initial_workstream_ids: string[];
   cwd?: string | null;
   /** `cwd` 由哪一层决定，以及发生 fallback 时的说明。 */
   cwd_resolution: CwdResolution;
@@ -649,7 +629,6 @@ export interface TerminalSummary {
   /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
   /** 首次绑定前的跟踪意图，绑定后清空。只在内存中保存。 */
-  initial_workstream_ids: string[];
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   activity?: TerminalActivity;
@@ -807,6 +786,7 @@ export interface CollaborationMessage {
   seq: number;
   /** null = 用户本人；通知消息保存真实发起者。 */
   sender_session_id: string | null;
+  sender_title: string | null;
   body: string;
   kind: CollaborationMessageKind;
   created_at: string;
@@ -814,6 +794,9 @@ export interface CollaborationMessage {
 
 export interface CollaborationMemberState {
   session_id: string;
+  title: string | null;
+  agent: Agent | null;
+  project_id: string | null;
   wake_method: CollaborationWakeMethod;
   wake_status: CollaborationWakeStatus;
   connection_state: CollaborationConnectionState;
@@ -854,6 +837,7 @@ export interface CollaborationRoomView {
 
 export interface CollaborationCandidate {
   session_id: string;
+  project_id: string | null;
   title: string | null;
   agent: Agent | null;
   /** 该会话实际支持的唤醒方式，不由前端假定都有 CLI。 */
@@ -879,13 +863,23 @@ export interface CollaborationStartedMember {
   wake_method: CollaborationWakeMethod;
 }
 
-export interface ProjectAssistant {
-  agents_md: string;
+export interface AssistantFile {
+  content: string;
   revision: string | null;
-  agents_md_state: "missing" | "current" | "unavailable";
+  state: "missing" | "current" | "unavailable";
+}
+
+export type AssistantFileName = "soul" | "role";
+export type AssistantPatch = { file: AssistantFileName; content: string };
+
+export interface ProjectAssistant {
+  guide_state: AssistantFile["state"] | "outdated";
+  soul: AssistantFile;
+  role: AssistantFile;
 }
 
 export interface CreateAssistantInput {
   name: string;
-  agents_md?: string;
+  soul_md?: string;
+  role_md?: string;
 }

@@ -1,12 +1,6 @@
 //! storage/domain consistency, and prepared-launch identity tests
 //! (Issues #5, #6, #8).
 //!
-//! Single-Owner model: a Session has at most one Owner Workstream, so an
-//! embedded terminal's selected task is assigned on its first exact native binding —
-//! there are no primary/related roles or bundles. A launch carries launch facts
-//! only (Agent, cwd, runtime, Owner) and never syncs or injects
-//! Context, so there is no delivery level or snapshot to assert on.
-
 use noending::domain::{Agent, Session, SessionMessageRole, SourceCursorUpdate};
 use noending::launcher;
 use noending::launcher::LaunchWorkspace;
@@ -81,16 +75,6 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
         .unwrap();
     support::ensure_session_source(db, agent, &root_id, &raw.to_string_lossy());
     db.get_session(&id).unwrap().unwrap()
-}
-
-/// The Session's current Owner, straight from the store.
-fn owner_of(db: &Db, session_id: &str) -> Option<String> {
-    db.get_session(session_id)
-        .unwrap()
-        .unwrap()
-        .tracked_workstream_ids
-        .into_iter()
-        .next()
 }
 
 #[test]
@@ -236,16 +220,11 @@ fn session_cursor_roundtrip() {
 // Prepared launch: side-effect contract & preview identity
 
 /// `prepare_new` is a pure preview: it resolves the launch directory and freezes
-/// `prepare_resume` reads the Session's stored Owner and commits nothing: the
-/// Owner survives untouched and no launch artifact is written.
 #[test]
-fn prepare_resume_uses_current_owner_without_writing() {
+fn prepare_resume_without_writing() {
     let db = open_db("prep-resume-no-side-effects");
-    let ws1 = ws_row(&db, "ws1");
 
     let session = session_row(&db, Agent::Codex, Some(now()), None);
-    // ws1 is the Session's current Owner
-    support::track(&db, &session.id, Some(&ws1.id)).unwrap();
 
     let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
     let launcher = launcher::SessionLauncher {
@@ -257,9 +236,6 @@ fn prepare_resume_uses_current_owner_without_writing() {
         .unwrap();
 
     assert_eq!(prepared.mode, "resume");
-
-    // INVARIANT: the Owner is unchanged (prepare only reads it)
-    assert_eq!(owner_of(&db, &session.id).as_deref(), Some(ws1.id.as_str()));
 
     // INVARIANT: nothing written
 
@@ -281,7 +257,6 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            Some(ws.id.as_str()),
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -293,7 +268,6 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             db,
             "new",
             None,
-            prepared.initial_workstream_ids.first().map(String::as_str),
             Agent::Codex,
             &LaunchWorkspace::default(),
             &prepared.cwd_resolution,
@@ -362,7 +336,6 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            Some(ws.id.as_str()),
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -409,7 +382,6 @@ fn prepared_launch_concurrent_consumption_is_exclusive() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            Some(ws.id.as_str()),
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -454,7 +426,6 @@ fn prepared_launch_lazy_ttl_cleanup() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            Some(ws.id.as_str()),
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -467,7 +438,6 @@ fn prepared_launch_lazy_ttl_cleanup() {
         .prepare_new_in(
             &db,
             Agent::Codex,
-            Some(ws.id.as_str()),
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )

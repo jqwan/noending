@@ -1339,10 +1339,6 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
         "codex",
         "--cwd",
         f.root.to_str().unwrap(),
-        "--task",
-        "a",
-        "--task",
-        "b",
         "--model",
         "test-model",
         "--file",
@@ -1353,7 +1349,6 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     let (ok, first) = f.run(exe, &args);
     assert!(ok, "{first}");
     assert_eq!(first["data"]["options"]["message"], literal);
-    assert_eq!(first["data"]["options"]["tasks"], json!(["a", "b"]));
     assert_eq!(first["data"]["options"]["runtime"]["model"], "test-model");
     let (ok, replay) = f.run(Path::new(env!("CARGO_BIN_EXE_noending")), &args);
     assert!(ok, "{replay}");
@@ -1928,7 +1923,10 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
             "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
              INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
                ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np'),('outsider','codex','no','jsonl','/no');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+             INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+             INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+             UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('coord','peer');
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('task1','room-project');",
         )
         .unwrap();
     use noending_lib::storage::collaboration::SelectedMember;
@@ -2094,7 +2092,10 @@ fn collaboration_participation_survives_across_real_cli_processes() {
             "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
              INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
                ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+             INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+             INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+             UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('coord','peer');
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('task1','room-project');",
         )
         .unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
@@ -2352,7 +2353,7 @@ fn chrono_now_minus(seconds: i64) -> String {
 }
 
 #[test]
-fn cli_session_start_forwards_working_directory_and_multiple_tasks() {
+fn cli_session_start_forwards_working_directory_and_rejects_task_options() {
     use noending::session_control::{ControlCommand, DesktopHost};
 
     let f = Fixture::new();
@@ -2380,6 +2381,17 @@ fn cli_session_start_forwards_working_directory_and_multiple_tasks() {
         .unwrap()
         .contains("assistant"));
 
+    let (success, unsupported) = f.run(
+        exe,
+        &["session", "new", "--agent", "pi", "--task", "task-id"],
+    );
+    assert!(!success, "{unsupported}");
+    assert_eq!(unsupported["error"]["code"], "invalid_arguments");
+    assert!(unsupported["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("task"));
+
     let _host = DesktopHost::start(&f.home, |command, _| match command {
         ControlCommand::Start(options) => Ok(serde_json::to_value(options).unwrap()),
         _ => panic!("unexpected control request"),
@@ -2396,18 +2408,10 @@ fn cli_session_start_forwards_working_directory_and_multiple_tasks() {
             "pi",
             "--model",
             "one-time-model",
-            "--task",
-            "first-task",
-            "--task",
-            "second-task",
         ],
     );
     assert!(success, "{started}");
     assert_eq!(started["data"]["cwd"], cwd);
     assert_eq!(started["data"]["agent"], "pi");
     assert_eq!(started["data"]["runtime"]["model"], "one-time-model");
-    assert_eq!(
-        started["data"]["tasks"],
-        serde_json::json!(["first-task", "second-task"])
-    );
 }

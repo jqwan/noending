@@ -10,7 +10,7 @@ vi.mock("../../api", () => ({ api: {
 } }));
 const session = { id: "s1", title: "Session", agent: "codex" as const };
 const terminal = (live: boolean): TerminalSummary => ({
-  terminal_id: "old", session_id: "s1", initial_workstream_ids: [], identity_revision: 1, agent: "codex",
+  terminal_id: "old", session_id: "s1", identity_revision: 1, agent: "codex",
   live, exit_code: live ? null : 0, cwd: "/work", created_at: "", session_title: "Session",
 });
 beforeEach(() => {

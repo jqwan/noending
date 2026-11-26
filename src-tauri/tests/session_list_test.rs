@@ -102,19 +102,7 @@ fn session_lists_keep_old_rows_without_loading_source_metadata_and_counts_are_co
             .unwrap();
         assert_eq!(archived.len(), 25);
         assert!(archived.iter().all(|s| s.archived_at.is_some()));
-        db.tx(|tx| {
-            tx.execute("INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('w','tracked','now','now')",[])?;
-            tx.execute("INSERT INTO session_workstreams(session_id,workstream_id) VALUES('s0000','w'),('s0600','w')",[])?;
-            Ok(())
-        }).unwrap();
-        let tracked = db.workstream_session_list_items("w").unwrap();
-        assert_eq!(
-            tracked.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            vec!["s0600", "s0000"]
-        );
-        assert!(tracked[0].archived_at.is_some());
-        assert_eq!(tracked[0].tracked_workstream_ids, vec!["w"]);
-        assert!(serde_json::to_value(&tracked[0])
+        assert!(serde_json::to_value(&archived[0])
             .unwrap()
             .get("metadata")
             .is_none());

@@ -383,7 +383,7 @@ const CURRENT_SCHEMA: &str = r#"
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS task_items_by_task ON task_items(task_id,created_at,id);
-    -- The Logical Session: user-visible conversation + lifecycle + tracking.
+    -- The Logical Session: user-visible conversation and lifecycle.
     -- Identity is (agent, root_agent_session_id): the root source's real
     -- Resume identity. A session IS its root source: exactly one source, one
     -- cursor, one frontier per session.
@@ -394,7 +394,7 @@ const CURRENT_SCHEMA: &str = r#"
       title TEXT,
       cwd TEXT,
       workspace_path_id TEXT,
-      -- Fork provenance only: lifecycle / tracking / Conversation stay
+      -- Fork provenance only: lifecycle and Conversation stay
       -- fully independent of the fork source.
       forked_from_session_id TEXT
         REFERENCES sessions(id) ON DELETE SET NULL,
@@ -591,12 +591,6 @@ END;
       PRIMARY KEY(workstream_id, project_id)
     );
     CREATE INDEX IF NOT EXISTS idx_workstream_projects_project ON workstream_projects(project_id);
-    CREATE TABLE IF NOT EXISTS session_workstreams (
-      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      workstream_id TEXT NOT NULL REFERENCES workstreams(id) ON DELETE CASCADE,
-      PRIMARY KEY(session_id, workstream_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_workstreams_task ON session_workstreams(workstream_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_paths_id_project ON workspace_paths(id,project_id);
     CREATE TABLE IF NOT EXISTS project_assistants (
       project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

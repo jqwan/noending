@@ -192,9 +192,7 @@ fn context_footprint(db: &Db) -> (i64, i64, i64) {
     (consumed, summaries, count(db, "session_contexts"))
 }
 
-/// The core invariant: ingestion runs, Context does not — even for a Session
-/// that already has an Owner Workstream, which is exactly the row an update
-/// WOULD write into.
+/// Ingestion writes facts independently of Context.
 #[test]
 fn ingestion_writes_facts_and_zero_context() {
     let dir = unique_dir("facts-only");
@@ -202,7 +200,6 @@ fn ingestion_writes_facts_and_zero_context() {
     let file = write_transcript(&dir, 3);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "NoEnding");
-    support::track(&db, &s.id, Some(&ws.id)).unwrap();
 
     let ingested = ingestion::ingest_session(&db, &s).unwrap();
     assert_eq!(ingested, 3, "every Agent event is ingested");
@@ -254,7 +251,7 @@ fn ingestion_writes_facts_and_zero_context() {
             .unwrap()
             .summary
             .is_empty(),
-        "the Owner Workstream got no summary"
+        "the task has no summary"
     );
     assert_eq!(
         db.get_workstream_context_state(&ws.id)
@@ -310,7 +307,6 @@ fn incremental_ingest_skips_an_unchanged_source_and_adds_only_the_append() {
     let file = write_transcript(&dir, 2);
     let s = session_row(&db, &file);
     let ws = ws_row(&db, "Delta");
-    support::track(&db, &s.id, Some(&ws.id)).unwrap();
 
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 2);
     assert_eq!(ingestion::ingest_session(&db, &s).unwrap(), 0);

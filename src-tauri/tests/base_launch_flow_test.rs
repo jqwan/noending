@@ -1,7 +1,7 @@
 //! Base Experience launch tests: the simplified New / Resume flow, where New
 //! Session always runs `prepare_new_in → launch_prepared` (the UI-side
 //! direct-launch path is gone), even standalone with zero Workstreams. A
-//! launch carries launch facts only (Agent, cwd, runtime, Owner)
+//! launch carries launch facts only (Agent, cwd, runtime)
 //! — never a Context sync, a Context file or an injection. Preparation commits
 //! nothing; the capability is single-use and the
 //! spawn step is injected via `launch_prepared_with_in` so no Terminal opens.
@@ -15,7 +15,6 @@ use noending::error::Result;
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
 use noending::platform::exec_resolver::AgentInstallation;
 use noending::platform::launcher::LaunchOutcome;
-use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
 use noending_lib as noending;
@@ -86,10 +85,9 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
     let launcher = launcher_in("standalone-new");
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, None, None, &LaunchWorkspace::default())
+        .prepare_new_in(&db, Agent::Codex, None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
-    assert!(prepared.initial_workstream_ids.is_empty());
     assert!(prepared.cwd.is_none());
     assert!(prepared.runtime.is_default());
 
@@ -124,7 +122,7 @@ fn an_embedded_new_launch_spawns_unbound() {
         let cwd = real_dir("embedded-new", "project");
         for message in [None, Some("  \n\t".to_string())] {
             let mut prepared = launcher
-                .prepare_new_in(&db, agent, None, Some(&cwd), &LaunchWorkspace::default())
+                .prepare_new_in(&db, agent, Some(&cwd), &LaunchWorkspace::default())
                 .expect("prepare");
             prepared.embedded = true;
             prepared.initial_message = message;
@@ -163,7 +161,7 @@ fn new_launch_transports_long_messages_as_files_for_all_interactive_agents() {
     ] {
         seed_installation(&db, agent);
         let mut prepared = launcher
-            .prepare_new_in(&db, agent, None, None, &workspace)
+            .prepare_new_in(&db, agent, None, &workspace)
             .unwrap();
         prepared.initial_message = Some("中".repeat(1998) + "😀");
         launcher
@@ -210,13 +208,6 @@ fn capture_embedded_new_message(
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
     assert_eq!(
-        target.initial_workstream_ids,
-        &[
-            "first-message-task".to_string(),
-            "second-message-task".to_string()
-        ]
-    );
-    assert_eq!(
         target.root_agent_session_id.is_some(),
         matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
     );
@@ -247,44 +238,9 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
         seed_installation(&db, agent);
         let launcher = launcher_in("first-message");
         let workspace = LaunchWorkspace::default();
-        db.upsert_workstream(&support::workstream(
-            "first-message-task".into(),
-            "Chosen task",
-        ))
-        .unwrap();
         let cwd = real_dir("first-message", "project");
-        db.tx(|tx| insert_workspace_path_conn(tx, &cwd, PROJECT))
-            .unwrap();
-        noending::workspace::workstream::set_workstream_projects(
-            &db,
-            "first-message-task",
-            &[PROJECT.into()],
-        )
-        .unwrap();
-        db.upsert_workstream(&support::workstream(
-            "second-message-task".into(),
-            "Second task",
-        ))
-        .unwrap();
-        noending::workspace::workstream::set_workstream_projects(
-            &db,
-            "second-message-task",
-            &[PROJECT.into()],
-        )
-        .unwrap();
         let mut prepared = launcher
-            .prepare_new_with_runtime_in(
-                &db,
-                agent,
-                &[
-                    "second-message-task".into(),
-                    "first-message-task".into(),
-                    "first-message-task".into(),
-                ],
-                Some(&cwd),
-                &workspace,
-                None,
-            )
+            .prepare_new_with_runtime_in(&db, agent, Some(&cwd), &workspace, None)
             .unwrap();
         assert!(prepared.initial_message.is_none());
         prepared.embedded = true;
@@ -505,7 +461,6 @@ fn antigravity_cli_source_is_terminal_resumable() {
         agent: Agent::Antigravity,
         root_agent_session_id: "conv-1".into(),
         title: None,
-        tracked_workstream_ids: vec![],
         cwd: None,
         workspace_path_id: None,
         project_id: None,
@@ -807,9 +762,9 @@ fn reconnect_fixture(
             cwd: None,
         },
         &noending::terminal::EmbeddedTarget {
+            require_cwd: false,
             registry,
             session_id: Some(sid),
-            initial_workstream_ids: &[],
             root_agent_session_id: Some(&session.root_agent_session_id),
             agent: session.agent,
         },

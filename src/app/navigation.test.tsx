@@ -28,7 +28,7 @@ beforeEach(() => {
   setPackageCatalogCache(null);
   vi.mocked(api.getDefaultAgent).mockResolvedValue(null);
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
-  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ workstream: task, projects: [], sessions: [] });
+  vi.mocked(api.getWorkstreamContext).mockResolvedValue({ workstream: task, projects: [] });
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "task", title: task.title, room: null, run: null, members: [] });
   vi.mocked(api.collaborationCandidates).mockResolvedValue({ items: [], next_cursor: null });
   vi.mocked(api.listTaskItems).mockResolvedValue([{ id: "work", task_id: "task", revision: 1, title: "接入公共加载流程", description: "", details: [], created_at: "2026-11-08", updated_at: "2026-11-08" }]);
@@ -60,13 +60,12 @@ it("renders a cold project board with real content on its first commit while bac
   expect(screen.queryByRole("status", { name: "正在读取列表" })).toBeNull();
 });
 
-it("prepares task items, summary controls and member selection for the first task detail frame", async () => {
+it("prepares task items, summary controls and the collaboration status for the first task detail frame", async () => {
   await prepareNavigation({ view: "workstream", workstreamId: "task" });
   vi.mocked(api.getWorkstreamContext).mockImplementation(pending);
   vi.mocked(api.listTaskItems).mockImplementation(pending);
   vi.mocked(api.getWorkstreamContextState).mockImplementation(pending);
   vi.mocked(api.collaborationRoomGet).mockImplementation(pending);
-  vi.mocked(api.collaborationCandidates).mockImplementation(pending);
   render(<WorkstreamDetailView workstreamId="task" navigate={vi.fn()} goBack={vi.fn()} />);
   expect(screen.getByRole("heading", { name: "接入公共加载流程" })).toBeTruthy();
   expect(screen.getByRole("heading", { name: "首屏约定" })).toBeTruthy();

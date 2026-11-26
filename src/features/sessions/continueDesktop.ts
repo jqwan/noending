@@ -11,7 +11,7 @@ import { agentStatusResource } from "../agents/agentsCache";
 /**
  * 「继续」的共享逻辑：按钮可用性（格式能力 + 桌面端在场）、终端优先入口、
  * 悬停说明、以及打开动作本身（桌面端直开 / 内嵌终端跳转）。
- * 使用者：会话三子页的头部动作簇、Sessions 看板的行/卡片按钮、任务卡片与任务会话列表。
+ * 使用者：会话三子页的头部动作簇、Sessions 看板的行/卡片按钮。
  */
 
 /** A single continue entry always prefers CLI capability over desktop capability. */

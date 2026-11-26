@@ -56,6 +56,7 @@ pub struct CollaborationMessage {
     pub run_id: String,
     pub seq: i64,
     pub sender_session_id: Option<String>,
+    pub sender_title: Option<String>,
     pub kind: String,
     pub body: String,
     pub created_at: String,
@@ -112,7 +113,8 @@ pub struct CollaborationCandidatePage {
 const ROOM_SELECT: &str = "SELECT id,task_id,revision,selected_members,coordinator_session_id,created_at,updated_at FROM collaboration_rooms";
 type RoomRow = (String, String, i64, String, Option<String>, String, String);
 const RUN_SELECT: &str = "SELECT id,room_id,status,started_at,activated_at,stopped_at,stop_initiator_session_id FROM collaboration_runs";
-const MESSAGE_SELECT: &str = "SELECT id,room_id,run_id,seq,sender_session_id,kind,body,created_at FROM collaboration_messages";
+const MESSAGE_SELECT: &str = "SELECT id,room_id,run_id,seq,sender_session_id,kind,body,created_at,
+    (SELECT title FROM sessions WHERE id=collaboration_messages.sender_session_id) FROM collaboration_messages";
 const RUN_MEMBER_SELECT: &str =
     "SELECT session_id,wake_method,wake_status,wake_error FROM collaboration_run_members";
 
@@ -161,6 +163,7 @@ fn row_message(r: &Row<'_>) -> rusqlite::Result<CollaborationMessage> {
         kind: r.get(5)?,
         body: r.get(6)?,
         created_at: r.get(7)?,
+        sender_title: r.get(8)?,
     })
 }
 fn row_run_member(r: &Row<'_>) -> rusqlite::Result<CollaborationRunMember> {
@@ -223,20 +226,20 @@ fn require_task_open(c: &Connection, task_id: &str) -> Result<()> {
     .ok_or_else(|| other("任务不存在或已归档，不能开启协作"))?;
     Ok(())
 }
-/// Every member must be a task-associated, unarchived session. Deleted
-/// sessions fail by absence; the wake capability itself is checked by the
-/// caller against the adapters.
+// Candidate discovery and admission share the current project scope.
+const CANDIDATE_SCOPE: &str = "SELECT m.session_id FROM project_session_membership m
+    JOIN workstream_projects wp ON wp.project_id=m.project_id WHERE wp.workstream_id=?1";
+
 fn require_members(c: &Connection, task_id: &str, session_ids: &[String]) -> Result<()> {
+    let mut stmt = c.prepare(&format!(
+        "SELECT EXISTS(SELECT 1 FROM sessions s
+         WHERE s.id=?2 AND s.archived_at IS NULL AND s.id IN ({CANDIDATE_SCOPE}))"
+    ))?;
     for id in session_ids {
-        let ok = c
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_workstreams sw JOIN sessions s ON s.id=sw.session_id WHERE sw.workstream_id=?1 AND sw.session_id=?2 AND s.archived_at IS NULL)",
-                params![task_id, id],
-                |r| r.get::<_, bool>(0),
-            )
-            .map_err(crate::error::AppError::from)?;
-        if !ok {
-            return Err(other(format!("成员 {id} 不属于该任务、已删除或已归档")));
+        if !stmt.query_row(params![task_id, id], |r| r.get::<_, bool>(0))? {
+            return Err(other(format!(
+                "成员 {id} 不在任务关联项目中，或会话已删除或归档"
+            )));
         }
     }
     Ok(())
@@ -372,32 +375,59 @@ impl Db {
             .map(parse_room)
             .transpose()
     }
-    /// Candidate sessions for a room: task-associated, unarchived, stably
-    /// ordered by id with an id cursor.
+    /// Filter the task's project sessions before paginating by activity and ID.
     pub fn collaboration_candidate_sessions(
         &self,
         task_id: &str,
         cursor: Option<&str>,
         limit: usize,
+        project_id: Option<&str>,
+        query: Option<&str>,
     ) -> Result<CollaborationCandidatePage> {
+        if !(1..=50).contains(&limit) {
+            return Err(other("无效的分页大小（1～50）"));
+        }
+        let boundary: Option<(String, String)> = cursor
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| other("候选会话游标无效"))?;
+        let (activity, session_id) = boundary.as_ref().map_or((None, None), |(time, id)| {
+            (Some(time.as_str()), Some(id.as_str()))
+        });
         let c = self.read();
-        // Archived sessions stay listed so the UI can show them greyed out
-        // with a reason; start revalidation rejects them regardless.
-        let mut stmt = c.prepare(
-            "SELECT s.id FROM sessions s JOIN session_workstreams sw ON sw.session_id=s.id
-             WHERE sw.workstream_id=?1 AND s.id>?2 ORDER BY s.id LIMIT ?3",
-        )?;
+        let mut stmt = c.prepare(&format!(
+            "WITH candidates AS (
+                SELECT s.id, COALESCE(s.last_conversation_at,s.last_activity_at,s.started_at,'') AS activity
+                FROM sessions s
+                WHERE s.id IN ({CANDIDATE_SCOPE} AND (?2 IS NULL OR m.project_id=?2))
+                  AND (?3 IS NULL OR instr(lower(COALESCE(s.title,'')),lower(?3))>0
+                                  OR instr(lower(s.agent),lower(?3))>0)
+             )
+             SELECT id, activity FROM candidates
+             WHERE ?4 IS NULL OR activity<?4 OR (activity=?4 AND id>?5)
+             ORDER BY activity DESC,id LIMIT ?6"
+        ))?;
         let rows = stmt
             .query_map(
-                params![task_id, cursor.unwrap_or(""), limit as i64 + 1],
-                |r| r.get::<_, String>(0),
+                params![
+                    task_id,
+                    project_id,
+                    query,
+                    activity,
+                    session_id,
+                    limit as i64 + 1
+                ],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(crate::error::AppError::from)?;
-        let more = rows.len() > limit;
-        let next_cursor = more.then(|| rows[limit - 1].clone());
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let next_cursor = if rows.len() > limit {
+            let (id, time) = &rows[limit - 1];
+            Some(serde_json::to_string(&(time, id))?)
+        } else {
+            None
+        };
         Ok(CollaborationCandidatePage {
-            items: rows.into_iter().take(limit).collect(),
+            items: rows.into_iter().take(limit).map(|(id, _)| id).collect(),
             next_cursor,
         })
     }

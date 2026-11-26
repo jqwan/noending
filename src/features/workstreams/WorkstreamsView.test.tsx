@@ -7,10 +7,10 @@ import { viewState } from "../../hooks/useViewState";
 import type { WorkstreamCardData } from "../../types";
 
 const state = vi.hoisted(() => ({ cards: [] as WorkstreamCardData[], refresh: vi.fn() }));
-vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, defaultAgent: "codex", refresh: state.refresh, loadError: "" }) }));
-vi.mock("../../api", () => ({ api: { matchObjects: vi.fn().mockResolvedValue([]), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
+vi.mock("./useWorkstreamCards", () => ({ useWorkstreamCards: () => ({ cards: state.cards, refresh: state.refresh, loadError: "" }) }));
+vi.mock("../../api", () => ({ api: { matchObjects: vi.fn().mockResolvedValue([]), listWorkstreamCards: vi.fn(), archiveWorkstream: vi.fn(), restoreWorkstream: vi.fn(), deleteWorkstreamPermanently: vi.fn() } }));
 vi.mock("../../components/Toast", () => ({ showToast: vi.fn() }));
-const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility, session_count: 1,  created_at: "", updated_at: "",  last_activity_at: null, latest_session: null });
+const card = (id: string, visibility: WorkstreamCardData["visibility"] = "normal"): WorkstreamCardData => ({ id, projects: [], title: id, description: "", visibility,  created_at: "", updated_at: "",  last_activity_at: null });
 beforeEach(() => { Object.values(removedTargets).forEach(ids => ids.clear()); vi.clearAllMocks(); viewState.clear(); localStorage.clear(); state.cards = [card("普通任务"), card("归档甲", "archived"), card("归档乙", "archived")]; });
 afterEach(cleanup);
 
@@ -68,7 +68,7 @@ it("shows and filters every related project in both board views", () => {
   fireEvent.click(projectFilter);
   fireEvent.click(screen.getByRole("option", { name: "项目乙" }));
   screen.getByRole("button", { name: "跨项目任务" });
-  screen.getByRole("button", { name: "新建会话" });
+  expect(screen.queryByRole("button", { name: "新建会话" })).toBeNull();
   expect(screen.queryByRole("button", { name: "无项目任务" })).toBeNull();
   expect(screen.getByText("2 个项目")).toBeTruthy();
   expect(screen.getByTitle("项目甲、项目乙")).toBeTruthy();
@@ -87,7 +87,6 @@ it("removes deleted tasks from the real board data source even when an old reque
   const { useWorkstreamCards, clearWorkstreamCardsCache } = await vi.importActual<typeof import("./useWorkstreamCards")>("./useWorkstreamCards");
   clearWorkstreamCardsCache();
   vi.mocked(api.listWorkstreamCards).mockResolvedValue([card("gone"), card("kept")]);
-  vi.mocked(api.getDefaultAgent).mockResolvedValue("codex");
   const { result } = renderHook(() => useWorkstreamCards());
   await waitFor(() => expect(result.current.cards?.map(w => w.id)).toEqual(["gone", "kept"]));
   act(() => invalidateTargets({ workstreamIds: ["gone"] }));

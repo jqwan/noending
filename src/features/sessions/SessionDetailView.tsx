@@ -28,7 +28,7 @@ import type { Route } from "../../app/routes";
 
 /**
  * Session Detail：一个逻辑会话（用户可感知、可 Resume 的主会话）的四块内容——
- * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context / task tracking。
+ * Conversation（只有 user/assistant prose）、Execution Info、Source / Lifecycle、Context。
  * 唯一的会话→会话链接是 fork 来源。
  */
 import { sessionDetailCache, sessionContextCache } from "./sessionDetailCache";

@@ -1,8 +1,8 @@
-//! Explicit task/project memberships and session tracking.
+//! Task lifecycle and project membership.
 //!
 //! Visibility (`normal | archived`) is the only task state. Archive/restore
-//! preserve projects, tracked sessions and summary. Permanent deletion requires
-//! archive state, removes task-owned data and tracking, and preserves sessions
+//! preserve projects and summary. Permanent deletion requires
+//! archive state, removes task-owned data, and preserves sessions
 //! and physical paths. Project membership does not import sessions or copy paths.
 
 use serde::Serialize;
@@ -68,8 +68,8 @@ pub fn set_workstream_projects(db: &Db, id: &str, projects: &[String]) -> Result
 
 // Archive state
 
-/// Archive preserves projects, summary and tracked sessions.
-/// Archived tasks cannot create sessions.
+/// Archive preserves projects and summary.
+/// Any active collaboration is stopped.
 ///
 /// Absolute, not a toggle: a retry or double click must not quietly
 /// un-archive the Workstream.

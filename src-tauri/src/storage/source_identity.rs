@@ -85,11 +85,6 @@ impl Db {
                 if id == session.id {
                     continue;
                 }
-                tx.execute(
-                    "INSERT OR IGNORE INTO session_workstreams(session_id,workstream_id)
-                     SELECT ?1,workstream_id FROM session_workstreams WHERE session_id=?2",
-                    params![session.id, id],
-                )?;
                 let summary: Option<(Summary, i64)> = tx.query_row(
                     "SELECT summary,revision FROM session_contexts WHERE session_id=?1",
                     [&id],

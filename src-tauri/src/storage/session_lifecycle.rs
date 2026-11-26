@@ -21,7 +21,7 @@ pub fn archive_session_conn(conn: &Connection, session_id: &str, ts: &str) -> Re
     Ok(n > 0)
 }
 
-/// Archive → Normal: same Session id; tracking, messages, the source cursor and
+/// Archive → Normal: same Session id; messages, the source cursor and
 /// the consumption frontier were never touched, so the next reconcile simply resumes.
 pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool> {
     let n = conn.execute(
@@ -94,17 +94,8 @@ impl PermanentDeletionCounts {
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
 /// Callers have already required Archive. Other sessions, physical paths,
-/// task summaries and Agent-owned sources survive; all tracked tasks become pending.
+/// task summaries and Agent-owned sources survive.
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()> {
-    let mut st = tx.prepare("SELECT workstream_id FROM session_workstreams WHERE session_id=?1")?;
-    let tasks = st
-        .query_map([session_id], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    drop(st);
-    for tid in tasks {
-        crate::storage::bump_input_revision_conn(tx, &tid)?;
-    }
-
     // The Session's current summary.
     tx.execute(
         "DELETE FROM session_contexts WHERE session_id = ?1",

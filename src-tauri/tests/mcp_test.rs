@@ -241,6 +241,14 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             )["error"]["code"],
             "invalid_arguments"
         );
+        assert!(start["inputSchema"]["properties"].get("tasks").is_none());
+        assert_eq!(
+            client.call(
+                "session_start",
+                json!({"agent":"codex","tasks":["task-id"]})
+            )["error"]["code"],
+            "invalid_arguments"
+        );
         let send = tools
             .iter()
             .find(|tool| tool["name"] == "mailbox_send")
@@ -566,24 +574,11 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     assert_eq!(resolved["id"], id);
     assert_eq!(resolved["native_id"], "mcp-native-session");
     assert_eq!(resolved["project_id"], sessions["items"][0]["project_id"]);
-    let task = client.ok(
-        "task_create",
-        json!({"title":"Evidence task","projects":[sessions["items"][0]["project_id"]]}),
-    )["task"]["id"]
-        .clone();
-    client.ok(
-        "task_session_set",
-        json!({"task":task,"session":id,"tracked":true}),
-    );
     assert_eq!(
         client.ok(
-            "session_resolve",
-            json!({"agent":"codex","native_id":"mcp-native-session"})
-        )["task_ids"],
-        json!([task])
-    );
-    assert_eq!(
-        client.ok("object_list", json!({"kind":"session","task":task}))["items"][0]["id"],
+            "object_list",
+            json!({"kind":"session","project":resolved["project_id"]})
+        )["items"][0]["id"],
         id
     );
     let first = client.ok("session_messages", json!({"id":id,"limit":1}));
@@ -608,14 +603,6 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     assert_eq!(rest["message"]["content"], "乙");
     assert_eq!(rest["message"]["sequence"], 1);
     assert!(rest["message"]["next_content_cursor"].is_null());
-    client.ok(
-        "task_session_set",
-        json!({"task":task,"session":id,"tracked":false}),
-    );
-    assert_eq!(
-        client.ok("object_list", json!({"kind":"session","task":task}))["items"],
-        json!([])
-    );
     client.finish();
 }
 
@@ -1154,7 +1141,10 @@ fn collaboration_room_tools_query_send_and_enforce_coordinator_stop() {
             "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
              INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
                ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np'),('outsider','codex','no','jsonl','/no');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+             INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+             INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+             UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('coord','peer');
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('task1','room-project');",
         )
         .unwrap();
     let mut c = f.start();
@@ -1255,7 +1245,10 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
             "INSERT INTO workstreams(id,title,created_at,updated_at) VALUES('task1','协作任务','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
              INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES
                ('coord','codex','nc','jsonl','/nc'),('peer','codex','np','jsonl','/np');
-             INSERT INTO session_workstreams(session_id,workstream_id) VALUES ('coord','task1'),('peer','task1');",
+             INSERT INTO projects(id,name,created_at,updated_at) VALUES ('room-project','Room project','now','now');
+             INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES ('room-path','/room-fixture','room-project');
+             UPDATE sessions SET workspace_path_id='room-path' WHERE id IN ('coord','peer');
+             INSERT INTO workstream_projects(workstream_id,project_id) VALUES ('task1','room-project');",
         )
         .unwrap();
     use noending_lib::storage::collaboration::SelectedMember;

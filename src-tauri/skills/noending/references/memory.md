@@ -2,7 +2,7 @@
 
 NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事项摘要。根据问题选择检索范围和材料层级，核对结论的有效性；更新会话或项目摘要前按需同步相关会话；协作摘要直接读取已保存的房间消息，无需会话同步。摘要与历史仍保存在 NoEnding，不另建一套长期记忆文件。
 
-协作摘要与关联会话仍属于本技能的记忆范围。创建任务、调整项目关联和会话跟踪见[任务管理](task.md)；单纯回忆不隐含这些操作。
+创建任务和调整项目范围见[任务管理](task.md)。
 
 ## 选择范围
 
@@ -12,7 +12,7 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 | --- | --- |
 | 当前会话 | 当前对话中已见内容，以及已确认会话的摘要和入库消息。当前对话可能尚未同步。 |
 | 当前／指定项目 | 项目摘要及归属于该项目的所有会话。关联任务可用于背景，但跨项目任务的整体结论不能直接当作本项目事实。 |
-| 所跟踪／指定任务 | 协作摘要及该任务关联的所有会话，允许跨项目。一个会话跟踪多个任务时，按问题选择相关任务。 |
+| 指定任务 | 先查协作摘要。需要补充证据时，在任务关联的项目中按问题检索会话历史。 |
 | 本机全部 | 当前 Home 中已摄入的全部会话及相关摘要；包括用户要求范围内的归档记录，不代表磁盘上所有未发现的会话。 |
 
 回忆历史通常使用 `scope=all`，避免默认的未归档筛选遗漏已完成工作；用户明确限定范围时遵从其限定。项目与任务可交叉，不要为了定位当前项目而把跨项目任务额外限制为单个项目。
@@ -66,12 +66,11 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 | 查询单个对象 | `ne session/task/project show ID`，三者选一 | `object_get`，`kind` 和 `id` |
 | 项目会话 | `ne session list --project ID --scope all` | `object_list`，`kind=session`、`project`、`scope=all` |
 | 项目关联任务 | `ne task list --project ID --scope all` | `object_list`，`kind=task`、`project`、`scope=all` |
-| 任务关联会话 | `ne session list --task ID --scope all` | `object_list`，`kind=session`、`task`、`scope=all` |
 | 已登记来源 | `ne source list` | `source_list` |
 | 目标更新状态 | `ne freshness --session ID`，或 `--task ID` / `--project ID` | `freshness`，同时提供 `kind` 和 `id` |
 | 本机更新状态 | `ne freshness` | `freshness`，不提供 `kind` 和 `id` |
 
-会话对象的 `task_ids` 是其跟踪任务。`session resolve` / `session_resolve` 返回 `id`（NoEnding ID）、`native_id` 及会话元数据，包含已归档记录；未命中返回 `not_found`，不自动同步。原生身份须来自调用方，不使用 MCP 服务自身的环境；不把 Codex 文件版本后缀或子 Agent ID 作为主会话身份。项目定位失败返回 `found=false`，不需要为检索而调用 `path register`。
+`session resolve` / `session_resolve` 返回 `id`（NoEnding ID）、`native_id` 及会话元数据，包含已归档记录；未命中返回 `not_found`，不自动同步。原生身份须来自调用方，不使用 MCP 服务自身的环境；不把 Codex 文件版本后缀或子 Agent ID 作为主会话身份。项目定位失败返回 `found=false`，不需要为检索而调用 `path register`。
 
 列表、搜索使用 `--cursor CURSOR` / MCP `cursor` 延续 `next_cursor`，保持其他参数一致。列表默认每页 20 项、最多 50 项；只有需要覆盖整个集合时才遍历全部页，不从第一页推断全量数量或完整结论。
 
@@ -82,13 +81,13 @@ NoEnding 保存跨 Agent 的会话历史，以及会话、任务、项目的事�
 | 完整摘要与覆盖状态 | `ne session/task/project summary ID`，三者选一 | `summary_get`，`kind` 和 `id` |
 | 摘要事项搜索 | `ne summary search --query TEXT --project ID --scope all`；本机范围省略 `--project` | `summary_search`，`query`、可选 `project`、`scope=all` |
 | 按事项读取 | `ne session/task/project summary ID --item-id ITEM_ID --revision REVISION` | `summary_get`，同时提供 `item_id` 和 `revision` |
-| 项目／任务历史搜索 | `ne search --query TEXT --project ID --scope all`，任务范围改为 `--task ID` | `session_search`，`query`、`project` 或 `task`、`scope=all` |
+| 项目会话历史搜索 | `ne search --query TEXT --project ID --scope all` | `session_search`，`query`、`project`、`scope=all` |
 | 当前已确认会话内搜索 | `ne session search ID --query TEXT` | `session_messages`，`id` 和 `query` |
 | 看最近的历史消息 | `ne session messages ID --limit 8` | `session_messages`，`id` 和 `limit` |
 | 阅读完整消息及上下文 | `ne session messages ID --from ORDINAL --to ORDINAL --limit 8` | `session_messages`，`id`、`from`、`to`、`limit` |
 | 继续读超长消息正文 | `ne session messages ID --content-cursor CURSOR` | `session_messages`，`id` 和 `content_cursor` |
 
-`summary_search` 是事项的字面检索，不是语义检索。项目筛选也可能返回关联任务的摘要，该任务可能覆盖其他项目；核实命中的 `kind` 与归属。严格只查项目会话事项时指定 `kind=session`。协作摘要搜索没有 `task` 参数：先读目标协作摘要，按需列出关联会话并读取其摘要；不要把同项目的全部会话当成任务会话。当前会话摘要直接按其 ID 读取，避免全库搜索后猜测身份。
+`summary_search` 是事项的字面检索，不是语义检索。项目筛选也可能返回关联任务的摘要，该任务可能覆盖其他项目；核实命中的 `kind` 与归属。严格只查项目会话事项时指定 `kind=session`。需要查看某个任务时，直接读取该任务的协作摘要，按需检索相关项目的会话。当前会话摘要直接按其 ID 读取，避免全库搜索后猜测身份。
 
 `session_search` 返回定位信息，完整证据用 `session_messages` 阅读。只需提供当前 Home 中目标会话的 NoEnding ID。消息 `sequence` / `from` / `to` 指会话当前投影中从 1 开始的编号，范围包含指定端点。`message_id` 是消息标识，不能拿来充当编号。默认读最近 8 条，页内从旧到新，下一页更早。指定编号范围时从旧到新翻页。搜索使用不同匹配机制，无匹配时可换用原话、别称或更短关键词；不要因一次关键词未命中就否定事实。
 

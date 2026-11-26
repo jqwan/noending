@@ -21,7 +21,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const terminal = (id: string, live = true, sessionId = "s1"): TerminalSummary => ({
-  terminal_id: id, session_id: sessionId, initial_workstream_ids: [], identity_revision: 1, agent: "codex", cwd: "/work",
+  terminal_id: id, session_id: sessionId, identity_revision: 1, agent: "codex", cwd: "/work",
   created_at: id, live, exit_code: null, session_title: "Session",
 });
 it("retains the known terminal status across remounts and applies the refreshed availability", async () => {

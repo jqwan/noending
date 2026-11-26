@@ -19,7 +19,6 @@ vi.mock("../../api", () => ({
     terminalNotifications: vi.fn(async (terminalId: string) => ({ terminal_id: terminalId, session_id: "s", queue_id: "q", active_terminal_id: null, phase: "manual", revision: 0, input_revision: 0, identity_revision: 0, enabled: false, writing:false, error:null })),
     terminalAutoNotifications: vi.fn(),
     mailboxList: vi.fn().mockResolvedValue({items:[],total:0,unread:0,next_cursor:null}), mailboxSend: vi.fn(), mailboxRemind: vi.fn(), mailboxEdit: vi.fn(), mailboxNotificationHint:vi.fn().mockResolvedValue(false),
-    getSessionTracking: vi.fn().mockResolvedValue({ tracked_workstreams: [], available_workstreams: [] }),
     getAgentStatus: vi.fn().mockResolvedValue({ codex: { terminal_cli: true } }),
     getSessionDetail: vi.fn().mockResolvedValue({
       session: { agent: "codex", source_kind: "codex", archived_at: null, title: "会话" },
@@ -195,7 +194,6 @@ function snapshot(over: Partial<TerminalSnapshot>): TerminalSnapshot {
   return {
     terminal_id: "t-1",
     session_id: "s1",
-    initial_workstream_ids: [],
     identity_revision: 1,
     agent: "codex",
     cwd: "/tmp/work",
@@ -377,7 +375,6 @@ it("an unbound terminal keeps the session-detail entry disabled; binding lights 
   vi.mocked(api.getSessionDetail).mockResolvedValue({
     session: { agent: "codex", source_kind: "codex", archived_at: null, title: "页面匹配的会话" },
     messages: [],
-    tracked_workstreams: [],
     workspace_path: null,
     source_status: "available",
     can_resume: true,
@@ -532,7 +529,6 @@ it("a bound snapshot shows the session-detail entry enabled from the start", asy
   vi.mocked(api.getSessionDetail).mockResolvedValue({
     session: { agent: "codex", source_kind: "codex", archived_at: null, title: "已有身份" },
     messages: [],
-    tracked_workstreams: [],
     workspace_path: null,
     source_status: "available",
     can_resume: true,
@@ -920,7 +916,6 @@ it("collapses the status sidebar without changing ownership or losing a composer
   await screen.findByRole("button", { name: "展开详情栏" });
   fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
   expect((screen.getByRole("textbox", { name: "发送消息" }) as HTMLTextAreaElement).value).toBe("keep this draft");
-  expect(screen.getByRole("region", { name: "跟踪任务" })).toBeTruthy();
 });
 it("managed terminals block user input but still answer terminal queries and restore manual input on exit", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));

@@ -242,7 +242,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             "search" if words.len() == 1 => Command::Search {
                 query: options.required("query")?,
                 project: options.take("project"),
-                task: options.take("task"),
                 scope: options.take("scope").unwrap_or_else(|| "unarchived".into()),
                 agent: options.take("agent"),
                 cursor: options.take("cursor"),
@@ -268,7 +267,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         crate::session_control::StartSession {
                             agent: options.required("agent")?,
                             cwd: options.take("cwd"),
-                            tasks: options.0.remove("task").unwrap_or_default(),
                             message: options.message()?,
                             runtime,
                         },
@@ -470,7 +468,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     "list" if words.len() == 2 => Command::List {
                         kind,
                         project: options.take("project"),
-                        task: options.take("task"),
                         scope: options.take("scope").unwrap_or_else(|| "unarchived".into()),
                         agent: options.take("agent"),
                         title: options.take("title"),
@@ -521,14 +518,6 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         title: options.required("title")?,
                         description: options.take("description").unwrap_or_default(),
                         projects: options.0.remove("project").unwrap_or_default(),
-                    },
-                    "attach" if kind == Kind::Task => Command::Attach {
-                        task: id(&words)?,
-                        session: options.required("session")?,
-                    },
-                    "detach" if kind == Kind::Task => Command::Detach {
-                        task: id(&words)?,
-                        session: options.required("session")?,
                     },
                     _ => return Err(invalid("命令无效，使用 --help 查看用法")),
                 }
@@ -656,14 +645,14 @@ fn help_for(resource: Option<&str>) -> CliResult<Value> {
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
-        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--task ID] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
-        Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]", "ne task attach ID --session ID", "ne task detach ID --session ID"],
+        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
+        Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]"],
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item-id ID | --item NUMBER] [--revision REVISION]"],
         Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--agent codex|claude_code|pi|antigravity|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],
         Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
         Some("agent") => vec!["ne agent list"],
         Some("source") => vec!["ne source list"],
-        Some("search")=>vec!["ne search --query TEXT [--project ID] [--task ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
+        Some("search")=>vec!["ne search --query TEXT [--project ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
         Some("request")=>vec!["ne request show ID", "写操作可用 --request-id ID 重试相同操作；查询操作不接受该选项"],
         Some("path")=>vec!["ne path register --path ABSOLUTE_EXISTING_DIRECTORY"],
         Some("freshness")=>vec!["ne freshness [--session ID | --task ID | --project ID]"],

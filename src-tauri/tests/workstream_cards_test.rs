@@ -1,11 +1,8 @@
-//! Workstream card stats must follow the real sources: session count /
-//! latest session come from the single Owner Workstream link, activity from
-//! the current summary timestamp, and a zero-session Workstream stays a
-//! legal card with no Resume target.
+//! Task card activity and the default Agent used by launch entry points.
 
 mod support;
-use noending::domain::{Agent, Session, Workstream};
-use noending::storage::{new_id, now, Db};
+use noending::domain::Agent;
+use noending::storage::{new_id, Db};
 use noending_lib as noending;
 
 fn db(tag: &str) -> Db {
@@ -13,93 +10,41 @@ fn db(tag: &str) -> Db {
     Db::open(&dir.join("test.db")).unwrap()
 }
 
-/// A discovered Logical Session, written through the production discovery
-/// write (`upsert_logical_session`): identity is (agent, root id), the cwd
-/// and the activity timestamps are the facts the card reads.
-fn discovered(db: &Db, agent: Agent, root_agent_session_id: &str, activity: &str) -> Session {
-    let (row_id, _) = db
-        .upsert_logical_session_unchecked(
-            agent,
-            root_agent_session_id,
-            Some("继续上次的工作"),
-            Some("/tmp/fake"),
-            None,
-            None,
-            Some("2026-09-01T08:00:00Z"),
-            Some(activity),
+#[test]
+fn card_activity_comes_from_task_items_and_summary_edits() {
+    use noending::workspace::{task_items, workstream};
+
+    let db = db("task-activity");
+    let task = workstream::create_workstream(&db, "Summary or progress", "", &[]).unwrap();
+    let card = || {
+        noending::commands::workstream::workstream_cards(&db)
+            .unwrap()
+            .remove(0)
+    };
+    assert!(card().last_activity_at.is_none());
+
+    let item = task_items::create(
+        &db,
+        &task.id,
+        task_items::CreateItem {
+            title: "Verify progress".into(),
+            description: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        card().last_activity_at.as_deref(),
+        Some(item.updated_at.as_str())
+    );
+
+    let summary_at = "2090-01-01T00:00:00Z";
+    db.write()
+        .execute(
+            "UPDATE workstream_context_state SET updated_at=?2 WHERE workstream_id=?1",
+            rusqlite::params![task.id, summary_at],
         )
         .unwrap();
-    db.get_session(&row_id).unwrap().unwrap()
-}
-
-fn set_owner(db: &Db, session_id: &str, workstream_id: &str) {
-    support::track(&db, session_id, Some(workstream_id)).unwrap();
-}
-
-fn workstream(db: &Db, title: &str) -> Workstream {
-    let w = Workstream {
-        id: new_id(),
-        title: title.into(),
-        description: String::new(),
-        visibility: "normal".into(),
-        created_at: now(),
-        updated_at: now(),
-    };
-    db.upsert_workstream(&w).unwrap();
-    w
-}
-
-#[test]
-fn card_stats_follow_sessions_and_active_state() {
-    let database = db("stats");
-    let w = workstream(&database, "Context Integrity");
-
-    // Two owned sessions; the OLDER row was written later, activity decides.
-    let older = discovered(
-        &database,
-        Agent::ClaudeCode,
-        "s-old",
-        "2026-09-10T09:00:00Z",
-    );
-    let newer = discovered(&database, Agent::Codex, "s-new", "2026-09-12T18:00:00Z");
-    set_owner(&database, &older.id, &w.id);
-    set_owner(&database, &newer.id, &w.id);
-
-    database
-        .tx(|tx| {
-            noending::storage::context_repo::commit_workstream_summary_conn(
-                tx,
-                &w.id,
-                &noending_lib::domain::Summary::single("修复 source-driven identity migration"),
-                0,
-            )
-        })
-        .unwrap();
-
-    let cards = noending::commands::workstream_cards(&database).unwrap();
-    let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
-    assert_eq!(card.session_count, 2);
-    let latest = card.latest_session.as_ref().unwrap();
-    assert_eq!(latest.id, newer.id, "latest session = most recent activity");
-    assert_eq!(latest.agent, "codex");
-    // the context edit is the newest work signal, later than both sessions
-    assert!(
-        card.last_activity_at.as_deref() > Some("2026-09-12T18:00:00Z"),
-        "the context edit outranks the latest session activity"
-    );
-}
-
-#[test]
-fn zero_session_workstream_is_a_legal_card_without_resume_target() {
-    let database = db("empty");
-    let w = workstream(&database, "Research Agent Memory");
-    let cards = noending::commands::workstream_cards(&database).unwrap();
-    let card = cards.iter().find(|c| c.workstream.id == w.id).unwrap();
-    assert_eq!(card.session_count, 0);
-    assert!(card.latest_session.is_none());
-    // no work signal yet → no "Last active"; sorting still surfaces the
-    // card via the updated_at fallback
-    assert!(card.last_activity_at.is_none());
+    assert_eq!(card().last_activity_at.as_deref(), Some(summary_at));
 }
 
 #[test]
