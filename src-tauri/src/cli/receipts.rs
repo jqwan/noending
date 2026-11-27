@@ -17,7 +17,7 @@ struct Receipt {
     command_hash: String,
     result: Option<CliResult<Value>>,
 }
-fn path(home: &NoEndingHome, id: &str) -> CliResult<PathBuf> {
+fn path(home: &NoEndingHome, id: &str, session: Option<&str>) -> CliResult<PathBuf> {
     if id.is_empty()
         || id.len() > 128
         || !id
@@ -29,10 +29,13 @@ fn path(home: &NoEndingHome, id: &str) -> CliResult<PathBuf> {
             "请求编号需为 1～128 个字母、数字、短横线或下划线",
         ));
     }
-    Ok(home
-        .runtime_dir
-        .join("cli-requests")
-        .join(format!("{:x}.json", Sha256::digest(id.as_bytes()))))
+    let mut directory = home.runtime_dir.join("cli-requests");
+    if let Some(session) = session {
+        directory = directory
+            .join("sessions")
+            .join(format!("{:x}", Sha256::digest(session.as_bytes())));
+    }
+    Ok(directory.join(format!("{:x}.json", Sha256::digest(id.as_bytes()))))
 }
 fn read(file: &mut File) -> CliResult<Receipt> {
     let mut text = String::new();
@@ -53,10 +56,13 @@ fn save(file: &mut File, receipt: &Receipt) -> CliResult<()> {
     Ok(())
 }
 pub(super) fn show(home: &NoEndingHome, id: &str) -> CliResult<Value> {
+    show_for(home, id, None)
+}
+pub(super) fn show_for(home: &NoEndingHome, id: &str, session: Option<&str>) -> CliResult<Value> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path(home, id)?)
+        .open(path(home, id, session)?)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 CliError::new("not_found", "请求记录不存在")
@@ -82,7 +88,16 @@ pub(crate) fn execute(
     command: &[u8],
     run: impl FnOnce() -> CliResult<Value>,
 ) -> CliResult<Value> {
-    let path = path(home, id)?;
+    execute_for(home, id, None, command, run)
+}
+pub(super) fn execute_for(
+    home: &NoEndingHome,
+    id: &str,
+    session: Option<&str>,
+    command: &[u8],
+    run: impl FnOnce() -> CliResult<Value>,
+) -> CliResult<Value> {
+    let path = path(home, id, session)?;
     transport::private_dir(path.parent().unwrap())?;
     let mut file = file_lock::exclusive(&path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::WouldBlock {

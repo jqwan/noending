@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     domain::*,
-    error::{other, Result},
+    error::{other, AppError, Result},
     storage::{assistant_profiles as repo, new_id, Db},
     workspace::{project, wiring::WorkspaceLayer},
 };
@@ -18,10 +18,18 @@ pub(crate) fn lock(home: &NoEndingHome) -> Result<std::fs::File> {
     )?)
 }
 fn registered_path(db: &Db, project_id: &str) -> Result<WorkspacePath> {
-    let conn = db.read();
-    let path_id =
-        repo::path_for_project(&conn, project_id)?.ok_or_else(|| other("项目没有智能体设置"))?;
-    crate::storage::workspace::get_workspace_path_conn(&conn, &path_id)?
+    registered_path_conn(&db.read(), project_id)?.ok_or_else(|| other("项目没有智能体设置"))
+}
+
+fn registered_path_conn(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<Option<WorkspacePath>> {
+    let Some(path_id) = repo::path_for_project(conn, project_id)? else {
+        return Ok(None);
+    };
+    crate::storage::workspace::get_workspace_path_conn(conn, &path_id)?
+        .map(Some)
         .ok_or_else(|| other("智能体档案目录未登记"))
 }
 fn ensure_profile_parent(home: &NoEndingHome) -> Result<()> {
@@ -42,6 +50,88 @@ fn archive_identity(path: &WorkspacePath) -> Result<(&str, uuid::Uuid)> {
         .ok_or_else(|| other("智能体档案目录名称无效"))?;
     let id = uuid::Uuid::parse_str(name).map_err(|_| other("智能体档案目录名称无效"))?;
     Ok((name, id))
+}
+
+pub(crate) fn archive_id(path: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(Path::new(path).file_name()?.to_str()?).ok()
+}
+
+pub(crate) fn archive_path_id(home: &NoEndingHome, id: uuid::Uuid) -> Result<String> {
+    crate::workspace::path_identity_of(&directory(home).join(id.to_string()).to_string_lossy())
+        .ok_or_else(|| other("智能体档案目录无效"))
+}
+
+fn session_archive(conn: &rusqlite::Connection, session: &str) -> Result<Option<WorkspacePath>> {
+    use rusqlite::OptionalExtension;
+    let path = conn.query_row(
+        "SELECT a.workspace_path_id FROM sessions s JOIN project_assistants a ON a.workspace_path_id=s.workspace_path_id WHERE s.id=?1",
+        [session], |row| row.get::<_, String>(0),
+    ).optional()?;
+    match path {
+        Some(path) => crate::storage::workspace::get_workspace_path_conn(conn, &path),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn session_assistant_id(db: &Db, session: &str) -> Result<Option<uuid::Uuid>> {
+    session_archive(&db.read(), session)?
+        .map(|path| archive_identity(&path).map(|(_, id)| id))
+        .transpose()
+}
+
+pub(crate) fn list_public_assistants(
+    db: &Db,
+    name: Option<&str>,
+) -> Result<Vec<AssistantDirectoryEntry>> {
+    let filter = name.unwrap_or_default().trim().to_lowercase();
+    let rows = repo::active_names_and_paths(&db.read())?;
+    rows.into_iter()
+        .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter))
+        .map(|(name, path)| {
+            let id = archive_id(&path).ok_or_else(|| other("智能体档案目录名称无效"))?;
+            Ok(AssistantDirectoryEntry { id, name })
+        })
+        .collect()
+}
+
+pub(crate) fn public_card(
+    db: &Db,
+    home: &NoEndingHome,
+    id: uuid::Uuid,
+) -> Result<Option<AssistantCard>> {
+    let (name, path) = {
+        let conn = db.read();
+        let path_id = archive_path_id(home, id)?;
+        let Some(project_id) = repo::project_for_path(&conn, &path_id)? else {
+            return Ok(None);
+        };
+        let project = crate::storage::workspace::get_project_conn(&conn, &project_id)?
+            .ok_or_else(|| other("智能体项目不存在"))?;
+        let path = crate::storage::workspace::get_workspace_path_conn(&conn, &path_id)?
+            .ok_or_else(|| other("智能体档案目录未登记"))?;
+        (project.name, path)
+    };
+    let intro = validate_directory(home, &path)
+        .ok()
+        .map(|root| files::read_intro(&root))
+        .unwrap_or_default();
+    Ok(Some(AssistantCard { id, name, intro }))
+}
+
+pub(crate) fn private_profile(
+    db: &Db,
+    home: &NoEndingHome,
+    session: &str,
+) -> Result<Option<AssistantPrivateProfile>> {
+    let Some(path) = session_archive(&db.read(), session)? else {
+        return Ok(None);
+    };
+    let id = archive_identity(&path)?.1;
+    let root = validate_directory(home, &path)?;
+    Ok(Some(AssistantPrivateProfile {
+        id,
+        files: files::inspect(&root),
+    }))
 }
 
 fn expected_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathBuf> {
@@ -170,6 +260,7 @@ pub fn create_profile_with_roots(
     fs::create_dir(&staging)?;
     let preparation = (|| {
         files::initialize(&staging, input.soul_md.as_deref(), input.role_md.as_deref())?;
+        files::sync_identity(&staging, &id, input.name.trim())?;
         prepare_default_skill(db, home, roots, &staging)
     })();
     if let Err(error) = preparation {
@@ -248,8 +339,61 @@ pub fn prepare_profile_files(
         fs::create_dir(&expected)?;
     }
     let root = validate_directory(home, &path)?;
+    let project = db
+        .get_project(project_id)?
+        .ok_or_else(|| other("智能体项目不存在"))?;
+    files::sync_identity(
+        &root,
+        &archive_identity(&path)?.1.to_string(),
+        &project.name,
+    )?;
     files::initialize(&root, None, None)?;
     Ok(files::inspect(&root))
+}
+
+/// Synchronize a generated identity while the caller holds the archive lock.
+pub(crate) fn sync_project_identity(
+    conn: &rusqlite::Connection,
+    home: &NoEndingHome,
+    project: &Project,
+) -> Result<bool> {
+    let Some(path) = registered_path_conn(conn, &project.id)? else {
+        return Ok(false);
+    };
+    let root = match validate_directory(home, &path) {
+        Ok(root) => root,
+        Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error),
+    };
+    files::sync_identity(
+        &root,
+        &archive_identity(&path)?.1.to_string(),
+        &project.name,
+    )?;
+    Ok(true)
+}
+
+/// Repair generated identities in existing archives without resetting their guides.
+pub(crate) fn refresh_identities(db: &Db, home: &NoEndingHome) -> Result<()> {
+    let _lock = lock(home)?;
+    let conn = db.read();
+    let project_ids = {
+        let mut stmt = conn.prepare("SELECT project_id FROM project_assistants")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for project_id in project_ids {
+        if let Some(project) = crate::storage::workspace::get_project_conn(&conn, &project_id)? {
+            if let Err(error) = sync_project_identity(&conn, home, &project) {
+                eprintln!(
+                    "[noending] could not update assistant identity for {project_id}: {error}"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the identity of the registered archive directory in this Home.

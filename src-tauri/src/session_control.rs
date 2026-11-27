@@ -19,6 +19,7 @@ use std::{
 use tauri::Manager;
 
 pub(crate) const CALLER_TERMINAL_ENV: &str = "NOENDING_TERMINAL_ID";
+pub(crate) const SESSION_ACCESS_ENV: &str = "NOENDING_SESSION_ACCESS";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -34,11 +35,15 @@ pub struct StartSession {
 pub enum ControlCommand {
     List { session: Option<String> },
     Identity { claimed: Option<String> },
+    VerifyAssistantSession { access: String },
     Start(StartSession),
 }
 impl ControlCommand {
     pub(crate) fn is_write(&self) -> bool {
-        !matches!(self, Self::List { .. } | Self::Identity { .. })
+        !matches!(
+            self,
+            Self::List { .. } | Self::Identity { .. } | Self::VerifyAssistantSession { .. }
+        )
     }
 }
 
@@ -71,6 +76,9 @@ pub(crate) fn request(
     command: ControlCommand,
     request_id: Option<String>,
 ) -> CliResult<Value> {
+    if let ControlCommand::Start(options) = &command {
+        require_ordinary_launch(home, options.cwd.as_deref())?;
+    }
     let sender_terminal = std::env::var(CALLER_TERMINAL_ENV)
         .ok()
         .filter(|s| !s.is_empty());
@@ -80,6 +88,37 @@ pub(crate) fn request(
             "当前命令未继承 NoEnding 终端上下文，请使用宿主提供的原生会话 ID 解析身份",
         ));
     }
+    request_as(home, command, request_id, sender_terminal)
+}
+
+fn require_ordinary_launch(home: &NoEndingHome, cwd: Option<&str>) -> CliResult<()> {
+    use crate::workspace::is_within;
+    let cwd = cwd
+        .map(std::path::Path::new)
+        .unwrap_or(&home.default_workspace);
+    let archives = crate::assistant::directory(home);
+    let under_archives = is_within(&cwd.to_string_lossy(), &archives.to_string_lossy())
+        || std::fs::canonicalize(cwd)
+            .ok()
+            .zip(std::fs::canonicalize(&archives).ok())
+            .is_some_and(|(cwd, archives)| {
+                is_within(&cwd.to_string_lossy(), &archives.to_string_lossy())
+            });
+    if under_archives {
+        return Err(CliError::new(
+            "permission_denied",
+            "智能体档案对话须由桌面用户启动",
+        ));
+    }
+    Ok(())
+}
+
+fn request_as(
+    home: &NoEndingHome,
+    command: ControlCommand,
+    request_id: Option<String>,
+    sender_terminal: Option<String>,
+) -> CliResult<Value> {
     let lease = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -99,6 +138,68 @@ pub(crate) fn request(
         })?,
         Duration::from_secs(30),
     )
+}
+
+/// A CLI invocation or one MCP connection inherits the credential once. Its
+/// first verified binding fixes its session until the process reconnects.
+pub(crate) struct AssistantCaller {
+    credentials: Option<(String, String)>,
+    binding: std::sync::Mutex<Option<(String, u64)>>,
+}
+
+impl AssistantCaller {
+    pub(crate) fn from_environment() -> Self {
+        let credentials = std::env::var(CALLER_TERMINAL_ENV)
+            .ok()
+            .zip(std::env::var(SESSION_ACCESS_ENV).ok())
+            .filter(|(terminal, access)| !terminal.is_empty() && !access.is_empty());
+        Self {
+            credentials,
+            binding: Default::default(),
+        }
+    }
+
+    pub(crate) fn has_credentials(&self) -> bool {
+        self.credentials.is_some()
+    }
+
+    pub(crate) fn verify(&self, home: &NoEndingHome) -> CliResult<String> {
+        let (terminal, access) = self.credentials.as_ref().ok_or_else(|| {
+            CliError::new(
+                "session_access_required",
+                "此操作需要 NoEnding 签发的会话凭证",
+            )
+        })?;
+        let current = request_as(
+            home,
+            ControlCommand::VerifyAssistantSession {
+                access: access.clone(),
+            },
+            None,
+            Some(terminal.clone()),
+        )?;
+        let session = current["session_id"]
+            .as_str()
+            .ok_or_else(|| CliError::new("sender_unbound", "来源终端尚未绑定会话"))?;
+        let revision = current["identity_revision"]
+            .as_u64()
+            .ok_or_else(|| CliError::new("protocol_mismatch", "桌面端未返回会话身份版本"))?;
+        let mut binding = self
+            .binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((old_session, old_revision)) = binding.as_ref() {
+            if old_session != session || *old_revision != revision {
+                return Err(CliError::new(
+                    "sender_identity_changed",
+                    "终端已切换会话，请重连 NoEnding",
+                ));
+            }
+        } else {
+            *binding = Some((session.to_owned(), revision));
+        }
+        Ok(session.to_owned())
+    }
 }
 
 pub struct DesktopHost {
@@ -249,7 +350,19 @@ pub(crate) fn dispatch(
         ControlCommand::Identity { claimed } => Ok(
             json!({"session_id":sender_session(&registry,&state.db,sender_terminal,claimed.as_deref())?}),
         ),
+        ControlCommand::VerifyAssistantSession { access } => {
+            let terminal = sender_terminal
+                .ok_or_else(|| CliError::new("session_access_required", "缺少会话凭证来源"))?;
+            registry.bind_discovered(&state.db);
+            let current = registry.verify_session_access(terminal, &access)?;
+            let session = current
+                .session_id
+                .ok_or_else(|| CliError::new("sender_unbound", "来源终端尚未绑定会话"))?;
+            Ok(json!({"session_id":session,"identity_revision":current.identity_revision}))
+        }
         ControlCommand::Start(options) => {
+            let home = app.state::<NoEndingHome>();
+            require_ordinary_launch(&home, options.cwd.as_deref())?;
             if let Some(cwd) = &options.cwd {
                 if !std::path::Path::new(cwd).is_absolute() || !std::path::Path::new(cwd).is_dir() {
                     return Err(CliError::new(

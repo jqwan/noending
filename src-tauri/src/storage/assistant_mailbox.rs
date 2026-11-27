@@ -56,6 +56,7 @@ pub struct Change {
 pub struct Message {
     pub id: String,
     pub sender_session_id: Option<String>,
+    pub sender_assistant_id: Option<uuid::Uuid>,
     pub body: String,
     pub created_at: String,
     pub read_at: Option<String>,
@@ -77,13 +78,19 @@ struct Inbox {
     archived: bool,
 }
 
-const SELECT: &str = "SELECT m.id,m.sender_session_id,m.body,m.created_at,m.read_at,m.handler_session_id,m.completed_at,m.revision,m.seq
-    FROM assistant_mailbox_messages m WHERE m.assistant_project_id=?1";
+const SELECT: &str = "SELECT m.id,m.sender_session_id,m.body,m.created_at,m.read_at,m.handler_session_id,m.completed_at,m.revision,m.seq,w.canonical_path
+    FROM assistant_mailbox_messages m LEFT JOIN sessions s ON s.id=m.sender_session_id
+    LEFT JOIN project_assistants a ON a.workspace_path_id=s.workspace_path_id
+    LEFT JOIN workspace_paths w ON w.id=a.workspace_path_id WHERE m.assistant_project_id=?1";
 
 fn row_message(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
         sender_session_id: row.get(1)?,
+        sender_assistant_id: row
+            .get::<_, Option<String>>(9)?
+            .as_deref()
+            .and_then(crate::assistant::archive_id),
         body: row.get(2)?,
         created_at: row.get(3)?,
         read_at: row.get(4)?,
@@ -95,9 +102,7 @@ fn row_message(row: &Row<'_>) -> rusqlite::Result<Message> {
 
 fn inbox(conn: &Connection, home: &NoEndingHome, assistant: &str) -> Result<Inbox> {
     let id = uuid::Uuid::parse_str(assistant).map_err(|_| other("智能体 ID 无效"))?;
-    let path = crate::assistant::directory(home).join(id.to_string());
-    let path_id = crate::workspace::path_identity_of(&path.to_string_lossy())
-        .ok_or_else(|| other("智能体档案目录无效"))?;
+    let path_id = crate::assistant::archive_path_id(home, id)?;
     conn.query_row(
         "SELECT a.project_id,p.visibility='archived'
          FROM project_assistants a JOIN projects p ON p.id=a.project_id

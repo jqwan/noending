@@ -109,6 +109,13 @@ struct Id {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct AssistantList {
+    /// Optional case-insensitive substring of an assistant's name.
+    name: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Freshness {
     /// Omit kind and id together for local database/source coverage.
     kind: Option<Kind>,
@@ -427,10 +434,13 @@ pub(super) fn catalog() -> Vec<Spec> {
         Spec::new("object_get", "Read one session, task or project by NoEnding ID. Project details include paths; task details include associated projects.", false, false, |p: Target| Command::Show {kind:p.kind,id:p.id}),
         Spec::new("session_terminals", "List desktop terminals and exact identity revisions, lifecycle state and queue status. Requires the desktop app running on this Home; does not launch or send.", false, false, |p: SessionTerminals| Command::SessionControl {command: crate::session_control::ControlCommand::List {session:p.session}}),
         Spec::new("session_start", "Start a new embedded Agent session. Use cwd to specify the working directory. Requires the desktop app on this Home. Messages over 2000 UTF-16 units use a private UTF-8 text file. Returns terminal ID with pending binding, not a fabricated session ID. Initial text is an ordinary startup prompt; subsequent cross-session messages use mailbox_send.", true, true, |p: crate::session_control::StartSession| Command::SessionControl {command: crate::session_control::ControlCommand::Start(p)}),
-        Spec::new("assistant_mailbox_list", "Read an assistant's shared inbox as a conversation from its archive. Uses assistant.id and your own from_session. Reading leaves read and processing state unchanged.", false, false, Command::AssistantMailboxList),
-        Spec::new("assistant_mailbox_read", "Read one letter from your assistant's shared inbox, including its current revision. Use the ID obtained from assistant_mailbox_list.", false, false, Command::AssistantMailboxRead),
-        Spec::new("assistant_mailbox_send", "Send a letter to an assistant's stable address (assistant.id from project_resolve). Supply your own NoEnding from_session. The letter is saved for an assistant conversation to pick up.", true, false, Command::AssistantMailboxSend),
-        Spec::new("assistant_mailbox_change", "Manage a letter in your assistant's inbox using its current revision. Use operation=read after reading, claim before doing the requested work, release to return your unfinished work, or complete once your work is done. Only a single conversation can claim at a time.", true, false, Command::AssistantMailboxChange),
+        Spec::new("assistant_list", "Find unarchived assistants in this NoEnding Home, optionally by name. Returns their public IDs and names. Use an ID to read the introduction or address a letter.", false, false, |p: AssistantList| Command::AssistantList { name:p.name }),
+        Spec::new("assistant_get", "Read an assistant's public name, stable ID and self-introduction in this NoEnding Home. Use assistant_list if you need to find the public assistant ID.", false, false, |p: Id| Command::AssistantGet { id:p.id }),
+        Spec::new("assistant_self", "Read the archive documents of the assistant this MCP connection's verified session belongs to. Requires a NoEnding session credential.", false, false, |_: Empty| Command::AssistantSelf),
+        Spec::new("assistant_mailbox_list", "Read the shared inbox of your verified assistant session. The assistant defaults to self. Reading leaves read and processing state unchanged.", false, false, Command::AssistantMailboxList),
+        Spec::new("assistant_mailbox_read", "Read a letter and its current revision in your verified assistant session's inbox. Use its ID from assistant_mailbox_list.", false, false, Command::AssistantMailboxRead),
+        Spec::new("assistant_mailbox_send", "Send a letter from your verified NoEnding session to an assistant's stable ID. The saved letter can be picked up by any conversation from the recipient's archive.", true, false, Command::AssistantMailboxSend),
+        Spec::new("assistant_mailbox_change", "Manage a letter in your verified assistant session's inbox using its current revision. Use read after reading, claim before working, release to return unfinished work, or complete once done.", true, false, Command::AssistantMailboxChange),
         Spec::new("mailbox_list", "List a Session mailbox. Reading never marks messages read. Persistent; works without desktop. Use next_cursor for more pages.",false,false,Command::MailboxList),
         Spec::new("mailbox_read", "Read one persistent mailbox message and its revision. Does not change read state. Sender is user when sender_session_id is null; otherwise reply to that Session only within authorized collaboration.",false,false,Command::MailboxRead),
         Spec::new("mailbox_send", "Persist a message in another Session mailbox. Requires explicit from_session with a valid sender Session ID, including embedded terminals; never user/external. Inherited terminal identity overrides the supplied sender; external callers use the supplied existing Session ID. Success means stored, not read or completed; desktop may wake/remind independently. Optional notify_immediately (default false) requests a merged mailbox reminder using the same native steering shortcut as manual reminders. Requires user-enabled automatic notifications and Idle/Completed/Unknown/Working; Waiting is excluded, Interrupted/Failed disable automatic notifications. Unknown permits best-effort notification but does not prove chat input readiness. Never changes mailbox message order or selects a particular message.",true,false,Command::MailboxSend),

@@ -1217,6 +1217,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
             }),
         },
         ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
+        ControlCommand::VerifyAssistantSession { .. } => unreachable!(),
         ControlCommand::Start(options) => {
             let terminal_id = noending::storage::new_id();
             if options.message.as_deref() == Some("disconnect fixture") {

@@ -75,7 +75,7 @@ export default function CreateAssistantModal({
 
         {[
           { id: "soul", label: "性格与交流方式", value: soul, setValue: setSoul, placeholder: "例如，我先说结论，再说明依据。（可选）" },
-          { id: "role", label: "长期职责", value: role, setValue: setRole, placeholder: "例如，我负责协调分工和核对交付。（可选）" },
+          { id: "role", label: "角色与职责", value: role, setValue: setRole, placeholder: "例如，我是发布协调员，负责协调分工和核对交付。（可选）" },
         ].map(({ id, label, value, setValue, placeholder }) => (
           <div key={id} className="form-group" style={{ marginBottom: "var(--space-md)" }}>
             <label className="label bold" htmlFor={`${formId}-${id}`}>{label}</label>

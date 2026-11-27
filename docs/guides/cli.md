@@ -190,10 +190,20 @@ ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 智能体详情页可以直接写信。即使当前没有打开对话，信件也会保存到这个智能体的信箱。同一档案的对话可以查阅来信，以当前版本接手。用户可以指定接手对话、转交或放回待处理。不同智能体的信箱按 `assistant.id` 区分，改名后地址保持有效。
 
 ```sh
-ne assistant-mailbox send --assistant ASSISTANT_ID --from-session SELF --message "请核对交付"
-ne assistant-mailbox list --assistant ASSISTANT_ID --from-session SELF --state pending
-ne assistant-mailbox claim --assistant ASSISTANT_ID --from-session SELF --message-id LETTER_ID --revision N
+ne assistant list
+ne assistant list --name "协调"
+ne assistant show ASSISTANT_ID
+ne assistant self
+ne assistant-mailbox send --assistant ASSISTANT_ID --message "请核对交付"
+ne assistant-mailbox list --state pending
+ne assistant-mailbox claim --message-id LETTER_ID --revision N
 ```
+
+`ne assistant list` 返回同一 Home 内未归档智能体的 `id` 和 `name`。`--name` 按名称片段匹配，忽略大小写，重名的匹配结果都会返回。用返回的 ID 投递，或通过 `ne assistant show` 查阅公开名片和自我介绍。名录和名片无需会话凭证。
+
+`ne assistant self` 和信箱操作需要运行中的 NoEnding 桌面端签发的会话凭证。内嵌终端自动继承。收发信时后台验证真实会话，旧的 `--from-session` 参数只用于核对。读或处理智能体来信时默认使用自己的档案。兼容的 `--assistant` 参数也必须指向同一档案。智能体档案对话使用普通会话信箱时，同样验证会话身份。
+
+CLI 和 MCP 的智能体信箱写入回执按来源会话隔离。在同一会话中查询 `request show` 或重试写入。来信和投递回执可以包含 `sender_assistant_id`，发件对话属于某个智能体时，用它给该智能体回信。智能体项目的重命名、归档和恢复由桌面端执行。
 
 `read` 查看正文和版本，`mark-read` 确认查阅，`release` 放回待处理，`complete` 标为已处理。写入需要实际读取到的 `revision`，同一操作重试可沿用 `--request-id`。本阶段由智能体对话主动查阅。发给特定对话的信与协作邀请仍使用会话地址。
 

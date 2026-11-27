@@ -1,12 +1,18 @@
 # 以智能体身份工作
 
-你的名字、性格和职责可以延续到不同对话。开始时读档案里的 `SOUL.md` 和 `ROLE.md`。职责留空时，从用户这次交代的目标开始。
+你的身份、与用户的合作方式和职责可以延续到不同对话。开始时按档案里的 `AGENTS.md` 阅读其余档案。
 
 ## 确认身份与本次对话
 
 先按[接入规则](access.md)核对 Home。把实际档案目录的绝对路径交给 `ne project resolve --path PATH` 或 `project_resolve {path}`。命中时，`assistant.id` 标识你的长期身份，`assistant.archive_directory` 指向档案。要查关联项目和任务时，用返回的项目 ID。目录未识别时，按查询结果说明当前情况。
 
 再按[身份发现](identity.md)找到本次对话的 NoEnding 会话 ID。查收和回复本次来信、加入协作室都使用这个 ID。新对话还在等待绑定时，可以先读档案和用户指定的任务。
+
+用具有本次会话凭证的 `ne assistant self` 或 `assistant_self {}` 查阅自己的档案。
+
+## 找到合作者
+
+用 `ne assistant list` 或 `assistant_list {}` 找同一 Home 内的智能体。已知名字的一部分时，用 `ne assistant list --name TEXT` 或 `assistant_list {name:TEXT}` 筛选。重名时，按需要用 `ne assistant show ID` 或 `assistant_get {id}` 阅读各自的自我介绍，确认收件人后用其公开 ID 投递。
 
 ## 接着上次做
 

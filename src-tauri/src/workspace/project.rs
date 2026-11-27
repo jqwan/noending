@@ -413,8 +413,39 @@ pub fn ensure_workspace_path_conn(
 }
 
 /// Rename the editable display name and refresh project/session search in one transaction.
-pub fn rename_project(db: &Db, id: &str, name: &str) -> Result<Project> {
-    db.tx(|tx| crate::storage::workspace::rename_project_conn(tx, id, name))
+pub fn rename_project(
+    db: &Db,
+    home: &super::home::NoEndingHome,
+    id: &str,
+    name: &str,
+) -> Result<Project> {
+    let _profile_lock = crate::assistant::lock(home)?;
+    let mut identity_written = false;
+    let renamed = db.tx(|tx| {
+        let project = crate::storage::workspace::rename_project_conn(tx, id, name)?;
+        identity_written = crate::assistant::sync_project_identity(tx, home, &project)?;
+        Ok(project)
+    });
+    match renamed {
+        // If SQLite failed to commit after the file write, restore the projection
+        // from the committed Project name while still holding the archive lock.
+        Err(error) if identity_written => {
+            let conn = db.read();
+            let restore = get_project_conn(&conn, id).and_then(|project| {
+                if let Some(project) = project {
+                    crate::assistant::sync_project_identity(&conn, home, &project)?;
+                }
+                Ok(())
+            });
+            match restore {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(other(format!(
+                    "{error}；恢复智能体身份文件失败：{restore_error}"
+                ))),
+            }
+        }
+        result => result,
+    }
 }
 
 /// Project archive state is independent of its tasks and sessions.

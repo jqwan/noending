@@ -11,8 +11,15 @@ use std::{
 const AGENTS: &str = "AGENTS.md";
 const SOUL: &str = "SOUL.md";
 const ROLE: &str = "ROLE.md";
+const USER: &str = "USER.md";
+const INTRO: &str = "INTRO.md";
+const IDENTITY: &str = "IDENTITY.md";
 const CLAUDE: &str = "CLAUDE.md";
 const STANDARD_ENTRY: &str = include_str!("templates/AGENTS.md");
+
+pub(super) fn read_intro(root: &Path) -> String {
+    inspect_document(root, INTRO).content
+}
 
 fn read_document(root: &Path, name: &str) -> Result<Option<(String, String)>> {
     let path = root.join(name);
@@ -34,19 +41,18 @@ fn read_document(root: &Path, name: &str) -> Result<Option<(String, String)>> {
 }
 
 pub fn inspect(root: &Path) -> ProjectAssistant {
+    let agents = inspect_document(root, AGENTS);
     ProjectAssistant {
-        guide_state: match read_document(root, AGENTS) {
-            Ok(Some((content, _))) if content == STANDARD_ENTRY => "current",
-            Ok(Some(_)) => "outdated",
-            Ok(None) => "missing",
-            Err(_) => "unavailable",
-        },
+        guide_is_default: agents.content == STANDARD_ENTRY,
         claude_md_missing: matches!(
             fs::symlink_metadata(root.join(CLAUDE)),
             Err(error) if error.kind() == ErrorKind::NotFound
         ),
+        agents,
         soul: inspect_document(root, SOUL),
         role: inspect_document(root, ROLE),
+        user: inspect_document(root, USER),
+        intro: inspect_document(root, INTRO),
     }
 }
 
@@ -81,15 +87,8 @@ pub fn initialize(root: &Path, soul: Option<&str>, role: Option<&str>) -> Result
         (ROLE, role.unwrap_or_default()),
         (CLAUDE, "@AGENTS.md\n"),
     ] {
-        let path = root.join(name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                if let Err(error) = file.write_all(content.as_bytes()) {
-                    drop(file);
-                    let _ = fs::remove_file(&path);
-                    return Err(error.into());
-                }
-            }
+        match create_document(root, name, content) {
+            Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
@@ -97,8 +96,36 @@ pub fn initialize(root: &Path, soul: Option<&str>, role: Option<&str>) -> Result
     Ok(())
 }
 
+pub(super) fn sync_identity(root: &Path, id: &str, name: &str) -> Result<()> {
+    let name = name.replace(['\r', '\n'], " ");
+    let content = format!("# 身份\n\n- 名称：{name}\n- 智能体 ID：`{id}`\n");
+    match read_document(root, IDENTITY)? {
+        Some((current, _)) if current == content => Ok(()),
+        Some((_, revision)) => save_document(root, IDENTITY, &revision, &content),
+        None => Ok(create_document(root, IDENTITY, &content)?),
+    }
+}
+
+fn create_document(root: &Path, name: &str, content: &str) -> std::io::Result<()> {
+    let path = root.join(name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(error) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub fn save(root: &Path, revision: &str, patch: AssistantPatch) -> Result<()> {
     let (name, content) = match patch {
+        AssistantPatch::Agents { content } => (AGENTS, content),
         AssistantPatch::Soul { content } => (SOUL, content),
         AssistantPatch::Role { content } => (ROLE, content),
     };

@@ -821,14 +821,17 @@ export interface AssistantFile {
   state: "missing" | "current" | "unavailable";
 }
 
-export type AssistantFileName = "soul" | "role";
+export type AssistantFileName = "agents" | "soul" | "role";
 export type AssistantPatch = { file: AssistantFileName; content: string };
 
 export interface ProjectAssistant {
-  guide_state: AssistantFile["state"] | "outdated";
+  guide_is_default: boolean;
   claude_md_missing: boolean;
+  agents: AssistantFile;
   soul: AssistantFile;
   role: AssistantFile;
+  user: AssistantFile;
+  intro: AssistantFile;
 }
 
 export interface AssistantMailboxMessage {

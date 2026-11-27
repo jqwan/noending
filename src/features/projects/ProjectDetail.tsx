@@ -12,7 +12,7 @@ import { Field, submitsOnEnter, timeAgo, useRefreshSignal, Modal, openPath, open
 import { GitStateBadge, MissingBadge, PathError } from "../workstreams/WorkspacePaths";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import AssistantMailbox from "../assistants/AssistantMailbox";
-import ProjectAssistantSection from "../assistants/ProjectAssistantSection";
+import ProjectAssistantSection, { AssistantReadOnlyDocument } from "../assistants/ProjectAssistantSection";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
 import { showToast } from "../../components/Toast";
@@ -109,7 +109,8 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
         ...current,
         assistant: {
           ...assistant,
-          guide_state: file ? assistant.guide_state : updated.guide_state,
+          agents: !file || file === "agents" ? updated.agents : assistant.agents,
+          guide_is_default: !file || file === "agents" ? updated.guide_is_default : assistant.guide_is_default,
           claude_md_missing: file ? assistant.claude_md_missing : updated.claude_md_missing,
           soul: file === "soul" || (!file && assistant.soul.state === "missing") ? updated.soul : assistant.soul,
           role: file === "role" || (!file && assistant.role.state === "missing") ? updated.role : assistant.role,
@@ -357,6 +358,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
       </>}>
         {assistant && <div hidden={!assistantView}>
+          <AssistantReadOnlyDocument file="intro" document={assistant.intro} onRefresh={refresh} />
           <AssistantMailbox key={assistant.id} assistantId={assistant.id} name={project.name}
             active={assistantView} archived={project.visibility === "archived"} sessions={displayedSessions} />
           <ProjectAssistantSection projectId={projectId} assistant={assistant} active={assistantView}

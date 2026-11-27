@@ -22,6 +22,18 @@ pub fn project_for_path(conn: &Connection, path: &str) -> Result<Option<String>>
         .optional()?)
 }
 
+pub(crate) fn active_names_and_paths(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT p.name, wp.canonical_path FROM project_assistants a
+         JOIN projects p ON p.id=a.project_id
+         JOIN workspace_paths wp ON wp.id=a.workspace_path_id
+         WHERE p.visibility='normal'
+         ORDER BY p.name COLLATE NOCASE, wp.canonical_path",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn register(conn: &Connection, path: &WorkspacePath) -> Result<()> {
     conn.execute(
         "INSERT INTO project_assistants(project_id,workspace_path_id) VALUES(?1,?2)",

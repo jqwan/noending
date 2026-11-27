@@ -166,11 +166,15 @@ pub fn run() {
                     let state: tauri::State<commands::AppState> = handle.state();
                     let layer: tauri::State<std::sync::Arc<workspace::wiring::WorkspaceLayer>> =
                         handle.state();
-                    match workspace::project::reconcile_workspace_paths(
+                    let result = workspace::project::reconcile_workspace_paths(
                         &state.db,
                         &layer.projection(),
                         usize::MAX,
-                    ) {
+                    );
+                    if let Err(error) = assistant::refresh_identities(&state.db, &home) {
+                        eprintln!("[noending] could not refresh assistant identities: {error}");
+                    }
+                    match result {
                         Ok(report) => {
                             let _ = handle.emit("workspace-reconcile-completed", ());
                             eprintln!(

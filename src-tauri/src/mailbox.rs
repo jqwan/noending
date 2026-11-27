@@ -88,11 +88,10 @@ pub(crate) fn actor(db: &Db, home: &NoEndingHome, claimed: Option<&str>) -> CliR
     }
     Ok(session)
 }
-pub(crate) fn send(db: &Db, home: &NoEndingHome, p: Send) -> CliResult<serde_json::Value> {
-    let sender = actor(db, home, Some(&p.from_session))?;
+pub(crate) fn send(db: &Db, sender: &str, p: Send) -> CliResult<serde_json::Value> {
     let m = db.mailbox_send_with_notification(
         &p.session,
-        Some(&sender),
+        Some(sender),
         &p.message,
         p.notify_immediately,
     )?;
@@ -296,8 +295,9 @@ mod wait_tests {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantList {
+    #[serde(default = "self_assistant")]
     pub assistant: String,
-    pub from_session: String,
+    pub from_session: Option<String>,
     #[serde(default)]
     pub state: crate::storage::assistant_mailbox::Filter,
     pub cursor: Option<i64>,
@@ -308,8 +308,9 @@ pub struct AssistantList {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantRead {
+    #[serde(default = "self_assistant")]
     pub assistant: String,
-    pub from_session: String,
+    pub from_session: Option<String>,
     pub message_id: String,
 }
 
@@ -317,18 +318,35 @@ pub struct AssistantRead {
 #[serde(deny_unknown_fields)]
 pub struct AssistantSend {
     pub assistant: String,
-    pub from_session: String,
+    pub from_session: Option<String>,
     pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantChange {
+    #[serde(default = "self_assistant")]
     pub assistant: String,
-    pub from_session: String,
+    pub from_session: Option<String>,
     pub message_id: String,
     pub revision: i64,
     pub operation: AssistantOperation,
+}
+
+fn self_assistant() -> String {
+    "self".into()
+}
+
+pub(crate) fn own_assistant(db: &Db, caller: &str, requested: &str) -> CliResult<String> {
+    let owner = crate::assistant::session_assistant_id(db, caller)?
+        .ok_or_else(|| CliError::new("permission_denied", "当前对话不属于智能体档案"))?;
+    if requested != "self" && uuid::Uuid::parse_str(requested).ok() != Some(owner) {
+        return Err(CliError::new(
+            "permission_denied",
+            "只能访问自己的智能体信箱",
+        ));
+    }
+    Ok(owner.to_string())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -354,13 +372,14 @@ impl From<AssistantOperation> for crate::storage::assistant_mailbox::Action {
 pub(crate) fn assistant_list(
     db: &Db,
     home: &NoEndingHome,
+    caller: &str,
     p: AssistantList,
 ) -> CliResult<serde_json::Value> {
-    let caller = actor(db, home, Some(&p.from_session))?;
+    let assistant = own_assistant(db, caller, &p.assistant)?;
     Ok(serde_json::to_value(db.assistant_mailbox_list(
         home,
-        &p.assistant,
-        Some(&caller),
+        &assistant,
+        Some(caller),
         p.state,
         p.cursor,
         p.limit,
@@ -370,13 +389,14 @@ pub(crate) fn assistant_list(
 pub(crate) fn assistant_read(
     db: &Db,
     home: &NoEndingHome,
+    caller: &str,
     p: AssistantRead,
 ) -> CliResult<serde_json::Value> {
-    let caller = actor(db, home, Some(&p.from_session))?;
+    let assistant = own_assistant(db, caller, &p.assistant)?;
     Ok(serde_json::to_value(db.assistant_mailbox_read(
         home,
-        &p.assistant,
-        Some(&caller),
+        &assistant,
+        Some(caller),
         &p.message_id,
     )?)?)
 }
@@ -384,25 +404,26 @@ pub(crate) fn assistant_read(
 pub(crate) fn assistant_send(
     db: &Db,
     home: &NoEndingHome,
+    sender: &str,
     p: AssistantSend,
 ) -> CliResult<serde_json::Value> {
-    let sender = actor(db, home, Some(&p.from_session))?;
-    let saved = db.assistant_mailbox_send(home, &p.assistant, Some(&sender), &p.message)?;
+    let saved = db.assistant_mailbox_send(home, &p.assistant, Some(sender), &p.message)?;
     Ok(
-        serde_json::json!({"message_id": saved.id, "assistant": p.assistant, "created_at": saved.created_at}),
+        serde_json::json!({"message_id": saved.id, "assistant": p.assistant, "created_at": saved.created_at, "sender_assistant_id": saved.sender_assistant_id}),
     )
 }
 
 pub(crate) fn assistant_change(
     db: &Db,
     home: &NoEndingHome,
+    caller: &str,
     p: AssistantChange,
 ) -> CliResult<serde_json::Value> {
-    let caller = actor(db, home, Some(&p.from_session))?;
+    let assistant = own_assistant(db, caller, &p.assistant)?;
     let saved = db.assistant_mailbox_change(
         home,
-        &p.assistant,
-        Some(&caller),
+        &assistant,
+        Some(caller),
         &crate::storage::assistant_mailbox::Change {
             message_id: p.message_id,
             revision: p.revision,

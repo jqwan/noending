@@ -45,6 +45,13 @@ pub(crate) enum Command {
     AssistantMailboxRead(crate::mailbox::AssistantRead),
     AssistantMailboxSend(crate::mailbox::AssistantSend),
     AssistantMailboxChange(crate::mailbox::AssistantChange),
+    AssistantList {
+        name: Option<String>,
+    },
+    AssistantGet {
+        id: String,
+    },
+    AssistantSelf,
     RoomResolve {
         task: String,
     },
@@ -279,6 +286,7 @@ pub(crate) struct Service {
     /// service: one id per MCP server connection; CLI joins share the
     /// resident-listener kind.
     pub instance_id: String,
+    assistant_caller: crate::session_control::AssistantCaller,
     _access: crate::workspace::home::HomeAccess,
 }
 impl Service {
@@ -297,8 +305,63 @@ impl Service {
             home,
             layer,
             instance_id,
+            assistant_caller: crate::session_control::AssistantCaller::from_environment(),
             _access: access,
         }))
+    }
+
+    fn assistant_session(&self, claimed: Option<&str>) -> CliResult<String> {
+        let session = self.assistant_caller.verify(&self.home)?;
+        if claimed.is_some_and(|claimed| claimed != session) {
+            return Err(CliError::new(
+                "identity_mismatch",
+                "来源会话与已验证身份不一致",
+            ));
+        }
+        Ok(session)
+    }
+
+    fn authorize_session_mailbox(&self, recipient: &str) -> CliResult<()> {
+        if crate::assistant::session_assistant_id(&self.db, recipient)?.is_some() {
+            self.assistant_session(Some(recipient))?;
+        }
+        Ok(())
+    }
+
+    fn session_mail_sender(&self, claimed: &str, recipient: &str) -> CliResult<(String, bool)> {
+        let sender = if self.assistant_caller.has_credentials() {
+            self.assistant_session(None)?
+        } else {
+            crate::mailbox::actor(&self.db, &self.home, Some(claimed))?
+        };
+        let protected = crate::assistant::session_assistant_id(&self.db, &sender)?.is_some()
+            || crate::assistant::session_assistant_id(&self.db, recipient)?.is_some();
+        if protected && !self.assistant_caller.has_credentials() {
+            return Err(CliError::new(
+                "session_access_required",
+                "智能体对话的收发信需要会话凭证",
+            ));
+        }
+        Ok((sender, protected))
+    }
+
+    fn update_ordinary_project(
+        &self,
+        id: &str,
+        update: impl FnOnce(&rusqlite::Connection) -> crate::error::Result<crate::domain::Project>,
+    ) -> CliResult<Value> {
+        let project = self
+            .db
+            .tx(|tx| {
+                if crate::storage::assistant_profiles::path_for_project(tx, id)?.is_some() {
+                    return Ok(None);
+                }
+                update(tx).map(Some)
+            })?
+            .ok_or_else(|| {
+                CliError::new("permission_denied", "智能体项目的管理操作由桌面用户执行")
+            })?;
+        Ok(json!({"project":project}))
     }
 
     fn require(&self, kind: Kind, id: &str) -> CliResult<()> {
@@ -322,7 +385,16 @@ impl Service {
                 request_id,
                 command,
             } => self.execute_once(&request_id, *command),
-            Command::Receipt { id } => super::receipts::show(&self.home, &id),
+            Command::Receipt { id } => {
+                if self.assistant_caller.has_credentials() {
+                    let session = self.assistant_session(None)?;
+                    match super::receipts::show_for(&self.home, &id, Some(&session)) {
+                        Err(error) if error.code == "not_found" => {}
+                        result => return result,
+                    }
+                }
+                super::receipts::show(&self.home, &id)
+            }
             Command::SessionControl { command } => {
                 if command.is_write() {
                     return Err(CliError::new(
@@ -332,27 +404,64 @@ impl Service {
                 }
                 crate::session_control::request(&self.home, command, None)
             }
-            Command::MailboxList(p) => Ok(serde_json::to_value(
-                self.db
-                    .mailbox_list(&p.session, &p.state, p.cursor, p.limit)?,
+            Command::MailboxList(p) => {
+                self.authorize_session_mailbox(&p.session)?;
+                Ok(serde_json::to_value(
+                    self.db
+                        .mailbox_list(&p.session, &p.state, p.cursor, p.limit)?,
+                )?)
+            }
+            Command::MailboxRead(p) => {
+                self.authorize_session_mailbox(&p.session)?;
+                Ok(serde_json::to_value(
+                    self.db.mailbox_read(&p.session, &p.message_id)?,
+                )?)
+            }
+            Command::MailboxSend(p) => {
+                let (sender, _) = self.session_mail_sender(&p.from_session, &p.session)?;
+                crate::mailbox::send(&self.db, &sender, p)
+            }
+            Command::MailboxMark(p) => {
+                self.authorize_session_mailbox(&p.session)?;
+                crate::mailbox::mark(&self.db, &self.home, p)
+            }
+            Command::MailboxWait(p) => {
+                self.authorize_session_mailbox(&p.session)?;
+                crate::mailbox::wait(&self.db, p)
+            }
+            Command::AssistantList { name } => Ok(serde_json::to_value(
+                crate::assistant::list_public_assistants(&self.db, name.as_deref())?,
             )?),
-            Command::MailboxRead(p) => Ok(serde_json::to_value(
-                self.db.mailbox_read(&p.session, &p.message_id)?,
-            )?),
-            Command::MailboxSend(p) => crate::mailbox::send(&self.db, &self.home, p),
-            Command::MailboxMark(p) => crate::mailbox::mark(&self.db, &self.home, p),
-            Command::MailboxWait(p) => crate::mailbox::wait(&self.db, p),
+            Command::AssistantGet { id } => {
+                let id = uuid::Uuid::parse_str(&id)
+                    .map_err(|_| CliError::new("invalid_arguments", "智能体 ID 无效"))?;
+                let card = crate::assistant::public_card(&self.db, &self.home, id)?
+                    .ok_or_else(|| CliError::new("not_found", "智能体不存在"))?;
+                Ok(serde_json::to_value(card)?)
+            }
+            Command::AssistantSelf => {
+                let caller = self.assistant_session(None)?;
+                let profile = crate::assistant::private_profile(&self.db, &self.home, &caller)?
+                    .ok_or_else(|| {
+                        CliError::new("permission_denied", "当前对话不属于智能体档案")
+                    })?;
+                Ok(serde_json::to_value(profile)?)
+            }
             Command::AssistantMailboxList(p) => {
-                crate::mailbox::assistant_list(&self.db, &self.home, p)
+                let caller = self.assistant_session(p.from_session.as_deref())?;
+                crate::mailbox::assistant_list(&self.db, &self.home, &caller, p)
             }
             Command::AssistantMailboxRead(p) => {
-                crate::mailbox::assistant_read(&self.db, &self.home, p)
+                let caller = self.assistant_session(p.from_session.as_deref())?;
+                crate::mailbox::assistant_read(&self.db, &self.home, &caller, p)
             }
             Command::AssistantMailboxSend(p) => {
-                crate::mailbox::assistant_send(&self.db, &self.home, p)
+                let caller = self.assistant_session(p.from_session.as_deref())?;
+                crate::mailbox::assistant_send(&self.db, &self.home, &caller, p)
             }
             Command::AssistantMailboxChange(p) => {
-                crate::mailbox::assistant_change(&self.db, &self.home, p)
+                let caller = self.assistant_session(p.from_session.as_deref())?;
+                crate::mailbox::assistant_change(&self.db, &self.home, &caller, p)
             }
             Command::RoomResolve { task } => crate::collaboration::room_view(&self.db, &task),
             Command::RoomShow { room } => crate::collaboration::room_view_by_room(&self.db, &room),
@@ -804,16 +913,17 @@ impl Service {
                         };
                         session_value(&session)
                     }
-                    Kind::Project => {
-                        json!({"project":crate::workspace::project::set_project_archived(&self.db, &id, archived)?})
-                    }
+                    Kind::Project => self.update_ordinary_project(&id, |tx| {
+                        crate::workspace::project::set_project_archived_conn(tx, &id, archived)
+                    })?,
                 };
                 Ok(value)
             }
             Command::RenameProject { id, name } => {
                 self.require(Kind::Project, &id)?;
-                let project = crate::workspace::project::rename_project(&self.db, &id, &name)?;
-                Ok(json!({"project":project}))
+                self.update_ordinary_project(&id, |tx| {
+                    crate::storage::workspace::rename_project_conn(tx, &id, &name)
+                })
             }
             Command::RegisterPath { path } => {
                 let path = self.register_path(&path)?;
@@ -852,7 +962,35 @@ impl Service {
             return crate::session_control::request(&self.home, command, Some(id.to_string()));
         }
         let payload = serde_json::to_vec(&command)?;
-        super::receipts::execute(&self.home, id, &payload, || self.dispatch(command))
+        if let Command::MailboxSend(p) = command {
+            let (sender, protected) = self.session_mail_sender(&p.from_session, &p.session)?;
+            return super::receipts::execute_for(
+                &self.home,
+                id,
+                protected.then_some(sender.as_str()),
+                &payload,
+                || crate::mailbox::send(&self.db, &sender, p),
+            );
+        }
+        let session = match &command {
+            Command::AssistantMailboxSend(p) => {
+                Some(self.assistant_session(p.from_session.as_deref())?)
+            }
+            Command::AssistantMailboxChange(p) => {
+                let caller = self.assistant_session(p.from_session.as_deref())?;
+                crate::mailbox::own_assistant(&self.db, &caller, &p.assistant)?;
+                Some(caller)
+            }
+            Command::MailboxMark(p)
+                if crate::assistant::session_assistant_id(&self.db, &p.session)?.is_some() =>
+            {
+                Some(self.assistant_session(Some(&p.session))?)
+            }
+            _ => None,
+        };
+        super::receipts::execute_for(&self.home, id, session.as_deref(), &payload, || {
+            self.dispatch(command)
+        })
     }
     fn sync(&self, source: Option<&str>, session: Option<&str>) -> CliResult<Value> {
         // Production CLI owns one Home per process, like the desktop startup.

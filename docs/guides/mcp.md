@@ -33,7 +33,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 | --- | --- |
 | 状态与定位 | `status`、`freshness`、`agent_list`、`project_resolve`、`session_resolve` |
 | 对象查询 | `object_list`、`object_get` |
-| 智能体信箱 | `assistant_mailbox_list`、`assistant_mailbox_read`、`assistant_mailbox_send`、`assistant_mailbox_change` |
+| 智能体档案与信箱 | `assistant_list`、`assistant_get`、`assistant_self`、`assistant_mailbox_list`、`assistant_mailbox_read`、`assistant_mailbox_send`、`assistant_mailbox_change` |
 | 会话信箱 | `mailbox_list`、`mailbox_read`、`mailbox_send`、`mailbox_mark`、`mailbox_wait` |
 | 会话控制（需桌面运行） | `session_terminals`、`session_start` |
 | 历史与证据 | `session_search`、`session_messages` |
@@ -109,7 +109,7 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 当前会话可通过自身执行工具运行 `ne session identity`，直接取得内嵌终端绑定的 `data.session_id`。不提供隐式读取共享 MCP 服务环境的身份工具；外部会话使用宿主原生 ID 调用 `session_resolve`，共享 MCP 发信和标记显式提供确认后的 `from_session`。
 
-信箱工具独立访问数据库，无需桌面：
+普通会话之间的信箱操作可独立访问数据库。智能体对话的信箱需要桌面端验证，读取操作仅对收件会话开放。
 
 | 工具 | 参数与语义 |
 | --- | --- |
@@ -125,18 +125,25 @@ Windows 的 `command` 使用原生 `ne.exe`，例如 `C:\\Tools\\NoEnding\\ne.ex
 
 新信到达时，桌面可继续没有运行终端且支持 TUI 的收件对话。运行期自动查信提醒由用户控制，模型无设置接口。普通自动查信提醒在 Idle／Completed／Unknown 排队提交；`mailbox_send` 可选 `notify_immediately=true`（默认 false），请求统一的查信提醒，使用与手动通知相同的原生插队快捷键，在 Idle／Completed／Unknown／Working 可发，Waiting 时不发送。仍须用户开启自动查信提醒，Unknown 允许开启并尝试发送，不代表输入框已就绪；Interrupted／Failed 仍关闭自动查信提醒。多条请求合并，不指定单条消息或改变信箱顺序；开启自动查信提醒时检查现有未读请求，写入前复查未读状态。手动通知只提供整个信箱的查信提醒，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动发送。不确认送达、不核对源文件、不自动重启重发。没有 TUI 的 Agent 仍正常收信。操作细则见 CLI 指南及统一技能中的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。
 
-### 智能体信箱
+### 智能体档案与信箱
 
-收件地址 `assistant` 使用 `project_resolve` 返回的 `assistant.id`。调用者用自己的 NoEnding 会话 ID 传入 `from_session`。智能体档案的对话可以读取和处理自己的智能体信箱。
+`assistant_list` 返回同一 Home 内未归档智能体的 `id` 和 `name`，可按名称片段匹配，忽略大小写，重名的匹配结果都会返回。`assistant_get` 按 ID 返回公开名片，字段是 `id`、`name` 和来自 `INTRO.md` 的 `intro`。未绑定的 MCP 可以查名录和名片。`assistant_self` 读取当前会话所属的档案。私有档案和信箱操作由桌面端验证会话凭证。
 
 | 工具 | 参数 |
 | --- | --- |
-| `assistant_mailbox_list` | `{assistant,from_session,state?:"all"\|"unread"\|"pending"\|"in_progress"\|"completed",cursor?,limit?}` |
-| `assistant_mailbox_read` | `{assistant,from_session,message_id}` |
-| `assistant_mailbox_send` | `{assistant,from_session,message,request_id?}` |
-| `assistant_mailbox_change` | `{assistant,from_session,message_id,revision,operation:"read"\|"claim"\|"release"\|"complete",request_id?}` |
+| `assistant_list` | `{name?}` |
+| `assistant_get` | `{id}` |
+| `assistant_self` | `{}` |
+| `assistant_mailbox_list` | `{state?:"all"\|"unread"\|"pending"\|"in_progress"\|"completed",cursor?,limit?}` |
+| `assistant_mailbox_read` | `{message_id}` |
+| `assistant_mailbox_send` | `{assistant,message,request_id?}` |
+| `assistant_mailbox_change` | `{message_id,revision,operation:"read"\|"claim"\|"release"\|"complete",request_id?}` |
 
-查阅后可以显式标为已读。每封信最多有一个接手对话，只有接手方可以通过 MCP 放回或完成。用户在桌面上可以转交。外部调用的会话 ID 仍遵循同一 Home 的受信本地调用规则，内嵌终端使用实际绑定的身份。状态变化后先重新读取，再按当前版本操作。
+发送时 `assistant` 用公开 ID。查阅和处理默认使用自己的档案。兼容的 `assistant` 和 `from_session` 参数必须与已验证的身份一致。来信和发信回执可以带 `sender_assistant_id`。每封信最多有一个接手对话，接手方可以放回或完成，桌面用户可以转交。
+
+受信宿主从 NoEnding 内嵌终端启动 stdio MCP，并继承 `NOENDING_TERMINAL_ID` 和 `NOENDING_SESSION_ACCESS`。会话凭证随终端签发，有效期为 8 小时，终端关闭时撤销。MCP 首次验证后固定在该会话，终端切换会话时重连。私有接口每次请求都重新验证，同一会话内使用原请求编号重试或查询回执。创建智能体档案对话、改名和归档需通过桌面端。
+
+这套检查覆盖智能体档案、智能体信箱和智能体对话的信箱。通用历史查询仍使用本地 Home 的访问边界。原生 Agent 的文件访问由操作系统和启动权限决定。
 
 ### 当前会话自行提取摘要
 

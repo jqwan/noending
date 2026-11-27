@@ -39,6 +39,7 @@ use crate::storage::{new_id, now};
 /// subpage switch can repaint, not to archive the whole conversation (the
 /// ingested Session is the archive).
 const SCROLLBACK_CAP: usize = 256 * 1024;
+const SESSION_ACCESS_TTL: std::time::Duration = std::time::Duration::from_secs(8 * 60 * 60);
 
 /// Initial PTY size. The frontend resizes on attach as soon as it knows the
 /// real cell geometry; TUIs handle the early SIGWINCH fine.
@@ -156,6 +157,7 @@ impl Scrollback {
 /// emit, so contention is bounded to microseconds.
 struct TerminalRecord {
     summary: TerminalSummary,
+    session_access: (String, std::time::Instant),
     /// Current native root identity, supplied by the launch or an Agent event.
     /// It also retains a switched-to identity while its source is not ingested.
     root_agent_session_id: Option<String>,
@@ -812,6 +814,28 @@ impl TerminalRegistry {
         self.snapshot(terminal_id, None)
     }
 
+    pub(crate) fn verify_session_access(
+        &self,
+        terminal: &str,
+        access: &str,
+    ) -> crate::cli::CliResult<TerminalSummary> {
+        let denied =
+            || crate::cli::CliError::new("session_access_denied", "会话凭证无效、已过期或已撤销");
+        let records = self.records.lock().map_err(|_| denied())?;
+        let record = records
+            .get(terminal)
+            .ok_or_else(denied)?
+            .lock()
+            .map_err(|_| denied())?;
+        if !record.summary.live
+            || std::time::Instant::now() >= record.session_access.1
+            || record.session_access.0 != access
+        {
+            return Err(denied());
+        }
+        Ok(record.summary.clone())
+    }
+
     fn snapshot(&self, terminal_id: &str, consumer: Option<&str>) -> Result<TerminalSnapshot> {
         let records = self
             .records
@@ -1014,6 +1038,7 @@ impl TerminalRegistry {
         summary: TerminalSummary,
         root_agent_session_id: Option<String>,
         identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
+        session_access: (String, std::time::Instant),
         scrollback: Scrollback,
         master: Box<dyn portable_pty::MasterPty + Send>,
         writer: Box<dyn std::io::Write + Send>,
@@ -1033,6 +1058,7 @@ impl TerminalRegistry {
         };
         let record = std::sync::Arc::new(Mutex::new(TerminalRecord {
             summary: summary.clone(),
+            session_access,
             root_agent_session_id,
             identity_bridge,
             scrollback,
@@ -1211,6 +1237,7 @@ pub fn spawn_embedded(
     // Capture before spawning: a fast CLI can write its source before register.
     let started_at = now();
     let terminal_id = new_id();
+    let session_access = (new_id(), std::time::Instant::now() + SESSION_ACCESS_TTL);
     let prepared_identity = if target.registry.app.is_some() {
         identity::prepare(cmd, target.agent, &terminal_id)?
     } else {
@@ -1230,6 +1257,10 @@ pub fn spawn_embedded(
     // The webview uses xterm; a GUI launch may have no TERM or inherit "dumb",
     // which makes Codex stop before its lifecycle hooks can run.
     wrapped.env(crate::session_control::CALLER_TERMINAL_ENV, &terminal_id);
+    wrapped.env(
+        crate::session_control::SESSION_ACCESS_ENV,
+        &session_access.0,
+    );
     wrapped.env("TERM", "xterm-256color");
     #[cfg(windows)]
     wrapped.env("COLORTERM", "truecolor");
@@ -1266,6 +1297,7 @@ pub fn spawn_embedded(
             summary,
             target.root_agent_session_id.map(str::to_string),
             bridge.clone(),
+            session_access,
             Scrollback::default(),
             pty.into_master(),
             writer,
@@ -1652,6 +1684,7 @@ mod tests {
                 session_title: None,
             },
             root_agent_session_id: native_id.map(str::to_string),
+            session_access: (new_id(), std::time::Instant::now() + SESSION_ACCESS_TTL),
             identity_bridge: None,
             scrollback: Scrollback::default(),
             cols: INITIAL_COLS,
@@ -1670,6 +1703,40 @@ mod tests {
             .unwrap()
             .insert(terminal_id.clone(), std::sync::Arc::new(Mutex::new(record)));
         terminal_id
+    }
+
+    #[test]
+    fn assistant_credential_requires_a_live_terminal_and_expires() {
+        let registry = registry();
+        let terminal = identity_terminal(&registry, Agent::Codex, None, Some("session"));
+        let record = registry
+            .records
+            .lock()
+            .unwrap()
+            .get(&terminal)
+            .unwrap()
+            .clone();
+        let credential = record.lock().unwrap().session_access.0.clone();
+        assert_eq!(
+            registry
+                .verify_session_access(&terminal, &credential)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("session")
+        );
+        assert!(registry
+            .verify_session_access(&terminal, &terminal)
+            .is_err());
+        record.lock().unwrap().session_access.1 = Instant::now();
+        assert!(registry
+            .verify_session_access(&terminal, &credential)
+            .is_err());
+        record.lock().unwrap().session_access.1 = Instant::now() + SESSION_ACCESS_TTL;
+        registry.close(&terminal);
+        assert!(registry
+            .verify_session_access(&terminal, &credential)
+            .is_err());
     }
 
     #[test]

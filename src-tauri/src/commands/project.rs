@@ -6,7 +6,7 @@
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::domain::*;
 use crate::error::{other, Result};
@@ -17,7 +17,7 @@ use crate::workspace::project::{
 use crate::workspace::wiring::WorkspaceLayer;
 
 use super::workstream::later_ts;
-use super::{noending_home, with_db, AppState};
+use super::{noending_home, run_on_blocking_worker, with_db, AppState};
 
 // ---------------- Projects ----------------
 
@@ -232,10 +232,18 @@ pub fn get_project_detail(
 /// overwrite this row's name again. No other column is touched: `git_id` in
 /// particular has exactly one writer, `workspace::project`.
 #[tauri::command]
-pub fn rename_project(state: State<AppState>, project_id: String, name: String) -> Result<Project> {
-    with_db(&state, |db| {
-        crate::workspace::project::rename_project(db, &project_id, &name)
+pub async fn rename_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    name: String,
+) -> Result<Project> {
+    let home = noending_home(&app).ok_or_else(|| other("NoEnding Home 未初始化"))?;
+    let db = state.db.clone();
+    run_on_blocking_worker(move || {
+        crate::workspace::project::rename_project(&db, &home, &project_id, &name)
     })
+    .await?
 }
 
 #[derive(Serialize)]

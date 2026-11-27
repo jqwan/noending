@@ -151,14 +151,31 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
         .assistant
         .is_some());
     let root = PathBuf::from(&first.workspace_path.canonical_path);
+    let identity_path = root.join("IDENTITY.md");
+    let identity_id = f
+        .project_detail(&first.project.id)
+        .unwrap()
+        .assistant
+        .unwrap()
+        .id;
+    assert_eq!(
+        std::fs::read_to_string(&identity_path).unwrap(),
+        format!("# 身份\n\n- 名称：Atlas\n- 智能体 ID：`{identity_id}`\n")
+    );
     std::fs::write(root.join("notes.txt"), "保留用户资料").unwrap();
-    let renamed = project::rename_project(f.db(), &first.project.id, "Atlas 改名").unwrap();
+    let renamed =
+        project::rename_project(f.db(), &f.home, &first.project.id, "Atlas 改名").unwrap();
     assert_eq!(renamed.id, first.project.id);
     drop(f.db.take());
     f.db = Some(Db::open(&f.home.db_path).unwrap());
     let reopened = f.project_detail(&first.project.id).unwrap();
     assert_eq!(reopened.project.name, "Atlas 改名");
     let assistant = reopened.assistant.unwrap();
+    assert_eq!(assistant.id, identity_id);
+    assert_eq!(
+        std::fs::read_to_string(&identity_path).unwrap(),
+        format!("# 身份\n\n- 名称：Atlas 改名\n- 智能体 ID：`{identity_id}`\n")
+    );
     assert_eq!(assistant.files.soul.content, "角色代号：Atlas");
     assert_eq!(assistant.workspace_path_id, first.workspace_path.id);
     assert_eq!(
@@ -198,9 +215,12 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     let peer = create_profile(&f, "Reviewer");
     let root = PathBuf::from(&profile.workspace_path.canonical_path);
     let guide = root.join("AGENTS.md");
+    let identity = root.join("IDENTITY.md");
+    let expected_identity = std::fs::read_to_string(&identity).unwrap();
     let claude_entry = root.join("CLAUDE.md");
     let guide_template = std::fs::read_to_string(&guide).unwrap();
-    assert_eq!(profile.files.guide_state, "current");
+    assert!(profile.files.guide_is_default);
+    assert_eq!(profile.files.agents.content, guide_template);
     assert!(!profile.files.claude_md_missing);
     assert_eq!(
         guide_template,
@@ -217,20 +237,49 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
         "@AGENTS.md\n"
     );
 
-    std::fs::write(&guide, "测试档案中的非标准入口").unwrap();
+    let custom_guide = "先查看发布验收任务。\n";
+    let guide_revision = profile.files.agents.revision.as_deref().unwrap();
+    let edited_guide = assistant::update_profile(
+        f.db(),
+        &f.home,
+        &profile.project.id,
+        guide_revision,
+        assistant::AssistantPatch::Agents {
+            content: custom_guide.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(edited_guide.agents.content, custom_guide);
+    assert!(assistant::update_profile(
+        f.db(),
+        &f.home,
+        &profile.project.id,
+        guide_revision,
+        assistant::AssistantPatch::Agents {
+            content: "过期草稿".into()
+        },
+    )
+    .is_err());
     std::fs::remove_file(root.join("ROLE.md")).unwrap();
     std::fs::remove_file(&claude_entry).unwrap();
+    std::fs::remove_file(&identity).unwrap();
     let external = f
         .project_detail(&profile.project.id)
         .unwrap()
         .assistant
         .unwrap()
         .files;
-    assert_eq!(external.guide_state, "outdated");
+    assert!(!external.guide_is_default);
+    assert_eq!(external.agents.state, "current");
+    assert_eq!(external.agents.content, custom_guide);
     assert!(external.claude_md_missing);
     assert_eq!(external.role.state, "missing");
     let prepared = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
-    assert_eq!(prepared.guide_state, "current");
+    assert!(prepared.guide_is_default);
+    assert_eq!(
+        std::fs::read_to_string(&identity).unwrap(),
+        expected_identity
+    );
     assert!(!prepared.claude_md_missing);
     assert_eq!(
         std::fs::read_to_string(&claude_entry).unwrap(),
@@ -280,6 +329,66 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     assert_eq!(cleared.role.state, "current");
     assert_eq!(std::fs::read_to_string(root.join("ROLE.md")).unwrap(), "");
 }
+
+#[test]
+fn an_identity_write_failure_rolls_back_the_rename() {
+    let f = Fixture::new();
+    let profile = create_profile(&f, "原名称");
+    let identity = PathBuf::from(&profile.workspace_path.canonical_path).join("IDENTITY.md");
+    std::fs::remove_file(&identity).unwrap();
+    std::fs::create_dir(&identity).unwrap();
+
+    let error =
+        project::rename_project(f.db(), &f.home, &profile.project.id, "新名称").unwrap_err();
+    assert!(error.to_string().contains("IDENTITY.md"));
+    assert_eq!(
+        f.db()
+            .get_project(&profile.project.id)
+            .unwrap()
+            .unwrap()
+            .name,
+        "原名称"
+    );
+    assert!(identity.is_dir());
+}
+
+#[test]
+fn assistant_written_documents_are_read_from_disk_and_survive_guide_reset() {
+    let f = Fixture::new();
+    let profile = create_profile(&f, "Curator");
+    let project_id = &profile.project.id;
+    let root = PathBuf::from(&profile.workspace_path.canonical_path);
+    let user_path = root.join("USER.md");
+    let intro_path = root.join("INTRO.md");
+    assert_eq!(profile.files.user.state, "missing");
+    assert_eq!(profile.files.intro.state, "missing");
+    let prepared = assistant::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
+    assert_eq!(prepared.user.state, "missing");
+    assert_eq!(prepared.intro.state, "missing");
+    assert!(!user_path.exists());
+    assert!(!intro_path.exists());
+
+    let impressions = "用户多次先问交付结论，再追问风险。\n";
+    let introduction = "## 什么时候找我\n\n我可以帮你核对发布验收。\n";
+    std::fs::write(&user_path, impressions).unwrap();
+    std::fs::write(&intro_path, introduction).unwrap();
+    let files = f
+        .project_detail(project_id)
+        .unwrap()
+        .assistant
+        .unwrap()
+        .files;
+    assert_eq!(files.user.state, "current");
+    assert_eq!(files.user.content, impressions);
+    assert_eq!(files.intro.state, "current");
+    assert_eq!(files.intro.content, introduction);
+    let prepared = assistant::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
+    assert_eq!(prepared.user.revision, files.user.revision);
+    assert_eq!(prepared.intro.revision, files.intro.revision);
+    assert_eq!(std::fs::read_to_string(&user_path).unwrap(), impressions);
+    assert_eq!(std::fs::read_to_string(&intro_path).unwrap(), introduction);
+}
+
 #[test]
 fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_candidates() {
     use noending::{domain::Agent, workspace::workstream};
@@ -543,9 +652,10 @@ fn missing_generated_working_directory_can_be_recovered_while_the_profile_exists
         .get_workspace_path(&p.workspace_path.id)
         .unwrap()
         .is_some());
-    let restored = assistant::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
-    assert_eq!(restored.guide_state, "current");
-    assert!(std::path::Path::new(&p.workspace_path.canonical_path).is_dir());
+    assistant::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
+    assert!(std::path::Path::new(&p.workspace_path.canonical_path)
+        .join("AGENTS.md")
+        .is_file());
 }
 
 #[test]
@@ -833,7 +943,8 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
         .unwrap();
     assert!(released.handler_session_id.is_none());
     assert_eq!(released.revision, 3);
-    let renamed = project::rename_project(f.db(), &profile.project.id, "发布负责人").unwrap();
+    let renamed =
+        project::rename_project(f.db(), &f.home, &profile.project.id, "发布负责人").unwrap();
     assert_ne!(renamed.name, profile.project.name);
     let page = f
         .db()

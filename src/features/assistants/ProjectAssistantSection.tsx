@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api } from "../../api";
 import { Modal } from "../../components/common";
 import { DetailContent, DetailSection } from "../../components/DetailSection";
@@ -6,18 +8,40 @@ import DialogActions from "../../components/DialogActions";
 import Icon from "../../components/Icon";
 import Notice from "../../components/Notice";
 import type { AssistantFile, AssistantFileName, ProjectAssistant } from "../../types";
+import { MD_COMPONENTS } from "../sessions/SessionMessage";
 import "./assistants.css";
 
 const documents = [
-  { file: "role", filename: "ROLE.md", title: "长期职责", empty: "尚未设定长期职责。" },
+  { file: "role", filename: "ROLE.md", title: "角色与职责", empty: "尚未设定角色与职责。" },
   { file: "soul", filename: "SOUL.md", title: "性格与交流方式", empty: "尚未设定性格与交流方式。" },
+  { file: "agents", filename: "AGENTS.md", title: "运行指南", empty: "运行指南为空。" },
 ] as const;
 
-const guideIssues = {
-  missing: "通用运行指南缺失。",
-  outdated: "通用运行指南与当前模板不同。",
-  unavailable: "无法读取通用运行指南，请检查档案目录中的 AGENTS.md。",
+const readOnlyDocuments = {
+  intro: { filename: "INTRO.md", title: "自我介绍", empty: "智能体还没有写自我介绍。" },
+  user: { filename: "USER.md", title: "用户印象", empty: "智能体还没有记录对用户的印象。" },
 };
+
+export function AssistantReadOnlyDocument({ file, document, onRefresh }: {
+  file: keyof typeof readOnlyDocuments;
+  document: AssistantFile;
+  onRefresh: () => void;
+}) {
+  const { filename, title, empty } = readOnlyDocuments[file];
+  const intro = file === "intro";
+  const refreshLabel = `刷新${title}`;
+  return <DetailSection sectionId={`assistant-${file}`} label={title}
+    title={<><Icon name={intro ? "spark" : "file"} /><span>{title}</span></>}
+    actions={<button type="button" className="btn ghost icon-button small"
+      title={refreshLabel} aria-label={refreshLabel} onClick={onRefresh}><Icon name="refresh" /></button>}>
+    {document.content.trim() ? (
+      <DetailContent label={`${title}内容`} className={intro ? "md-body assistant-intro-body" : undefined}>
+        {intro ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>{document.content}</ReactMarkdown>
+          : <p className="detail-description">{document.content}</p>}
+      </DetailContent>
+    ) : <p className="detail-empty">{document.state === "unavailable" ? `无法读取 ${filename}。` : empty}</p>}
+  </DetailSection>;
+}
 
 type ArchiveProps = {
   projectId: string;
@@ -33,13 +57,12 @@ export default function ProjectAssistantSection({ assistant, active, ...props }:
   const [confirmReset, setConfirmReset] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState("");
-  const guideState = assistant.guide_state;
   const missingFiles = [
-    ...documents.filter(({ file }) => assistant[file].state === "missing").map(({ filename }) => filename),
+    ...documents.filter(({ file }) => file !== "agents" && assistant[file].state === "missing").map(({ filename }) => filename),
     ...(assistant.claude_md_missing ? ["CLAUDE.md"] : []),
   ];
-  const hasIssue = guideState !== "current" || missingFiles.length > 0;
-  const canReset = !props.archived && guideState !== "unavailable";
+  const canReset = !props.archived && assistant.agents.state !== "unavailable"
+    && (!assistant.guide_is_default || missingFiles.length > 0);
 
   useEffect(() => {
     if (!active) setConfirmReset(false);
@@ -61,27 +84,18 @@ export default function ProjectAssistantSection({ assistant, active, ...props }:
   }
 
   return <>
-    {hasIssue && (
-      <Notice tone="warning">
-        {guideState === "current" ? "档案文件缺失。" : guideIssues[guideState]}
-        {canReset && (
-          <div className="assistant-editor-actions">
-            <button type="button" className="btn small" disabled={resetting}
-              onClick={() => { setResetError(""); setConfirmReset(true); }}>重置运行指南</button>
-          </div>
-        )}
-      </Notice>
-    )}
+    {missingFiles.length > 0 && <Notice tone="warning">档案文件缺失。</Notice>}
     {documents.map(({ file, ...document }) => (
-      <AssistantDocument key={file} {...props} {...document} file={file} document={assistant[file]} />
+      <AssistantDocument key={file} {...props} {...document} file={file} document={assistant[file]}
+        onReset={file === "agents" && canReset ? () => { setResetError(""); setConfirmReset(true); } : undefined} />
     ))}
+    <AssistantReadOnlyDocument file="user" document={assistant.user} onRefresh={props.onRefresh} />
     {active && confirmReset && (
       <Modal title="重置运行指南？" onClose={() => { if (!resetting) setConfirmReset(false); }}>
         <ul>
           <li><code>AGENTS.md</code> 恢复为 NoEnding 默认模板，现有的自定义内容会被替换。</li>
           {missingFiles.map(filename => <li key={filename}>补建 <code>{filename}</code>。</li>)}
         </ul>
-        <p className="small muted">已有的 <code>SOUL.md</code>、<code>ROLE.md</code> 和 <code>CLAUDE.md</code> 会保留。补建以执行时的文件状态为准。</p>
         {resetError && <Notice tone="error">{resetError}</Notice>}
         <DialogActions>
           <button type="button" className="btn" disabled={resetting} onClick={() => setConfirmReset(false)}>取消</button>
@@ -94,12 +108,13 @@ export default function ProjectAssistantSection({ assistant, active, ...props }:
   </>;
 }
 
-function AssistantDocument({ projectId, archived, onSaved, onRefresh, file, title, filename, empty, document }: ArchiveProps & {
+function AssistantDocument({ projectId, archived, onSaved, onRefresh, file, title, filename, empty, document, onReset }: ArchiveProps & {
   file: AssistantFileName;
   title: string;
   filename: string;
   empty: string;
   document: AssistantFile;
+  onReset?: () => void;
 }) {
   const { content, revision, state } = document;
   const [editing, setEditing] = useState(false);
@@ -109,6 +124,8 @@ function AssistantDocument({ projectId, archived, onSaved, onRefresh, file, titl
   const editButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef(false);
   const conflicted = draft !== null && draft.revision !== revision;
+  const canEdit = !archived && revision !== null;
+  const reset = editing ? undefined : onReset;
 
   useEffect(() => {
     if (!editing && returnFocus.current) {
@@ -145,11 +162,12 @@ function AssistantDocument({ projectId, archived, onSaved, onRefresh, file, titl
     <DetailSection sectionId={`assistant-${file}`} label={title}
       title={<><Icon name="file" /><span>{title}</span></>}
       status={state !== "current" && <span className="badge warn">{status}</span>}
-      actions={({ expand }) => !archived && revision !== null && (
-        <button ref={editButton} type="button" className="btn ghost icon-button small"
+      actions={canEdit || reset ? ({ expand }) => <>
+        {reset && <button type="button" className="btn ghost small" onClick={reset}>重置运行指南</button>}
+        {canEdit && <button ref={editButton} type="button" className="btn ghost icon-button small"
           disabled={editing} title={`编辑 ${title}`} aria-label={`编辑${title}`}
-          onClick={() => { expand(); setError(""); setEditing(true); }}><Icon name="edit" /></button>
-      )}>
+          onClick={() => { expand(); setError(""); setEditing(true); }}><Icon name="edit" /></button>}
+      </> : undefined}>
       {error && <Notice tone="error">{error}</Notice>}
       {editing && !archived ? (
         <div className="instructions-editor">

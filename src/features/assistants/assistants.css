@@ -1,3 +1,5 @@
+.assistant-intro-body { overflow-wrap: anywhere; }
+
 .instructions-editor {
   display: flex;
   flex-direction: column;

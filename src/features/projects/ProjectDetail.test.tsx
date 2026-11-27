@@ -158,10 +158,13 @@ function assistantProject(): ProjectDetailData & { assistant: NonNullable<Projec
     cwd: "/a/linked/worktree",
   }], assistant: {
     id: "archive-id",
-    guide_state: "current",
+    guide_is_default: true,
     claude_md_missing: false,
+    agents: { content: "默认运行指南", revision: "guide-hash", state: "current" },
     soul: { content: "价值观", revision: "soul-hash", state: "current" },
     role: { content: "核对交付", revision: "hash-1", state: "current" },
+    user: { content: "", revision: null, state: "missing" },
+    intro: { content: "", revision: null, state: "missing" },
     workspace_path_id: "wp-linked",
   } };
 }
@@ -179,7 +182,7 @@ describe("ProjectDetail", () => {
     expect(screen.getByText("Git 项目")).toBeTruthy();
     expect(screen.getByRole("region", { name: "项目摘要" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "关联任务" })).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "长期职责" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "角色与职责" })).toBeNull();
     const workingDirectories = screen.getByRole("region", { name: "工作目录" });
     expect(within(workingDirectories).getByTitle("/z/main/worktree")).toBeTruthy();
     const tabs = within(screen.getByRole("group", { name: "项目子页" }));
@@ -201,7 +204,7 @@ describe("ProjectDetail", () => {
     expect(screen.getByRole("button", { name: "档案会话" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Session 1" })).toBeNull();
     expect(screen.getByRole("region", { name: "性格与交流方式" })).toBeTruthy();
-    expect(screen.getByRole("region", { name: "长期职责" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "角色与职责" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "AGENTS.md" })).toBeNull();
     expect(screen.queryByRole("region", { name: "所属项目" })).toBeNull();
     expect(within(archiveDirectory).getByRole("button", { name: "打开档案目录" })).toBeTruthy();
@@ -259,13 +262,87 @@ describe("ProjectDetail", () => {
     expect(await within(reader).findByText("已处理 · 由 档案会话 处理")).toBeTruthy();
   });
 
+  it("refreshes the assistant-written introduction and renders it above the inbox", async () => {
+    const detail = assistantProject();
+    const intro = { content: "### 什么时候找我\n\n- 我可以帮你核对发布验收。", revision: "intro-hash", state: "current" } as const;
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    await screen.findByRole("button", { name: "智能体详情" });
+    expect(screen.queryByRole("region", { name: "自我介绍" })).toBeNull();
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+
+    const section = screen.getByRole("region", { name: "自我介绍" });
+    const mailbox = screen.getByRole("region", { name: "智能体信箱" });
+    expect(section.compareDocumentPosition(mailbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(section).getByText("智能体还没有写自我介绍。")).toBeTruthy();
+
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...detail.assistant, intro } });
+    fireEvent.click(within(section).getByRole("button", { name: "刷新自我介绍" }));
+    expect(await within(section).findByRole("heading", { name: "什么时候找我" })).toBeTruthy();
+    expect(within(section).getByRole("listitem").textContent).toBe("我可以帮你核对发布验收。");
+    expect(within(section).queryByRole("button", { name: /编辑|添加/ })).toBeNull();
+  });
+
+  it("refreshes the assistant's impressions from disk and keeps the section read-only", async () => {
+    const detail = assistantProject();
+    const user = { content: "用户多次先问交付结论，再追问风险。", revision: "user-hash", state: "current" } as const;
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+
+    const section = await screen.findByRole("region", { name: "用户印象" });
+    expect(within(section).getByText("智能体还没有记录对用户的印象。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...detail.assistant, user } });
+    fireEvent.click(within(section).getByRole("button", { name: "刷新用户印象" }));
+    expect(await within(section).findByText(user.content)).toBeTruthy();
+    expect(within(section).queryByRole("button", { name: /编辑|添加/ })).toBeNull();
+  });
+
+  it("edits the guide only on the assistant subpage and restores the default after confirmation", async () => {
+    const detail = assistantProject();
+    const content = "先查看发布验收任务。";
+    const edited = { ...detail.assistant, guide_is_default: false, agents: { ...detail.assistant.agents, content, revision: "edited-guide" } };
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    vi.mocked(api.updateAssistantProfile).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: edited });
+      return edited;
+    });
+    vi.mocked(api.prepareAssistantFiles).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+      return detail.assistant;
+    });
+    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
+    await screen.findByRole("button", { name: "智能体详情" });
+    expect(screen.queryByRole("region", { name: "运行指南" })).toBeNull();
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+
+    const guide = screen.getByRole("region", { name: "运行指南" });
+    fireEvent.click(within(guide).getByRole("button", { name: "编辑运行指南" }));
+    const editor = within(guide).getByRole("textbox", { name: "AGENTS.md" });
+    expect(editor).toHaveProperty("value", detail.assistant.agents.content);
+    fireEvent.change(editor, { target: { value: content } });
+    fireEvent.click(within(guide).getByRole("button", { name: "保存修改" }));
+    expect(api.updateAssistantProfile).toHaveBeenCalledWith("p1", "guide-hash", { file: "agents", content });
+    expect(await within(guide).findByText(content)).toBeTruthy();
+
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} />));
+    expect(screen.queryByRole("region", { name: "运行指南" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+
+    fireEvent.click(within(guide).getByRole("button", { name: "重置运行指南" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "重置运行指南？" })).getByRole("button", { name: "确认重置" }));
+    expect(await within(guide).findByText(detail.assistant.agents.content)).toBeTruthy();
+    expect(within(guide).queryByRole("button", { name: "重置运行指南" })).toBeNull();
+  });
+
   it("keeps the ROLE.md draft across subpages and detects external writes", async () => {
     const detail = assistantProject();
     const remote = { ...detail, assistant: { ...detail.assistant, role: { ...detail.assistant.role, content: "外部修改", revision: "hash-2" } } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     vi.mocked(api.updateAssistantProfile).mockRejectedValueOnce(new Error("版本冲突"));
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
-    fireEvent.click(await screen.findByRole("button", { name: "编辑长期职责" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑角色与职责" }));
     const input = screen.getByRole("textbox", { name: "ROLE.md" });
     fireEvent.change(input, { target: { value: "本地草稿" } });
     fireEvent.click(screen.getByRole("button", { name: "项目详情" }));
@@ -302,7 +379,7 @@ describe("ProjectDetail", () => {
     render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
 
     const reset = await screen.findByRole("button", { name: "重置运行指南" });
-    expect(within(screen.getByRole("region", { name: "长期职责" })).queryByRole("button", { name: /补建/ })).toBeNull();
+    expect(within(screen.getByRole("region", { name: "角色与职责" })).queryByRole("button", { name: /补建/ })).toBeNull();
     fireEvent.click(reset);
     const dialog = screen.getByRole("dialog", { name: "重置运行指南？" });
     const changes = within(dialog).getAllByRole("listitem").map(item => item.textContent);
@@ -319,8 +396,8 @@ describe("ProjectDetail", () => {
     expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
     expect(api.prepareAssistantFiles).toHaveBeenCalledWith("p1");
     expect(screen.getByText("价值观")).toBeTruthy();
-    expect(screen.getByText("尚未设定长期职责。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "编辑长期职责" }));
+    expect(screen.getByText("尚未设定角色与职责。")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "编辑角色与职责" }));
     expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "");
   });
 

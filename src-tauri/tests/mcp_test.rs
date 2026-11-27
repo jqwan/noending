@@ -28,7 +28,8 @@ impl Fixture {
         command
             .args(["--home", self.home.root.to_str().unwrap(), "mcp", "serve"])
             .env("NOENDING_HOME", self.root.join("wrong-home"))
-            .env_remove("NOENDING_TERMINAL_ID");
+            .env_remove("NOENDING_TERMINAL_ID")
+            .env_remove("NOENDING_SESSION_ACCESS");
         command
     }
     fn start(&self) -> Client {
@@ -232,10 +233,13 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
         assert_eq!(
             assistant_tools,
             [
+                "assistant_get",
+                "assistant_list",
                 "assistant_mailbox_change",
                 "assistant_mailbox_list",
                 "assistant_mailbox_read",
                 "assistant_mailbox_send",
+                "assistant_self",
             ]
         );
         let start = tools
@@ -792,6 +796,7 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
     db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender-native','jsonl','/sender'),('target','codex','target-native','jsonl','/target')").unwrap();
     let _host=DesktopHost::start(&f.home,move|command,sender_terminal|match command {
         ControlCommand::List{session}=>Ok(json!({"items":[],"session":session})),
+        ControlCommand::VerifyAssistantSession{..}=>unreachable!(),
         ControlCommand::Start(p)=>Ok(json!({"terminal_id":noending_lib::storage::new_id(),"options":p,"caller_terminal":sender_terminal})),
         ControlCommand::Identity{claimed}=>if claimed.as_deref().is_none_or(|id|id=="sender") {
             Ok(json!({"session_id":"sender"}))
@@ -1487,45 +1492,161 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
 }
 
 #[test]
-fn assistant_mailbox_supports_cli_to_mcp_handoff_and_reuses_receipts() {
-    use noending_lib::{assistant, skills::Roots, workspace::wiring::WorkspaceLayer};
+fn assistant_directory_finds_active_recipients_without_session_credentials() {
+    use noending_lib::{assistant, workspace};
+
+    let f = Fixture::new();
+    let db = Db::open(&f.home.db_path).unwrap();
+    let first = "00000000-0000-4000-8000-000000000001";
+    let second = "00000000-0000-4000-8000-000000000002";
+    let archived = "00000000-0000-4000-8000-000000000003";
+    let other = "00000000-0000-4000-8000-000000000004";
+    let duplicate_name = "Édit 交付";
+    {
+        let conn = db.write();
+        conn.execute(
+            "INSERT INTO projects(id,name,created_at,updated_at) VALUES ('ordinary','Édit 普通项目','now','now')",
+            [],
+        )
+        .unwrap();
+        for (project, id, name, visibility) in [
+            ("first", first, duplicate_name, "normal"),
+            ("second", second, duplicate_name, "normal"),
+            ("archived", archived, "Édit 归档", "archived"),
+            ("other", other, "A 发布顾问", "normal"),
+        ] {
+            let path = assistant::directory(&f.home).join(id);
+            let path = path.to_str().unwrap();
+            let path_id = workspace::path_identity_of(path).unwrap();
+            conn.execute(
+                "INSERT INTO projects(id,name,visibility,created_at,updated_at) VALUES (?1,?2,?3,'now','now')",
+                [project, name, visibility],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO workspace_paths(id,canonical_path,project_id) VALUES (?1,?2,?3)",
+                [path_id.as_str(), path, project],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO project_assistants(project_id,workspace_path_id) VALUES (?1,?2)",
+                [project, path_id.as_str()],
+            )
+            .unwrap();
+        }
+    }
+
+    let matches = json!([
+        {"id":first,"name":duplicate_name},
+        {"id":second,"name":duplicate_name}
+    ]);
+    let mut client = f.start();
+    assert_eq!(
+        client.ok("assistant_list", json!({})),
+        json!([
+            {"id":other,"name":"A 发布顾问"},
+            matches[0],
+            matches[1]
+        ])
+    );
+    assert_eq!(
+        client.ok("assistant_list", json!({"name":" édit "})),
+        matches
+    );
+    assert_eq!(
+        client.ok("assistant_list", json!({"name":"没有匹配"})),
+        json!([])
+    );
+    assert_eq!(
+        client.ok("assistant_get", json!({"id":matches[0]["id"]})),
+        json!({"id":first,"name":duplicate_name,"intro":""})
+    );
+    client.finish();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ne"))
+        .args([
+            "--home",
+            f.home.root.to_str().unwrap(),
+            "assistant",
+            "list",
+            "--name",
+            "交付",
+        ])
+        .env_remove("NOENDING_TERMINAL_ID")
+        .env_remove("NOENDING_SESSION_ACCESS")
+        .output()
+        .unwrap();
+    let listing: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{listing}");
+    assert_eq!(listing["data"], matches);
+}
+
+#[test]
+fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
+    use noending_lib::{
+        assistant,
+        cli::CliError,
+        session_control::{ControlCommand, DesktopHost},
+        skills::Roots,
+        workspace::wiring::WorkspaceLayer,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
     let f = Fixture::new();
     let db = Db::open(&f.home.db_path).unwrap();
     let native_home = f.root.join("native");
     std::fs::create_dir(&native_home).unwrap();
-    let project = assistant::create_profile_with_roots(
-        &db,
-        &f.home,
-        &WorkspaceLayer::new(&f.home),
-        assistant::AssistantCreate {
-            name: "交付协调员".into(),
-            role_md: None,
-            soul_md: None,
-        },
-        &Roots {
-            codex: native_home.join(".codex"),
-            claude: native_home.join(".claude"),
-            pi: native_home.join(".pi/agent"),
-            dsh: native_home.join(".dsh"),
-            home: native_home,
-        },
+    let roots = Roots {
+        codex: native_home.join(".codex"),
+        claude: native_home.join(".claude"),
+        pi: native_home.join(".pi/agent"),
+        dsh: native_home.join(".dsh"),
+        home: native_home,
+    };
+    let create = |name: &str| {
+        let project = assistant::create_profile_with_roots(
+            &db,
+            &f.home,
+            &WorkspaceLayer::new(&f.home),
+            assistant::AssistantCreate {
+                name: name.into(),
+                role_md: Some(format!("档案职责 {name}")),
+                soul_md: None,
+            },
+            &roots,
+        )
+        .unwrap();
+        let path = db
+            .list_workspace_paths_for_project(&project.id)
+            .unwrap()
+            .remove(0);
+        let id = std::path::Path::new(&path.canonical_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        (project.id, path, id)
+    };
+    let (project_id, archive, recipient) = create("交付协调员");
+    let (_, sender_archive, sender_assistant) = create("发布顾问");
+    std::fs::write(
+        std::path::Path::new(&archive.canonical_path).join("INTRO.md"),
+        "我可以核对交付。",
     )
     .unwrap();
-    let path = db
-        .list_workspace_paths()
-        .unwrap()
-        .into_iter()
-        .find(|path| path.project_id == project.id)
-        .unwrap();
-    let archive_id = std::path::Path::new(&path.canonical_path)
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let manager = db
-        .upsert_logical_session_unchecked(
+    std::fs::write(
+        std::path::Path::new(&archive.canonical_path).join("USER.md"),
+        "私有印象",
+    )
+    .unwrap();
+    let session = |path: &noending_lib::domain::WorkspacePath, native: &str| {
+        db.upsert_logical_session_unchecked(
             Agent::Codex,
-            "manager-inbox",
+            native,
             None,
             Some(&path.canonical_path),
             Some(&path.id),
@@ -1534,8 +1655,95 @@ fn assistant_mailbox_supports_cli_to_mcp_handoff_and_reuses_receipts() {
             None,
         )
         .unwrap()
-        .0;
-    let sender = support::ensure_session(&db, "sender".into(), Agent::Codex, "external-work").id;
+        .0
+    };
+    let manager = session(&archive, "manager-inbox");
+    let peer = session(&archive, "peer-inbox");
+    let sender = session(&sender_archive, "sender-inbox");
+
+    let switched = Arc::new(AtomicBool::new(false));
+    let switch = switched.clone();
+    let (manager_bound, peer_bound, sender_bound) = (manager.clone(), peer.clone(), sender.clone());
+    let _host = DesktopHost::start(&f.home, move |command, terminal| {
+        let ControlCommand::VerifyAssistantSession { access } = command else {
+            unreachable!()
+        };
+        let (session_id, revision) = match (terminal.as_deref(), access.as_str()) {
+            (Some("manager"), "manager-test-access") if switch.load(Ordering::Acquire) => {
+                (&peer_bound, 1)
+            }
+            (Some("manager"), "manager-test-access") => (&manager_bound, 0),
+            (Some("peer"), "peer-test-access") => (&peer_bound, 0),
+            (Some("sender"), "sender-test-access") => (&sender_bound, 0),
+            _ => {
+                return Err(CliError {
+                    code: "session_access_denied".into(),
+                    message: "fixture credential refused".into(),
+                    details: None,
+                })
+            }
+        };
+        Ok(json!({"session_id":session_id,"identity_revision":revision}))
+    })
+    .unwrap();
+    let bound = |terminal: &str, credential: &str| {
+        let mut command = f.command(env!("CARGO_BIN_EXE_ne"));
+        command
+            .env("NOENDING_TERMINAL_ID", terminal)
+            .env("NOENDING_SESSION_ACCESS", credential);
+        Client::start(command)
+    };
+    let mut public = f.start();
+    assert_eq!(
+        public.ok("assistant_get", json!({"id":recipient})),
+        json!({"id":recipient,"name":"交付协调员","intro":"我可以核对交付。"})
+    );
+    assert_eq!(
+        public.call("assistant_self", json!({}))["error"]["code"],
+        "session_access_required"
+    );
+    assert_eq!(
+        public.call(
+            "assistant_mailbox_list",
+            json!({"assistant":recipient,"from_session":manager})
+        )["error"]["code"],
+        "session_access_required"
+    );
+    assert_eq!(
+        public.call("mailbox_list", json!({"session":manager}))["error"]["code"],
+        "session_access_required"
+    );
+    assert_eq!(
+        public.call(
+            "mailbox_send",
+            json!({"session":manager,"from_session":sender,"message":"冒名投递"})
+        )["error"]["code"],
+        "session_access_required"
+    );
+    assert_eq!(
+        public.call("project_rename", json!({"id":project_id,"name":"不应改名"}))["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(
+        public.call(
+            "object_archive",
+            json!({"kind":"project","id":project_id,"archived":true})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    assert_eq!(
+        public.call(
+            "session_start",
+            json!({"agent":"codex","cwd":archive.canonical_path})
+        )["error"]["code"],
+        "permission_denied"
+    );
+    let mut wrong = bound("manager", "not-the-access");
+    assert_eq!(
+        wrong.call("assistant_self", json!({}))["error"]["code"],
+        "session_access_denied"
+    );
+    wrong.finish();
 
     let output = Command::new(env!("CARGO_BIN_EXE_ne"))
         .args([
@@ -1544,51 +1752,90 @@ fn assistant_mailbox_supports_cli_to_mcp_handoff_and_reuses_receipts() {
             "assistant-mailbox",
             "send",
             "--assistant",
-            archive_id,
-            "--from-session",
-            &sender,
+            &recipient,
             "--message",
             "交付已就绪",
             "--request-id",
             "delivery",
         ])
-        .env_remove("NOENDING_TERMINAL_ID")
+        .env("NOENDING_TERMINAL_ID", "sender")
+        .env("NOENDING_SESSION_ACCESS", "sender-test-access")
         .output()
         .unwrap();
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(output.status.success(), "{result}");
-    let letter_id = result["data"]["message_id"].as_str().unwrap();
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{receipt}");
+    let letter = receipt["data"]["message_id"].as_str().unwrap();
+    assert_eq!(receipt["data"]["sender_assistant_id"], sender_assistant);
 
-    let mut client = f.start();
-    let replay = client.ok("assistant_mailbox_send", json!({
-        "assistant": archive_id, "from_session": sender, "message": "交付已就绪", "request_id": "delivery"
-    }));
-    assert_eq!(replay["message_id"], letter_id);
-    let forbidden = client.call(
-        "assistant_mailbox_list",
-        json!({"assistant":archive_id,"from_session":sender}),
+    let mut sender_client = bound("sender", "sender-test-access");
+    assert_eq!(
+        sender_client.ok("assistant_self", json!({}))["id"],
+        sender_assistant
     );
-    assert_eq!(forbidden["ok"], false);
-    let page = client.ok(
-        "assistant_mailbox_list",
-        json!({"assistant":archive_id,"from_session":manager,"state":"pending"}),
+    assert_eq!(
+        sender_client.call("assistant_mailbox_list", json!({"assistant":recipient}))["error"]
+            ["code"],
+        "permission_denied"
     );
+    assert_eq!(
+        sender_client.call(
+            "assistant_mailbox_list",
+            json!({"assistant":recipient,"from_session":manager})
+        )["error"]["code"],
+        "identity_mismatch"
+    );
+    let replay = sender_client.ok(
+        "assistant_mailbox_send",
+        json!({"assistant":recipient,"message":"交付已就绪","request_id":"delivery"}),
+    );
+    assert_eq!(replay["message_id"], letter);
+    let shown = sender_client.ok("request_get", json!({"id":"delivery"}));
+    assert_eq!(shown["response"]["data"]["message_id"], letter);
+
+    let mut manager_client = bound("manager", "manager-test-access");
+    let profile = manager_client.ok("assistant_self", json!({}));
+    assert_eq!(profile["id"], recipient);
+    assert_eq!(profile["files"]["user"]["content"], "私有印象");
+    assert_eq!(
+        manager_client.call("request_get", json!({"id":"delivery"}))["error"]["code"],
+        "not_found"
+    );
+    let page = manager_client.ok("assistant_mailbox_list", json!({"state":"pending"}));
     assert_eq!(page["unread"], 1);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    let letter = client.ok(
-        "assistant_mailbox_read",
-        json!({"assistant":archive_id,"from_session":manager,"message_id":letter_id}),
+    let envelope = manager_client.ok("assistant_mailbox_read", json!({"message_id":letter}));
+    assert_eq!(envelope["sender_session_id"], sender);
+    assert_eq!(envelope["sender_assistant_id"], sender_assistant);
+    let claimed = manager_client.ok(
+        "assistant_mailbox_change",
+        json!({"message_id":letter,"revision":envelope["revision"],"operation":"claim"}),
     );
-    assert_eq!(letter["sender_session_id"], sender);
-    assert!(letter["read_at"].is_null());
-    let result = client.ok("assistant_mailbox_change", json!({
-        "assistant":archive_id,"from_session":manager,"message_id":letter_id,"revision":letter["revision"],"operation":"claim"
-    }));
-    assert_eq!(result["handler_session_id"], manager);
-    assert_eq!(result["revision"], 2);
-    let done = client.ok("assistant_mailbox_change", json!({
-        "assistant":archive_id,"from_session":manager,"message_id":letter_id,"revision":result["revision"],"operation":"complete"
-    }));
+    assert_eq!(claimed["handler_session_id"], manager);
+    let mut peer_client = bound("peer", "peer-test-access");
+    assert_eq!(
+        peer_client.ok("assistant_mailbox_read", json!({"message_id":letter}))["id"],
+        letter
+    );
+    assert_eq!(
+        peer_client.call(
+            "assistant_mailbox_change",
+            json!({"message_id":letter,"revision":claimed["revision"],"operation":"complete"})
+        )["ok"],
+        false
+    );
+    let done = manager_client.ok(
+        "assistant_mailbox_change",
+        json!({"message_id":letter,"revision":claimed["revision"],"operation":"complete"}),
+    );
     assert!(done["completed_at"].is_string());
-    client.finish();
+
+    switched.store(true, Ordering::Release);
+    assert_eq!(
+        manager_client.call("assistant_self", json!({}))["error"]["code"],
+        "sender_identity_changed"
+    );
+    peer_client.finish();
+    manager_client.finish();
+    sender_client.finish();
+    public.finish();
 }
