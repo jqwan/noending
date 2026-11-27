@@ -734,6 +734,7 @@ fn navigation_lookup_with_context_discovers_disk_skills() {
         codex: home.join(".codex"),
         claude: home.join(".claude"),
         pi: home.join(".pi/agent"),
+        dsh: home.join(".dsh"),
         home: home.clone(),
     };
 

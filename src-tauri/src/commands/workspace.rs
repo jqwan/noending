@@ -17,11 +17,7 @@ use tauri::{AppHandle, Manager};
 use crate::error::{other, Result};
 use crate::workspace::home::{self, BootstrapPointer, HomeSource, NoEndingHome, WorkspaceSettings};
 
-/// `get_workspace_settings`.
-///
-/// Also the one place the UI learns which database file it is looking at, so
-/// `get_app_info` retired into it (v0.2 had two commands reporting the same
-/// Home, and only one of them was reading the live handle).
+/// Report settings for the active Home and the open database.
 #[tauri::command]
 pub fn get_workspace_settings(
     app: AppHandle,

@@ -1,5 +1,5 @@
 //! DSH is desktop-hosted with a Cordis-based package system: the desktop
-//! profile (`~/.dsh/profiles/desktop/package.json`) declares its loaded
+//! profile (`profiles/desktop/package.json` under DSH Home) declares its loaded
 //! bundles in `dsh.profile.bundles`, and the bundle packages live under the
 //! profile's `node_modules`. NoEnding manages the desktop profile only —
 //! other profiles (web and friends) belong to their own surfaces — and
@@ -7,9 +7,7 @@
 //! bundled `dsh plugin` command plus a declaration edit. Enablement lives in
 //! the Cordis patch layer and stays untouched (state reports Unknown).
 
-use super::{
-    dsh_dir, files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState,
-};
+use super::{files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState};
 use crate::domain::Agent;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -18,11 +16,11 @@ use std::path::{Path, PathBuf};
 pub const DESKTOP_PROFILE: &str = "desktop";
 
 pub fn desktop_profile_dir(roots: &Roots) -> PathBuf {
-    dsh_dir(roots).join("profiles").join(DESKTOP_PROFILE)
+    roots.dsh.join("profiles").join(DESKTOP_PROFILE)
 }
 
 pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<PackageEntry> {
-    let profiles = dsh_dir(roots).join("profiles");
+    let profiles = roots.dsh.join("profiles");
     let profile_root = desktop_profile_dir(roots);
     let manifest = profile_root.join("package.json");
     if !manifest.is_file() {
@@ -132,9 +130,29 @@ pub fn declare_bundle(roots: &Roots, name: &str) -> Result<()> {
     write_profile(&manifest, &value)
 }
 
-/// Removes the declaration BEFORE the package is uninstalled: if the removal
-/// then fails, the profile still boots (an undeclared installed package is
-/// benign; a declared missing one is not).
+pub(super) fn uninstall_bundle(
+    roots: &Roots,
+    name: &str,
+    remove_dependency: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let manifest = desktop_profile_dir(roots).join("package.json");
+    let profile = read_profile_object(&manifest)?;
+    let has_dependency = ["dependencies", "devDependencies", "optionalDependencies"]
+        .into_iter()
+        .any(|field| {
+            profile
+                .get(field)
+                .and_then(|entries| entries.get(name))
+                .is_some()
+        });
+    if has_dependency {
+        remove_dependency()?;
+    }
+    // Read the manifest again to retain the dependency changes made by DSH.
+    // With no direct dependency, deselection also repairs an interrupted uninstall.
+    undeclare_bundle(roots, name).map_err(|error| other(format!("清理 DSH 插件声明失败：{error}")))
+}
+
 pub fn undeclare_bundle(roots: &Roots, name: &str) -> Result<()> {
     let manifest = desktop_profile_dir(roots).join("package.json");
     let mut value = read_profile_object(&manifest)?;
@@ -146,8 +164,12 @@ pub fn undeclare_bundle(roots: &Roots, name: &str) -> Result<()> {
     else {
         return Ok(());
     };
+    let count = bundles.len();
     bundles.retain(|bundle| bundle.as_str() != Some(name));
-    write_profile(&manifest, &value)
+    if bundles.len() != count {
+        write_profile(&manifest, &value)?;
+    }
+    Ok(())
 }
 
 fn read_profile_object(manifest: &Path) -> Result<Value> {

@@ -95,14 +95,6 @@ pub fn update_workstream(state: State<AppState>, workstream: Workstream) -> Resu
     })
 }
 
-#[tauri::command]
-pub fn list_workstreams(
-    state: State<AppState>,
-    project_id: Option<String>,
-) -> Result<Vec<Workstream>> {
-    with_db(&state, |db| db.list_workstreams(project_id.as_deref()))
-}
-
 // ---------------- archive state ----------------
 
 /// Archive the task. Absolute: archiving an archived Workstream is a

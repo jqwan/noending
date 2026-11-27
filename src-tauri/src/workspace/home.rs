@@ -568,10 +568,6 @@ impl MigrationReport {
             workspace_left_behind: None,
         }
     }
-
-    pub fn is_noop(&self) -> bool {
-        self.dirs.is_empty()
-    }
 }
 
 /// Move `data/ runtime/ logs/` from the current Home to the pending one, then

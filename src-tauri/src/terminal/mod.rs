@@ -740,13 +740,8 @@ impl TerminalRegistry {
         }
     }
 
-    /// Explicit close from the sidebar's 运行中 item: kill the child and
-    /// REMOVE the record. Removal is deliberate — an explicitly closed
-    /// terminal has no replay value (ingestion keeps the conversation), and
-    /// a removed record cannot be resurrected by terminal_for_session, so
-    /// the next Resume spawns a fresh terminal instead of landing on a
-    /// corpse. The wait thread still reaps the child (it holds its own Arc)
-    /// and publishes terminal-exit + terminals-changed.
+    /// Stop the child and remove its terminal record. The wait thread
+    /// still reaps the child and publishes the exit events.
     pub fn close(&self, terminal_id: &str) -> Option<TerminalSummary> {
         let _identity = self.identity_mutations.lock().ok()?;
         self.close_locked(terminal_id)

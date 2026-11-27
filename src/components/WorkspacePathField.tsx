@@ -16,9 +16,9 @@ import type { PathProbe, RecentWorkspacePath } from "../types";
  */
 
 /** 只挡明显写错的形式；「能不能当工作路径」的最终判定在 Rust 侧。 */
-export const ABSOLUTE_PATH_RE = /^([~/\\]|[A-Za-z]:[\\/])/;
+const ABSOLUTE_PATH_RE = /^([~/\\]|[A-Za-z]:[\\/])/;
 
-export function absolutePathHint(raw: string): string {
+function absolutePathHint(raw: string): string {
   if (raw === "") return "";
   return ABSOLUTE_PATH_RE.test(raw)
     ? ""
@@ -48,7 +48,7 @@ export type WorkspacePathFieldProps = {
 };
 
 /** 输入内容的探测状态：一个可复用的防抖 hook（路径列表的每一行也用它）。 */
-export function usePathProbe(raw: string, enabled: boolean): PathProbe | null {
+function usePathProbe(raw: string, enabled: boolean): PathProbe | null {
   const [probe, setProbe] = useState<PathProbe | null>(null);
   useEffect(() => {
     if (!enabled) return undefined;
@@ -78,7 +78,7 @@ function gitLabel(kind: string | null): string {
 }
 
 /** 探测结果的一行反馈：绿是事实、黄是提醒，没有红色——判定权在提交那一刻。 */
-export function ProbeFeedback({ probe }: { probe: PathProbe | null }) {
+function ProbeFeedback({ probe }: { probe: PathProbe | null }) {
   if (!probe) return null;
   if (probe.status !== "ok") {
     const text =

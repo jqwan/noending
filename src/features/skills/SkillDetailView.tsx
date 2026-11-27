@@ -15,10 +15,8 @@ import { displayPath } from "../../pathDisplay";
 import type { SkillLocation, SkillProjectScope, SkillResourceDetail, SkillSourceKind, SkillUninstallPreview } from "../../types";
 import SkillConfigDialog from "./SkillConfigDialog";
 import SkillRegisterDialog from "./SkillRegisterDialog";
-import { skillDetailCache, clearSkillDetailCache } from "./skillDetailCache";
+import { skillDetailCache } from "./skillDetailCache";
 import "./skills.css";
-
-export { skillDetailCache, clearSkillDetailCache };
 
 const SOURCE_KIND_LABELS: Record<SkillSourceKind, string> = {
   library: "NoEnding 源库",
@@ -243,7 +241,7 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
   </div></DetailPanelProvider>;
 }
 
-export function parseFrontmatter(raw: string): { key: string; value: string }[] {
+function parseFrontmatter(raw: string): { key: string; value: string }[] {
   const lines = raw.split(/\r?\n/);
   const pairs: { key: string; value: string }[] = [];
   let currentKey = "";

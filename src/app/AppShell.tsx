@@ -18,7 +18,7 @@ import Icon from "../components/Icon";
 import PanelToggle from "../components/PanelToggle";
 import PanelResizer from "../components/PanelResizer";
 import { LaunchDetailsHost } from "../features/launcher/LaunchResultModal";
-import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, type Route } from "./routes";
+import { EVT_SYNCED, EVT_TERMINALS, EVT_TERMINAL_ACTIVITY, withoutAction, type Route } from "./routes";
 import { EVT_REMOVED, isRemovedRoute, type RemovedTargets } from "./removedTargets";
 import { sessionDetailCache, sessionContextCache } from "../features/sessions/sessionDetailCache";
 import { clearSessionsCache } from "../features/sessions/sessionsCache";
@@ -29,24 +29,6 @@ import { clearWorkstreamDetailCache } from "../features/workstreams/workstreamDe
 
 
 type NavigationState = { entries: Route[]; index: number };
-
-function withoutAction(route: Route): Route {
-  if (!("action" in route) || !route.action) return route;
-  const { action: _action, ...base } = route;
-  return base as Route;
-}
-
-export function normalizeRoute(route: Route): Route {
-  if (route.view === "sessions" && route.action === "new") {
-    return { view: "new-session" };
-  }
-  if (route.view === "settings") {
-    if (route.section === "agents" || route.section === "sources") {
-      return { view: "agents" };
-    }
-  }
-  return route;
-}
 
 function sameRoute(a: Route, b: Route): boolean {
   const left = withoutAction(a);
@@ -164,7 +146,7 @@ export default function AppShell() {
       if (request === navigationRequest.current) { setPreparing(false); pendingDestination.current = null; showToast(`无法打开：${String(error)}`); }
     };
     try {
-      const prepared = prepareNavigation(normalizeRoute(target));
+      const prepared = prepareNavigation(target);
       if (prepared instanceof Promise) { setPreparing(true); void prepared.then(ready).catch(fail); }
       else ready(prepared);
     } catch (error) { fail(error); }
@@ -194,7 +176,7 @@ export default function AppShell() {
   const navigateSession = useCallback((target: Route) => {
     if (isRemovedRoute(target)) return;
     if (isSessionRoute(currentRoute.current)) navigate(target);
-    else if (isSessionRoute(target)) lastSessionRoute.current = withoutAction(normalizeRoute(target));
+    else if (isSessionRoute(target)) lastSessionRoute.current = target;
   }, [navigate]);
 
   useEffect(() => {
@@ -286,8 +268,6 @@ export default function AppShell() {
   useEffect(() => {
     // 后台摄入的唯一完成事件（commands/ingestion.rs）。
     const un1 = listen("ingestion-completed", () => emitSynced());
-    // Projects Experience v0.2 工作区刷新完成后同样扇出刷新信号，
-    // Sidebar 最近列表等自行 invalidate。
     const un2 = listen("workspace-reconcile-completed", () => emitSynced());
     const unCli = listen("cli-data-changed", () => emitSynced());
     const unMailboxError = listen<{session_id:string;error:string}>("mailbox-notification-error", ({payload}) => {

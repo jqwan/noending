@@ -12,13 +12,9 @@ import { Modal, copyToClipboard, openPath, submitsOnEnter } from "../../componen
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
 import type { WorkspaceSettings } from "../../types";
-import type { Route, SettingsSection, LegacySettingsSection } from "../../app/routes";
 
 /** Settings：设置页合并为统一平铺视图，聚焦于主题外观、摘要提取与本地存储数据。 */
-export default function SettingsView({ section: _section, navigate: _navigate }: {
-  section?: SettingsSection | LegacySettingsSection;
-  navigate?: (r: Route) => void;
-}) {
+export default function SettingsView() {
   return (
     <div className="main settings-page">
       <PageHeader title="设置" icon={<Icon name="settings" />} />
@@ -31,7 +27,6 @@ export default function SettingsView({ section: _section, navigate: _navigate }:
   );
 }
 
-/** Appearance：主题设置（tokens 支持暗色）；Density 暂缓。 */
 type Theme = "system" | "light" | "dark";
 const THEME_LABELS: Record<Theme, string> = { system: "跟随系统", light: "浅色", dark: "深色" };
 function AppearanceSettings() {

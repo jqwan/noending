@@ -9,8 +9,7 @@ import type { ProjectContextView, SessionListItem } from "../../types";
 
 import Icon from "../../components/Icon";
 
-import { projectSummaryCache as cache, clearProjectSummaryCache } from "./projectSummaryCache";
-export { clearProjectSummaryCache };
+import { projectSummaryCache as cache } from "./projectSummaryCache";
 
 
 /** Pure reads on navigation; extraction requires an explicit user action. */

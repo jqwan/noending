@@ -26,8 +26,6 @@ pub mod sync;
 pub mod terminal;
 pub mod workspace;
 
-use std::sync::Mutex;
-
 use tauri::{Emitter, Manager};
 
 pub fn run() {
@@ -93,7 +91,6 @@ pub fn run() {
             app.manage(commands::AppState {
                 db: std::sync::Arc::new(db),
                 ingestion: Default::default(),
-                prepared_launches: Mutex::new(std::collections::HashMap::new()),
             });
 
             // Embedded terminal registry. The AppHandle rides inside so the
@@ -217,7 +214,6 @@ pub fn run() {
             commands::project::list_projects,
             commands::project::list_project_cards,
             commands::project::get_project_detail,
-            commands::project::list_project_workstreams,
             commands::project::rename_project,
             commands::project::add_project_path,
             commands::project::clean_missing_project_paths,
@@ -230,17 +226,14 @@ pub fn run() {
             commands::workstream::probe_workspace_path,
             commands::workstream::list_recent_workspace_paths,
             commands::workstream::update_workstream,
-            commands::workstream::list_workstreams,
             commands::workstream::list_workstream_cards,
             commands::workstream::set_workstream_projects,
             commands::workstream::archive_workstream,
             commands::workstream::restore_workstream,
             commands::workstream::delete_workstream_permanently,
             commands::get_default_agent,
-            commands::set_default_agent,
             // Explicit summary reads and user-triggered extraction.
             commands::get_session_context,
-            commands::get_freshness,
             commands::workstream::list_task_items,
             commands::workstream::create_task_item,
             commands::workstream::update_task_item,
@@ -282,10 +275,7 @@ pub fn run() {
             commands::list_ingest_sources,
             commands::add_ingest_source,
             commands::remove_ingest_source,
-            commands::launch_new_session,
-            commands::prepare_new_session,
-            commands::launch_prepared,
-            commands::cancel_prepared,
+            commands::preview_new_session,
             commands::launch_embedded_resume,
             commands::launch_embedded_new,
             commands::continue_session_desktop,
@@ -294,7 +284,6 @@ pub fn run() {
             commands::terminal_close,
             commands::read_clipboard_for_terminal,
             commands::write_clipboard_for_terminal,
-            commands::terminal_for_session,
             commands::terminal_attach,
             commands::terminal_activity_seen,
             commands::collaboration::collaboration_candidates,
@@ -320,7 +309,6 @@ pub fn run() {
             commands::lookup_navigation,
             commands::match_objects,
             commands::get_agent_status,
-            commands::set_agent_launch_enabled,
             commands::redetect_agent,
             commands::get_agent_runtime_settings,
             commands::refresh_agent_runtime_options,

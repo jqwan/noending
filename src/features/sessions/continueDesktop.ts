@@ -112,8 +112,6 @@ export async function openSessionTerminal(
   finally { openingSessions.delete(session.id); }
 }
 
-export const continueSessionTerminalWithToast = openSessionTerminal;
-
 /** Agent 状态表（桌面端名字与在场是「继续」置灰判断的输入）。读不到时返回
  *  null——在场未知不当作缺席。 */
 export function useAgentStatus(enabled = true): Record<string, AgentStatusEntry> | null {

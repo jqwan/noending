@@ -98,12 +98,6 @@ fn seed_installation(db: &Db, agent: Agent) {
     .unwrap();
 }
 
-fn launcher_in(tag: &str) -> SessionLauncher {
-    SessionLauncher {
-        runtime_dir: temp_root(tag).join("runtime"),
-    }
-}
-
 fn workspace(default_workspace: Option<&str>) -> LaunchWorkspace {
     LaunchWorkspace {
         default_workspace: default_workspace.map(|s| s.to_string()),
@@ -176,7 +170,7 @@ fn is_stale(err: &str) -> bool {
 fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     let db = open_db("default-ws");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("default-ws");
+    let launcher = SessionLauncher;
     let before = real_dir("default-ws", "home-a/workspace");
     let after = real_dir("default-ws", "home-b/workspace");
 
@@ -220,7 +214,7 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
     let home_dir = real_dir("resume-cwd", "session-home");
     let s = session_row(&db, Some(&home_dir), None);
 
-    let launcher = launcher_in("resume-cwd");
+    let launcher = SessionLauncher;
     let prepared = launcher
         .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
@@ -251,7 +245,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     let original = real_dir("resume-drift", "original");
     let s = session_row(&db, Some(&original), None);
 
-    let launcher = launcher_in("resume-drift");
+    let launcher = SessionLauncher;
     let prepared = launcher
         .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
@@ -309,7 +303,7 @@ fn a_resume_with_no_recorded_cwd_uses_default_workspace() {
     let workspace = LaunchWorkspace {
         default_workspace: Some(default_dir.clone()),
     };
-    let launcher = launcher_in("resume-no-cwd");
+    let launcher = SessionLauncher;
     let prepared = launcher.prepare_resume_in(&db, &s.id, &workspace).unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(default_dir.as_str()));
     assert_eq!(prepared.cwd_resolution.source, CwdSource::DefaultWorkspace);
@@ -328,7 +322,7 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
         .unwrap();
     let s = session_row(&db, Some(&dir), Some(&first));
 
-    let launcher = launcher_in("session-path");
+    let launcher = SessionLauncher;
     let prepared = launcher
         .prepare_resume_in(&db, &s.id, &LaunchWorkspace::default())
         .unwrap();
@@ -364,7 +358,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     let paths_before = count(&db, "SELECT COUNT(*) FROM workstream_projects");
     let wp_before = count(&db, "SELECT COUNT(*) FROM workspace_paths");
 
-    let launcher = launcher_in("phantom");
+    let launcher = SessionLauncher;
     let prepared = launcher
         .prepare_new_in(
             &db,
@@ -422,7 +416,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     seed_installation(&db, Agent::Codex);
     let primary = real_dir("payload", "primary");
     let default_ws = missing_dir("payload", "workspace");
-    let launcher = launcher_in("payload");
+    let launcher = SessionLauncher;
     let home = workspace(Some(&default_ws));
     let no_home = LaunchWorkspace::default();
 
@@ -489,7 +483,7 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
     };
     let db = open_db("one-time-runtime");
     seed_installation(&db, Agent::Codex);
-    let l = launcher_in("one-time-runtime");
+    let l = SessionLauncher;
     let ws = workspace(Some(&real_dir("one-time-runtime", "cwd")));
     let saved = AgentRuntimeOverrides {
         model: Some("saved".into()),
@@ -565,7 +559,7 @@ fn disabling_new_launches_rejects_new_and_prepared_new_but_allows_resume() {
     seed_installation(&db, Agent::Codex);
     let cwd = real_dir("launch-preference", "cwd");
     let ws = workspace(Some(&cwd));
-    let l = launcher_in("launch-preference");
+    let l = SessionLauncher;
     let prepared = l.prepare_new_in(&db, Agent::Codex, None, &ws).unwrap();
     let session = session_row(&db, Some(&cwd), None);
     set_launch_enabled(&db, Agent::Codex, false).unwrap();
@@ -602,7 +596,7 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
         &session.root_agent_session_id,
         &session.source_path,
     );
-    let launcher = launcher_in("availability");
+    let launcher = SessionLauncher;
     let workspace = workspace(Some(&real_dir("availability", "default")));
     let probe = || {
         terminal_resume_states(&db, &[session.id.clone()])

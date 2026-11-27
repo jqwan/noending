@@ -1,6 +1,3 @@
-import { ellipsisPathMiddle } from "../sessions/SessionTable";
-import { openPath } from "../../components/common";
-import Icon from "../../components/Icon";
 import type {
   WorkspaceGitState,
 } from "../../types";
@@ -45,52 +42,6 @@ export function MissingBadge() {
     </span>
   );
 }
-
-/** 完整路径：中段省略（末段才是识别信息），全串留在 title 上。点击在文件管理器中打开对应目录或定位文件。 */
-export function PathText({
-  path,
-  max = 46,
-  interactive = true,
-}: {
-  path: string;
-  max?: number;
-  interactive?: boolean;
-}) {
-  const text = ellipsisPathMiddle(path, max);
-  if (!interactive) {
-    return (
-      <span className="mono path-text-with-icon" title={path} style={{ overflowWrap: "anywhere" }}>
-        <Icon name="folder" />
-        <span>{text}</span>
-      </span>
-    );
-  }
-  return (
-    <span
-      role="button"
-      tabIndex={0}
-      className="mono path-link path-text-with-icon"
-      title={path}
-      style={{ overflowWrap: "anywhere" }}
-      onClick={(e) => {
-        e.stopPropagation();
-        void openPath(path);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.stopPropagation();
-          e.preventDefault();
-          void openPath(path);
-        }
-      }}
-    >
-      <Icon name="folder" />
-      <span>{text}</span>
-    </span>
-  );
-}
-
-/** 只读：增 / 删 / 换序都在「••• → 编辑任务」里。 */
 
 export function PathError({ text }: { text: string }) {
   return (

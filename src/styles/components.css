@@ -149,11 +149,7 @@ p.ws-card-body.muted { color: var(--text-muted); }
   min-height: 32px;
 }
 .ws-card-actions { display: flex; gap: var(--space-icon); align-items: center; flex-shrink: 0; }
-
-.ws-btn { display: inline-flex; align-items: center; gap: var(--space-icon); }
-.ws-btn .agent-icon { flex: none; }
 /* Resume is the highest-frequency action on Home — slightly stronger than New */
-.ws-btn.resume-primary { border-color: var(--text-primary); font-weight: var(--weight-medium); }
 
 /* ---------- Toast ---------- */
 .toast-host {
@@ -344,12 +340,6 @@ p.ws-card-body.muted { color: var(--text-muted); }
   flex-shrink: 0;
 }
 .task-card .ws-card-actions { margin-left: auto; }
-.existing-path-list { min-height: 160px; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; margin: 12px 0; }
-.existing-path-option { display: flex; align-items: center; gap: var(--space-md); padding: 12px 8px; border-bottom: 1px solid var(--border-subtle); border-radius: var(--radius-sm); cursor: pointer; }
-.existing-path-option:hover, .existing-path-option:focus-within { background: var(--bg-hover); }
-.existing-path-option.is-added { opacity: .6; cursor: default; }
-.existing-path-option > input { width: 16px; flex: none; }
-.existing-path-info { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 
 /* 图标按钮与公共按钮工具 */
 button.icon-button,
@@ -430,7 +420,6 @@ html[data-panel-resizing] * {
 @media (prefers-reduced-motion: reduce) {
   .panel-resizer, .panel-resizer::before { transition: none; }
 }
-.detail-wrapper { width: 100%; }
 .ui-section,
 .detail-section {
   padding: var(--section-padding);
@@ -704,7 +693,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 /* 所有看板共用的列表行和内容入口，不依赖会话页样式加载。 */
 
 
-.board-list,
 .session-list,
 .task-list,
 .project-list,
@@ -713,7 +701,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 .package-list {
   border-top: 1px solid var(--border-subtle);
 }
-.board-list-row,
 .session-list-row,
 .task-list-row,
 .project-list-row,
@@ -730,8 +717,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   content-visibility: auto;
   contain-intrinsic-size: auto 68px;
 }
-.board-list-row:hover,
-.board-list-row:focus-within,
 .session-list-row:hover,
 .session-list-row:focus-within,
 .task-list-row:hover,
@@ -746,7 +731,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
 .package-list-row:focus-within {
   background: var(--bg-hover);
 }
-.board-list-open,
 .session-open,
 .task-open,
 .project-open,
@@ -766,7 +750,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   text-align: left;
   cursor: pointer;
 }
-.board-list-title,
 .session-list-title,
 .task-list-title,
 .project-list-title,
@@ -780,7 +763,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   min-width: 0;
   font-weight: var(--weight-semibold);
 }
-.board-list-title > span,
 .session-list-title > span,
 .task-list-title > span,
 .project-list-title > span,
@@ -792,7 +774,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   white-space: nowrap;
   min-width: 0;
 }
-.board-list-meta,
 .session-list-meta,
 .task-list-meta,
 .project-list-meta,
@@ -806,7 +787,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
 }
-.board-list-description,
 .task-list-summary,
 .skill-list-desc {
   color: var(--text-muted);
@@ -816,7 +796,6 @@ button.detail-list-open:hover { background: var(--bg-hover); }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.board-list-actions,
 .task-list-actions,
 .project-list-actions,
 .agent-list-actions,

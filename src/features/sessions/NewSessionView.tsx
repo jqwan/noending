@@ -14,14 +14,13 @@ import BrandLockup from "../../components/BrandLockup";
 import { showToast } from "../../components/Toast";
 import type { Route } from "../../app/routes";
 import { announceLaunch } from "../launcher/LaunchResultModal";
-import { usePreparedLaunch } from "../launcher/usePreparedLaunch";
+import { useLaunchPreview } from "../launcher/useLaunchPreview";
 import { ellipsisPathMiddle } from "./SessionTable";
 import {
   AGENT_LABELS,
   type Agent,
   type AgentStatusEntry,
   type AgentRuntimeOverrides,
-  type PreparedLaunch,
   type ProjectCardData,
 } from "../../types";
 import { isSelectableProject } from "../projects/projectKind";
@@ -328,19 +327,19 @@ export default function NewSessionView({
   // 没有目录不是错误：后端 `resolve_new_cwd` 会回落到 NoEnding 默认工作目录
   // （`CwdSource::DefaultWorkspace`，不存在时还有 `Unresolved`），并且这个决定本来就
   // 要向用户说明。前端再拦一道就等于否定了标签里那句「默认工作目录」——所以这里不拦。
-  const prepareLaunch = useCallback(async (): Promise<PreparedLaunch | null> => {
+  const loadLaunchPreview = useCallback(async () => {
     if (!selectedAgent || !agentAvailable || !archiveReady) return null;
-    return api.prepareNewSession(selectedAgent, launchCwd, runtimeOverride);
+    return api.previewNewSession(selectedAgent, launchCwd, runtimeOverride);
   }, [selectedAgent, launchCwd, runtimeOverride, agentAvailable, archiveReady]);
 
-  const { prepared, preparing, error, setError, prepare, release: releasePrepared } =
-    usePreparedLaunch(prepareLaunch);
+  const { preview, preparing, error, setError, refresh, clear: clearPreview } =
+    useLaunchPreview(loadLaunchPreview);
 
   const handleProjectChange = (next: string) => {
     if (next === selectedProjectId) return;
     projectChanged.current = true;
     setProjectError("");
-    releasePrepared();
+    clearPreview();
     setSelectedProjectId(next);
     // 用户亲手挑过之后，项目就不再是"默认"的了。
     setProjectDefaulted(false);
@@ -353,7 +352,7 @@ export default function NewSessionView({
 
   const handleDirChange = (next: string) => {
     if (next === selectedDirPath) return;
-    releasePrepared();
+    clearPreview();
     setSelectedDirPath(next);
     updateNewSessionPreferences(current => ({ ...current, directories: { ...current.directories, [selectedProjectId]: next } }));
   };
@@ -390,7 +389,7 @@ export default function NewSessionView({
     agentChanged.current = true;
     updateNewSessionPreferences(current => ({ ...current, agent: next }));
     if (next === selectedAgent) return;
-    releasePrepared();
+    clearPreview();
     setRuntimeChoice({ agent: next, value: lastNewSessionRuntime(next) });
     setSelectedAgent(next);
   };
@@ -409,13 +408,13 @@ export default function NewSessionView({
   const hasMessage = Boolean(message.trim());
   const messageUsesFile = message.length > INLINE_MESSAGE_LIMIT;
   const launchLabel = hasMessage ? "发送" : "打开终端";
-  const canSend = Boolean(selectedAgent && agentAvailable && archiveReady && prepared && !preparing && !busy);
+  const canSend = Boolean(selectedAgent && agentAvailable && archiveReady && preview && !preparing && !busy);
 
   /** 这一发落在哪个目录，必须说出来。后端 `CwdResolution` 分四档并备好 note，
    *  但对 New 流程而言 `default_workspace` 那档 `fallback` 是 false、`note` 是空——
    *  用户没挑目录时，前端得替它把那句话补上，否则会话开在哪儿无人知晓。 */
   const cwdNote = (() => {
-    const resolution = prepared?.cwd_resolution;
+    const resolution = preview;
     if (!resolution) return "";
     // 后端约定：只要发生了 fallback 就必须可见，不接受沉默降级。
     if (resolution.fallback) return resolution.note ?? "未从默认工作目录启动";
@@ -430,7 +429,7 @@ export default function NewSessionView({
     if (!canSend || launching.current) return;
     launching.current = true;
     agentChanged.current = true;
-    releasePrepared();
+    clearPreview();
     setBusy(true);
     setError("");
     try {
@@ -453,7 +452,7 @@ export default function NewSessionView({
       launching.current = false;
       setBusy(false);
       // launchEmbeddedNew 会重新 prepare；失败后恢复预览以便重试。
-      await prepare();
+      await refresh();
       setError(`启动失败：${String(e)}`);
     }
   };
@@ -794,7 +793,7 @@ export default function NewSessionView({
                   value={runtimeOverride}
                   disabled={busy}
                   onChange={(v) => {
-                    releasePrepared();
+                    clearPreview();
                     setRuntimeOverride(v);
                     rememberNewSessionRuntime(selectedAgent, v);
                   }}
@@ -823,7 +822,7 @@ export default function NewSessionView({
             <div className="new-session-error" role="alert">
               <span>{projectError || error}</span>
               {!preparing && !busy && (
-                <button type="button" className="btn small" onClick={() => projectError ? setProjectLoadAttempt((n) => n + 1) : void prepare()}>重试</button>
+                <button type="button" className="btn small" onClick={() => projectError ? setProjectLoadAttempt((n) => n + 1) : void refresh()}>重试</button>
               )}
             </div>
           )}

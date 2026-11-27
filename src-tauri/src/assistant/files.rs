@@ -11,6 +11,7 @@ use std::{
 const AGENTS: &str = "AGENTS.md";
 const SOUL: &str = "SOUL.md";
 const ROLE: &str = "ROLE.md";
+const CLAUDE: &str = "CLAUDE.md";
 const STANDARD_ENTRY: &str = include_str!("templates/AGENTS.md");
 
 fn read_document(root: &Path, name: &str) -> Result<Option<(String, String)>> {
@@ -40,6 +41,10 @@ pub fn inspect(root: &Path) -> ProjectAssistant {
             Ok(None) => "missing",
             Err(_) => "unavailable",
         },
+        claude_md_missing: matches!(
+            fs::symlink_metadata(root.join(CLAUDE)),
+            Err(error) if error.kind() == ErrorKind::NotFound
+        ),
         soul: inspect_document(root, SOUL),
         role: inspect_document(root, ROLE),
     }
@@ -74,7 +79,7 @@ pub fn initialize(root: &Path, soul: Option<&str>, role: Option<&str>) -> Result
         (AGENTS, STANDARD_ENTRY),
         (SOUL, soul.unwrap_or(include_str!("templates/SOUL.md"))),
         (ROLE, role.unwrap_or_default()),
-        ("CLAUDE.md", "@AGENTS.md\n"),
+        (CLAUDE, "@AGENTS.md\n"),
     ] {
         let path = root.join(name);
         match OpenOptions::new().write(true).create_new(true).open(&path) {

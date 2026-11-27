@@ -123,7 +123,6 @@ export default function SessionsView({ navigate, scope }: {
   const candidates = useMemo(() => sessions?.filter((s) => (agent === "all" ? true : s.agent === agent))
       // 和 Project 徽章同一个判据：只有存在物理锚点的行才算这个 Project 的成员。
       // 徽章说"历史标签，已不决定任何事"的行不能一边显示成无归属、一边又被筛进来
-      // （M34 / M29：一个视图不能两个真相）。
       .filter((s) =>
         projectId === "all" ? true : projectId === "none"
           ? !s.workspace_path_id || !s.project_id

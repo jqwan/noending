@@ -1,9 +1,5 @@
 import { AGENT_LABELS, type Agent } from "../../types";
 
-/* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
- * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
- * provenance（AGENTS.md: Context Provenance Fidelity）。 */
-
 /** 无标题 / title 未知的 Session：不拿 root_agent_session_id 当标题糊用户。 */
 export const UNTITLED_SESSION = "未命名会话";
 
@@ -11,14 +7,12 @@ export const UNTITLED_SESSION = "未命名会话";
 export const NO_CWD = "未设置";
 
 /** 后端新增未知 Agent 时的兜底，不留空白单元格。 */
-export const UNKNOWN_AGENT = "未知 Agent";
-
-/** Workstream 标题为空串时的兜底（Session 可以未归属，但不能显示成空白格）。 */
+const UNKNOWN_AGENT = "未知 Agent";
 
 /** 有 cwd、但还没被 NoEnding 登记成 WorkspacePath 的 Project 单元格状态。 */
 export const PROJECT_PENDING = "待解析";
 
-/** 连 cwd 都没有的 Project 单元格状态（v0.2：Project 只能从工作目录派生）。 */
+/** 会话没有记录工作目录时的项目占位。 */
 export const PROJECT_NO_PATH = "无工作目录";
 
 export function agentDisplayLabel(agent: Agent | null | undefined): string {

@@ -1,14 +1,6 @@
 /* NoEnding - Settings Feature Styles */
 
 /* ---------- Settings ---------- */
-.settings-layout {
-  display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  gap: var(--space-3xl);
-  margin-top: 18px;
-}
-.settings-nav { display: flex; flex-direction: column; gap: var(--space-2xs); }
-.settings-nav .nav-item { padding: 6px 10px; }
 .settings-page { max-width: none; }
 .settings-pane section { margin-bottom: var(--space-lg); }
 .settings-pane section > h3:first-child { margin-top: 0; }
@@ -39,12 +31,6 @@
 .theme-preview-dark { background: #202020; border-color: #555; }
 .theme-preview-dark > span:first-child { background: #444; }
 .theme-preview-system { background: linear-gradient(90deg, #f5f5f3 50%, #202020 50%); }
-.settings-pane .row-line {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: var(--space-lg); padding: 11px 0; border-top: 1px solid var(--border-subtle);
-}
-.settings-pane .row-line:first-of-type { border-top: 0; }
-.settings-row-label { font-size: var(--font-size-body); }
 .settings-row-hint { color: var(--text-muted); font-size: var(--font-size-sm); margin-top: 1px; }
 
 /* ---------- Settings storage section ---------- */

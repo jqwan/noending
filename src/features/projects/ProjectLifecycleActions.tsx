@@ -16,7 +16,7 @@ export type LifecycleProject = Pick<Project, "id" | "name" | "visibility"> & {
   session_count: number;
 };
 
-export function canDeleteProject(project: LifecycleProject) {
+function canDeleteProject(project: LifecycleProject) {
   return project.visibility === "archived" && !project.purpose && project.session_count === 0;
 }
 

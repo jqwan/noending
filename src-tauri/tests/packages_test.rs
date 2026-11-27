@@ -5,7 +5,7 @@ use noending_lib::{
     packages::{self, Capabilities, Origin},
     skills::Roots,
 };
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, process::Command};
 
 struct Fixture {
     root: PathBuf,
@@ -22,6 +22,7 @@ impl Fixture {
                 codex: home.join(".codex"),
                 claude: home.join(".claude"),
                 pi: home.join(".pi/agent"),
+                dsh: home.join(".dsh"),
                 home,
             },
             root,
@@ -948,6 +949,129 @@ fn dsh_bundle_declarations_edit_the_desktop_profile_safely() {
     );
     assert!(noending_lib::packages::dsh::declare_bundle(&roots, "y").is_err());
     noending_lib::packages::dsh::undeclare_bundle(&roots, "y").unwrap();
+}
+
+#[test]
+fn dsh_uses_the_configured_home_and_preserves_declarations_on_failed_uninstall() {
+    const CHILD: &str = "NOENDING_TEST_DSH_UNINSTALL";
+    const BUNDLE: &str = "@example/dsh-extra";
+    const INITIAL: &str = r#"{
+        "dependencies": {"@example/dsh-extra": "1.0.0"},
+        "dsh": {"profile": {"bundles": ["@example/dsh-extra", "@example/keep"]}}
+    }"#;
+    const AFTER_NATIVE_REMOVAL: &str = r#"{
+        "dependencies": {},
+        "dsh": {"profile": {"bundles": ["@example/dsh-extra", "@example/keep"]}},
+        "nativeChange": true
+    }"#;
+
+    let mut f = Fixture::new();
+    if std::env::var_os(CHILD).is_none() {
+        #[cfg(windows)]
+        let shim = f.write(
+            "bin/dsh.cmd",
+            r#"@echo off
+if "%~1"=="--version" exit /b 0
+if not "%~1 %~2 %~3 %~4 %~5"=="plugin --profile desktop remove @example/dsh-extra" exit /b 2
+if exist "%DSH_HOME%\fail" (echo simulated DSH uninstall failure 1>&2 & exit /b 7)
+copy /y "%DSH_HOME%\after.json" "%DSH_HOME%\profiles\desktop\package.json" >nul
+"#,
+        );
+        #[cfg(unix)]
+        let shim = {
+            use std::os::unix::fs::PermissionsExt;
+
+            let shim = f.write(
+                "bin/dsh",
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$*" != "plugin --profile desktop remove @example/dsh-extra" ]; then exit 2; fi
+if [ -f "$DSH_HOME/fail" ]; then echo "simulated DSH uninstall failure" >&2; exit 7; fi
+cp "$DSH_HOME/after.json" "$DSH_HOME/profiles/desktop/package.json"
+"#,
+            );
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+            shim
+        };
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(shim.parent().unwrap().to_path_buf())
+            .chain(std::env::split_paths(&path));
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dsh_uses_the_configured_home_and_preserves_declarations_on_failed_uninstall",
+            ])
+            .current_dir(&f.root)
+            .env(CHILD, "1")
+            .env("DSH_HOME", "custom dsh home")
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let cwd = std::env::current_dir().unwrap();
+    f.roots.dsh = Roots::current().unwrap().dsh;
+    assert_eq!(f.roots.dsh, cwd.join("custom dsh home"));
+    assert_eq!(
+        noending_lib::platform::paths::resolve_agent_data_dir(noending_lib::domain::Agent::Dsh),
+        Some(f.roots.dsh.clone())
+    );
+    let default_manifest = f.write(
+        "home/.dsh/profiles/desktop/package.json",
+        r#"{"dsh":{"profile":{"bundles":["@example/default-home"]}}}"#,
+    );
+    let manifest = f.roots.dsh.join("profiles/desktop/package.json");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    fs::write(&manifest, INITIAL).unwrap();
+    fs::write(f.roots.dsh.join("after.json"), AFTER_NATIVE_REMOVAL).unwrap();
+    let fail = f.roots.dsh.join("fail");
+    fs::write(&fail, "").unwrap();
+
+    let inventory = f.discover();
+    assert!(inventory
+        .packages
+        .iter()
+        .all(|p| p.name != "@example/default-home"));
+    let bundle = entry(&inventory, "dsh", BUNDLE);
+    assert_eq!(PathBuf::from(&bundle.scopes[0].config_path), manifest);
+    let error = packages::uninstall(&f.roots, &inventory, &bundle.id).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("simulated DSH uninstall failure"));
+    assert_eq!(fs::read_to_string(&manifest).unwrap(), INITIAL);
+    assert_eq!(entry(&f.discover(), "dsh", BUNDLE).id, bundle.id);
+
+    fs::remove_file(&fail).unwrap();
+    packages::uninstall(&f.roots, &f.discover(), &bundle.id).unwrap();
+    let result: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    assert_eq!(result["nativeChange"], true);
+    assert!(result["dependencies"].get(BUNDLE).is_none());
+    assert_eq!(
+        result["dsh"]["profile"]["bundles"],
+        serde_json::json!(["@example/keep"])
+    );
+    assert!(f.discover().packages.iter().all(|p| p.name != BUNDLE));
+
+    // If only the declaration remains, the native command would reject a
+    // second removal of the same dependency. Finish by editing the profile.
+    fs::write(&manifest, AFTER_NATIVE_REMOVAL).unwrap();
+    fs::write(&fail, "").unwrap();
+    packages::uninstall(&f.roots, &f.discover(), &bundle.id).unwrap();
+    assert_eq!(
+        fs::read_to_string(&manifest).unwrap(),
+        format!("{}\n", serde_json::to_string_pretty(&result).unwrap())
+    );
+    assert!(fs::read_to_string(default_manifest)
+        .unwrap()
+        .contains("@example/default-home"));
 }
 
 #[test]

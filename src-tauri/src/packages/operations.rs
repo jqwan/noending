@@ -1,15 +1,16 @@
 //! Package mutations. Install/uninstall delegate to the owning Agent's native
 //! CLI so downloads, dependencies and install records stay Agent-managed;
-//! enable/disable writes the native toggle the Agent itself reads back. All
-//! writes are revision-checked against the discovery snapshot.
+//! enable/disable uses the native toggle and checks the discovery revision.
 
-use super::{files, Origin, PackageEntry, PackageInventory};
+use super::{dsh, files, Origin, PackageEntry, PackageInventory, Roots};
 use crate::domain::Agent;
 use crate::error::{other, Result};
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub const CLI_TIMEOUT_SECS: u64 = 180;
+static DSH_MUTATION: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageAction {
@@ -53,7 +54,7 @@ pub fn cli_args(agent: Agent, action: PackageAction, target: &str) -> Result<Vec
         (Agent::Antigravity, PackageAction::Disable) => vec!["plugin", "disable", target],
         _ => {
             return Err(other(
-                "不支持的插件包安装方式；本地目录安装仅支持 Pi 和 Antigravity",
+                "不支持的插件包操作；本地目录安装仅支持 Pi、DSH 和 Antigravity",
             ))
         }
     };
@@ -79,13 +80,26 @@ fn cli_target(entry: &PackageEntry) -> String {
     }
 }
 
-fn run_cli(agent: Agent, args: &[String]) -> Result<()> {
+fn run_dsh_cli(roots: &Roots, args: &[String]) -> Result<()> {
+    let home = roots
+        .dsh
+        .to_str()
+        .ok_or_else(|| other("DSH 数据目录包含无法传给 CLI 的字符"))?;
+    run_cli(
+        Agent::Dsh,
+        args,
+        &[(crate::platform::paths::agent_env_override(Agent::Dsh), home)],
+    )
+}
+
+fn run_cli(agent: Agent, args: &[String], env: &[(&str, &str)]) -> Result<()> {
     let installation = crate::platform::exec_resolver::resolve(agent)?;
-    let output = crate::platform::exec_runner::run(
+    let output = crate::platform::exec_runner::run_with_env(
         Path::new(&installation.executable_path),
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
         None,
         CLI_TIMEOUT_SECS,
+        env,
     )?;
     if !output.success {
         let reason = if output.exit_code.is_none() {
@@ -98,21 +112,24 @@ fn run_cli(agent: Agent, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Market-name install was removed: NoEnding never triggers a marketplace
-/// download through Codex/Claude selectors. Install args only carry local
-/// directories (Pi/Antigravity imports), see [`install_imported`].
-pub fn uninstall(inventory: &PackageInventory, id: &str) -> Result<PackageOperationResult> {
+pub fn uninstall(
+    roots: &Roots,
+    inventory: &PackageInventory,
+    id: &str,
+) -> Result<PackageOperationResult> {
     let entry = locate(inventory, id)?;
     let agent = entry
         .agent
         .ok_or_else(|| other("该插件包没有所属 Agent，无法卸载"))?;
     let args = cli_args(agent, PackageAction::Uninstall, &cli_target(entry))?;
     if agent == Agent::Dsh {
-        // Undeclare first: a failed removal then leaves an installed-but-
-        // undeclared package (benign), never a declared-but-missing one.
-        super::dsh::undeclare_bundle(&crate::skills::Roots::current()?, &entry.name)?;
+        let _guard = DSH_MUTATION
+            .lock()
+            .map_err(|_| other("DSH 插件操作锁不可用"))?;
+        dsh::uninstall_bundle(roots, &entry.name, || run_dsh_cli(roots, &args))?;
+    } else {
+        run_cli(agent, &args, &[])?;
     }
-    run_cli(agent, &args)?;
     Ok(PackageOperationResult {
         message: "插件包已卸载；已有终端请重新加载或重新打开".into(),
     })
@@ -148,13 +165,13 @@ pub fn set_enabled(
         }
         Some(Agent::ClaudeCode) => {
             let args = cli_args(Agent::ClaudeCode, action, &cli_target(entry))?;
-            run_cli(Agent::ClaudeCode, &args)?;
+            run_cli(Agent::ClaudeCode, &args, &[])?;
         }
         Some(Agent::Antigravity) => {
             // agy's enable/disable keys on the bare plugin name, matching
             // `plugin list --json`.
             let args = cli_args(Agent::Antigravity, action, &entry.name)?;
-            run_cli(Agent::Antigravity, &args)?;
+            run_cli(Agent::Antigravity, &args, &[])?;
         }
         _ => return Err(other("该 Agent 未提供插件启停开关")),
     }
@@ -274,11 +291,11 @@ pub fn install_local_marketplace(
             }
         }
         if *agent == Agent::Codex {
-            run_cli(Agent::Codex, &marketplace_add_args(&path))?;
+            run_cli(Agent::Codex, &marketplace_add_args(&path), &[])?;
         }
         for plugin in plugins {
             let args = marketplace_install_args(*agent, plugin, &path, &market_name)?;
-            run_cli(*agent, &args)?;
+            run_cli(*agent, &args, &[])?;
             installed += 1;
         }
     }
@@ -289,9 +306,7 @@ pub fn install_local_marketplace(
     })
 }
 
-/// Installs a local package directory into the requested Agents. Nothing is
-/// registered: each requested Agent must have a matching root manifest, and
-/// the native CLI is the only thing that records the install.
+/// Installs a local package directory through each selected Agent's CLI.
 pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperationResult> {
     let canonical = super::imported::canonical_dir(raw_path)?;
     let path = canonical.to_string_lossy().into_owned();
@@ -314,23 +329,13 @@ pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperatio
     let mut installed = 0;
     let mut failures = Vec::new();
     for agent in agents {
-        let outcome =
-            cli_args(*agent, PackageAction::Install, &path).and_then(|args| run_cli(*agent, &args));
-        if outcome.is_ok() && *agent == Agent::Dsh {
-            // The dependency landed; declare the bundle so the loader picks
-            // it up. The declared name is the source package's npm name.
-            let (source_name, _) = super::imported::read_manifest_meta(&canonical);
-            if source_name.is_empty() {
-                failures.push("DSH：源目录 package.json 缺少 name，无法声明插件包".into());
-                continue;
+        let outcome = cli_args(*agent, PackageAction::Install, &path).and_then(|args| {
+            if *agent == Agent::Dsh {
+                install_dsh(&canonical, &args)
+            } else {
+                run_cli(*agent, &args, &[])
             }
-            if let Err(error) =
-                super::dsh::declare_bundle(&crate::skills::Roots::current()?, &source_name)
-            {
-                failures.push(format!("DSH：{error}"));
-                continue;
-            }
-        }
+        });
         match outcome {
             Ok(()) => installed += 1,
             Err(error) => failures.push(format!("{}：{error}", agent.display_name())),
@@ -347,4 +352,17 @@ pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperatio
         message.push_str(&format!("；失败：{}", failures.join("；")));
     }
     Ok(PackageOperationResult { message })
+}
+
+fn install_dsh(source: &Path, args: &[String]) -> Result<()> {
+    let (name, _) = super::imported::read_manifest_meta(source);
+    if name.is_empty() {
+        return Err(other("源目录 package.json 缺少 name，无法声明插件包"));
+    }
+    let roots = Roots::current()?;
+    let _guard = DSH_MUTATION
+        .lock()
+        .map_err(|_| other("DSH 插件操作锁不可用"))?;
+    run_dsh_cli(&roots, args)?;
+    dsh::declare_bundle(&roots, &name)
 }

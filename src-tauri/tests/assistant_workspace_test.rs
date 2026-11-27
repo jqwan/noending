@@ -50,6 +50,7 @@ fn profile_roots(f: &Fixture) -> noending::skills::Roots {
         codex: home.join(".codex"),
         claude: home.join(".claude"),
         pi: home.join(".pi/agent"),
+        dsh: home.join(".dsh"),
         home,
     }
 }
@@ -191,14 +192,16 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     );
 }
 #[test]
-fn assistant_role_is_optional_and_repair_restores_only_the_managed_guide() {
+fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     let f = Fixture::new();
     let profile = create_profile(&f, "Curator");
     let peer = create_profile(&f, "Reviewer");
     let root = PathBuf::from(&profile.workspace_path.canonical_path);
     let guide = root.join("AGENTS.md");
+    let claude_entry = root.join("CLAUDE.md");
     let guide_template = std::fs::read_to_string(&guide).unwrap();
     assert_eq!(profile.files.guide_state, "current");
+    assert!(!profile.files.claude_md_missing);
     assert_eq!(
         guide_template,
         std::fs::read_to_string(
@@ -210,12 +213,13 @@ fn assistant_role_is_optional_and_repair_restores_only_the_managed_guide() {
     assert_eq!(profile.files.role.state, "current");
     assert_eq!(std::fs::read_to_string(root.join("ROLE.md")).unwrap(), "");
     assert_eq!(
-        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        std::fs::read_to_string(&claude_entry).unwrap(),
         "@AGENTS.md\n"
     );
 
     std::fs::write(&guide, "测试档案中的非标准入口").unwrap();
     std::fs::remove_file(root.join("ROLE.md")).unwrap();
+    std::fs::remove_file(&claude_entry).unwrap();
     let external = f
         .project_detail(&profile.project.id)
         .unwrap()
@@ -223,9 +227,15 @@ fn assistant_role_is_optional_and_repair_restores_only_the_managed_guide() {
         .unwrap()
         .files;
     assert_eq!(external.guide_state, "outdated");
+    assert!(external.claude_md_missing);
     assert_eq!(external.role.state, "missing");
     let prepared = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
     assert_eq!(prepared.guide_state, "current");
+    assert!(!prepared.claude_md_missing);
+    assert_eq!(
+        std::fs::read_to_string(&claude_entry).unwrap(),
+        "@AGENTS.md\n"
+    );
     assert_eq!(std::fs::read_to_string(&guide).unwrap(), guide_template);
     assert_eq!(prepared.role.state, "current");
     assert!(prepared.role.content.is_empty());

@@ -409,47 +409,9 @@ button.btn.conversation-jump:active {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.path-text-with-icon {
-  display: inline-flex;
-  align-items: flex-start;
-  gap: var(--space-icon);
-  max-width: 100%;
-  text-align: left;
-}
-.path-text-with-icon .ui-icon {
-  width: var(--icon-size-xs);
-  height: var(--icon-size-xs);
-  flex-shrink: 0;
-  margin-top: 2.5px;
-  color: var(--text-muted);
-}
-.path-text-with-icon > span {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-all;
-}
-
-
-.settings-nav { align-self: start; position: sticky; top: 0; }
 .settings-pane { min-width: 0; }
-.settings-pane .row-line { flex-wrap: wrap; }
-@media (max-width: 1100px) {
-  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-xl); }
-  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: var(--space-xs); }
-  .settings-nav .nav-item { width: auto; }
-}
 
 .board-page, .agents-page, .settings-page, .session-detail, .task-detail, .project-detail { max-width: none; }
-.path-draft-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 10px; }
-.path-draft-list > .list-row { gap: var(--space-md); flex-wrap: wrap; }
-.path-draft-name { min-width: 0; flex: 1; }
-.path-draft-name > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
-.path-add-actions { gap: var(--space-sm); margin-bottom: 8px; flex-wrap: wrap; }
-.path-list-editor .workspace-path-field > .row { flex-wrap: wrap; }
-/* 迷你列表行（项目详情的会话与任务）：图标 + 标题同行，标题截断。 */
-
-
 
 /* 会话看板的运行中伪行/伪卡：可点击、与真实会话行视觉同族但有一道 accent 边。 */
 

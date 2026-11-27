@@ -16,7 +16,7 @@ import type { TerminalSummary, Session, ProjectCardData } from "../types";
 vi.mock("../api", () => ({
   api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
-    getAgentStatus: vi.fn(), continueSessionDesktop: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
+    getAgentStatus: vi.fn(), continueSessionDesktop: vi.fn(), launchEmbeddedResume: vi.fn(),
     terminalList: vi.fn(), terminalReconnect: vi.fn(),
     listSessions: vi.fn(),
     listWorkstreamCards: vi.fn(),
@@ -29,7 +29,6 @@ beforeEach(() => {
   Object.values(removedTargets).forEach(ids => ids.clear());
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
   vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
-  vi.mocked(api.terminalForSession).mockReset().mockResolvedValue(null);
   vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue({ terminal_id: "reconnected" } as never);
   vi.mocked(api.launchEmbeddedResume).mockReset().mockResolvedValue({ terminal_id: "spawned" } as never);
   viewState.clear();

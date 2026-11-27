@@ -10,6 +10,7 @@ pub struct AssistantFile {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectAssistant {
     pub guide_state: &'static str,
+    pub claude_md_missing: bool,
     pub soul: AssistantFile,
     pub role: AssistantFile,
 }

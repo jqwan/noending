@@ -26,14 +26,9 @@ use crate::adapters::{AgentCommand, DesktopResume};
 use crate::agent_runtime::AgentRuntimeOverrides;
 use crate::domain::Agent;
 use crate::error::{other, Result};
-use crate::storage::{new_id, now, Db};
+use crate::storage::{new_id, Db};
 
-/// How a prepared launch decided the directory the Agent will start in
-///. This is a *user-visible* fact, not an implementation detail:
-/// every tier below the one the flow normally uses has to be sayable out loud
-/// in the UI, and it is part of the state fingerprint, so a tier that
-/// changes between Preview and Launch aborts the launch instead of quietly
-/// moving the Agent somewhere else.
+/// Resolution source shown in the UI and checked before spawning the Agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CwdSource {
@@ -140,50 +135,25 @@ impl LaunchWorkspace {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PreparedLaunch {
-    pub id: String,
     pub mode: String, // "new" | "resume"
     pub agent: Agent,
     pub session_id: Option<String>,
-    /// The directory the Agent WILL start in — authoritative: the spawn step
-    /// uses this value and nothing else; re-reading `sessions.cwd` let
-    /// background discovery move a launch between Preview and Launch.
+    /// Working directory passed to the spawn step.
     pub cwd: Option<String>,
-    /// Which tier of [`LaunchWorkspace`] produced `cwd`, so the UI can name it
-    /// and a downgrade can never be silent. Part of `state_fingerprint`.
-    #[serde(default)]
     pub cwd_resolution: CwdResolution,
-    /// NoEnding's runtime override intent, frozen at Preview time. `None`
-    /// fields mean *Agent default* — Launch must pass no corresponding flag.
-    /// It is part of `state_fingerprint`, so changing an override between
-    /// Preview and Launch invalidates the preview instead of silently
-    /// launching with parameters the user never saw.
+    /// Overrides for this launch. Empty fields defer to the Agent.
     pub runtime: AgentRuntimeOverrides,
     /// None inherits saved settings; Some(empty) explicitly uses native defaults.
-    #[serde(default)]
     pub runtime_override: Option<AgentRuntimeOverrides>,
-    /// Set when Continue for this session means opening the Agent's desktop
-    /// app instead of the terminal. The route is decided per ROOT member's
-    /// SOURCE FORMAT at prepare time (`AgentAdapter::continue_route`) — the
-    /// same format facts the fingerprint already covers — and frozen at
-    /// Preview like every other launch fact. `None` = the terminal CLI path.
-    #[serde(default)]
+    /// Desktop route selected for the root member's source format.
     pub desktop_open: Option<DesktopResume>,
-    /// True when the spawn step must run the CLI inside NoEnding's embedded
-    /// terminal (`crate::terminal`) instead of an external window. Frozen at
-    /// Preview by the command layer from the stored open-method preference;
-    /// like `desktop_open` it rides on static format facts, so it is not
-    /// separately hashed. `desktop_open` and `embedded` are mutually
-    /// exclusive — a desktop route never carries the embedded flag.
-    #[serde(default)]
+    /// Run the CLI in an embedded terminal. Desktop routes take precedence.
     pub embedded: bool,
-    /// An explicitly supplied user turn, frozen for this New/Resume launch.
-    /// It is not generated Context.
-    #[serde(default)]
+    /// User-provided first message or follow-up.
     pub initial_message: Option<String>,
     pub state_fingerprint: String,
-    pub prepared_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,10 +181,7 @@ pub struct EmbeddedSpawn<'a> {
     ) -> Result<crate::platform::launcher::LaunchOutcome>,
 }
 
-pub struct SessionLauncher {
-    /// Where launch artifacts go: NoEnding Home's `runtime/`.
-    pub runtime_dir: PathBuf,
-}
+pub struct SessionLauncher;
 
 impl SessionLauncher {
     /// Prepare New Session:
@@ -261,7 +228,6 @@ impl SessionLauncher {
         )?;
 
         Ok(PreparedLaunch {
-            id: new_id(),
             mode: "new".into(),
             agent,
             session_id: None,
@@ -273,7 +239,6 @@ impl SessionLauncher {
             embedded: false,
             initial_message: None,
             state_fingerprint: fingerprint,
-            prepared_at: now(),
         })
     }
 
@@ -341,7 +306,6 @@ impl SessionLauncher {
         )?;
 
         Ok(PreparedLaunch {
-            id: new_id(),
             mode: "resume".into(),
             agent: session.agent,
             session_id: Some(session_id.to_string()),
@@ -357,7 +321,6 @@ impl SessionLauncher {
             embedded: false,
             initial_message: None,
             state_fingerprint: fingerprint,
-            prepared_at: now(),
         })
     }
 
@@ -397,8 +360,7 @@ impl SessionLauncher {
     /// The injected functions replace ONLY the OS calls: `spawn` opens a
     /// terminal and runs the Agent CLI, `open` dispatches a desktop-open URI
     /// (deep link / app activation). Every integrity gate stays on the same
-    /// path in the same order: state fingerprint (Preview-Launch Identity)
-    /// and the single-use capability consumed by the command layer.
+    /// path, including the state fingerprint check.
     ///
     /// Exists so integration tests can drive the whole
     /// prepare → launch_prepared chain without opening a real Terminal
@@ -619,19 +581,6 @@ impl SessionLauncher {
                 terminal_id: outcome.terminal_id,
             })
         }
-    }
-
-    pub fn new_session_in(
-        &self,
-        db: &Db,
-        agent: Agent,
-        cwd: Option<&str>,
-        workspace: &LaunchWorkspace,
-    ) -> Result<LaunchResult> {
-        let prepared = self.prepare_new_in(db, agent, cwd, workspace)?;
-        // One-shot launches have no embedded surface: the terminal subpage
-        // attach protocol only exists for prepared resume launches.
-        self.launch_prepared_in(db, &prepared, workspace, None)
     }
 }
 

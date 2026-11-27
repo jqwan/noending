@@ -22,7 +22,7 @@ export const FORMAT_CAPS: Record<string, SessionFormatCaps> = {
 };
 
 /** 会话所属的格式 id：antigravity 靠 source_kind 区分两个存储，其余格式即 agent。 */
-export function formatIdOf(agent: Agent, sourceKind: string): string {
+function formatIdOf(agent: Agent, sourceKind: string): string {
   if (agent !== "antigravity") return agent;
   return sourceKind.includes("cli") ? "antigravity_cli" : "antigravity_desktop";
 }

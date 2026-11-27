@@ -5,7 +5,7 @@ import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 
 /** 启动结果：这次启动经过哪些步骤、执行的命令与说明。 */
-export default function LaunchResultModal({ result, onClose }: {
+function LaunchResultModal({ result, onClose }: {
   result: LaunchResult;
   onClose: () => void;
 }) {
@@ -25,7 +25,7 @@ export default function LaunchResultModal({ result, onClose }: {
 let openDetails: ((r: LaunchResult) => void) | null = null;
 
 /** 从任何调用点打开「启动详情」— host 挂在 AppShell，页面卸载也不受影响。 */
-export function showLaunchDetails(result: LaunchResult) {
+function showLaunchDetails(result: LaunchResult) {
   openDetails?.(result);
 }
 

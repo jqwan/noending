@@ -22,8 +22,8 @@ export interface SkillResource {
   revision: string; registered: boolean; error: string | null;
 }
 export interface SkillInventory { resources: SkillResource[]; locations: SkillLocation[]; warnings: string[] }
-export interface SkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
-export interface SkillProjectWorkspaceScope { workspace_path_id: string; path: string; entries: SkillScopeEntry[] }
+interface SkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
+interface SkillProjectWorkspaceScope { workspace_path_id: string; path: string; entries: SkillScopeEntry[] }
 export interface SkillProjectScope { project_id: string; project_name: string; workspaces: SkillProjectWorkspaceScope[]; enabled: boolean; full: boolean }
 export interface SkillResourceDetail { resource: SkillResource; content: string }
 export type SkillSourceKind = "library" | "agent" | "external";
@@ -35,9 +35,9 @@ export interface SkillOperationResult { message: string }
 
 /** Plugin packages — mirror of src-tauri/src/packages (offline discovery). */
 export type PackageOrigin = "market" | "bundled" | "noending_managed" | "local" | "profile";
-export type PackageScope = "user" | "project" | "local";
+type PackageScope = "user" | "project" | "local";
 export type PackageToggleState = "enabled" | "disabled" | "unset" | "unknown";
-export interface PackageScopeState {
+interface PackageScopeState {
   scope: PackageScope;
   state: PackageToggleState;
   config_path: string;
@@ -46,7 +46,7 @@ export interface PackageScopeState {
   config_exists: boolean;
   project_path: string | null;
 }
-export interface PackageCapabilities { uninstall: boolean; toggle: boolean }
+interface PackageCapabilities { uninstall: boolean; toggle: boolean }
 export interface PackageEntry {
   id: string;
   agent: Agent | null;
@@ -61,12 +61,12 @@ export interface PackageEntry {
   revision: string;
   error: string | null;
 }
-export interface PackageContents { skills: string[]; mcp_files: string[] }
+interface PackageContents { skills: string[]; mcp_files: string[] }
 export interface PackageDetail { entry: PackageEntry; contents: PackageContents; root: string | null }
 export interface PackageInventory { packages: PackageEntry[]; warnings: string[] }
 export interface PackageOperationResult { message: string }
-export interface PackageMarketplacePlugin { name: string; description: string }
-export interface PackageImportOption {
+interface PackageMarketplacePlugin { name: string; description: string }
+interface PackageImportOption {
   agent: Agent;
   manifest: string;
   /** Package name, or the marketplace's own name. */
@@ -75,11 +75,11 @@ export interface PackageImportOption {
   /** Empty for single packages; the marketplace's plugin list otherwise. */
   plugins: PackageMarketplacePlugin[];
 }
-export type PackageImportKind = "package" | "marketplace";
+type PackageImportKind = "package" | "marketplace";
 export interface PackageImportPreview { path: string; kind: PackageImportKind; options: PackageImportOption[] }
 
 /** Task archive state; there is no active/completed classification. */
-export type WorkstreamVisibility = "normal" | "archived";
+type WorkstreamVisibility = "normal" | "archived";
 /** `missing` = Git evidence is gone; ordinary projects retain their identity. */
 export type WorkspaceGitState = "none" | "detected" | "missing";
 export type ProjectKind = "git" | "single_directory" | "directory_group";
@@ -137,10 +137,10 @@ export interface AddProjectPathResult {
 }
 
 /** Why the string is not a WorkspacePath right now (`PathProbe.status`）。 */
-export type ProbeStatus = "ok" | "unresolvable" | "reserved" | "home";
+type ProbeStatus = "ok" | "unresolvable" | "reserved" | "home";
 
 /** The Project a path would land in. `known: false` = 提交后会新建这个名字。 */
-export interface ProjectHint {
+interface ProjectHint {
   id: string | null;
   name: string | null;
   known: boolean;
@@ -198,7 +198,7 @@ export interface ProjectDetailData {
 }
 
 /** A task associated with a Project through any working path. */
-export interface ProjectWorkstreamRow {
+interface ProjectWorkstreamRow {
   workstream: Workstream;
 }
 
@@ -254,7 +254,7 @@ export interface Session {
   cwd: string | null;
   /** Read projection of `workspace_path_id → workspace_paths.project_id`; never stored. */
   project_id: string | null;
-  /** Null for a Session with no cwd — v0.2 never fabricates a path. */
+  /** Null when the session has no recorded working directory. */
   workspace_path_id: string | null;
   /** 会话可跟踪多个任务，不影响目录和项目归属。 */
   /** 若本会话是独立 fork，其来源会话（仅 provenance；生命周期完全独立）。 */
@@ -292,7 +292,7 @@ export type SessionListItem = Pick<Session,
 >;
 
 /** `role` 只有 user | assistant——Conversation 的全部形状。 */
-export type SessionMessageRole = "user" | "assistant";
+type SessionMessageRole = "user" | "assistant";
 
 /** 会话消息：只来自根源的用户可见 prose。 */
 export interface SessionMessage {
@@ -372,7 +372,7 @@ export interface SummaryDocument {
   items: SummaryItem[];
 }
 
-export interface SummaryFreshness {
+interface SummaryFreshness {
   refreshed_at: string | null;
   pending_messages: number | null;
   history_rewritten_sessions: number;
@@ -382,28 +382,8 @@ export interface SummaryFreshness {
   pending: boolean;
 }
 
-export interface SyncCheck {
-  started_at: string | null;
-  finished_at: string | null;
-  outcome: "success" | "partial" | "failed" | "missing" | "cancelled" | null;
-  checked_at: string | null;
-}
-
-export interface FreshnessView {
-  kind: "session" | "task" | "project" | null;
-  id: string | null;
-  all_sources: SyncCheck;
-  sources: { id: string; agent: Agent; path: string; check: SyncCheck }[];
-  sessions: {
-    total: number; checked: number; unknown: number; failed: number; missing: number;
-    oldest_checked_at: string | null; latest_checked_at: string | null;
-  };
-  session_check: SyncCheck | null;
-  summary: SummaryFreshness | null;
-}
-
 /** Session 的事项摘要（后端 `SessionContextFields`）。 */
-export interface SessionContextFields {
+interface SessionContextFields {
   summary: SummaryDocument;
 }
 
@@ -454,7 +434,7 @@ export interface WorkstreamContextView {
 }
 
 /** 显式更新的结果词汇（后端 `ContextUpdateStatus`）。全部是成功。 */
-export type ContextUpdateStatus = "updated" | "partial" | "no_change" | "skipped";
+type ContextUpdateStatus = "updated" | "partial" | "no_change" | "skipped";
 
 export interface SessionUpdateOutcome {
   session_id: string;
@@ -482,7 +462,7 @@ export interface IngestTaskStatus {
 }
 
 /** `get_session_detail.workspace_path` — the derived, read-only facts. */
-export interface SessionWorkspacePath {
+interface SessionWorkspacePath {
   id: string;
   canonical_path: string;
   exists: boolean;
@@ -490,7 +470,7 @@ export interface SessionWorkspacePath {
   project_name: string;
 }
 
-export interface SessionMessageStats {
+interface SessionMessageStats {
   user_messages: number;
   assistant_messages: number;
 }
@@ -566,45 +546,18 @@ export interface SessionMessageWindow {
  * cwd 的解析层级——Agent 的启动目录由谁决定。后端 `CwdSource`，
  * `rename_all = "snake_case"`。
  */
-export type CwdSource =
+type CwdSource =
   | "explicit"
   | "session_cwd"
   | "default_workspace"
   | "unresolved";
 
-/**
- * `PreparedLaunch.cwd` 的来源说明。它是预览的一部分，也是 Launch 指纹的一部分，
- * 所以 UI 显示的就是 Agent 真正会拿到的那个决定（Preview-Launch Identity）。
- * `note` 已由 Rust 写成中文，可直接渲染；它不进哈希，改文案不会让预览失效。
- */
+/** 启动前显示的工作目录及其解析来源。 */
 export interface CwdResolution {
   source: CwdSource;
-  /** 与 `PreparedLaunch.cwd` 恒等；null 表示没有解析出目录。 */
   cwd: string | null;
-  /** 不是这条流程通常的起点——必须以可见方式提示，不能静默。 */
   fallback: boolean;
   note: string | null;
-}
-
-export interface PreparedLaunch {
-  id: string;
-  /** 新会话启动时交给 Agent 的首条消息。 */
-  initial_message?: string | null;
-  mode: "new" | "resume";
-  agent: Agent;
-  session_id?: string | null;
-  cwd?: string | null;
-  /** `cwd` 由哪一层决定，以及发生 fallback 时的说明。 */
-  cwd_resolution: CwdResolution;
-  /** NoEnding 的 override 意图（null = Agent default），与 Launch 完全一致。 */
-  runtime: AgentRuntimeOverrides;
-  runtime_override?: AgentRuntimeOverrides | null;
-  /** 非 null：继续 = 打开 Agent 桌面应用（CLI 无法恢复该会话的源格式）。 */
-  desktop_open?: { uri: string; note: string } | null;
-  /** true：继续 = 在 NoEnding 内嵌终端里跑 CLI（与 desktop_open 互斥）。 */
-  embedded?: boolean;
-  state_fingerprint: string;
-  prepared_at: string;
 }
 
 export interface LaunchResult {
@@ -617,18 +570,17 @@ export interface LaunchResult {
 
 // ---------------- Embedded terminal（内嵌终端子页） ----------------
 
-export interface TerminalActivity {
+interface TerminalActivity {
   state: "unknown" | "idle" | "working" | "waiting" | "completed" | "failed" | "interrupted";
   revision: number;
   unread: boolean;
 }
 
-/** terminal_list / terminal_for_session 的一行：一个内嵌终端的运行时事实。 */
+/** 一个内嵌终端的状态快照。 */
 export interface TerminalSummary {
   terminal_id: string;
   /** 当前原生会话尚未被摄入或身份未知时为 null。 */
   session_id: string | null;
-  /** 首次绑定前的跟踪意图，绑定后清空。只在内存中保存。 */
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   activity?: TerminalActivity;
@@ -678,7 +630,7 @@ export const AGENT_LABELS: Record<Agent, string> = {
 
 // Agent Runtime Configuration
 
-export type RuntimeFieldCapability = "unsupported" | "free_form" | "suggested" | "discoverable";
+type RuntimeFieldCapability = "unsupported" | "free_form" | "suggested" | "discoverable";
 
 /** null 一律表示 Agent default：NoEnding 不传该参数，由 Agent 自己决定。 */
 export interface AgentRuntimeOverrides {
@@ -693,9 +645,9 @@ export interface ExtractionSettings {
 }
 
 /** dynamic = 来自 Agent CLI；suggested = NoEnding 建议值；unavailable = 获取失败。 */
-export type ModelSource = "not_loaded" | "dynamic" | "suggested" | "unavailable";
+type ModelSource = "not_loaded" | "dynamic" | "suggested" | "unavailable";
 
-export interface RuntimeModelOption {
+interface RuntimeModelOption {
   id: string;
   display_name: string | null;
   provider: string | null;
@@ -771,12 +723,12 @@ export interface OperationStatus {
 // 字段名与后端一致（snake_case）；首次开启时房间尚不存在，room=null。
 
 export type CollaborationRunStatus = "starting" | "active" | "stopped";
-export type CollaborationConnectionState = "pending" | "connected" | "disconnected" | "left";
+type CollaborationConnectionState = "pending" | "connected" | "disconnected" | "left";
 /** 处理阶段与连接状态独立：有心跳只说明参与通道活着。 */
-export type CollaborationPhase = "listening" | "processing";
-export type CollaborationWakeStatus = "pending" | "opened" | "failed";
+type CollaborationPhase = "listening" | "processing";
+type CollaborationWakeStatus = "pending" | "opened" | "failed";
 export type CollaborationWakeMethod = "terminal" | "desktop";
-export type CollaborationMessageKind = "text" | "start" | "stop";
+type CollaborationMessageKind = "text" | "start" | "stop";
 
 export interface CollaborationMessage {
   id: string;
@@ -811,7 +763,7 @@ export interface CollaborationMemberState {
   error: string | null;
 }
 
-export interface CollaborationRunView {
+interface CollaborationRunView {
   id: string;
   status: CollaborationRunStatus;
   started_at: string;
@@ -819,7 +771,7 @@ export interface CollaborationRunView {
 }
 
 /** 房间配置：成员选择与负责人属于配置，与某次运行的参与状态分开。 */
-export interface CollaborationRoomConfig {
+interface CollaborationRoomConfig {
   id: string;
   revision: number;
   /** 保存唤醒方式：停止后再次开启沿用原选择，不用重新推断能力。 */
@@ -874,6 +826,7 @@ export type AssistantPatch = { file: AssistantFileName; content: string };
 
 export interface ProjectAssistant {
   guide_state: AssistantFile["state"] | "outdated";
+  claude_md_missing: boolean;
   soul: AssistantFile;
   role: AssistantFile;
 }

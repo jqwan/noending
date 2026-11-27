@@ -24,10 +24,8 @@ vi.mock("../../api", () => ({
     getAgentStatus: vi.fn(),
     getAgentRuntimeSettings: vi.fn(),
     refreshAgentRuntimeOptions: vi.fn(),
-    setAgentLaunchEnabled: vi.fn(),
     redetectAgent: vi.fn(),
     getDefaultAgent: vi.fn(),
-    setDefaultAgent: vi.fn(),
     listIngestSources: vi.fn(),
     addIngestSource: vi.fn(),
     removeIngestSource: vi.fn(),
@@ -40,8 +38,6 @@ vi.mock("../../api", () => ({
     listSessions: vi.fn(),
     getSessionCountsByAgent: vi.fn(),
     getAgentLatestActivities: vi.fn(),
-    prepareNewSession: vi.fn(),
-    cancelPrepared: vi.fn(),
   },
 }));
 
@@ -128,13 +124,11 @@ beforeEach(() => {
   clearAgentsCache();
   vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
   vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
-  vi.mocked(api.setAgentLaunchEnabled).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.redetectAgent).mockReset().mockResolvedValue(runtimeFixture());
   vi.mocked(api.addIngestSource).mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
   vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
-  vi.mocked(api.setDefaultAgent).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.listIngestSources).mockReset().mockResolvedValue(mockSources);
   vi.mocked(api.getIngestionStatus).mockReset().mockResolvedValue(mockIngestStatus);
   vi.mocked(api.reconcileSource).mockReset().mockResolvedValue({ queued: true });

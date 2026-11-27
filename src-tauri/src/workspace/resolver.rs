@@ -245,10 +245,6 @@ impl GitAccess {
         }
     }
 
-    pub fn is_available(&self) -> bool {
-        self.program.is_some()
-    }
-
     /// Ask git about this directory, never an enclosing repository.
     pub fn probe(&self, dir: &Path) -> GitProbe {
         let Some(program) = self.program.as_deref() else {

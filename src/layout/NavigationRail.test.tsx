@@ -28,7 +28,7 @@ it("highlights the section that owns the route and returns to its board when cli
     [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
     [{ view: "project", projectId: "p1", fromAssistants: true }, "智能体", { view: "projects", assistantOnly: true }],
     [{ view: "skill", resourceId: "skill1" }, "技能", { view: "skills" }],
-    [{ view: "settings", section: "appearance" }, "设置", { view: "settings" }],
+    [{ view: "settings" }, "设置", { view: "settings" }],
   ];
   const navigate = vi.fn();
   const { rerender } = render(<NavigationRail route={cases[0][0]} navigate={navigate} />);

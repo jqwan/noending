@@ -209,7 +209,6 @@
   letter-spacing: 0.4px;
   font-weight: var(--weight-semibold);
 }
-.sidebar .spacer { flex: none; min-height: 12px; }
 
 /* 看板筛选卡片钉在滚动区顶部：页头已在滚动区之外，滚动条不再经过标题栏。 */
 .board-toolbar {
@@ -345,7 +344,6 @@
   margin-inline-end: var(--space-xs);
 }
 .toolbar { display: flex; gap: var(--space-sm); align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
-.divider { border: 0; border-top: 1px solid var(--border-subtle); margin: 26px 0; }
 
 /* breadcrumb back link (Detail 页) */
 .back-link {
@@ -364,14 +362,6 @@
 .back-link:hover { color: var(--text-primary); }
 
 /* section label — small uppercase section titles */
-.section-label {
-  font-size: var(--font-size-sm);
-  font-weight: var(--weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--text-secondary);
-  margin: 0 0 8px;
-}
 
 .panel-resizer { position: absolute; width: var(--panel-resizer-hit-width); cursor: col-resize; touch-action: none; }
 .sidebar-resizer { top: var(--titlebar-height); bottom: var(--workspace-inset); left: calc(var(--rail-width) + var(--sidebar-width) - (var(--panel-resizer-hit-width) + 1px) / 2); z-index: 8; }

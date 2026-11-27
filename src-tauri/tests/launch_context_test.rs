@@ -226,10 +226,7 @@ fn prepare_resume_without_writing() {
 
     let session = session_row(&db, Agent::Codex, Some(now()), None);
 
-    let tmp_dir = std::env::temp_dir().join(format!("noending-launcher-{}", new_id()));
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: tmp_dir.clone(),
-    };
+    let launcher = launcher::SessionLauncher;
 
     let prepared = launcher
         .prepare_resume_in(&db, &session.id, &LaunchWorkspace::default())
@@ -238,8 +235,6 @@ fn prepare_resume_without_writing() {
     assert_eq!(prepared.mode, "resume");
 
     // INVARIANT: nothing written
-
-    assert!(!tmp_dir.exists());
 }
 
 /// Preview-Launch Identity covers the Runtime override intent too: an
@@ -250,9 +245,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
     let db = open_db("stale-runtime-detection");
     let ws = ws_row(&db, "test ws");
 
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: std::env::temp_dir(),
-    };
+    let launcher = launcher::SessionLauncher;
     let prepared = launcher
         .prepare_new_in(
             &db,
@@ -329,9 +322,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
     )
     .unwrap();
 
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: std::env::temp_dir(),
-    };
+    let launcher = launcher::SessionLauncher;
     let prepared = launcher
         .prepare_new_in(
             &db,
@@ -366,96 +357,4 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
     // already-prepared intent — it just makes the preview stale.
     noending::agent_runtime::set_runtime_overrides(&db, Agent::Codex, &Default::default()).unwrap();
     assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
-}
-
-#[test]
-fn prepared_launch_concurrent_consumption_is_exclusive() {
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    let db = open_db("concurrent-prep");
-    let ws = ws_row(&db, "test ws");
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: std::env::temp_dir(),
-    };
-    let prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(&task_cwd(&db, &ws.id)),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-
-    let map = Arc::new(Mutex::new(HashMap::new()));
-    map.lock()
-        .unwrap()
-        .insert(prepared.id.clone(), prepared.clone());
-
-    let num_threads = 8;
-    let mut handles = Vec::new();
-
-    for _ in 0..num_threads {
-        let map_clone = Arc::clone(&map);
-        let pid = prepared.id.clone();
-        handles.push(std::thread::spawn(move || {
-            noending::commands::consume_prepared_launch(&map_clone, &pid)
-        }));
-    }
-
-    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let successes = results.iter().filter(|r| r.is_ok()).count();
-    let failures = results.iter().filter(|r| r.is_err()).count();
-
-    // INVARIANT: Exactly one consumer succeeds; all other 7 fail.
-    assert_eq!(successes, 1, "exactly 1 thread must succeed in consuming");
-    assert_eq!(failures, num_threads - 1, "all other threads must fail");
-}
-
-#[test]
-fn prepared_launch_lazy_ttl_cleanup() {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    let db = open_db("ttl-cleanup-prep");
-    let ws = ws_row(&db, "test ws");
-    let launcher = launcher::SessionLauncher {
-        runtime_dir: std::env::temp_dir(),
-    };
-    let mut stale_prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(&task_cwd(&db, &ws.id)),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-    // Simulate an old timestamp: 35 minutes ago
-    let old_ts = chrono::Utc::now() - chrono::Duration::seconds(35 * 60);
-    stale_prepared.prepared_at = old_ts.to_rfc3339();
-
-    let fresh_prepared = launcher
-        .prepare_new_in(
-            &db,
-            Agent::Codex,
-            Some(&task_cwd(&db, &ws.id)),
-            &LaunchWorkspace::default(),
-        )
-        .unwrap();
-
-    let map = Mutex::new(HashMap::new());
-    {
-        let mut guard = map.lock().unwrap();
-        guard.insert(stale_prepared.id.clone(), stale_prepared.clone());
-        guard.insert(fresh_prepared.id.clone(), fresh_prepared.clone());
-    }
-
-    // 1. Attempting to consume stale prepared fails because TTL pruned it
-    let stale_res = noending::commands::consume_prepared_launch(&map, &stale_prepared.id);
-    assert!(stale_res.is_err());
-
-    // 2. Fresh prepared launch is still present and can be consumed
-    let fresh_res = noending::commands::consume_prepared_launch(&map, &fresh_prepared.id);
-    assert!(fresh_res.is_ok());
-    assert_eq!(fresh_res.unwrap().id, fresh_prepared.id);
 }

@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
 
-  IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
+  CwdResolution, IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
-  Project, ProjectCardData, ProjectDetailData, ProjectWorkstreamRow, ProjectContextView, ProjectUpdateOutcome,
+  Project, ProjectCardData, ProjectDetailData, ProjectContextView, ProjectUpdateOutcome,
   AddProjectPathResult,
   RecentWorkspacePath, WorkspaceSettings,
 
@@ -68,8 +68,6 @@ export const api = {
   listProjectCards: () => invoke<ProjectCardData[]>("list_project_cards"),
   getProjectDetail: (projectId: string) =>
     invoke<ProjectDetailData>("get_project_detail", { projectId }),
-  listProjectWorkstreams: (projectId: string) =>
-    invoke<ProjectWorkstreamRow[]>("list_project_workstreams", { projectId }),
   renameProject: (projectId: string, name: string) =>
     invoke<Project>("rename_project", { projectId, name }),
   archiveProject: (projectId: string) => invoke<Project>("archive_project", { projectId }),
@@ -91,8 +89,6 @@ export const api = {
   setNoendingHome: (newHome: string) =>
     invoke<WorkspaceSettings>("set_noending_home", { newHome }),
 
-  listWorkstreams: (projectId?: string) =>
-    invoke<Workstream[]>("list_workstreams", { projectId: projectId ?? null }),
   listWorkstreamCards: () => invoke<WorkstreamCardData[]>("list_workstream_cards"),
   createWorkstream: (title: string,description: string,projectIds: string[] = []) =>
     invoke<Workstream>("create_workstream",{title,description,projectIds}),
@@ -185,8 +181,6 @@ export const api = {
   /** 最近一次后台摄入任务的结果（高级维护页展示）。 */
   getIngestionStatus: () => invoke<IngestTaskStatus | null>("get_ingestion_status"),
 
-  getFreshness: (kind?: "session" | "task" | "project", id?: string) =>
-    invoke<import("./types").FreshnessView>("get_freshness", { kind: kind ?? null, id: id ?? null }),
 
   // Explicit Context update (read + one-click update)
   /** Session 摘要 + 待更新状态。纯读取，不摄入、不调用模型。 */
@@ -222,16 +216,12 @@ export const api = {
   regenerateWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
 
-  prepareNewSession: (agent: Agent, cwd?: string, runtime?: AgentRuntimeOverrides) =>
-    invoke<import("./types").PreparedLaunch>("prepare_new_session", {
+  previewNewSession: (agent: Agent, cwd?: string, runtime?: AgentRuntimeOverrides) =>
+    invoke<CwdResolution>("preview_new_session", {
       agent,
       runtime: runtime ?? null,
       cwd: cwd ?? null,
     }),
-  launchPrepared: (preparedId: string) =>
-    invoke<LaunchResult>("launch_prepared", { preparedId }),
-  cancelPrepared: (preparedId: string) =>
-    invoke<void>("cancel_prepared", { preparedId }),
 
   /** Agent 图标「继续」按钮：直接在会话格式对应的桌面应用里打开，无预览。
    *  没有桌面路由的格式（后端 desktop_resume_route 拒绝）在此报错。 */
@@ -262,8 +252,6 @@ export const api = {
   // terminal-output://{id} / terminal-exit://{id} 事件。
   launchEmbeddedResume: (sessionId: string) =>
     invoke<LaunchResult>("launch_embedded_resume", { sessionId }),
-  terminalForSession: (sessionId: string) =>
-    invoke<import("./types").TerminalSummary | null>("terminal_for_session", { sessionId }),
   terminalAttach: (terminalId: string, consumerId?: string) =>
     invoke<import("./types").TerminalSnapshot>("terminal_attach", { terminalId, consumerId }),
   terminalActivitySeen: (terminalId: string, revision: number) =>
@@ -336,11 +324,9 @@ export const api = {
   getAgentStatus: () =>
     invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
 
-  setAgentLaunchEnabled: (agent: Agent, enabled: boolean) => invoke<void>("set_agent_launch_enabled", { agent, enabled }),
   redetectAgent: (agent: Agent) => invoke<AgentRuntimeSettings>("redetect_agent", { agent }),
 
   getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
-  setDefaultAgent: (agent: Agent) => invoke<void>("set_default_agent", { agent }),
 
   getExtractionSettings: () => invoke<import("./types").ExtractionSettings>("get_extraction_settings"),
   setExtractionSettings: (settings: import("./types").ExtractionSettings) =>

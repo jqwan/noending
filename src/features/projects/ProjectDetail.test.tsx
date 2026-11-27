@@ -2,7 +2,8 @@ import { clearReadResources } from "../../hooks/readResource";
 import { refreshOperationStatus } from "../../hooks/useOperationState";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import ProjectDetail, { clearProjectDetailCache } from "./ProjectDetail";
+import ProjectDetail from "./ProjectDetail";
+import { clearProjectDetailCache } from "./projectDetailCache";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
 import { api } from "../../api";
 import { notifyDataChanged } from "../../app/routes";
@@ -150,6 +151,7 @@ function assistantProject(): ProjectDetailData & { assistant: NonNullable<Projec
   }], assistant: {
     id: "archive-id",
     guide_state: "current",
+    claude_md_missing: false,
     soul: { content: "价值观", revision: "soul-hash", state: "current" },
     role: { content: "核对交付", revision: "hash-1", state: "current" },
     workspace_path_id: "wp-linked",
@@ -234,11 +236,11 @@ describe("ProjectDetail", () => {
     expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-2", { file: "role", content: "本地草稿" });
   });
 
-  it("repairs the managed guide and keeps an empty role editable", async () => {
+  it("confirms a single guide reset and lists the missing files it will create", async () => {
     const detail = assistantProject();
     const emptyRole = { ...detail.assistant, role: { ...detail.assistant.role, content: "" } };
     vi.mocked(api.getProjectDetail).mockResolvedValue({
-      ...detail, assistant: { ...emptyRole, guide_state: "outdated" },
+      ...detail, assistant: { ...detail.assistant, claude_md_missing: true, role: { content: "", revision: null, state: "missing" } },
     });
     vi.mocked(api.prepareAssistantFiles).mockImplementation(async () => {
       vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: emptyRole });
@@ -246,11 +248,25 @@ describe("ProjectDetail", () => {
     });
     render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
 
-    const repair = await screen.findByRole("button", { name: "修复运行指南" });
-    expect(screen.getByText("尚未设定长期职责。")).toBeTruthy();
-    fireEvent.click(repair);
-    await waitFor(() => expect(screen.queryByRole("button", { name: "修复运行指南" })).toBeNull());
+    const reset = await screen.findByRole("button", { name: "重置运行指南" });
+    expect(within(screen.getByRole("region", { name: "长期职责" })).queryByRole("button", { name: /补建/ })).toBeNull();
+    fireEvent.click(reset);
+    const dialog = screen.getByRole("dialog", { name: "重置运行指南？" });
+    const changes = within(dialog).getAllByRole("listitem").map(item => item.textContent);
+    expect(changes).toEqual([
+      "AGENTS.md 恢复为 NoEnding 默认模板，现有的自定义内容会被替换。",
+      "补建 ROLE.md。",
+      "补建 CLAUDE.md。",
+    ]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(api.prepareAssistantFiles).not.toHaveBeenCalled();
+    fireEvent.click(reset);
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "重置运行指南？" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
     expect(api.prepareAssistantFiles).toHaveBeenCalledWith("p1");
+    expect(screen.getByText("价值观")).toBeTruthy();
+    expect(screen.getByText("尚未设定长期职责。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "编辑 ROLE.md" }));
     expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "");
   });

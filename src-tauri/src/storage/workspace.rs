@@ -124,15 +124,6 @@ impl Db {
         let conn = self.read();
         list_workspace_paths_for_project_conn(&conn, project_id)
     }
-
-    pub fn count_workspace_paths_for_project(&self, project_id: &str) -> Result<i64> {
-        let conn = self.read();
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM workspace_paths WHERE project_id = ?1",
-            params![project_id],
-            |r| r.get(0),
-        )?)
-    }
 }
 
 /// Insert a WorkspacePath for an already-normalized path.
@@ -226,17 +217,6 @@ fn row_git_identity(r: &Row) -> rusqlite::Result<GitIdentity> {
 }
 
 impl Db {
-    pub fn get_git_identity(&self, id: &str) -> Result<Option<GitIdentity>> {
-        let conn = self.read();
-        Ok(conn
-            .query_row(
-                "SELECT * FROM git_identities WHERE id = ?1",
-                params![id],
-                row_git_identity,
-            )
-            .optional()?)
-    }
-
     pub fn find_git_identity_by_common_dir(&self, common_dir: &str) -> Result<Option<GitIdentity>> {
         let conn = self.read();
         find_git_identity_by_common_dir_conn(&conn, common_dir)

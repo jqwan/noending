@@ -178,7 +178,6 @@ pub fn collaboration_room_coordinator(
     expected_revision: i64,
     request_id: String,
 ) -> Result<Value> {
-    let _ = request_id; // Swap idempotence: repeating a successful swap is a no-op.
     let (task_id, room) = with_db(&state, |db| {
         let room = map_cli(crate::collaboration::set_coordinator(
             db,

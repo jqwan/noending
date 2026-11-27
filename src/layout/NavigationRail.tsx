@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import Icon, { type IconName } from "../components/Icon";
-import type { Route } from "../app/routes";
+import { withoutAction, type Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
 import { preloadAgentsCache } from "../features/agents/agentsCache";
 
@@ -10,7 +10,7 @@ export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
 }
 
-export function getRouteSection(route: Route): RailSection | null {
+function getRouteSection(route: Route): RailSection | null {
   if (isSessionRoute(route)) return "sessions";
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
   if (route.view === "projects") return route.assistantOnly ? "assistants" : "projects";
@@ -22,7 +22,7 @@ export function getRouteSection(route: Route): RailSection | null {
   return null;
 }
 
-export function getSectionRootRoute(section: RailSection): Route {
+function getSectionRootRoute(section: RailSection): Route {
   switch (section) {
     case "sessions":
       return { view: "sessions" };
@@ -41,12 +41,6 @@ export function getSectionRootRoute(section: RailSection): Route {
     case "settings":
       return { view: "settings" };
   }
-}
-
-export function withoutAction(route: Route): Route {
-  if (!("action" in route) || !route.action) return route;
-  const { action: _action, ...base } = route;
-  return base as Route;
 }
 
 export default function NavigationRail({ route, navigate }: {

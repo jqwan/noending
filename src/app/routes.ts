@@ -2,14 +2,6 @@
 
 import type { Agent } from "../types";
 
-export type SettingsSection =
-  | "general"
-  | "appearance"
-  | "advanced";
-
-/** 兼容历史旧设置子入口；在 AppShell 导航入口统一归一化为 agents 面板 */
-export type LegacySettingsSection = "agents" | "sources";
-
 /**
  * 页面动作直接携带在 Route 上（palette → 页面 Modal），目标页已挂载时也能收到：
  * AppShell 每次带 action 的导航都递增 actionSeq，页面以它为 effect 依赖。
@@ -32,7 +24,7 @@ export type Route =
   | { view: "new-session"; agent?: Agent; projectId?: string; archivePathId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; initialTitle?: string; entry?: WorkstreamEntry }
-  | { view: "sessions"; action?: ViewAction; scope?: SessionScope }
+  | { view: "sessions"; scope?: SessionScope }
   | {
       view: "session";
       sessionId: string;
@@ -54,7 +46,13 @@ export type Route =
   | { view: "package"; packageId: string; initialTitle?: string; agent?: Agent }
   | { view: "projects"; scope?: "unarchived" | "archived"; assistantOnly?: boolean }
   | { view: "project"; projectId: string; initialTitle?: string; entry?: ProjectEntry; fromAssistants?: boolean }
-  | { view: "settings"; section?: SettingsSection | LegacySettingsSection };
+  | { view: "settings" };
+
+export function withoutAction(route: Route): Route {
+  if (route.view !== "workstreams" || !route.action) return route;
+  const { action: _action, ...destination } = route;
+  return destination;
+}
 
 /** 后台摄入完成的全局刷新信号（UI state，不进 domain）。 */
 export const EVT_SYNCED = "noending:sync";

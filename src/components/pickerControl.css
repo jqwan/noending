@@ -1,11 +1,4 @@
 /* 复杂选择器的公共触发器与内容定位；列表外观由 PopupMenu 统一。 */
-
-.picker-menu-empty {
-  margin: 0;
-  padding: 8px 10px;
-  color: var(--text-muted);
-  font-size: var(--font-size-base);
-}
 .picker-menu.dropup {
   top: auto;
   bottom: calc(100% + 8px);

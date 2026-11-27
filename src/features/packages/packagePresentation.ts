@@ -1,10 +1,10 @@
-import type { Agent, PackageEntry, PackageOrigin, PackageToggleState } from "../../types";
+import type { PackageEntry, PackageOrigin, PackageToggleState } from "../../types";
 
 export function packageDetailRoute(entry: PackageEntry) {
   return { view: "package" as const, packageId: entry.id, initialTitle: entry.name, agent: entry.agent ?? undefined };
 }
 
-export const ORIGIN_LABELS: Record<PackageOrigin, string> = {
+const ORIGIN_LABELS: Record<PackageOrigin, string> = {
   market: "市场安装",
   bundled: "Agent 内置",
   noending_managed: "NoEnding 内置",
@@ -37,10 +37,3 @@ export function originLabel(entry: PackageEntry): string {
 export function entryState(entry: PackageEntry): PackageToggleState {
   return entry.scopes[0]?.state ?? "unknown";
 }
-
-export function agentLabel(agent: Agent | null): string {
-  if (!agent) return "未安装到任何 Agent";
-  return agent;
-}
-
-

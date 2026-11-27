@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 it("applies and persists themes, then restores system appearance", async () => {
-  render(<SettingsView section="appearance" navigate={vi.fn()} />);
+  render(<SettingsView />);
   await screen.findByText("/tmp/noending/data/noending.db");
   fireEvent.click(screen.getByRole("button", { name: "深色" }));
   expect(document.documentElement.dataset.theme).toBe("dark");
@@ -58,7 +58,7 @@ it("applies and persists themes, then restores system appearance", async () => {
 });
 
 it("opens modal to change data storage directory and can submit new path", async () => {
-  render(<SettingsView navigate={vi.fn()} />);
+  render(<SettingsView />);
   await screen.findByText("/tmp/noending/data/noending.db");
 
   fireEvent.click(screen.getByRole("button", { name: "更改位置…" }));
@@ -84,7 +84,7 @@ beforeEach(() => {
 });
 
 it("saves extraction settings immediately on selection and handles disable extraction", async () => {
-  render(<SettingsView navigate={vi.fn()} />);
+  render(<SettingsView />);
   const agent = await screen.findByLabelText("提取 Agent");
 
   const piExpected = { agent: "pi" as const, runtime: { model: null, provider: null, effort: null } };

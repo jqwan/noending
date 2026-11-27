@@ -634,6 +634,7 @@ mod tests {
             codex: home.join(".codex"),
             claude: home.join(".claude"),
             pi: home.join(".pi/agent"),
+            dsh: home.join(".dsh"),
             home: home.clone(),
         };
         let registry = skills::SkillRegistry::default();

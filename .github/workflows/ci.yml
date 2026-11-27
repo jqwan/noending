@@ -47,9 +47,7 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets
 
-      # A red `cargo test` must not hide whether the frontend still
-      # builds. Both jobs on `395066e` skipped these two steps and reported
-      # nothing about them; the job still fails on the Rust step above.
+      # Report frontend results even when a Rust check fails.
       - name: frontend install
         if: always()
         working-directory: .
@@ -60,9 +58,6 @@ jobs:
         working-directory: .
         run: pnpm build
 
-      # The Settings discovery contract (mount never spawns a CLI,
-      # Refresh is the only entry, overrides survive failures) is locked by
-      # vitest and must gate both platforms like the Rust suite does.
       - name: frontend test
         if: always()
         working-directory: .

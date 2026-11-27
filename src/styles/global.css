@@ -147,17 +147,6 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
 .badge.warn { background: var(--warning-wash); color: var(--warning); }
 .badge.success { background: transparent; color: var(--success); }
 
-.kbd {
-  font-family: var(--mono);
-  font-size: var(--font-size-xs);
-  border: 1px solid var(--border-subtle);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-xs);
-  padding: 0 5px;
-  background: var(--bg-surface);
-  color: var(--text-muted);
-}
-
 /* ---------- Rows & cards ---------- */
 .card {
   border-radius: var(--radius-lg);
@@ -170,31 +159,6 @@ label.field span { display: block; font-size: var(--font-size-sm); color: var(--
 .card.clickable:hover { background: var(--bg-hover); }
 .inset-card { padding: var(--space-lg); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-panel); }
 .inset-card.compact { padding: var(--card-padding); }
-
-.list-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-lg);
-  padding: 13px 4px;
-  border-top: 1px solid var(--border-subtle);
-  cursor: pointer;
-}
-.list-row:first-of-type { border-top: 0; }
-.list-row:hover { background: var(--bg-hover); }
-.list-row .grow { flex: 1; min-width: 0; }
-.list-row .title { font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.list-row .meta {
-  color: var(--text-muted);
-  font-size: var(--font-size-sm);
-  margin-top: 1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.list-row .side { flex: none; display: flex; align-items: center; gap: var(--space-md); color: var(--text-muted); font-size: var(--font-size-sm); }
-
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-sm) var(--space-2xl); }
 
 .empty {
   padding: var(--space-4xl) var(--space-sm);

@@ -301,8 +301,6 @@ mod imp {
     }
 }
 
-#[allow(unused_imports)]
-pub use imp::launch as launch_command;
 pub use imp::{launch, open_uri};
 
 #[cfg(test)]

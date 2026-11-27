@@ -72,7 +72,7 @@ export function extractVersion(raw?: string | null): string {
   return match ? match[0] : raw.trim();
 }
 
-export function formatCliStatus(agent: Agent, entry?: AgentStatusEntry): string {
+function formatCliStatus(agent: Agent, entry?: AgentStatusEntry): string {
   if (!entry?.terminal_cli) {
     return "无终端 CLI";
   }

@@ -26,6 +26,7 @@ impl Fixture {
                 codex: home.join(".codex"),
                 claude: home.join(".claude"),
                 pi: home.join(".pi/agent"),
+                dsh: home.join(".dsh"),
                 home,
             },
             root,

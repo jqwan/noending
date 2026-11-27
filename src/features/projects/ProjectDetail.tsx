@@ -33,13 +33,11 @@ import type { ProjectEntry, Route } from "../../app/routes";
 /**
  * Project Detail：一次 `get_project_detail` 读到全部真相——它拥有的 WorkspacePaths、
  * 经由这些路径到达的 Workstreams，以及 cwd 落在这些路径上的
- * Sessions（走权威链，不走缓存列，M29）。
+ * Sessions 通过工作目录关联到项目。
  * 项目事实由目录派生，当前摘要由用户主动更新或重新生成。
  */
-import { projectDetailCache, clearProjectDetailCache } from "./projectDetailCache";
+import { projectDetailCache } from "./projectDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
-export { projectDetailCache, clearProjectDetailCache };
-
 
 export default function ProjectDetail({ projectId, initialTitle, navigate, entry, fromAssistants }: {
   projectId: string;
@@ -111,6 +109,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
         assistant: {
           ...assistant,
           guide_state: file ? assistant.guide_state : updated.guide_state,
+          claude_md_missing: file ? assistant.claude_md_missing : updated.claude_md_missing,
           soul: file === "soul" || (!file && assistant.soul.state === "missing") ? updated.soul : assistant.soul,
           role: file === "role" || (!file && assistant.role.state === "missing") ? updated.role : assistant.role,
         },
@@ -357,7 +356,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
       </>}>
         {assistant && <div hidden={!assistantView}>
-          <ProjectAssistantSection projectId={projectId} assistant={assistant}
+          <ProjectAssistantSection projectId={projectId} assistant={assistant} active={assistantView}
             archived={project.visibility === "archived"} onSaved={onAssistantSaved} onRefresh={refresh} />
         </div>}
         {!assistantView && <>

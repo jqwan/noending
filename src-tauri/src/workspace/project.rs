@@ -1201,29 +1201,6 @@ pub fn project_detail(
     }))
 }
 
-/// The tasks associated with one Project, once per task.
-pub fn project_workstreams(db: &Db, project_id: &str) -> Result<Vec<ProjectWorkstream>> {
-    Ok(
-        crate::storage::workstream_projects::workstreams_for_project(&db.read(), project_id)?
-            .into_iter()
-            .map(|workstream| ProjectWorkstream { workstream })
-            .collect(),
-    )
-}
-
-/// Every Project the app currently derives, plus the paths behind it. Used by the
-/// reconcile reporting surface and by the integrity audit.
-pub fn list_projects_with_paths(db: &Db) -> Result<Vec<(Project, Vec<WorkspacePath>)>> {
-    let mut out = Vec::new();
-    for project in db.list_projects()? {
-        out.push((
-            project.clone(),
-            list_workspace_paths_for_project_conn(&db.read(), &project.id)?,
-        ));
-    }
-    Ok(out)
-}
-
 /// A mechanical check, available to tests and to the integrity audit:
 /// no WorkspacePath is shared, no Project is empty, no path is unparented.
 pub fn registry_is_consistent(db: &Db) -> std::result::Result<(), String> {

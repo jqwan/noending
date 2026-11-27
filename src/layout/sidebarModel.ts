@@ -47,17 +47,16 @@ export function getStoredPinnedSessions(): string[] {
   }
 }
 
-export const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
-export const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
 export const MAX_GROUP_SESSIONS_DEFAULT = 5;
 
-export function sessionConversationTime(session: { last_conversation_at?: string | null }): number | null {
+function sessionConversationTime(session: { last_conversation_at?: string | null }): number | null {
   if (!session.last_conversation_at) return null;
   const time = new Date(session.last_conversation_at).getTime();
   return isNaN(time) ? null : time;
 }
 
-export function sessionCreatedTime(session: {
+function sessionCreatedTime(session: {
   started_at?: string | null;
   last_conversation_at?: string | null;
   last_activity_at?: string | null;
@@ -82,7 +81,7 @@ export function sessionCreatedTime(session: {
   return 0;
 }
 
-export function sessionUpdatedTime(session: {
+function sessionUpdatedTime(session: {
   last_conversation_at?: string | null;
   started_at?: string | null;
   last_activity_at?: string | null;
@@ -106,7 +105,7 @@ export function compareSidebarSessions(
   return diff !== 0 ? diff : a.id.localeCompare(b.id);
 }
 
-export function isSessionWithinFiveDays(
+function isSessionWithinFiveDays(
   session: {
     last_conversation_at?: string | null;
     terminals?: TerminalSummary[];
@@ -120,15 +119,7 @@ export function isSessionWithinFiveDays(
   return diff >= -60000 && diff <= FIVE_DAYS_MS;
 }
 
-export function isSessionWithinSevenDays(session: SessionListItem, now = Date.now()): boolean {
-  if (session.archived_at) return false;
-  const time = sessionConversationTime(session);
-  if (time === null) return false;
-  const diff = now - time;
-  return diff >= -60000 && diff <= SEVEN_DAYS_MS;
-}
-
-export function isSessionTerminalContinuable(
+function isSessionTerminalContinuable(
   session: { id: string; archived_at?: string | null; terminals?: TerminalSummary[] },
   resume: TerminalResumeState | undefined,
 ): boolean {
@@ -216,7 +207,7 @@ export interface SidebarSessionGroup {
   sessions: SidebarSession[];
 }
 
-export function isAgentTerminalContinuable(agentKey: string): boolean {
+function isAgentTerminalContinuable(agentKey: string): boolean {
   if (FORMAT_CAPS[agentKey]?.terminal) return true;
   if (agentKey === "antigravity" && FORMAT_CAPS.antigravity_cli?.terminal) return true;
   if (FORMAT_CAPS[`${agentKey}_cli`]?.terminal) return true;

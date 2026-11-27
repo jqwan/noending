@@ -175,7 +175,7 @@ function renderRoute(
     case "package":
       return <PackageDetailView key={route.packageId} packageId={route.packageId} initialTitle={route.initialTitle} agent={route.agent} navigate={navigate} />;
     case "settings":
-      return <SettingsView section={(route.section as any) ?? "general"} navigate={navigate} />;
+      return <SettingsView />;
     default:
       return <div className="main">Unknown view</div>;
   }

@@ -95,27 +95,4 @@ impl Summary {
         }
         Ok(self)
     }
-    /// Markdown is a read/export projection, not another persisted copy.
-    pub fn markdown(&self) -> String {
-        self.items
-            .iter()
-            .map(|item| {
-                let mut parts = vec![format!("### {}", item.title)];
-                if !item.description.is_empty() {
-                    parts.push(item.description.clone());
-                }
-                if !item.details.is_empty() {
-                    parts.push(
-                        item.details
-                            .iter()
-                            .map(|detail| format!("- {}", detail.replace('\n', "\n  ")))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
-                parts.join("\n\n")
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
 }

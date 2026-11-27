@@ -36,7 +36,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../api", () => ({ api: {
   appForeground, getSessionDetail: vi.fn(), getSessionContext: vi.fn(), collaborationRoomGet: vi.fn(), collaborationCandidates: vi.fn(),
-  listProjectCards: vi.fn(), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), listSessions: vi.fn(), listProjects: vi.fn(), listWorkstreams: vi.fn(),
+  listProjectCards: vi.fn(), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), listSessions: vi.fn(), listProjects: vi.fn(),
   listSkillCatalog: vi.fn(), listPackages: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(), mailboxList: vi.fn(), getOperationStatus: vi.fn(),
   getExtractionSettings: vi.fn(), getWorkspaceSettings: vi.fn(), getProjectContextState: vi.fn(),
 } }));
@@ -68,7 +68,6 @@ beforeEach(() => {
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
-  vi.mocked(api.listWorkstreams).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSkillCatalog).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
   vi.mocked(api.listPackages).mockReset().mockResolvedValue({ packages: [], warnings: [] });
   vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue(null);
@@ -258,15 +257,6 @@ it("queues ingestion only after the window returns from the background", async (
   changed({ payload: true });
 
   await waitFor(() => expect(appForeground).toHaveBeenCalledTimes(1));
-});
-
-it("normalizes legacy settings sections to agents view", async () => {
-  const { normalizeRoute } = await import("./AppShell");
-  expect(normalizeRoute({ view: "settings", section: "agents" })).toEqual({ view: "agents" });
-  expect(normalizeRoute({ view: "settings", section: "sources" })).toEqual({ view: "agents" });
-  expect(normalizeRoute({ view: "settings", section: "general" })).toEqual({ view: "settings", section: "general" });
-  expect(normalizeRoute({ view: "workstreams" })).toEqual({ view: "workstreams" });
-  expect(normalizeRoute({ view: "sessions", action: "new" })).toEqual({ view: "new-session" });
 });
 
 it("resolves an ID-only destination before changing pages, and cancels a late result after newer navigation", async () => {

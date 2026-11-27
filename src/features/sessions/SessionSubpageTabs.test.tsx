@@ -9,7 +9,7 @@ import { clearReadResources } from "../../hooks/readResource";
 vi.mock("../../api", () => ({ api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
   terminalActivitySeen: vi.fn().mockResolvedValue(undefined),
-  terminalReconnect: vi.fn(), terminalList: vi.fn(), terminalForSession: vi.fn(), launchEmbeddedResume: vi.fn(),
+  terminalReconnect: vi.fn(), terminalList: vi.fn(), launchEmbeddedResume: vi.fn(),
 } }));
 beforeEach(() => {
   clearReadResources();
@@ -72,7 +72,6 @@ it("switches among this session's live and exited terminals and remembers the se
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t1" })));
 });
 it("changes detail tabs without launching until the user selects an available terminal action", async () => {
-  vi.mocked(api.terminalForSession).mockResolvedValue(null);
   vi.mocked(api.launchEmbeddedResume).mockResolvedValue({ terminal_id: "new" } as never);
   const navigate = vi.fn();
   const props = { sessionId: "s1", title: "Session", agent: "codex" as const, navigate };

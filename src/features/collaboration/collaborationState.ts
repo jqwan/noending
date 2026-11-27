@@ -1,5 +1,4 @@
 import type {
-  CollaborationConnectionState,
   CollaborationMemberState,
   CollaborationRunStatus,
   CollaborationWakeMethod,
@@ -23,11 +22,9 @@ export type MemberTone =
   | "left"
   | "failed";
 
-export type RunTone = "starting" | "active" | "stopped";
-
 /** 待消息阶段超过这个时长仍未查收，才显示「暂未响应」。 */
-export const STALL_MS = 2 * 60 * 1000;
-export const LEASE_MS = 30 * 1000;
+const STALL_MS = 2 * 60 * 1000;
+const LEASE_MS = 30 * 1000;
 
 export function memberStatus(
   member: CollaborationMemberState,
@@ -73,13 +70,4 @@ export function defaultWakeMethod(modes: CollaborationWakeMethod[]): Collaborati
   if (modes.includes("terminal")) return "terminal";
   if (modes.includes("desktop")) return "desktop";
   return null;
-}
-
-export function connectionLabel(state: CollaborationConnectionState): string {
-  switch (state) {
-    case "pending": return "尚未加入";
-    case "connected": return "参与连接有效";
-    case "disconnected": return "参与连接中断";
-    case "left": return "已退出参与";
-  }
 }

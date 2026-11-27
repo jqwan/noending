@@ -24,7 +24,6 @@ vi.mock("../../api", () => ({
       session: { agent: "codex", source_kind: "codex", archived_at: null, title: "会话" },
       can_resume: true,
     }),
-    terminalForSession: vi.fn(),
     terminalAttach: vi.fn(),
     terminalInput: vi.fn().mockResolvedValue(undefined),
     terminalReconnect: vi.fn(),
@@ -831,7 +830,6 @@ it("attaching by terminal id never launches and never navigates away on bind", a
   await waitFor(() => expect(FakeTerminal.last).not.toBeNull());
   // 本视图只 attach：launch 是会话页终端入口的职责。
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
-  expect(api.terminalForSession).not.toHaveBeenCalled();
 
   // 绑定事实到达：视图留在原地，只点亮入口（旧的"replace 跳子页"已退场）。
   pushIdentity("s-bound", 2, "t-free");

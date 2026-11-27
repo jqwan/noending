@@ -6,12 +6,10 @@
 .package-detail-page .page-title { display: flex; align-items: center; gap: var(--space-sm); }
 .package-detail-page .page-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .package-detail-page .page-title > .ui-icon { width: var(--icon-size-sm); height: var(--icon-size-sm); color: var(--text-secondary); }
-.package-agent { display: inline-flex; align-items: center; gap: var(--space-icon); }
 .package-contents { display: flex; flex-wrap: wrap; gap: var(--space-icon); margin-bottom: 8px; }
 .package-dialog-hint { font-size: var(--font-size-sm); color: var(--text-secondary); line-height: 1.6; margin: 0 0 12px; }
 .package-check { display: flex; align-items: center; gap: var(--space-sm); padding: 6px 0; font-size: var(--font-size-base); }
 .package-check input { width: auto; margin: 0; }
-.package-scope-state { display: inline-flex; align-items: center; gap: var(--space-sm); }
 .package-list-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .package-preview { margin: 10px 0 2px; }
 .package-preview-head { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; }
@@ -22,8 +20,6 @@
 .package-market-option { padding: 4px 0 8px; border-bottom: 1px solid var(--border-subtle); }
 .package-market-option:last-child { border-bottom: none; padding-bottom: 0; }
 .package-market-plugin-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.package-scope-state { display: inline-flex; align-items: center; gap: var(--space-sm); flex-wrap: wrap; }
-.package-scope-path { font-size: var(--font-size-xs); color: var(--text-muted); overflow-wrap: anywhere; cursor: pointer; }
 .package-card-version { display: flex; min-width: 0; }
 .package-version-text { font-size: var(--font-size-sm); color: var(--text-muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .package-version { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -32,7 +28,4 @@
    gap; inline-flex removes it so the icon centers against the title. */
 .package-card .ws-card-title > span[role="img"],
 .package-list-title > span[role="img"] { display: inline-flex; align-items: center; }
-.package-scope-state { display: inline-flex; align-items: center; gap: var(--space-md); min-width: 0; }
-.package-scope-state > .badge { flex: none; }
-.package-scope-path { margin-top: 6px; }
 .package-pick-btn { white-space: nowrap; flex: none; }

@@ -23,10 +23,8 @@ import TaskSubpageTabs from "./TaskSubpageTabs";
 import CollaborationRoomView from "../collaboration/CollaborationRoomView";
 
 /** Task organization. All background reads are pure. */
-import { workstreamDetailCache, clearWorkstreamDetailCache } from "./workstreamDetailCache";
+import { workstreamDetailCache } from "./workstreamDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
-export { workstreamDetailCache, clearWorkstreamDetailCache };
-
 
 export default function WorkstreamDetailView({
   workstreamId,

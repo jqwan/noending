@@ -1,7 +1,8 @@
 import { clearReadResources } from "../../hooks/readResource";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import WorkstreamDetailView, { clearWorkstreamDetailCache } from "./WorkstreamDetailView";
+import WorkstreamDetailView from "./WorkstreamDetailView";
+import { clearWorkstreamDetailCache } from "./workstreamDetailCache";
 import { api } from "../../api";
 import { viewState } from "../../hooks/useViewState";
 import type { WorkstreamContext, WorkstreamContextView } from "../../types";

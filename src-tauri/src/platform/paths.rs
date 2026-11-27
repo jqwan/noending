@@ -14,14 +14,6 @@ pub fn resolve_home() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Resolve the OS-specific application data directory used by NoEnding itself
-/// (macOS `~/Library/Application Support/...`, Windows `%APPDATA%\...`).
-/// When running inside Tauri we prefer `app_data_dir()`; this fallback covers
-/// unit tests and CLI usage.
-pub fn resolve_app_data() -> Option<PathBuf> {
-    dirs::data_dir()
-}
-
 /// Environment variable that overrides the data root for each agent,
 /// mirroring what the agents themselves honour where applicable.
 ///
@@ -104,6 +96,25 @@ fn non_empty_env(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub(crate) fn dsh_home_override() -> Option<PathBuf> {
+    let configured = std::env::var(agent_env_override(Agent::Dsh)).ok()?;
+    if configured.trim().is_empty() {
+        return None;
+    }
+    let expanded = if configured == "~" {
+        resolve_home()
+    } else {
+        configured
+            .strip_prefix("~/")
+            .or_else(|| configured.strip_prefix("~\\"))
+            .and_then(|path| {
+                resolve_home().map(|home| home.join(path.trim_start_matches(['/', '\\'])))
+            })
+    };
+    let path = expanded.unwrap_or_else(|| PathBuf::from(configured));
+    Some(std::path::absolute(&path).unwrap_or(path))
+}
+
 /// Pure core of Pi's resolution, split out so tests never touch the process
 /// environment: the specific `PI_CODING_AGENT_SESSION_DIR` (the sessions
 /// folder itself) wins over `PI_CODING_AGENT_DIR` (the agent folder that
@@ -139,7 +150,11 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
     if matches!(agent, Agent::Pi) {
         return resolve_pi_sessions_dir();
     }
-    if let Some(p) = non_empty_env(agent_env_override(agent)) {
+    let configured = match agent {
+        Agent::Dsh => dsh_home_override(),
+        _ => non_empty_env(agent_env_override(agent)),
+    };
+    if let Some(p) = configured {
         return Some(p);
     }
     resolve_home().map(|home| home.join(agent_default_dir(agent)))

@@ -1,5 +1,4 @@
 //! Tauri command surface — the Application Domain API the UI talks to.
-//! The Assistant (LLM runtime, later phase) consumes the same functions.
 //!
 //! The Project / Workstream / Session-command areas are sibling modules
 //! (`project`, `workstream`, `session_workspace`, `workspace`) so their
@@ -34,26 +33,10 @@ pub struct AppState {
     pub db: std::sync::Arc<Db>,
     /// The one place background ingestion is queued. Never calls AI.
     pub ingestion: ingestion::IngestionCoordinator,
-    /// In-memory store for prepared launches awaiting user confirmation.
-    pub prepared_launches:
-        std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
 }
 
 pub(crate) fn with_db<T>(state: &AppState, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
     f(&state.db)
-}
-
-/// The launcher, pointed at NoEnding Home's `runtime/`.
-///
-/// The temp-dir fallback is deliberate: a context bundle is a launch artifact,
-/// and failing a launch because the Home could not be resolved would trade a
-/// cosmetic path for a broken primary action.
-fn launcher_for(app: &AppHandle) -> crate::launcher::SessionLauncher {
-    let runtime_dir = app
-        .try_state::<crate::workspace::home::NoEndingHome>()
-        .map(|h| h.inner().runtime_dir.clone())
-        .unwrap_or_else(std::env::temp_dir);
-    crate::launcher::SessionLauncher { runtime_dir }
 }
 
 /// The Home the app is actually running on, for the few commands that need it.
@@ -74,7 +57,7 @@ pub(crate) fn launch_workspace(app: &AppHandle) -> crate::launcher::LaunchWorksp
         .unwrap_or_default()
 }
 
-// ---------------- Default Agent (Settings → Default Agent) ----------------
+// ---------------- Default Agent ----------------
 
 const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
 
@@ -120,31 +103,7 @@ pub fn record_installation_probe(
     }
 }
 
-#[tauri::command]
-pub fn set_default_agent(state: State<AppState>, agent: String) -> Result<()> {
-    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    // 新建会话由终端 CLI 承载；桌面端 Agent 没有可启动的命令行，不能当默认。
-    if !crate::adapters::adapter_for(agent).has_terminal_cli() {
-        return Err(other("该 Agent 只有桌面端，不能用于新建会话"));
-    }
-    with_db(&state, |db| {
-        db.set_setting(DEFAULT_AGENT_KEY, agent.as_str())
-    })
-}
-
 // ---------------- Explicit Context update ----------------
-
-/// Read persisted sync observations and summary coverage without scanning.
-#[tauri::command]
-pub fn get_freshness(
-    state: State<AppState>,
-    kind: Option<String>,
-    id: Option<String>,
-) -> Result<crate::context::freshness::FreshnessView> {
-    with_db(&state, |db| {
-        crate::context::freshness::view(db, kind.as_deref(), id.as_deref())
-    })
-}
 
 /// Read the Session's summary + pending state. A pure read: no ingestion, no AI.
 #[tauri::command]
@@ -332,67 +291,15 @@ pub fn get_workstream_context(
 // ---------------- Launcher ----------------
 
 #[tauri::command]
-pub fn launch_new_session(
-    app: AppHandle,
-    state: State<AppState>,
-    agent: String,
-    cwd: Option<String>,
-) -> Result<crate::launcher::LaunchResult> {
-    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    let launcher = launcher_for(&app);
-    let workspace = launch_workspace(&app);
-    let result = with_db(&state, |db| {
-        launcher.new_session_in(db, agent, cwd.as_deref(), &workspace)
-    })?;
-    ingestion::enqueue(&app, ingestion::IngestScope::ReconcileAll);
-    Ok(result)
-}
-
-/// Maximum time a prepared launch remains valid in memory before lazy cleanup (30 minutes).
-pub const PREPARED_LAUNCH_TTL_SECS: i64 = 30 * 60;
-
-/// Prune stale prepared launches whose `prepared_at` timestamp exceeds TTL.
-/// Pure in-memory check without background thread.
-pub fn prune_stale_prepared_launches(
-    map: &mut std::collections::HashMap<String, crate::launcher::PreparedLaunch>,
-) {
-    let now = chrono::Utc::now();
-    map.retain(|_, p| {
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&p.prepared_at) {
-            (now - ts.with_timezone(&chrono::Utc)).num_seconds() < PREPARED_LAUNCH_TTL_SECS
-        } else {
-            false
-        }
-    });
-}
-
-/// Atomically consume a prepared launch capability.
-///
-/// INVARIANT: PreparedLaunch = single-use capability.
-/// Once consumed, it is removed immediately so no concurrent or repeated launch can reuse it.
-pub fn consume_prepared_launch(
-    map: &std::sync::Mutex<std::collections::HashMap<String, crate::launcher::PreparedLaunch>>,
-    prepared_id: &str,
-) -> Result<crate::launcher::PreparedLaunch> {
-    let mut guard = map
-        .lock()
-        .map_err(|_| other("prepared_launches lock poisoned"))?;
-    prune_stale_prepared_launches(&mut guard);
-    guard
-        .remove(prepared_id)
-        .ok_or_else(|| other("Prepared launch 已被使用或已过期，请刷新预览"))
-}
-
-#[tauri::command]
-pub fn prepare_new_session(
+pub fn preview_new_session(
     app: AppHandle,
     state: State<AppState>,
     agent: String,
     cwd: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
-) -> Result<crate::launcher::PreparedLaunch> {
+) -> Result<crate::launcher::CwdResolution> {
     let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
-    let launcher = launcher_for(&app);
+    let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
         launcher.prepare_new_with_runtime_in(
@@ -403,13 +310,7 @@ pub fn prepare_new_session(
             runtime.as_ref(),
         )
     })?;
-    let mut map = state
-        .prepared_launches
-        .lock()
-        .map_err(|_| other("prepared_launches lock poisoned"))?;
-    prune_stale_prepared_launches(&mut map);
-    map.insert(prepared.id.clone(), prepared.clone());
-    Ok(prepared)
+    Ok(prepared.cwd_resolution)
 }
 
 /// The agent-icon continue button: open the session in its desktop app, no
@@ -450,44 +351,7 @@ pub fn continue_session_desktop(
     }
 }
 
-#[tauri::command]
-pub fn launch_prepared(
-    app: AppHandle,
-    state: State<AppState>,
-    terminal: State<'_, crate::terminal::TerminalRegistry>,
-    prepared_id: String,
-) -> Result<crate::launcher::LaunchResult> {
-    let prepared = consume_prepared_launch(&state.prepared_launches, &prepared_id)?;
-
-    let launcher = launcher_for(&app);
-    let workspace = launch_workspace(&app);
-    let embedded = crate::launcher::EmbeddedSpawn {
-        reconnect: None,
-        registry: &terminal,
-        spawn: crate::terminal::spawn_embedded,
-    };
-    let result = with_db(&state, |db| {
-        launcher.launch_prepared_in(db, &prepared, &workspace, Some(&embedded))
-    })?;
-    let scope = if prepared.mode == "resume" {
-        prepared
-            .session_id
-            .map(ingestion::IngestScope::RefreshSession)
-            .unwrap_or(ingestion::IngestScope::ReconcileAll)
-    } else {
-        ingestion::IngestScope::ReconcileAll
-    };
-    ingestion::enqueue(&app, scope);
-    Ok(result)
-}
-
-/// The terminal subpage's direct entry: prepare + launch an embedded resume
-/// in ONE step, no preview. The terminal button IS the explicit intent, so
-/// the embedded flag is forced here — it is the only embedded entry; the
-/// stored open-method preference governs only the Resume modal's
-/// terminal-vs-desktop choice. Every prepare-side gate (trash, missing
-/// source) still applies, and a live embedded terminal for the same session
-/// is refused.
+/// Resume this session in the embedded terminal if it has no live terminal.
 #[tauri::command]
 pub fn launch_embedded_resume(
     app: AppHandle,
@@ -495,7 +359,7 @@ pub fn launch_embedded_resume(
     terminal: State<'_, crate::terminal::TerminalRegistry>,
     session_id: String,
 ) -> Result<crate::launcher::LaunchResult> {
-    let launcher = launcher_for(&app);
+    let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(&app);
     let mut prepared = with_db(&state, |db| {
         launcher.prepare_resume_in(db, &session_id, &workspace)
@@ -506,9 +370,6 @@ pub fn launch_embedded_resume(
         ));
     }
     if prepared.desktop_open.is_some() {
-        // The stored preference resolved a desktop route (codex with the
-        // desktop choice); the terminal button overrides it — the terminal
-        // route is the CLI path, which is what embedding runs.
         prepared.desktop_open = None;
     }
     prepared.embedded = true;
@@ -543,7 +404,7 @@ pub fn launch_embedded_new(
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::LaunchResult> {
     let agent = agent_of(&agent)?;
-    let launcher = launcher_for(&app);
+    let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(&app);
     let mut prepared = with_db(&state, |db| {
         launcher.prepare_new_with_runtime_in(
@@ -591,17 +452,6 @@ pub fn terminal_list(
     Ok(summaries)
 }
 
-#[tauri::command]
-pub fn cancel_prepared(state: State<AppState>, prepared_id: String) -> Result<()> {
-    let mut map = state
-        .prepared_launches
-        .lock()
-        .map_err(|_| other("prepared_launches lock poisoned"))?;
-    prune_stale_prepared_launches(&mut map);
-    map.remove(&prepared_id);
-    Ok(())
-}
-
 // ---------------- Clipboard paste → terminal ----------------
 
 /// Read non-empty clipboard text natively to avoid duplicate WebView pastes.
@@ -630,16 +480,6 @@ pub fn write_clipboard_for_terminal(text: String) -> Result<()> {
 // detach protocol the frontend terminal subpage speaks. The registry is the
 // source of truth — the subpage is a view, not a process owner.
 
-/// Jump to one of the Session's live bound terminals.
-/// Native identities may associate multiple terminals with the same Session.
-#[tauri::command]
-pub fn terminal_for_session(
-    terminal: State<'_, crate::terminal::TerminalRegistry>,
-    session_id: String,
-) -> Result<Option<crate::terminal::TerminalSummary>> {
-    Ok(terminal.for_session(&session_id))
-}
-
 pub(crate) fn wake_mailbox_terminal(
     app: &AppHandle,
     session: &str,
@@ -654,7 +494,7 @@ pub(crate) fn wake_mailbox_terminal(
     if unread == 0 && require_unread {
         return Ok(());
     }
-    let launcher = launcher_for(app);
+    let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(app);
     let mut prepared = launcher.prepare_resume_in(&state.db, session, &workspace)?;
     prepared.desktop_open = None;
@@ -691,7 +531,7 @@ pub fn terminal_reconnect(
     if bound_session_id != session_id {
         return Err(other("终端已切换会话，请重试"));
     }
-    let launcher = launcher_for(&app);
+    let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(&app);
     let result = with_db(&state, |db| {
         let mut prepared = launcher.prepare_resume_in(db, &session_id, &workspace)?;
@@ -940,16 +780,6 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
         );
     }
     Ok(serde_json::Value::Object(out))
-}
-
-#[tauri::command]
-pub fn set_agent_launch_enabled(
-    state: State<AppState>,
-    agent: String,
-    enabled: bool,
-) -> Result<()> {
-    let agent = agent_of(&agent)?;
-    crate::agent_runtime::store::set_launch_enabled(&state.db, agent, enabled)
 }
 
 #[tauri::command]

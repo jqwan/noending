@@ -49,12 +49,14 @@ pub struct Roots {
     pub codex: PathBuf,
     pub claude: PathBuf,
     pub pi: PathBuf,
+    pub dsh: PathBuf,
 }
 
 impl Roots {
     pub fn current() -> Result<Self> {
-        let home =
-            crate::platform::paths::resolve_home().ok_or_else(|| other("无法确定用户目录"))?;
+        use crate::platform::paths;
+
+        let home = paths::resolve_home().ok_or_else(|| other("无法确定用户目录"))?;
         let override_or = |key: &str, default: PathBuf| {
             std::env::var_os(key)
                 .filter(|v| !v.is_empty())
@@ -65,6 +67,8 @@ impl Roots {
             codex: override_or("CODEX_HOME", home.join(".codex")),
             claude: override_or("CLAUDE_CONFIG_DIR", home.join(".claude")),
             pi: override_or("PI_CODING_AGENT_DIR", home.join(".pi/agent")),
+            dsh: paths::dsh_home_override()
+                .unwrap_or_else(|| home.join(paths::agent_default_dir(Agent::Dsh))),
             home,
         })
     }

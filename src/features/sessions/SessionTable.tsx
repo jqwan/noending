@@ -7,7 +7,7 @@ import "./sessions.css";
 import { type AgentStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
 
 import {
-  continueSessionTerminalWithToast,
+  openSessionTerminal,
   terminalContinueState,
   desktopContinueState,
   resolveSessionContinueMode,
@@ -21,31 +21,21 @@ import type { Route } from "../../app/routes";
 import {
   UNTITLED_SESSION,
   NO_CWD,
-  UNKNOWN_AGENT,
   PROJECT_PENDING,
   PROJECT_NO_PATH,
   agentDisplayLabel,
   sessionDisplayTitle,
 } from "./sessionDisplay";
 
-/* 展示层 helper —— SessionCards 与 SessionDetailView 共用。只做「怎么显示得下、
- * 看得懂」：截断与中文占位，不改领域字段；完整值永远可达，所以截断不损失
- * provenance（AGENTS.md: Context Provenance Fidelity）。 */
-
 export {
   UNTITLED_SESSION,
   NO_CWD,
-  UNKNOWN_AGENT,
-  PROJECT_PENDING,
-  PROJECT_NO_PATH,
   agentDisplayLabel,
   sessionDisplayTitle,
 };
 
-
-
 /**
- * Project 单元格。v0.2 里 Project 只有一条事实链：`workspace_path_id →
+ * Project 单元格。关联来自 `workspace_path_id →
  * WorkspacePath.project_id`；API 的 `session.project_id` 在读取时由该链派生。
  * 缺目录时分别说「待解析」/「无工作目录」。
  */
@@ -113,7 +103,7 @@ function widthOf(s: string): number {
 }
 
 /** 尾部省略：用在「靠前更重要」的文本上（标题）。 */
-export function ellipsisTail(text: string, max: number): string {
+function ellipsisTail(text: string, max: number): string {
   if (widthOf(text) <= max) return text;
   const chars = [...text];
   let used = 0;
@@ -127,7 +117,7 @@ export function ellipsisTail(text: string, max: number): string {
 }
 
 /** 保头保尾、省中间：UUID / 超长目录名这种「两头都有信息」的字符串用。 */
-export function shrinkMiddle(text: string, max: number): string {
+function shrinkMiddle(text: string, max: number): string {
   if (text === "") return "";
   if (widthOf(text) <= max) return text;
   if (max <= 2) return "…";
@@ -196,7 +186,7 @@ export function ellipsisPathMiddle(path: string, max: number): string {
   return shrinkMiddle(trimmed, max);
 }
 
-export function cwdDisplayLabel(cwd: string | null | undefined, max: number): string {
+function cwdDisplayLabel(cwd: string | null | undefined, max: number): string {
   const trimmed = (cwd ?? "").trim();
   if (trimmed === "") return NO_CWD;
   return ellipsisPathMiddle(trimmed, max);
@@ -210,13 +200,6 @@ export function formatDateTime(iso: string | null | undefined): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${t.getFullYear()}/${pad(t.getMonth() + 1)}/${pad(t.getDate())} `
     + `${pad(t.getHours())}:${pad(t.getMinutes())}`;
-}
-
-/** 相对时间 + 绝对时间：列表要看快慢，Detail 要看具体时刻。 */
-export function activityLabel(iso: string | null | undefined): string {
-  const relative = timeAgo(iso);
-  if (!iso) return relative;
-  return `${relative} · ${formatDateTime(iso)}`;
 }
 
 /**
@@ -589,7 +572,7 @@ export function SessionResumeButton({
       if (!navigate) return;
       setTerminalBusy(true);
       try {
-        await continueSessionTerminalWithToast(session, navigate);
+        await openSessionTerminal(session, navigate);
       } finally {
         setTerminalBusy(false);
       }

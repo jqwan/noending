@@ -40,16 +40,6 @@ it.each(cases)("publishes invalidation on $command success and retains targets o
   } finally { window.removeEventListener(EVT_REMOVED, listener); }
 });
 
-it("queries persisted freshness for the requested scope without synchronizing", async () => {
-  vi.mocked(invoke).mockResolvedValue({ kind: "project", id: "p" });
-  await expect(api.getFreshness("project", "p")).resolves.toEqual({ kind: "project", id: "p" });
-  expect(vi.mocked(invoke).mock.calls).toEqual([["get_freshness", { kind: "project", id: "p" }]]);
-  vi.mocked(invoke).mockClear();
-  await api.getFreshness();
-  expect(vi.mocked(invoke).mock.calls).toEqual([["get_freshness", { kind: null, id: null }]]);
-});
-
-
 it("queries active operation presence without submitting work", async () => {
   const result = [{id:"queued",kind:"sync",state:"queued",targets:[{kind:"session",id:"one"}],agent:null}];
   vi.mocked(invoke).mockResolvedValue(result);

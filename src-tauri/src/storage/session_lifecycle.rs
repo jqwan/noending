@@ -31,20 +31,6 @@ pub fn restore_session_conn(conn: &Connection, session_id: &str) -> Result<bool>
     Ok(n > 0)
 }
 
-/// Commit-time guard: the session must still exist, or the rows a caller
-/// prepared have nowhere to land. Archive is NOT part of it (see
-/// `sessions.archived_at`); only a permanent purge removes the row.
-pub fn session_exists_conn(conn: &Connection, session_id: &str) -> Result<bool> {
-    let exists: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM sessions WHERE id = ?1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(exists.is_some())
-}
-
 // FTS
 
 /// Drop a permanently deleted session's message rows from the FTS index. Message

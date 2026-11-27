@@ -6,8 +6,3 @@ import type { SessionContextView, SessionDetail } from "../../types";
  */
 export const sessionDetailCache = new Map<string, SessionDetail>();
 export const sessionContextCache = new Map<string, SessionContextView>();
-
-export function clearSessionDetailCache() {
-  sessionDetailCache.clear();
-  sessionContextCache.clear();
-}

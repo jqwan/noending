@@ -52,7 +52,11 @@ pub async fn install_local_marketplace(
 
 #[tauri::command]
 pub async fn uninstall_package(id: String) -> Result<packages::PackageOperationResult> {
-    super::run_on_blocking_worker(move || packages::uninstall(&inventory()?, &id)).await?
+    super::run_on_blocking_worker(move || {
+        let roots = skills::Roots::current()?;
+        packages::uninstall(&roots, &packages::discover(&roots), &id)
+    })
+    .await?
 }
 
 #[tauri::command]

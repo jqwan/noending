@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import Icon, { type IconName } from "./Icon";
 import PopupMenu, { PopupMenuItem } from "./PopupMenu";
 
-export interface CustomSelectOption {
+interface CustomSelectOption {
   value: string;
   label: string;
   icon?: IconName | string | React.ReactNode;

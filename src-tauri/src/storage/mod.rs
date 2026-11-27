@@ -346,19 +346,6 @@ impl Db {
         upsert_workstream_conn(&conn, w)
     }
 
-    /// Delete a Workstream and everything it owns — in full FK order, which a
-    /// bare `DELETE FROM workstreams` violates under
-    /// `PRAGMA foreign_keys = ON` (it fails the moment the Workstream has ever
-    /// had a Context item or a path).
-    ///
-    /// This is the mechanical half only. The *product* door is
-    /// `workspace::workstream::delete_workstream_permanently`, which additionally
-    /// requires `visibility = archived` and preserves Sessions.
-    pub fn delete_workstream(&self, id: &str) -> Result<()> {
-        self.tx(|tx| workstream_projects::purge_workstream_data_conn(tx, id))?;
-        Ok(())
-    }
-
     // Logical Sessions
 
     /// Session-only fixture helper. Production discovery uses
@@ -835,17 +822,6 @@ impl Db {
         get_messages_conn(&conn, session_id, after_ordinal, limit)
     }
 
-    /// The Context-input read: current-projection messages after the
-    /// processed ordinal, in order.
-    pub fn get_messages_after(
-        &self,
-        session_id: &str,
-        processed_ordinal: i64,
-        limit: i64,
-    ) -> Result<Vec<SessionMessage>> {
-        self.get_messages(session_id, Some(processed_ordinal), limit)
-    }
-
     /// The newest `limit` messages of the CURRENT conversation, oldest first.
     pub fn recent_messages(&self, session_id: &str, limit: i64) -> Result<Vec<SessionMessage>> {
         let conn = self.read();
@@ -1317,15 +1293,6 @@ impl Db {
     }
 
     // helpers
-
-    pub fn touch_project(&self, project_id: &str) -> Result<()> {
-        let conn = self.write();
-        conn.execute(
-            "UPDATE projects SET updated_at = ?2 WHERE id = ?1",
-            params![project_id, now()],
-        )?;
-        Ok(())
-    }
 
     /// Sources whose facts are already fully stored: source_path →
     /// (source_file_identity, last_seen_size, mtime) for members whose owning

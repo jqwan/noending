@@ -12,15 +12,14 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 use crate::workspace::project::{
-    project_detail, project_kind, project_workstreams, ProjectDeletion, ProjectDetail,
-    ProjectWorkstream, WorkspacePolicy,
+    project_detail, project_kind, ProjectDeletion, ProjectDetail, WorkspacePolicy,
 };
 use crate::workspace::wiring::WorkspaceLayer;
 
 use super::workstream::later_ts;
 use super::{noending_home, with_db, AppState};
 
-// ---------------- Projects: the v0.2 surface ----------------
+// ---------------- Projects ----------------
 
 /// One Project as the Projects Board needs it: identity, physical
 /// availability, workstream/session reach and a recent-activity signal —
@@ -224,15 +223,6 @@ pub fn get_project_detail(
         project_detail(db, &project_id, layer.projection().policy())?
             .ok_or_else(|| other(format!("Project {project_id} 不存在")))
     })
-}
-
-/// All tasks associated with this Project through any working path.
-#[tauri::command]
-pub fn list_project_workstreams(
-    state: State<AppState>,
-    project_id: String,
-) -> Result<Vec<ProjectWorkstream>> {
-    with_db(&state, |db| project_workstreams(db, &project_id))
 }
 
 /// rename, and nothing else. A Project's only user-editable fact.

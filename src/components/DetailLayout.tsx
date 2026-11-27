@@ -57,7 +57,7 @@ export function DetailPanelToggle({ panel: suppliedPanel }: { panel?: Panel | nu
     controls={panel.id} hint={panel.hint} onToggle={panel.toggle} /></div>;
 }
 
-export function DetailSidePanel({ children, label = "详情栏" }: { children: ReactNode; label?: string }) {
+function DetailSidePanel({ children, label = "详情栏" }: { children: ReactNode; label?: string }) {
   const panel = useContext(PanelContext);
   const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   if (!panel) throw new Error("详情栏需要 DetailPanelProvider");

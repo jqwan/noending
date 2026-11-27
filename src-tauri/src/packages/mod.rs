@@ -35,8 +35,7 @@ pub use operations::{
     marketplace_install_args, set_enabled, uninstall, PackageAction, PackageOperationResult,
 };
 
-/// Reuses the Skill roots so environment overrides (`CODEX_HOME`,
-/// `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`) stay consistent across features.
+/// Reuse the native Agent roots captured for extension management.
 pub use crate::skills::Roots;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,8 +158,7 @@ pub struct PackageInventory {
     pub warnings: Vec<String>,
 }
 
-/// Antigravity/WorkBuddy roots are fixed under the user's home; only Codex,
-/// Claude and Pi offer environment overrides.
+/// Antigravity and WorkBuddy roots are fixed under the user's home.
 pub(crate) fn gemini_dir(roots: &Roots) -> PathBuf {
     roots.home.join(".gemini")
 }
@@ -175,10 +173,6 @@ pub(crate) fn qoder_dir(roots: &Roots) -> PathBuf {
 
 pub(crate) fn zcode_dir(roots: &Roots) -> PathBuf {
     roots.home.join(".zcode/cli")
-}
-
-pub(crate) fn dsh_dir(roots: &Roots) -> PathBuf {
-    roots.home.join(".dsh")
 }
 
 /// Offline discovery across every integrated provider. Each provider appends

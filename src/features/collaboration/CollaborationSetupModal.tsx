@@ -13,7 +13,7 @@ import { WAKE_LABEL, defaultWakeMethod } from "./collaborationState";
 
 const PAGE = 20;
 
-export type DraftMember = CollaborationStartedMember & Pick<CollaborationCandidate, "title" | "project_id">;
+type DraftMember = CollaborationStartedMember & Pick<CollaborationCandidate, "title" | "project_id">;
 export interface CollaborationSelection {
   selected: DraftMember[];
   coordinator: string | null;

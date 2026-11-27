@@ -72,17 +72,11 @@ fn fake_spawn(_cmd: &AgentCommand) -> Result<LaunchOutcome> {
 
 const FAKE_SPAWN_TAG: &str = "test-spawn";
 
-fn launcher_in(dir_tag: &str) -> SessionLauncher {
-    SessionLauncher {
-        runtime_dir: std::env::temp_dir().join(format!("noending-base-launch-appdata-{}", dir_tag)),
-    }
-}
-
 #[test]
 fn standalone_new_session_launches_through_the_prepared_flow() {
     let db = open_db("standalone-new");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("standalone-new");
+    let launcher = SessionLauncher;
 
     let prepared = launcher
         .prepare_new_in(&db, Agent::Codex, None, &LaunchWorkspace::default())
@@ -118,7 +112,7 @@ fn an_embedded_new_launch_spawns_unbound() {
     ] {
         let db = open_db("embedded-new");
         seed_installation(&db, agent);
-        let launcher = launcher_in("embedded-new");
+        let launcher = SessionLauncher;
         let cwd = real_dir("embedded-new", "project");
         for message in [None, Some("  \n\t".to_string())] {
             let mut prepared = launcher
@@ -151,7 +145,7 @@ const FIRST_MESSAGE: &str = "  请开始实现\n$(id) 'literal' \"message\"  ";
 #[test]
 fn new_launch_transports_long_messages_as_files_for_all_interactive_agents() {
     let db = open_db("message-files");
-    let launcher = launcher_in("message-files");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     for agent in [
         Agent::Codex,
@@ -236,7 +230,7 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
     ] {
         let db = open_db(&format!("first-message-{}", agent.as_str()));
         seed_installation(&db, agent);
-        let launcher = launcher_in("first-message");
+        let launcher = SessionLauncher;
         let workspace = LaunchWorkspace::default();
         let cwd = real_dir("first-message", "project");
         let mut prepared = launcher
@@ -278,7 +272,7 @@ fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
 #[test]
 fn antigravity_desktop_sessions_require_the_desktop_app() {
     let db = open_db("agy-desktop-open");
-    let launcher = launcher_in("agy-desktop-open");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
 
     let raw = std::env::temp_dir().join(format!("noending-agy-{}.jsonl", new_id()));
@@ -336,7 +330,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
 #[test]
 fn the_continue_route_follows_the_source_format() {
     let db = open_db("continue-route-format");
-    let launcher = launcher_in("continue-route-format");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
 
     // WorkBuddy: desktop-only. The root member's source file must exist —
@@ -414,7 +408,7 @@ fn the_continue_route_follows_the_source_format() {
 fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     let db = open_db("desktop-open-resume");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("desktop-open-resume");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
 
     let raw = std::env::temp_dir().join(format!("noending-dx-{}.jsonl", new_id()));
@@ -575,7 +569,7 @@ fn codex_resume_session(db: &Db, tag: &str) -> String {
 fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
     let db = open_db("embedded-resume");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("embedded-resume");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "launch");
 
@@ -626,7 +620,7 @@ fn unexpected_embedded_spawn(
 fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
     let db = open_db("embedded-resume-pending");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("embedded-resume-pending");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "pending");
     let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
@@ -671,7 +665,7 @@ fn failed_embedded_spawn(
 fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
     let db = open_db("embedded-resume-failed");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("embedded-resume-failed");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "failed");
     let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
@@ -703,7 +697,7 @@ fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
 fn an_external_resume_does_not_consume_an_embedded_reservation() {
     let db = open_db("external-resume-pending");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("external-resume-pending");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "external");
     let prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
@@ -733,7 +727,7 @@ fn an_external_resume_does_not_consume_an_embedded_reservation() {
 fn an_embedded_prepared_launch_without_a_surface_is_refused_not_downgraded() {
     let db = open_db("embedded-refused");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("embedded-refused");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "refuse");
 
@@ -800,7 +794,7 @@ fn controlled_reconnect_spawn(
 fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
     let db = open_db("reconnect");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("reconnect");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect");
     let registry = noending::terminal::TerminalRegistry::new(None);
@@ -836,7 +830,7 @@ fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
 fn reconnect_failure_keeps_the_stopped_terminal_and_releases_the_reservation() {
     let db = open_db("reconnect-fail");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("reconnect-fail");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect-fail");
     let registry = noending::terminal::TerminalRegistry::new(None);
@@ -866,7 +860,7 @@ fn reconnect_failure_keeps_the_stopped_terminal_and_releases_the_reservation() {
 fn reconnect_validates_archive_state_before_stopping_the_terminal() {
     let db = open_db("reconnect-archived");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("reconnect-archived");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect-archived");
     let registry = noending::terminal::TerminalRegistry::new(None);
@@ -897,7 +891,7 @@ fn reconnect_validates_archive_state_before_stopping_the_terminal() {
 fn resume_followup_uses_existing_identity_and_redacts_the_prompt() {
     let db = open_db("resume-followup");
     seed_installation(&db, Agent::Codex);
-    let launcher = launcher_in("resume-followup");
+    let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "followup");
     let mut prepared = launcher.prepare_resume_in(&db, &sid, &workspace).unwrap();
