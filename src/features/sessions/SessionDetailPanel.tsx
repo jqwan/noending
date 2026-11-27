@@ -68,13 +68,13 @@ export default function SessionDetailPanel({ detail, navigate }: {
 
   {/* 执行事实：一次会话「在什么时候、哪个目录、源在哪里」。值可整段选中并复制。 */}
   <DetailFields>
-    <Field label="Agent">
+    <Field label="AgentTool">
       <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
         <button
           type="button"
           className="link"
-          title={`打开 Agent：${agentDisplayLabel(session.agent)}`}
-          onClick={() => navigate({ view: "agents", agent: session.agent })}
+          title={`打开 运行工具：${agentDisplayLabel(session.agent)}`}
+          onClick={() => navigate({ view: "agent-tools", agent: session.agent })}
         >
           <span>{agentDisplayLabel(session.agent)}</span>
         </button>
@@ -122,7 +122,7 @@ export default function SessionDetailPanel({ detail, navigate }: {
           </button>
           {cwd !== "" && cwd !== workspacePath.canonical_path && (
             <div className="muted small" style={{ marginTop: 4 }}>
-              Agent 原始记录：
+              AgentTool 原始记录：
               <button
                 type="button"
                 className="link mono"
@@ -183,7 +183,7 @@ export default function SessionDetailPanel({ detail, navigate }: {
     <Field label="会话统计">
       <span className="row" style={{ gap: 12, flexWrap: "wrap" }}>
         <span>用户消息 {detail.message_stats?.user_messages ?? detail.messages.filter((m) => m.role === "user").length}</span>
-        <span>Agent 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
+        <span>运行工具 回复 {detail.message_stats?.assistant_messages ?? detail.messages.filter((m) => m.role === "assistant").length}</span>
       </span>
     </Field>
     {/* 源会话：会话自己的源文件。
@@ -228,9 +228,9 @@ export default function SessionDetailPanel({ detail, navigate }: {
       </div>
     </Field>
     <Field
-      label="Agent 会话 ID"
+      label="运行工具会话 ID"
       copyValue={session.root_agent_session_id}
-      copyTitle="复制 Agent 会话 ID"
+      copyTitle="复制 运行工具会话 ID"
     >
       <div
         className="mono"
@@ -249,7 +249,7 @@ export default function SessionDetailPanel({ detail, navigate }: {
             className="link"
             style={{ textAlign: "left", wordBreak: "break-word" }}
             title={`打开来源会话：${sessionDisplayTitle(detail.forked_from.title)}`}
-            onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialAgent: detail.forked_from!.agent })}
+            onClick={() => navigate({ view: "session", sessionId: detail.forked_from!.id, initialTitle: sessionDisplayTitle(detail.forked_from!.title), initialTool: detail.forked_from!.agent })}
           >
             分叉自：{sessionDisplayTitle(detail.forked_from.title)}
             {detail.forked_from.archived_at !== null && (

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../../api";
 import PackagesView from "./PackagesView";
 import PackageDetailView from "./PackageDetailView";
-import AgentPackagesSection from "./AgentPackagesSection";
+import AgentToolPackagesSection from "./AgentToolPackagesSection";
 import type { Route } from "../../app/routes";
 import { viewState } from "../../hooks/useViewState";
 import type { PackageDetail, PackageEntry, PackageInventory } from "../../types";
@@ -66,7 +66,7 @@ beforeEach(() => {
   vi.mocked(api.uninstallPackage).mockResolvedValue({ message: "插件包已卸载" });
   vi.mocked(api.enablePackage).mockResolvedValue({ message: "启停配置已保存" });
   vi.mocked(api.disablePackage).mockResolvedValue({ message: "启停配置已保存" });
-  vi.mocked(api.installLocalPackage).mockResolvedValue({ message: "已安装到 1 个 Agent" });
+  vi.mocked(api.installLocalPackage).mockResolvedValue({ message: "已安装到 1 个 运行工具" });
   vi.mocked(api.previewImportPackage).mockImplementation(async path => ({
     path, kind: "package" as const,
     options: [{ agent: "pi" as const, manifest: "plugin.json", name: "toolkit", description: "Imported toolkit", plugins: [] }],
@@ -148,20 +148,20 @@ it("filters by agent and query on the board", async () => {
   expect(await screen.findByText("review")).toBeTruthy();
   expect(screen.getByText("team-tools")).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: /^筛选 Agent：/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^筛选运行工具：/ }));
   fireEvent.click(screen.getByRole("option", { name: "Pi" }));
   expect(await screen.findByText("team-tools")).toBeTruthy();
   expect(screen.queryByText("review")).toBeNull();
 });
 
-it("keeps read-only surfaces for entries whose Agent exposes no management", async () => {
+it("keeps read-only surfaces for entries whose AgentTool exposes no management", async () => {
   inventory = { packages: [
     entry({ id: "pkg-wb-builtin", agent: "workbuddy", name: "welcome", origin: "bundled", marketplace: "workbuddy-builtin", capabilities: { uninstall: false, toggle: false } }),
     entry({ id: "pkg-pi-quiet", agent: "pi", name: "quiet", origin: "market", marketplace: null, capabilities: { uninstall: true, toggle: false }, scopes: [{ scope: "user", state: "enabled", config_path: "s", config_exists: true, project_path: null }] }),
   ], warnings: [] };
   const { unmount } = render(<PackageDetailView packageId="pkg-wb-builtin" initialTitle="welcome" navigate={navigation} />);
   await screen.findByRole("region", { name: "插件包详情" });
-  expect(screen.getByText("Agent 内置")).toBeTruthy();
+  expect(screen.getByText("运行工具内置")).toBeTruthy();
   // Bundled packages get no toggle or uninstall at all.
   expect(screen.queryByRole("button", { name: "停用" })).toBeNull();
   expect(screen.queryByRole("button", { name: "卸载插件包" })).toBeNull();
@@ -190,7 +190,7 @@ it("installs a single-format directory straight to its matched agent without reg
   // The install is the whole flow — the dialog closes and the board refresh
   // toast carries the result. Nothing is registered or rolled back.
   await vi.waitFor(() => expect(within(dialog).queryByRole("dialog", { name: "导入插件包" })).toBeNull());
-  expect(showToast).toHaveBeenCalledWith("已安装到 1 个 Agent");
+  expect(showToast).toHaveBeenCalledWith("已安装到 1 个 运行工具");
 });
 
 it("offers every format of a dual-manifest directory and installs only the checked ones", async () => {
@@ -201,7 +201,7 @@ it("offers every format of a dual-manifest directory and installs only the check
       { agent: "pi", manifest: "package.json", name: "a-package", description: "", plugins: [] },
     ],
   });
-  vi.mocked(api.installLocalPackage).mockResolvedValue({ message: "已安装到 1 个 Agent" });
+  vi.mocked(api.installLocalPackage).mockResolvedValue({ message: "已安装到 1 个 运行工具" });
   render(<PackagesView navigate={navigation} />);
   fireEvent.click(await screen.findByRole("button", { name: "导入插件包" }));
   const dialog = await screen.findByRole("dialog", { name: "导入插件包" });
@@ -362,9 +362,9 @@ it("shows the desktop-only dsh bundle as manageable with unknown enablement", as
   expect(within(dshCard as HTMLElement).getByText("未知")).toBeTruthy();
 });
 
-it("gives the Agent detail package block the same direct toggle", async () => {
+it("gives the AgentTool detail package block the same direct toggle", async () => {
   inventory = { packages: [entry({ id: "pkg-codex-review", agent: "codex", name: "review" })], warnings: [] };
-  const view = render(<AgentPackagesSection agent="codex" navigate={navigation} />);
+  const view = render(<AgentToolPackagesSection agent="codex" navigate={navigation} />);
   const row = await screen.findByRole("button", { name: /review/ });
   expect(screen.queryByText("已启用")).toBeNull();
   // Same direct user-level toggle as the board cards.
@@ -375,7 +375,7 @@ it("gives the Agent detail package block the same direct toggle", async () => {
   expect(navigation).toHaveBeenCalledWith(expect.objectContaining({ view: "package", packageId: "pkg-codex-review" }));
   view.unmount();
   vi.mocked(api.listPackages).mockImplementation(() => new Promise(() => {}));
-  render(<AgentPackagesSection agent="codex" navigate={navigation} />);
+  render(<AgentToolPackagesSection agent="codex" navigate={navigation} />);
   expect(screen.getByRole("button", { name: "review" })).toBeTruthy();
   expect(screen.queryByText("正在读取插件包…")).toBeNull();
 });

@@ -2,8 +2,8 @@
 //! and hosts the Tauri run() entry.
 
 pub mod adapters;
+pub mod agent;
 pub mod agent_runtime;
-pub mod assistant;
 pub mod cli;
 pub mod collaboration;
 pub mod commands;
@@ -73,7 +73,7 @@ pub fn run() {
             // an uninstalled CLI is no longer reported as detected and can
             // no longer be auto-selected as default agent.
             {
-                for agent in domain::Agent::all() {
+                for agent in domain::AgentTool::all() {
                     let resolved = platform::exec_resolver::resolve(*agent).ok();
                     if resolved.is_none() {
                         eprintln!(
@@ -171,8 +171,8 @@ pub fn run() {
                         &layer.projection(),
                         usize::MAX,
                     );
-                    if let Err(error) = assistant::refresh_identities(&state.db, &home) {
-                        eprintln!("[noending] could not refresh assistant identities: {error}");
+                    if let Err(error) = agent::refresh_identities(&state.db, &home) {
+                        eprintln!("[noending] could not refresh agent identities: {error}");
                     }
                     match result {
                         Ok(report) => {
@@ -235,7 +235,7 @@ pub fn run() {
             commands::workstream::archive_workstream,
             commands::workstream::restore_workstream,
             commands::workstream::delete_workstream_permanently,
-            commands::get_default_agent,
+            commands::get_default_tool,
             // Explicit summary reads and user-triggered extraction.
             commands::get_session_context,
             commands::workstream::list_task_items,
@@ -255,8 +255,8 @@ pub fn run() {
             commands::open_path,
             commands::get_workstream_context,
             commands::session_workspace::list_sessions,
-            commands::session_workspace::get_session_counts_by_agent,
-            commands::session_workspace::get_agent_latest_activities,
+            commands::session_workspace::get_session_counts_by_tool,
+            commands::session_workspace::get_tool_latest_activities,
             commands::session_workspace::get_session_terminal_states,
             commands::session_workspace::get_session_detail,
             commands::session_workspace::reveal_session_source,
@@ -298,10 +298,10 @@ pub fn run() {
         commands::collaboration::collaboration_room_send,
         commands::collaboration::collaboration_room_start,
         commands::collaboration::collaboration_room_stop,
-        commands::assistant::assistant_mailbox_list,
-        commands::assistant::assistant_mailbox_read,
-        commands::assistant::assistant_mailbox_send,
-        commands::assistant::assistant_mailbox_change,
+        commands::agent::agent_mailbox_list,
+        commands::agent::agent_mailbox_read,
+        commands::agent::agent_mailbox_send,
+        commands::agent::agent_mailbox_change,
         commands::mailbox_list,
             commands::mailbox_notification_hint,
             commands::mailbox_send,
@@ -316,21 +316,21 @@ pub fn run() {
             commands::terminal_resize,
             commands::lookup_navigation,
             commands::match_objects,
-            commands::get_agent_status,
-            commands::redetect_agent,
-            commands::get_agent_runtime_settings,
-            commands::refresh_agent_runtime_options,
+            commands::get_tool_status,
+            commands::redetect_tool,
+            commands::get_tool_runtime_settings,
+            commands::refresh_tool_runtime_options,
             commands::get_extraction_settings,
             commands::set_extraction_settings,
-            commands::assistant::create_assistant_profile,
-            commands::assistant::update_assistant_profile,
-            commands::assistant::prepare_assistant_files,
+            commands::agent::create_agent_profile,
+            commands::agent::update_agent_profile,
+            commands::agent::prepare_agent_files,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             // Documented product behavior: closing NoEnding ends every
-            // embedded Agent. The external-terminal path is unaffected.
+            // embedded agent tool. The external-terminal path is unaffected.
             if let tauri::RunEvent::Exit = event {
                 if let Some(watcher) = app.try_state::<cli::ChangeWatcher>() {
                     watcher.shutdown();

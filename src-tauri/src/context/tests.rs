@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::{
-    Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate, Workstream,
+    AgentTool, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate, Workstream,
 };
 use crate::workspace::home::NoEndingHome;
 use serde_json::{json, Value};
@@ -45,7 +45,7 @@ impl ServiceFixture {
         let root_id = format!("context-service-root-{}", crate::storage::new_id());
         let session_id = db
             .upsert_logical_session(
-                Agent::Codex,
+                AgentTool::Codex,
                 &root_id,
                 None,
                 Some("Context service fixture"),
@@ -223,7 +223,7 @@ fn session_full_input_increment_regeneration_and_long_summary() {
     .unwrap();
     crate::agent_runtime::set_runtime_overrides(
         f.db(),
-        Agent::Codex,
+        AgentTool::Codex,
         &crate::agent_runtime::AgentRuntimeOverrides {
             model: Some("unrelated-global-model".into()),
             effort: Some("low".into()),
@@ -249,7 +249,7 @@ fn session_full_input_increment_regeneration_and_long_summary() {
     let mut calls = 0;
     let mut invocation = PathBuf::new();
     let mut runner = |cli: &CliExtractor, prompt: &str, dir: &Path| {
-        assert_eq!(cli.agent, Agent::Codex);
+        assert_eq!(cli.agent, AgentTool::Codex);
         assert_eq!(cli.opts.model.as_deref(), Some("extraction-model"));
         assert_eq!(cli.opts.effort.as_deref(), Some("high"));
         calls += 1;
@@ -383,7 +383,7 @@ fn skip_advances_progress_preserves_valid_summary_and_avoids_repeat_calls() {
     );
     assert_eq!(view.processed_through_seq, 2);
     let mut never =
-        |_: &CliExtractor, _: &str, _: &Path| panic!("no increment must not launch an Agent");
+        |_: &CliExtractor, _: &str, _: &Path| panic!("no increment must not launch an AgentTool");
     assert_eq!(
         extract_session(f.db(), &id, Some(&home), false, &mut never)
             .unwrap()
@@ -505,7 +505,7 @@ fn unconfigured_agent_never_invokes_cli_and_logs_only_operation_metadata() {
             r#"{"agent":"none","runtime":{"model":null,"provider":null,"effort":null}}"#,
         )
         .unwrap();
-    let mut never = |_: &CliExtractor, _: &str, _: &Path| panic!("no configured Agent");
+    let mut never = |_: &CliExtractor, _: &str, _: &Path| panic!("no configured AgentTool");
     assert_eq!(
         code(extract_session(f.db(), &id, Some(&home), false, &mut never)),
         "agent_not_configured"
@@ -710,7 +710,7 @@ fn project_batch_uses_physical_scope_reuses_task_session_protocol_and_retries_pa
     assert_eq!(out.updated_sessions, vec![b.clone()]);
     assert!(!project_context_view(f.db(), &p.id).unwrap().pending);
     let mut no_call =
-        |_: &CliExtractor, _: &str, _: &Path| panic!("unchanged update must not invoke Agent");
+        |_: &CliExtractor, _: &str, _: &Path| panic!("unchanged update must not invoke AgentTool");
     assert_eq!(
         project::extract_project(f.db(), &p.id, Some(&home), false, &mut no_call)
             .unwrap()
@@ -840,8 +840,9 @@ fn project_scope_changes_and_invalid_results_keep_saved_sessions_and_release_loc
     let a = f.add_session(1, 10);
     let (p, _) = project_fixture(&f, "locked", &[&a]);
     let mut runner = |_: &CliExtractor, _: &str, dir: &Path| {
-        let mut must_not_run =
-            |_: &CliExtractor, _: &str, _: &Path| panic!("locked extraction must not invoke Agent");
+        let mut must_not_run = |_: &CliExtractor, _: &str, _: &Path| {
+            panic!("locked extraction must not invoke AgentTool")
+        };
         assert_eq!(
             code(extract_session(
                 f.db(),

@@ -977,7 +977,7 @@ button.sidebar-pinned-header,
   padding: 8px 10px;
 }
 
-/* Unified detail page layout (Agent, Project, Workstream, Session) */
+/* Unified detail page layout (AgentTool, Project, Workstream, Session) */
 /* 详情页与终端共用可收起右栏；两侧各自滚动。 */
 .main.detail-page {
   --main-gutter: var(--space-lg);

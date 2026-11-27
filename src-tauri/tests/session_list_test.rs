@@ -1,5 +1,5 @@
 //! UI list projection: complete lightweight rows, bounded previews and counts.
-use noending::domain::{Agent, SessionListScope};
+use noending::domain::{AgentTool, SessionListScope};
 use noending::storage::{Db, SessionFilter};
 use noending_lib as noending;
 
@@ -82,7 +82,7 @@ fn session_lists_keep_old_rows_without_loading_source_metadata_and_counts_are_co
         let preview = db
             .list_session_items(
                 SessionFilter {
-                    agent: Some(Agent::Codex),
+                    agent: Some(AgentTool::Codex),
                     ..Default::default()
                 },
                 Some(25),

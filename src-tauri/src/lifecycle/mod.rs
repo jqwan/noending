@@ -6,21 +6,21 @@
 //!   local purge is allowed, what the preview must contain;
 //! - **storage::session_lifecycle** owns the SQL (guarded flips,
 //!   purge);
-//! - **the Agent adapter** owns the source verdict — this module NEVER
-//!   touches the Agent's files, because there is nothing to touch:
+//! - **the agent tool adapter** owns the source verdict — this module NEVER
+//!   touches the agent tool's files, because there is nothing to touch:
 //!   ```text
-//!   NoEnding never deletes Agent-owned session sources.
+//!   NoEnding never deletes agent tool-owned session sources.
 //!   ```
 //!
 //! Permanent delete is a NoEnding-LOCAL purge and nothing else: Archive is the
-//! only gate, one SQLite transaction, no Agent file ever touched. The root
-//! source's verdict is COPY, not a gate — NoEnding never deletes an Agent
+//! only gate, one SQLite transaction, no agent tool file ever touched. The root
+//! source's verdict is COPY, not a gate — NoEnding never deletes an agent tool
 //! source, so a source that is still there just gets re-ingested as a new
 //! Session (no tombstone).
 
 use crate::adapters::adapter_for;
 use crate::domain::SourceAvailability;
-use crate::domain::{Agent, Session};
+use crate::domain::{AgentTool, Session};
 use crate::error::{other, Result};
 use crate::storage::{session_lifecycle, Db, PermanentDeletionCounts};
 
@@ -32,7 +32,7 @@ use crate::storage::{session_lifecycle, Db, PermanentDeletionCounts};
 pub struct LocalDeletePreview {
     pub session_id: String,
     pub session_title: Option<String>,
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub root_agent_session_id: String,
     /// Fresh verdict on the ROOT source at preview time. COPY, not a gate: a
     /// `present` source will be re-ingested as a new Session.
@@ -47,7 +47,7 @@ pub struct PermanentDeleteResult {
     pub purged: bool,
 }
 
-/// Archive without changing messages, Context, search or the Agent source.
+/// Archive without changing messages, Context, search or the agent tool source.
 pub fn archive_session(db: &Db, session_id: &str) -> Result<Session> {
     let changed = db
         .tx(|tx| session_lifecycle::archive_session_conn(tx, session_id, &crate::storage::now()))?;

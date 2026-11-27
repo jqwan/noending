@@ -1,7 +1,7 @@
 //! Ephemeral operation presence, shared by desktop, CLI and MCP for one database.
 //! OS locks own liveness: a crashed process never leaves a permanent busy flag.
 use crate::{
-    domain::Agent,
+    domain::AgentTool,
     error::{other, Result},
     storage::Db,
 };
@@ -49,12 +49,12 @@ pub struct OperationStatus {
     pub kind: Kind,
     pub state: State,
     pub targets: Vec<Target>,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentTool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_summary_progress: Option<ProjectSummaryProgress>,
 }
 impl OperationStatus {
-    pub fn sync(kind: &str, id: &str, agent: Option<Agent>) -> Self {
+    pub fn sync(kind: &str, id: &str, agent: Option<AgentTool>) -> Self {
         Self {
             id: String::new(),
             kind: Kind::Sync,
@@ -64,7 +64,7 @@ impl OperationStatus {
             project_summary_progress: None,
         }
     }
-    pub fn source(db: &Db, id: &str, agent: Option<Agent>) -> Result<Self> {
+    pub fn source(db: &Db, id: &str, agent: Option<AgentTool>) -> Result<Self> {
         let mut status = Self::sync("source", id, agent);
         if let Some(source) = db.get_ingest_source(id)? {
             let roots = crate::adapters::source_discovery_roots(&source);
@@ -86,7 +86,7 @@ impl OperationStatus {
         }
         Ok(status)
     }
-    pub fn native(db: &Db, agent: Agent, native_id: &str) -> Result<Self> {
+    pub fn native(db: &Db, agent: AgentTool, native_id: &str) -> Result<Self> {
         Ok(match db.find_session_by_root_agent_id(agent, native_id)? {
             Some(session) => Self::sync("session", &session.id, Some(agent)),
             None => Self::sync("native", native_id, Some(agent)),

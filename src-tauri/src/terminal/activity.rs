@@ -1,4 +1,4 @@
-//! Agent lifecycle, independent of PTY liveness. No terminal bytes are inspected.
+//! agent tool lifecycle, independent of PTY liveness. No terminal bytes are inspected.
 //! Working includes thinking, tools and response output, not a token-stream claim.
 //! Hook coverage differs: e.g. Claude has no manual-interrupt hook and Codex has
 //! no dedicated failure hook. Missing notifications never imply completion.

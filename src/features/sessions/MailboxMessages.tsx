@@ -54,7 +54,7 @@ function MailboxMetadata({ message, navigate }: { message: MailboxMessage; navig
     <span className="mailbox-history-sender">
       {!senderId ? <span>用户</span> : <>
         {sender ? <button type="button" className="link mailbox-sender-name" title={`${title}\nNoEnding ID：${senderId}`}
-          aria-label={`打开发件会话：${title}`} onClick={() => navigate({ view: "session", sessionId: senderId, initialTitle: title, initialAgent: sender.agent })}>{title}</button>
+          aria-label={`打开发件会话：${title}`} onClick={() => navigate({ view: "session", sessionId: senderId, initialTitle: title, initialTool: sender.agent })}>{title}</button>
           : <span className="mailbox-sender-name" title={`NoEnding ID：${senderId}`}>{title}</span>}
         <button type="button" className="btn ghost icon-button small" aria-label="复制发件会话 ID" title="复制发件会话 ID" onClick={() => void copySender()}><Icon name="copy" /></button>
       </>}

@@ -1,4 +1,4 @@
-import type { Agent, SkillInventory, SkillLocation, SkillResource } from "../../types";
+import type { AgentTool, SkillInventory, SkillLocation, SkillResource } from "../../types";
 import type { Route } from "../../app/routes";
 import { displayPath } from "../../pathDisplay";
 
@@ -17,7 +17,7 @@ export function under(path: string, root: string) {
   return path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}\\`);
 }
 
-export function locationSupportsAgent(location: SkillLocation, agent: Agent) {
+export function locationSupportsAgent(location: SkillLocation, agent: AgentTool) {
   // Mirrors supports_user_agent/supports_project_agent in the backend: the
   // shared (agent-less) root covers everyone but Claude and WorkBuddy at
   // user level, plus Antigravity only at project level.

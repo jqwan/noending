@@ -4,7 +4,7 @@ import { useTerminalActivitySeen } from "./useTerminalActivitySeen";
 import { useEffect, useRef, useState } from "react";
 import Icon from "../../components/Icon";
 import type { Route, SessionEntry } from "../../app/routes";
-import type { Agent } from "../../types";
+import type { AgentTool } from "../../types";
 import { capsOf } from "./sessionFormats";
 import { openSessionTerminal, terminalContinueState, terminalForContinue } from "./continueDesktop";
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
@@ -30,7 +30,7 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   terminalId?: string;
   terminalLive?: boolean;
   title?: string;
-  agent?: Agent;
+  agent?: AgentTool;
   sourceKind?: string;
   archived?: boolean;
   terminalBusy?: boolean;
@@ -65,8 +65,8 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
   useEffect(() => {
     setOpen(false);
     if (sessionId) rememberSessionPage(sessionId, terminalId
-      ? { view: "terminal", terminalId, initialTitle: title, initialAgent: agent, initialSessionId: sessionId }
-      : { view: "session", sessionId, entry, initialTitle: title, initialAgent: agent });
+      ? { view: "terminal", terminalId, initialTitle: title, initialTool: agent, initialSessionId: sessionId }
+      : { view: "session", sessionId, entry, initialTitle: title, initialTool: agent });
   }, [sessionId, terminalId, entry, title, agent]);
   useEffect(() => {
     if (!open) return;
@@ -115,10 +115,10 @@ export default function SessionSubpageTabs({ sessionId, entry, terminalId, termi
     <div className="settings-seg icon-seg" role="group" aria-label="会话子页">
       <button className={!terminalId && entry === "conversation" ? "on" : ""} aria-pressed={!terminalId && entry === "conversation"}
         aria-label="历史消息" title="历史消息" disabled={!sessionId}
-        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation", initialTitle: title, initialAgent: agent })}><Icon name="chatLines" /></button>
+        onClick={() => sessionId && navigate({ view: "session", sessionId, entry: "conversation", initialTitle: title, initialTool: agent })}><Icon name="chatLines" /></button>
       <button className={!terminalId && entry === undefined ? "on" : ""} aria-pressed={!terminalId && entry === undefined}
         aria-label="会话详情" title="会话详情" disabled={!sessionId}
-        onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialAgent: agent })}><Icon name="info" /></button>
+        onClick={() => sessionId && navigate({ view: "session", sessionId, initialTitle: title, initialTool: agent })}><Icon name="info" /></button>
       {canTerminal && <>
         <button className={`${terminalId ? "on " : ""}${connecting ? "terminal-connecting" : live === true ? "terminal-running" : live === false ? "terminal-exited" : ""}`}
           aria-pressed={!!terminalId} aria-label={terminalLabel} title={terminalTitle}

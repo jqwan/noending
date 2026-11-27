@@ -1,5 +1,5 @@
 //! Registered Skill sources may live in the NoEnding library or remain in an
-//! external directory. Native Agent directories determine enablement; registry
+//! external directory. Native agent tool directories determine enablement; registry
 //! membership keeps referenced sources managed after their links are removed.
 use super::{files, Inventory, Resource};
 use crate::{

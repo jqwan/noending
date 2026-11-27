@@ -1,11 +1,11 @@
 //! Pi model catalog: `pi --list-models` prints a fixed-width table whose
 //! columns are `provider model context max-out thinking images`.
 //!
-//! Pi is the only Agent here with a provider dimension, so this is also where
+//! Pi is the only agent tool here with a provider dimension, so this is also where
 //! the Provider → Model cascade gets its data.
 
 use super::{run_cli, warn, ModelCatalog, ModelOption};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 
 /// `pi --help`: "Set thinking level: off, minimal, low, medium, high, xhigh, max".
 pub const EFFORT_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -13,7 +13,7 @@ pub const EFFORT_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", 
 const THINKING_CAPABLE: &str = "yes";
 
 pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
-    match run_cli(Agent::Pi, &["--list-models"]) {
+    match run_cli(AgentTool::Pi, &["--list-models"]) {
         Ok(raw) => {
             let models = parse(&raw);
             if models.is_empty() {

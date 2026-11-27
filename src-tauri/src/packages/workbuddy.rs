@@ -5,7 +5,7 @@
 use super::{
     files, workbuddy_dir, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState,
 };
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 
 pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<PackageEntry> {
@@ -37,7 +37,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
                 || builtin_names.iter().any(|builtin| builtin == name);
             Some(PackageEntry {
                 id: files::key(format!("package:workbuddy:{key}")),
-                agent: Some(Agent::WorkBuddy),
+                agent: Some(AgentTool::WorkBuddy),
                 name: name.to_string(),
                 version: install
                     .get("version")

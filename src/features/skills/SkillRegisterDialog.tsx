@@ -59,7 +59,7 @@ export default function SkillRegisterDialog({ id, name, onClose, onDone }: {
           ? "源目录将移入 NoEnding 技能库，原加载入口改为指向新位置的链接。"
           : "保留原目录，只登记源路径，不移动或复制文件，也不改动现有加载入口。"}
       </p>
-      {!migrateSource && physical && <p className="small skill-safe-note">源目录位于 Agent 生效路径，对应作用域会保持启用，不能直接停用该物理入口。</p>}
+      {!migrateSource && physical && <p className="small skill-safe-note">源目录位于 运行工具 生效路径，对应作用域会保持启用，不能直接停用该物理入口。</p>}
     </div>
     {error && <Notice role="alert" >{error}</Notice>}
     <DialogActions>

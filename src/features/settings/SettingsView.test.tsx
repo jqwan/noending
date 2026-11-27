@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
-import { runtimeFixture } from "../agents/runtimeFixtures";
+import { clearRuntimeCatalog } from "../agent-tools/useAgentRuntime";
+import { runtimeFixture } from "../agent-tools/runtimeFixtures";
 import { viewState } from "../../hooks/useViewState";
 import { clearReadResources } from "../../hooks/readResource";
 import SettingsView from "./SettingsView";
@@ -36,8 +36,8 @@ vi.mock("../../api", () => ({
     disableSkillAll: vi.fn(),
     getExtractionSettings: vi.fn(),
     setExtractionSettings: vi.fn(),
-    getAgentRuntimeSettings: vi.fn(),
-    refreshAgentRuntimeOptions: vi.fn(),
+    getToolRuntimeSettings: vi.fn(),
+    refreshToolRuntimeOptions: vi.fn(),
   },
 }));
 
@@ -79,13 +79,13 @@ beforeEach(() => {
   viewState.clear(); localStorage.clear(); clearRuntimeCatalog();
   vi.mocked(api.getExtractionSettings).mockReset().mockResolvedValue({ agent: "codex", runtime: { model: null, provider: null, effort: null } });
   vi.mocked(api.setExtractionSettings).mockReset();
-  vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async agent => runtimeFixture(agent));
-  vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
+  vi.mocked(api.getToolRuntimeSettings).mockReset().mockImplementation(async agent => runtimeFixture(agent));
+  vi.mocked(api.refreshToolRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
 });
 
 it("saves extraction settings immediately on selection and handles disable extraction", async () => {
   render(<SettingsView />);
-  const agent = await screen.findByLabelText("提取 Agent");
+  const agent = await screen.findByLabelText("提取 运行工具");
 
   const piExpected = { agent: "pi" as const, runtime: { model: null, provider: null, effort: null } };
   vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(piExpected);
@@ -102,13 +102,13 @@ it("saves extraction settings immediately on selection and handles disable extra
 
   const antigravityExpected = { agent: "antigravity" as const, runtime: { model: null, provider: null, effort: null } };
   vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(antigravityExpected);
-  fireEvent.click(screen.getByRole("button", { name: "提取 Agent：Pi" }));
+  fireEvent.click(screen.getByRole("button", { name: "提取 运行工具：Pi" }));
   fireEvent.click(screen.getByText("Antigravity", { selector: ".menu-item-label" }));
   await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(antigravityExpected));
 
   const noneExpected = { agent: "none" as const, runtime: { model: null, provider: null, effort: null } };
   vi.mocked(api.setExtractionSettings).mockResolvedValueOnce(noneExpected);
-  fireEvent.change(screen.getByLabelText("提取 Agent"), { target: { value: "none" } });
+  fireEvent.change(screen.getByLabelText("提取 运行工具"), { target: { value: "none" } });
   await waitFor(() => expect(api.setExtractionSettings).toHaveBeenCalledWith(noneExpected));
   expect(screen.queryByRole("button", { name: "模型与推理设置" })).toBeNull();
   expect(screen.getByText(/已停用后台提取/)).toBeTruthy();

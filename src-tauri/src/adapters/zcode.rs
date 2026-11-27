@@ -46,14 +46,14 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
+    ms_epoch_to_rfc3339, AgentToolCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
     ExecOptions, MemberReadDelta, ResumeRoute,
 };
 use crate::domain::{
-    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
+    AgentTool, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
 };
 use crate::error::{other, Result};
-use crate::platform::exec_resolver::AgentInstallation;
+use crate::platform::exec_resolver::AgentToolInstallation;
 
 pub struct ZCodeAdapter;
 
@@ -232,7 +232,7 @@ impl ZCodeAdapter {
         let is_root = kind.is_logical_root();
         Ok((
             DiscoveredMember {
-                agent: Agent::ZCode,
+                agent: AgentTool::ZCode,
                 source_member_id: id.clone(),
                 kind,
                 parent_source_member_id: parent.clone(),
@@ -286,12 +286,12 @@ impl ZCodeAdapter {
 }
 
 impl crate::adapters::AgentAdapter for ZCodeAdapter {
-    fn agent(&self) -> Agent {
-        Agent::ZCode
+    fn tool(&self) -> AgentTool {
+        AgentTool::ZCode
     }
 
     /// Always `None`: ZCode is a desktop app, not a CLI.
-    fn detect(&self) -> Option<AgentInstallation> {
+    fn detect(&self) -> Option<AgentToolInstallation> {
         None
     }
 
@@ -416,30 +416,30 @@ impl crate::adapters::AgentAdapter for ZCodeAdapter {
 
     fn build_new_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
     }
 
     fn build_resume_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
     }
 
     fn build_exec_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("ZCode 是桌面应用，没有可启动的 CLI"))
     }
 
@@ -636,7 +636,7 @@ mod tests {
     fn session_of(db: &Path, id: &str) -> Session {
         Session {
             id: "sess-zcode".into(),
-            agent: Agent::ZCode,
+            agent: AgentTool::ZCode,
             root_agent_session_id: id.into(),
             title: None,
             cwd: None,
@@ -710,7 +710,7 @@ mod tests {
 
     /// A `first_input` title is ZCode's own naive truncation of the first input
     /// — the same thing we would derive, and often worse. It is not a title the
-    /// Agent thought about, so the derived one stands.
+    /// agent tool thought about, so the derived one stands.
     #[test]
     fn a_first_input_title_is_not_treated_as_native() {
         let root = unique_dir("title-source");
@@ -1002,7 +1002,7 @@ mod tests {
         let db = Db::open(&root.join("noending.db")).unwrap();
         let (session_id, _) = db
             .upsert_logical_session(
-                Agent::ZCode,
+                AgentTool::ZCode,
                 "b",
                 None,
                 Some("B"),

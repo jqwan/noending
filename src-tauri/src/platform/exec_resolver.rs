@@ -12,12 +12,12 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AgentInstallation {
-    pub agent: Agent,
+pub struct AgentToolInstallation {
+    pub agent: AgentTool,
     pub executable_path: String,
     pub version: Option<String>,
 }
@@ -182,38 +182,38 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file() && (cfg!(target_os = "windows") || is_executable_unix(p))
 }
 
-/// Executable names to probe for an Agent, in order. These may also serve
+/// Executable names to probe for an agent tool, in order. These may also serve
 /// management commands such as DSH plugins; they do not imply support for
 /// terminal sessions or headless extraction. Check those capabilities at
 /// the adapter or extraction boundary.
-pub fn cli_names(agent: Agent) -> Vec<&'static str> {
+pub fn cli_names(agent: AgentTool) -> Vec<&'static str> {
     match agent {
-        Agent::Codex => vec!["codex"],
-        Agent::ClaudeCode => vec!["claude"],
-        Agent::Pi => vec!["pi"],
-        Agent::Qoder => vec![],
+        AgentTool::Codex => vec!["codex"],
+        AgentTool::ClaudeCode => vec!["claude"],
+        AgentTool::Pi => vec!["pi"],
+        AgentTool::Qoder => vec![],
         // Electron GUI: only /Applications/WorkBuddy.app/Contents/MacOS/Electron.
-        Agent::WorkBuddy => vec![],
+        AgentTool::WorkBuddy => vec![],
         // dsh's CLI ships inside the app bundle (not on PATH by default).
         // Boot-style launches still need a user-chosen profile and stay
         // unavailable; the `plugin --profile desktop` subcommand, however,
         // names its profile explicitly and is safe to resolve here.
         // macOS uses the bundled absolute path; Windows is PATH-only until
         // the in-bundle path is verified on a real install.
-        Agent::Dsh => dsh_cli_names(),
+        AgentTool::Dsh => dsh_cli_names(),
         // Desktop app: its runtime lives inside the bundle (`zcode.cjs`) and
         // is not usable standalone — the app hosts it.
-        Agent::ZCode => vec![],
+        AgentTool::ZCode => vec![],
         // The official Antigravity CLI (`agy`, install script at
         // antigravity.google/cli/install.sh), a native binary on PATH.
-        Agent::Antigravity => vec!["agy"],
+        AgentTool::Antigravity => vec!["agy"],
     }
 }
 
-pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
+pub fn resolve(agent: AgentTool) -> Result<AgentToolInstallation> {
     let names: Vec<&str> = cli_names(agent);
     if names.is_empty() {
-        // Reading an Agent's transcripts never depends on its CLI; only
+        // Reading an agent tool's transcripts never depends on its CLI; only
         // launching does. Saying so beats a PATH error the user cannot fix.
         return Err(other(format!(
             "{} 没有可启动的 CLI，NoEnding 只读取它的历史会话",
@@ -222,7 +222,7 @@ pub fn resolve(agent: Agent) -> Result<AgentInstallation> {
     }
     for name in names {
         if let Some(candidate) = resolve_executable(name) {
-            return Ok(AgentInstallation {
+            return Ok(AgentToolInstallation {
                 agent,
                 executable_path: candidate.to_string_lossy().to_string(),
                 version: probe_version(&candidate),
@@ -251,7 +251,7 @@ fn is_executable_unix(_p: &std::path::Path) -> bool {
 
 /// Resolve with a time budget per agent so a hanging `--version` probe
 /// cannot stall startup (versions are optional metadata).
-pub fn resolve_quiet(agent: Agent) -> Option<AgentInstallation> {
+pub fn resolve_quiet(agent: AgentTool) -> Option<AgentToolInstallation> {
     let t = Instant::now();
     let r = resolve(agent).ok();
     if r.is_some() {
@@ -260,7 +260,7 @@ pub fn resolve_quiet(agent: Agent) -> Option<AgentInstallation> {
     r
 }
 
-fn tracing_ok(agent: Agent, elapsed: std::time::Duration) {
+fn tracing_ok(agent: AgentTool, elapsed: std::time::Duration) {
     eprintln!(
         "[exec-resolver] {} resolved in {}ms",
         agent.display_name(),

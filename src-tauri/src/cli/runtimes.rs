@@ -1,21 +1,21 @@
 //! Live executable availability, separate from authentication and model access.
 use crate::{
-    domain::Agent,
-    platform::exec_resolver::{self, AgentInstallation},
+    domain::AgentTool,
+    platform::exec_resolver::{self, AgentToolInstallation},
 };
 use serde_json::{json, Value};
 
 pub(super) fn list() -> Value {
     list_with(|agent| exec_resolver::resolve(agent).ok())
 }
-fn list_with(mut resolve: impl FnMut(Agent) -> Option<AgentInstallation>) -> Value {
-    let items: Vec<_> = Agent::all()
+fn list_with(mut resolve: impl FnMut(AgentTool) -> Option<AgentToolInstallation>) -> Value {
+    let items: Vec<_> = AgentTool::all()
         .iter()
         .map(|agent| {
             let supports_cli = !exec_resolver::cli_names(*agent).is_empty();
             let installation = if supports_cli { resolve(*agent) } else { None };
             json!({
-                "agent":agent, "name":agent.display_name(), "supports_cli":supports_cli,
+                "tool":agent, "name":agent.display_name(), "supports_cli":supports_cli,
                 "cli_available":installation.is_some(),
                 "executable_path":installation.as_ref().map(|i| &i.executable_path),
                 "version":installation.as_ref().and_then(|i| i.version.as_ref()),
@@ -31,10 +31,10 @@ fn list_with(mut resolve: impl FnMut(Agent) -> Option<AgentInstallation>) -> Val
 mod tests {
     use super::*;
     #[test]
-    fn availability_distinguishes_installed_missing_and_history_only_agents() {
+    fn availability_distinguishes_installed_missing_and_history_only_tools() {
         let result = list_with(|agent| {
             assert!(!exec_resolver::cli_names(agent).is_empty());
-            (agent == Agent::Codex).then(|| AgentInstallation {
+            (agent == AgentTool::Codex).then(|| AgentToolInstallation {
                 agent,
                 executable_path: "/test/codex".into(),
                 version: Some("test-version".into()),
@@ -45,7 +45,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|i| i["agent"] == id)
+                .find(|i| i["tool"] == id)
                 .unwrap()
         };
         assert_eq!(item("codex")["cli_available"], true);

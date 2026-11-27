@@ -1,8 +1,8 @@
 import React, { useRef, useState } from "react";
 import type { Route } from "../app/routes";
 import Icon from "../components/Icon";
-import AgentIcon from "../components/AgentIcon";
-import type { AgentStatusEntry, TerminalResumeState } from "../types";
+import AgentToolIcon from "../components/AgentToolIcon";
+import type { AgentToolStatusEntry, TerminalResumeState } from "../types";
 import { sessionDisplayTitle } from "../features/sessions/sessionDisplay";
 import { capsOf } from "../features/sessions/sessionFormats";
 import { DesktopContinueButton } from "../features/sessions/SessionHeaderActions";
@@ -17,7 +17,7 @@ export default function SidebarSessionRow({
   session,
   route,
   navigate,
-  agentStatus,
+  toolStatus,
   loading,
   isPinned,
   onTogglePin,
@@ -27,7 +27,7 @@ export default function SidebarSessionRow({
   session: SidebarSession;
   route: Route;
   navigate: (r: Route) => void;
-  agentStatus: Record<string, AgentStatusEntry> | null;
+  toolStatus: Record<string, AgentToolStatusEntry> | null;
   loading: boolean;
   isPinned?: boolean;
   onTogglePin?: () => void;
@@ -145,7 +145,7 @@ export default function SidebarSessionRow({
           onSelectSession();
         }}
       >
-        {showIcon && <AgentIcon agent={s.agent} size={14} />}
+        {showIcon && <AgentToolIcon agent={s.agent} size={14} />}
         <span
           ref={titleRef}
           className={`sidebar-session-title${isScrolling ? " scrolling" : ""}`}
@@ -220,7 +220,7 @@ export default function SidebarSessionRow({
               agent={s.agent}
               sourceKind={s.source_kind}
               archived={!!s.archived_at}
-              agentStatus={agentStatus}
+              toolStatus={toolStatus}
               className="sidebar-session-action"
               label={`在桌面应用中继续：${title}`}
             />

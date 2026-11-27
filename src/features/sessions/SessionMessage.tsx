@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import { Modal, copyToClipboard } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import { agentDisplayLabel, formatDateTime } from "./SessionTable";
-import type { Agent, SessionMessage } from "../../types";
+import type { AgentTool, SessionMessage } from "../../types";
 
 /** 一条会话消息：Conversation 只剩 user | assistant 两种 role 的 prose，
  *  `who` 由调用方给出（用户 / Codex / …）。 */
@@ -17,18 +17,18 @@ export interface SessionMessageData {
   content: string;
   ts: string | null;
   who: string;
-  /** 仅 Assistant 有意义：是否该轮的最终回复。 */
+  /** 只用于模型回复：是否该轮的最终回复。 */
   turnFinal: boolean;
 }
 
 /** 消息的展示形状：谁说的由角色决定。 */
-export function messageData(m: SessionMessage, agent: Agent | null): SessionMessageData {
+export function messageData(m: SessionMessage, agent: AgentTool | null): SessionMessageData {
   return {
     sequence: m.sequence,
     role: m.role,
     content: m.content,
     ts: m.ts,
-    who: m.role === "user" ? "用户" : agent === null ? "Agent" : agentDisplayLabel(agent),
+    who: m.role === "user" ? "用户" : agent === null ? "AgentTool" : agentDisplayLabel(agent),
     turnFinal: m.role === "assistant" ? m.turn_final : true,
   };
 }
@@ -42,7 +42,7 @@ export function messageData(m: SessionMessage, agent: Agent | null): SessionMess
  */
 const TRUNCATE_AT = 240;
 
-/** 两种气泡：用户右、Agent 左。 */
+/** 两种气泡：用户右、运行工具 左。 */
 export default function SessionMessage({ msg, ordinal }: {
   msg: SessionMessageData;
   /** 历史消息显示当前对话位置；sequence 仍用于滚动锚点。 */

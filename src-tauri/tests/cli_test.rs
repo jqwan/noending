@@ -391,7 +391,7 @@ fn development_desktop_launchers_ignore_a_stale_sibling_console() {
 }
 
 #[test]
-fn assistant_and_bundled_launchers_use_their_explicit_home_and_literal_arguments() {
+fn agent_and_bundled_launchers_use_their_explicit_home_and_literal_arguments() {
     let mut f = Fixture::new();
     let directory = f.root.join("assistant's tools with spaces");
     cli::install_workspace_entry(
@@ -568,7 +568,7 @@ fn concurrent_commands_initialize_one_home_and_replay_one_write_across_processes
 
 #[test]
 fn explicit_sync_ingests_only_the_selected_source_then_refreshes_one_session() {
-    use noending::domain::Agent;
+    use noending::domain::AgentTool;
     use serde_json::json;
     use std::io::Write;
     let f = Fixture::new();
@@ -587,7 +587,7 @@ fn explicit_sync_ingests_only_the_selected_source_then_refreshes_one_session() {
     let source =
         f.db.as_ref()
             .unwrap()
-            .add_ingest_source(Agent::Codex, root.to_str().unwrap())
+            .add_ingest_source(AgentTool::Codex, root.to_str().unwrap())
             .unwrap();
     let exe = Path::new(env!("CARGO_BIN_EXE_ne"));
     let (_, before) = f.run(exe, &["session", "list"]);
@@ -689,7 +689,9 @@ fn desktop_observer_sees_cli_commits_and_cli_preserves_an_unsupported_database()
 #[cfg(unix)]
 #[test]
 fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interruptions() {
-    use noending::domain::{Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate};
+    use noending::domain::{
+        AgentTool, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate,
+    };
     use serde_json::json;
     use std::{
         os::unix::fs::PermissionsExt,
@@ -709,7 +711,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     let db = f.db.as_ref().unwrap();
     let sid = db
         .upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             "summary-protocol",
             None,
             Some("Protocol session"),
@@ -748,7 +750,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let availability = Command::new(env!("CARGO_BIN_EXE_ne"))
-        .args(["agent", "list"])
+        .args(["runtime", "list"])
         .env("NOENDING_HOME", &f.home.root)
         .env("PATH", std::env::join_paths(&paths).unwrap())
         .output()
@@ -763,7 +765,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["agent"] == "codex")
+        .find(|item| item["tool"] == "codex")
         .unwrap();
     assert_eq!(codex["cli_available"], true);
     assert_eq!(codex["supports_extraction"], true);
@@ -779,7 +781,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
             "summary",
             "config",
             "set",
-            "--agent",
+            "--tool",
             "codex",
             "--model",
             "protocol-model",
@@ -798,7 +800,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     );
     assert!(
         !ready.exists(),
-        "saving extraction configuration must not invoke the Agent"
+        "saving extraction configuration must not invoke the AgentTool"
     );
     let spawn = |action: &str, request: &str| {
         Command::new(env!("CARGO_BIN_EXE_ne"))
@@ -825,11 +827,11 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     while !ready.exists() {
         assert!(
             guard.0.try_wait().unwrap().is_none(),
-            "CLI exited before its Agent was ready"
+            "CLI exited before its AgentTool was ready"
         );
         assert!(
             started.elapsed() < Duration::from_secs(10),
-            "Agent failed to reach the test barrier"
+            "AgentTool failed to reach the test barrier"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -853,7 +855,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
     while guard.0.try_wait().unwrap().is_none() {
         assert!(
             started.elapsed() < Duration::from_secs(10),
-            "CLI failed to finish after releasing its Agent"
+            "CLI failed to finish after releasing its AgentTool"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -921,7 +923,7 @@ fn summary_command_waits_for_commit_and_preserves_data_and_locks_across_interrup
                     .status()
                     .unwrap()
                     .success(),
-                "cancelled command left its Agent running"
+                "cancelled command left its AgentTool running"
             );
         } else {
             // SIGKILL cannot run cleanup; explicitly stop this test's orphan stub.
@@ -1217,7 +1219,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
             }),
         },
         ControlCommand::List { session } => Ok(json!({"items":[],"session":session})),
-        ControlCommand::VerifyAssistantSession { .. } => unreachable!(),
+        ControlCommand::VerifyAgentSession { .. } => unreachable!(),
         ControlCommand::Start(options) => {
             let terminal_id = noending::storage::new_id();
             if options.message.as_deref() == Some("disconnect fixture") {
@@ -1318,7 +1320,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
         &[
             "session",
             "new",
-            "--agent",
+            "--tool",
             "codex",
             "--message",
             "--model is message text",
@@ -1336,7 +1338,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     let args = [
         "session",
         "new",
-        "--agent",
+        "--tool",
         "codex",
         "--cwd",
         f.root.to_str().unwrap(),
@@ -1363,7 +1365,7 @@ fn session_control_uses_the_matching_desktop_and_replays_write_receipts() {
     let disconnect_args = [
         "session",
         "new",
-        "--agent",
+        "--tool",
         "codex",
         "--message",
         "disconnect fixture",
@@ -1804,7 +1806,7 @@ fn cli_current_session_extracts_shared_collaboration_messages_without_a_model() 
     db.write().execute("INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at) VALUES(?1,?1,'[]',?2,?2)",rusqlite::params![id,timestamp]).unwrap();
     db.write().execute("INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES(?1,?1,'stopped',?2)",rusqlite::params![id,timestamp]).unwrap();
     db.write().execute("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) VALUES('message',?1,?1,1,'text','Members agreed on the protocol',?2)",rusqlite::params![id,timestamp]).unwrap();
-    let (ok, _) = f.run(exe, &["summary", "config", "set", "--agent", "none"]);
+    let (ok, _) = f.run(exe, &["summary", "config", "set", "--tool", "none"]);
     assert!(ok);
     let (ok, c) = f.run(
         exe,
@@ -2366,25 +2368,18 @@ fn cli_session_start_forwards_working_directory_and_rejects_task_options() {
 
     let (success, unsupported) = f.run(
         exe,
-        &[
-            "session",
-            "new",
-            "--assistant",
-            "project-id",
-            "--agent",
-            "pi",
-        ],
+        &["session", "new", "--agent-id", "project-id", "--tool", "pi"],
     );
     assert!(!success, "{unsupported}");
     assert_eq!(unsupported["error"]["code"], "invalid_arguments");
     assert!(unsupported["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("assistant"));
+        .contains("agent-id"));
 
     let (success, unsupported) = f.run(
         exe,
-        &["session", "new", "--agent", "pi", "--task", "task-id"],
+        &["session", "new", "--tool", "pi", "--task", "task-id"],
     );
     assert!(!success, "{unsupported}");
     assert_eq!(unsupported["error"]["code"], "invalid_arguments");
@@ -2405,7 +2400,7 @@ fn cli_session_start_forwards_working_directory_and_rejects_task_options() {
             "new",
             "--cwd",
             cwd,
-            "--agent",
+            "--tool",
             "pi",
             "--model",
             "one-time-model",
@@ -2413,6 +2408,6 @@ fn cli_session_start_forwards_working_directory_and_rejects_task_options() {
     );
     assert!(success, "{started}");
     assert_eq!(started["data"]["cwd"], cwd);
-    assert_eq!(started["data"]["agent"], "pi");
+    assert_eq!(started["data"]["tool"], "pi");
     assert_eq!(started["data"]["runtime"]["model"], "one-time-model");
 }

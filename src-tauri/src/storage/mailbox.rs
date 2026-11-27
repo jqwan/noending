@@ -135,7 +135,7 @@ impl Db {
     ) -> Result<MailboxPage> {
         self.mailbox_list_ordered(session, state, cursor, limit, false)
     }
-    /// Desktop cards start with the latest arrivals; Agent readers keep FIFO order.
+    /// Desktop cards start with the latest arrivals; agent tool readers keep FIFO order.
     pub fn mailbox_list_latest(
         &self,
         session: &str,

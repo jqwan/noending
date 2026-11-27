@@ -4,10 +4,10 @@
 //! * [`run`] / [`run_with_env`] — the generic mechanism: structured program +
 //!   literal args + an explicit `cwd` + a hard timeout. No shell, no invented
 //!   working directory.
-//! * [`run_headless`] — the Agent-CLI policy on top of it (a bad exit becomes an
+//! * [`run_headless`] — the agent tool-CLI policy on top of it (a bad exit becomes an
 //!   error the UI can show).
 //!
-//! Explicit summary extraction uses authenticated Agent CLIs (`codex exec`,
+//! Explicit summary extraction uses authenticated agent tool CLIs (`codex exec`,
 //! `claude -p`, `pi -p --no-session`, `agy --print`). These child processes have a hard
 //! timeout and submit results through the extraction connection.
 
@@ -18,7 +18,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::adapters::AgentCommand;
+use crate::adapters::AgentToolCommand;
 use crate::error::{other, Result};
 
 pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 120;
@@ -148,7 +148,7 @@ pub fn run(
 /// [`run`] plus per-child environment.
 ///
 /// Git detection needs `GIT_OPTIONAL_LOCKS=0` / `GIT_TERMINAL_PROMPT=0`
-///; keeping them out of `run`'s signature leaves the Agent
+///; keeping them out of `run`'s signature leaves the agent tool
 /// path (which must inherit the user's environment verbatim) untouched.
 pub fn run_with_env(
     program: &Path,
@@ -262,7 +262,7 @@ fn run_process(
 /// The `spawned` bit lets the operation log distinguish a
 /// failed executable lookup from a CLI that actually ran.
 pub fn run_context_extraction(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     timeout_secs: u64,
 ) -> std::result::Result<(), ContextExecFailure> {
     let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
@@ -329,11 +329,11 @@ fn safe_io_error_kind(kind: std::io::ErrorKind) -> &'static str {
     }
 }
 
-/// Run an AgentCommand headlessly, turning a bad exit into an error.
+/// Run an AgentToolCommand headlessly, turning a bad exit into an error.
 ///
-/// Agent CLIs are a user-visible action, so "claude exited 1" must reach the
+/// agent tool CLIs are a user-visible action, so "claude exited 1" must reach the
 /// UI; the generic [`run`] deliberately does not decide that.
-pub fn run_headless(cmd: &AgentCommand, timeout_secs: u64) -> Result<HeadlessOutput> {
+pub fn run_headless(cmd: &AgentToolCommand, timeout_secs: u64) -> Result<HeadlessOutput> {
     let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
     let out = run(
         Path::new(&cmd.program),
@@ -383,7 +383,7 @@ mod context_extraction_tests {
 
     #[test]
     fn missing_executable_is_not_reported_as_a_spawned_cli() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: std::env::temp_dir()
                 .join(format!("noending-missing-cli-{}", uuid::Uuid::new_v4()))
                 .to_string_lossy()
@@ -401,7 +401,7 @@ mod context_extraction_tests {
     #[cfg(unix)]
     #[test]
     fn failed_cli_exposes_only_safe_status_metadata() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "printf 'private stderr' >&2; exit 17".into()],
             cwd: Some(std::env::temp_dir()),
@@ -416,7 +416,7 @@ mod context_extraction_tests {
     #[cfg(unix)]
     #[test]
     fn timed_out_cli_is_recorded_as_invoked_without_exposing_output() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "/bin/sh".into(),
             args: vec![
                 "-c".into(),

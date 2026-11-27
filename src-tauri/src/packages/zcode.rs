@@ -11,7 +11,7 @@
 use super::{
     files, zcode_dir, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState,
 };
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 use std::path::Path;
 
@@ -82,7 +82,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
         .filter(|(key, ..)| !is_suppressed(key))
         .map(|(key, name, marketplace, data_dir)| PackageEntry {
             id: files::key(format!("package:zcode:{key}")),
-            agent: Some(Agent::ZCode),
+            agent: Some(AgentTool::ZCode),
             name,
             version: String::new(),
             description: String::new(),

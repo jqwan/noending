@@ -65,7 +65,7 @@ pub async fn list_sessions(
     if limit.is_some_and(|limit| !(1..=500).contains(&limit)) {
         return Err(other("会话预览数量必须在 1～500 之间"));
     }
-    let agent = agent.and_then(|a| Agent::parse(&a));
+    let agent = agent.and_then(|a| AgentTool::parse(&a));
     let scope = scope
         .as_deref()
         .map(SessionListScope::parse)
@@ -85,7 +85,7 @@ pub async fn list_sessions(
 }
 
 #[tauri::command]
-pub async fn get_session_counts_by_agent(
+pub async fn get_session_counts_by_tool(
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, i64>> {
     let db = state.db.clone();
@@ -93,7 +93,7 @@ pub async fn get_session_counts_by_agent(
 }
 
 #[tauri::command]
-pub async fn get_agent_latest_activities(
+pub async fn get_tool_latest_activities(
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, String>> {
     let db = state.db.clone();
@@ -272,7 +272,7 @@ pub struct SessionMessageMark {
 /// an older page is fetched by passing the previous page's cursor back.
 /// `after_ordinal` reads the other direction — the messages NEWER than it —
 /// which is how a reader that jumped into the middle keeps going forward.
-/// 一页按「用户消息 + 每轮最终回复」计（骨架），Agent 的中间输出不占加载配额，
+/// 一页按「用户消息 + 每轮最终回复」计（骨架），运行工具 的中间输出不占加载配额，
 /// 由每条最终回复的 `turn` 摘要标注成可展开的块。
 #[tauri::command]
 pub fn get_session_messages(

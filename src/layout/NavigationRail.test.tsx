@@ -8,14 +8,14 @@ afterEach(cleanup);
 it("opens the existing primary pages", () => {
   const sections = [
     ["会话", "sessions"], ["任务", "workstreams"], ["项目", "projects"],
-    ["智能体", "projects"], ["运行工具", "agents"], ["技能", "skills"], ["设置", "settings"],
+    ["智能体", "projects"], ["运行工具", "agent-tools"], ["技能", "skills"], ["设置", "settings"],
   ] as const;
 
   for (const [label, view] of sections) {
     const navigate = vi.fn();
     const { unmount } = render(<NavigationRail route={{ view: "new-session" }} navigate={navigate} />);
     fireEvent.click(screen.getByRole("button", { name: label }));
-    expect(navigate).toHaveBeenCalledWith(label === "智能体" ? { view, assistantOnly: true } : { view });
+    expect(navigate).toHaveBeenCalledWith(label === "智能体" ? { view, agentOnly: true } : { view });
     unmount();
   }
 });
@@ -26,7 +26,7 @@ it("highlights the section that owns the route and returns to its board when cli
     [{ view: "session", sessionId: "s1" }, "会话", { view: "sessions" }],
     [{ view: "workstream", workstreamId: "w1" }, "任务", { view: "workstreams" }],
     [{ view: "project", projectId: "p1" }, "项目", { view: "projects" }],
-    [{ view: "project", projectId: "p1", fromAssistants: true }, "智能体", { view: "projects", assistantOnly: true }],
+    [{ view: "project", projectId: "p1", fromAgents: true }, "智能体", { view: "projects", agentOnly: true }],
     [{ view: "skill", resourceId: "skill1" }, "技能", { view: "skills" }],
     [{ view: "settings" }, "设置", { view: "settings" }],
   ];

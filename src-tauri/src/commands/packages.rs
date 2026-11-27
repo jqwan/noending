@@ -1,6 +1,6 @@
 //! Tauri boundary for plugin package management. Discovery is an offline read
-//! of native registries; no command here launches an Agent CLI except the
-//! Agent-owned uninstall and the local-directory install.
+//! of native registries; no command here launches an agent tool CLI except the
+//! agent tool-owned uninstall and the local-directory install.
 use crate::{domain, error::Result, packages, skills};
 
 fn inventory() -> Result<packages::PackageInventory> {
@@ -28,20 +28,20 @@ pub async fn preview_import_package(path: String) -> Result<packages::ImportPrev
 #[tauri::command]
 pub async fn install_local_package(
     path: String,
-    agents: Vec<domain::Agent>,
+    agents: Vec<domain::AgentTool>,
 ) -> Result<packages::PackageOperationResult> {
     super::run_on_blocking_worker(move || packages::install_local(&path, &agents)).await?
 }
 
 /// Installs selected plugins from a local marketplace directory; the
-/// directory is registered as a marketplace in each selected Agent.
+/// directory is registered as a marketplace in each selected agent tool.
 #[tauri::command]
 pub async fn install_local_marketplace(
     path: String,
     selections: Vec<packages::MarketplaceSelection>,
 ) -> Result<packages::PackageOperationResult> {
     super::run_on_blocking_worker(move || {
-        let selections: Vec<(domain::Agent, Vec<String>)> = selections
+        let selections: Vec<(domain::AgentTool, Vec<String>)> = selections
             .into_iter()
             .map(|selection| (selection.agent, selection.plugins))
             .collect();

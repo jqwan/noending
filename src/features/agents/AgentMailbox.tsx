@@ -6,24 +6,24 @@ import DialogActions from "../../components/DialogActions";
 import Icon from "../../components/Icon";
 import Notice from "../../components/Notice";
 import { Modal, timeAgo, useRefreshSignal } from "../../components/common";
-import type { AssistantMailboxChange, AssistantMailboxMessage, AssistantMailboxPage, SessionListItem } from "../../types";
+import type { AgentMailboxChange, AgentMailboxMessage, AgentMailboxPage, SessionListItem } from "../../types";
 
-function status(letter: AssistantMailboxMessage) {
+function status(letter: AgentMailboxMessage) {
   if (letter.completed_at) return "已处理";
   return letter.handler_session_id ? "处理中" : "待接手";
 }
 
-export default function AssistantMailbox({
-  assistantId, name, active, archived, sessions,
+export default function AgentMailbox({
+  agentId, name, active, archived, sessions,
 }: {
-  assistantId: string;
+  agentId: string;
   name: string;
   active: boolean;
   archived: boolean;
   sessions: SessionListItem[];
 }) {
-  const [page, setPage] = useState<AssistantMailboxPage | null>(null);
-  const [opened, setOpened] = useState<AssistantMailboxMessage | null>(null);
+  const [page, setPage] = useState<AgentMailboxPage | null>(null);
+  const [opened, setOpened] = useState<AgentMailboxMessage | null>(null);
   const [composing, setComposing] = useState(false);
   const [draft, setDraft] = useState("");
   const [target, setTarget] = useState("");
@@ -39,7 +39,7 @@ export default function AssistantMailbox({
   const sendEnabled = !archived && Boolean(draft.trim());
   const sessionName = (id: string) => sessions.find(session => session.id === id)?.title || id;
   const eligible = sessions.filter(session => !session.archived_at);
-  const handler = (letter: AssistantMailboxMessage) => letter.handler_session_id
+  const handler = (letter: AgentMailboxMessage) => letter.handler_session_id
     ? `由 ${sessionName(letter.handler_session_id)} 处理` : "";
   const distinctTarget = target !== selected?.handler_session_id && eligible.some(session => session.id === target);
 
@@ -48,7 +48,7 @@ export default function AssistantMailbox({
     const sequence = ++request.current;
     setMoreLoading(cursor !== undefined);
     try {
-      const next = await api.assistantMailboxList(assistantId, cursor);
+      const next = await api.agentMailboxList(agentId, cursor);
       if (sequence !== request.current) return;
       setPage(current => {
         if (cursor === undefined || !current) return next;
@@ -61,15 +61,15 @@ export default function AssistantMailbox({
     } finally {
       if (sequence === request.current) setMoreLoading(false);
     }
-  }, [active, assistantId]);
+  }, [active, agentId]);
 
   const refresh = useCallback(() => { void load(); }, [load]);
   const refreshOpenLetter = useCallback(() => {
     if (!active || !openId) return;
-    void api.assistantMailboxRead(assistantId, openId).then(letter => {
+    void api.agentMailboxRead(agentId, openId).then(letter => {
       setOpened(current => current?.id === letter.id && letter.revision > current.revision ? letter : current);
     }, () => {});
-  }, [active, assistantId, openId]);
+  }, [active, agentId, openId]);
   useEffect(() => {
     refresh();
     return () => { request.current += 1; };
@@ -98,17 +98,17 @@ export default function AssistantMailbox({
     event.preventDefault();
     if (!sendEnabled) return;
     void write(async () => {
-      await api.assistantMailboxSend(assistantId, draft);
+      await api.agentMailboxSend(agentId, draft);
       setDraft("");
       setComposing(false);
       refresh();
     });
   }
 
-  function change(operation: AssistantMailboxChange["operation"]) {
+  function change(operation: AgentMailboxChange["operation"]) {
     if (!selected) return;
     void write(async () => {
-      const saved = await api.assistantMailboxChange(assistantId, {
+      const saved = await api.agentMailboxChange(agentId, {
         message_id: selected.id,
         revision: selected.revision,
         operation,
@@ -129,7 +129,7 @@ export default function AssistantMailbox({
   }
 
   return (
-    <DetailSection sectionId="assistant-mailbox" label="智能体信箱"
+    <DetailSection sectionId="agent-mailbox" label="智能体信箱"
       title={<><Icon name="inbox" /><span>信箱{page && page.unread > 0 ? `（${page.unread} 封未读）` : ""}</span></>}
       actions={<>
         <button type="button" className="btn ghost icon-button small" title="刷新信箱" aria-label="刷新信箱"
@@ -167,7 +167,7 @@ export default function AssistantMailbox({
         <p className="small muted">{selected.sender_session_id ? `发件对话 ${sessionName(selected.sender_session_id)}` : "你发出的信"} · {timeAgo(selected.created_at)}</p>
         <p className="detail-description">{selected.body}</p>
         <p className="small muted">{[status(selected), handler(selected)].filter(Boolean).join(" · ")}</p>
-        {!archived && !selected.completed_at && eligible.length > 0 && <div className="assistant-editor-actions">
+        {!archived && !selected.completed_at && eligible.length > 0 && <div className="agent-editor-actions">
           <CustomSelect ariaLabel="接手对话" value={target} disabled={busy}
             options={[{ value: "", label: "选择接手对话" }, ...eligible.map(session => ({ value: session.id, label: session.title || session.id }))]}
             onChange={setTarget} />

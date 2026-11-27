@@ -12,8 +12,8 @@ use crate::error::{other, Result};
 
 // The WorkspacePath registry, explicit task/project memberships and Session→path
 // attach each live in their own impl file rather than growing this monolith.
-pub mod assistant_mailbox;
-pub mod assistant_profiles;
+pub mod agent_mailbox;
+pub mod agent_profiles;
 pub mod collaboration;
 pub mod context_repo;
 pub mod freshness;
@@ -89,9 +89,9 @@ pub fn new_id() -> String {
 pub const IDENTITY_GENESIS: &str = "genesis";
 
 /// Stable identity of a ROOT conversation message, used to make re-scans of the
-/// same Agent source idempotent.
+/// same agent tool source idempotent.
 ///
-/// - WITH a native Agent message id: content hash of
+/// - WITH a native agent tool message id: content hash of
 ///   `(native_id | role | ts | content)`, so identity is position-independent.
 /// - WITHOUT one: chained hash `H(prev_hash | role | ts | content)`. The chain
 ///   encodes *adjacency*: an unchanged prefix reproduces the chain (dedup),
@@ -126,14 +126,14 @@ pub fn message_identity_hash(
     out
 }
 
-/// Title update policy, applied in the conflict branch below: the Agent app's
+/// Title update policy, applied in the conflict branch below: the agent tool app's
 /// own (native) title may keep renaming the session, so it writes through;
 /// the text-derived fallback is fixed at the conversation's beginning, so it
 /// only ever fills an EMPTY slot — it never overwrites anything.
 #[allow(clippy::too_many_arguments)]
 fn upsert_logical_session_conn(
     conn: &Connection,
-    agent: Agent,
+    agent: AgentTool,
     root_agent_session_id: &str,
     native_title: Option<&str>,
     title: Option<&str>,
@@ -354,7 +354,7 @@ impl Db {
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_logical_session_unchecked(
         &self,
-        agent: Agent,
+        agent: AgentTool,
         root_agent_session_id: &str,
         title: Option<&str>,
         cwd: Option<&str>,
@@ -383,14 +383,14 @@ impl Db {
     /// carries its root source (`source_kind` / `source_path` / `metadata`)
     /// directly; discovery is the authority and replaces them wholesale.
     ///
-    /// `native_title` is the Agent app's own name for the conversation and
+    /// `native_title` is the agent tool app's own name for the conversation and
     /// writes through on every ingest; `title` is the text-derived fallback
     /// and only fills an empty slot (see the policy on
     /// [`upsert_logical_session_conn`]).
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_logical_session(
         &self,
-        agent: Agent,
+        agent: AgentTool,
         root_agent_session_id: &str,
         native_title: Option<&str>,
         title: Option<&str>,
@@ -437,7 +437,7 @@ impl Db {
     /// session lookup for terminal binding and Resume.
     pub fn find_session_by_root_agent_id(
         &self,
-        agent: Agent,
+        agent: AgentTool,
         root_agent_session_id: &str,
     ) -> Result<Option<Session>> {
         let conn = self.read();
@@ -457,7 +457,7 @@ impl Db {
     }
 
     /// Ingestion needs complete source entities, independently of UI queries.
-    pub fn sessions_for_ingestion(&self, agent: Agent) -> Result<Vec<Session>> {
+    pub fn sessions_for_ingestion(&self, agent: AgentTool) -> Result<Vec<Session>> {
         let conn = self.read();
         let mut st = conn.prepare(&format!("{SESSION_SELECT} WHERE agent = ?1 ORDER BY id"))?;
         let rows = st.query_map([agent.as_str()], row_session)?;
@@ -747,7 +747,7 @@ impl Db {
             )?;
 
             // Source activity advances only when its observed cursor changes;
-            // reading an unchanged file is not Agent activity.
+            // reading an unchanged file is not agent tool activity.
             if source_changed {
                 let (agent, current): (String, Option<String>) = tx.query_row(
                     "SELECT agent, last_activity_at FROM sessions WHERE id = ?1",
@@ -757,7 +757,7 @@ impl Db {
                 // Codex compresses cold rollouts and expands them on resume.
                 // Its filesystem mtime therefore includes maintenance; only
                 // transcript timestamps may advance conversation activity.
-                let observed = if agent == Agent::Codex.as_str() {
+                let observed = if agent == AgentTool::Codex.as_str() {
                     messages
                         .iter()
                         .filter_map(|m| m.ts.as_deref())
@@ -1025,7 +1025,7 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn add_ingest_source(&self, agent: Agent, path: &str) -> Result<IngestSource> {
+    pub fn add_ingest_source(&self, agent: AgentTool, path: &str) -> Result<IngestSource> {
         let conn = self.write();
         let src = IngestSource {
             id: new_id(),
@@ -1098,11 +1098,11 @@ impl Db {
         Ok(())
     }
 
-    // Assistant
+    // Agent archive
 
     pub fn save_installation(
         &self,
-        i: &crate::platform::exec_resolver::AgentInstallation,
+        i: &crate::platform::exec_resolver::AgentToolInstallation,
     ) -> Result<()> {
         let conn = self.write();
         conn.execute(
@@ -1116,8 +1116,8 @@ impl Db {
 
     pub fn get_installation(
         &self,
-        agent: Agent,
-    ) -> Result<Option<crate::platform::exec_resolver::AgentInstallation>> {
+        agent: AgentTool,
+    ) -> Result<Option<crate::platform::exec_resolver::AgentToolInstallation>> {
         let conn = self.read();
         Ok(conn
             .query_row(
@@ -1125,8 +1125,9 @@ impl Db {
                  FROM agent_installations WHERE agent = ?1",
                 params![agent.as_str()],
                 |r| {
-                    Ok(crate::platform::exec_resolver::AgentInstallation {
-                        agent: Agent::parse(&r.get::<_, String>(0)?).unwrap_or(Agent::Codex),
+                    Ok(crate::platform::exec_resolver::AgentToolInstallation {
+                        agent: AgentTool::parse(&r.get::<_, String>(0)?)
+                            .unwrap_or(AgentTool::Codex),
                         executable_path: r.get(1)?,
                         version: r.get(2)?,
                     })
@@ -1138,7 +1139,7 @@ impl Db {
     /// Drop a cached installation row (startup snapshot: a failed resolve
     /// means the CLI is gone; keeping the row would keep reporting it as
     /// detected and let it be chosen as default agent).
-    pub fn delete_installation(&self, agent: Agent) -> Result<()> {
+    pub fn delete_installation(&self, agent: AgentTool) -> Result<()> {
         let conn = self.write();
         conn.execute(
             "DELETE FROM agent_installations WHERE agent = ?1",
@@ -1419,7 +1420,7 @@ pub fn reindex_sessions_for_project_conn(conn: &Connection, project_id: &str) ->
 }
 
 /// Write (or refresh) one Session's search document: title is the Session title
-/// (falling back to the Agent name), body is the Project name and the cwd.
+/// (falling back to the agent tool name), body is the Project name and the cwd.
 pub fn index_session_conn(conn: &rusqlite::Connection, session_id: &str) -> Result<()> {
     let row: Option<(String, String, Option<String>)> = conn
         .query_row(
@@ -1718,7 +1719,7 @@ fn row_workstream(r: &Row) -> rusqlite::Result<Workstream> {
 fn row_session(r: &Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get("id")?,
-        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
+        agent: AgentTool::parse(&r.get::<_, String>("agent")?).unwrap_or(AgentTool::Codex),
         root_agent_session_id: r.get("root_agent_session_id")?,
         title: r.get("title")?,
         cwd: r.get("cwd")?,
@@ -1765,7 +1766,7 @@ fn row_message(r: &Row) -> rusqlite::Result<SessionMessage> {
 fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
     Ok(IngestSource {
         id: r.get(0)?,
-        agent: Agent::parse(&r.get::<_, String>(1)?).unwrap_or(Agent::Codex),
+        agent: AgentTool::parse(&r.get::<_, String>(1)?).unwrap_or(AgentTool::Codex),
         path: r.get(2)?,
         origin: r.get(3)?,
     })
@@ -1774,7 +1775,7 @@ fn row_ingest_source(r: &Row) -> rusqlite::Result<IngestSource> {
 #[derive(Debug, Default, Clone)]
 pub struct SessionFilter {
     pub project_id: Option<String>,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentTool>,
     /// Board scope defaults to unarchived; association queries include both.
     pub scope: SessionListScope,
 }

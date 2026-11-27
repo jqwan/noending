@@ -7,13 +7,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import type { Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import CustomSelect from "../../components/CustomSelect";
 import { Modal } from "../../components/common";
 import PageHeader from "../../layout/PageHeader";
 import { showToast } from "../../components/Toast";
 import { preferenceValues, useViewPreference, useViewScroll, useViewState } from "../../hooks/useViewState";
-import { AGENT_LABELS, type PackageEntry, type PackageInventory } from "../../types";
+import { AGENT_TOOL_LABELS, type PackageEntry, type PackageInventory } from "../../types";
 import { entryState, originClassLabel, originLabel, packageDetailRoute, shortVersion } from "./packagePresentation";
 import PackageImportDialog from "./PackageImportDialog";
 import { packageCatalogCache, packageDetailCache, setPackageCatalogCache } from "./packageDetailCache";
@@ -22,7 +22,7 @@ import "./packages.css";
 const EMPTY: PackageInventory = { packages: [], warnings: [] };
 
 /** 可管理 = NoEnding can act on the package at all: toggle its switch and/or
- *  uninstall it through the Agent's own machinery. Enablement is a separate
+ *  uninstall it through the AgentTool's own machinery. Enablement is a separate
  *  dimension shown as a badge. NoEnding built-ins follow the same rules —
  *  with neither capability they are simply unmanageable. */
 type PackageTab = "managed" | "unmanaged";
@@ -87,7 +87,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
   };
 
   // Only entries with a user scope and a native toggle get the interactive
-  // power switch; the uninstall shortcut rides along whenever the Agent
+  // power switch; the uninstall shortcut rides along whenever the agent tool
   // provides an uninstall command.
   const configurable = (entry: PackageEntry) =>
     entry.capabilities.toggle && entry.scopes.some(scope => scope.scope === "user");
@@ -132,7 +132,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
   };
 
   // Enablement is its own filled badge: 启用 (accent, matching the power
-  // switch) / 停用 (explicitly off or never written) / 未知 (the Agent
+  // switch) / 停用 (explicitly off or never written) / 未知 (the 运行工具
   // exposes no evidence — read-only boards).
   const stateBadge = (entry: PackageEntry) => {
     const state = entryState(entry);
@@ -151,10 +151,10 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
     return parts.filter(Boolean).join(" · ");
   };
 
-  // The owning Agent is the most useful per-card identity, so it takes the
+  // The owning agent tool is the most useful per-card identity, so it takes the
   // title icon slot; agentless imports fall back to the resource icon.
   const titleIcon = (entry: PackageEntry) => entry.agent
-    ? <span role="img" aria-label={AGENT_LABELS[entry.agent]} title={AGENT_LABELS[entry.agent]}><AgentIcon agent={entry.agent} size={16} /></span>
+    ? <span role="img" aria-label={AGENT_TOOL_LABELS[entry.agent]} title={AGENT_TOOL_LABELS[entry.agent]}><AgentToolIcon agent={entry.agent} size={16} /></span>
     : <Icon name="puzzle" />;
 
   return <div className="main board-page packages-page">
@@ -169,10 +169,10 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
       <BoardToolbar searchLabel="搜索插件包" placeholder="搜索插件包…（名称、说明或市场）" query={query} onQueryChange={setQuery}>
         <div className="toolbar ws-controls">
           <div className="ws-controls-group">
-            <div className="ws-control"><span className="muted small">Agent</span>
-              <CustomSelect value={agentFilter} onChange={setAgentFilter} ariaLabel="筛选 Agent" options={[
-                { value: "", label: "全部 Agent" },
-                ...agents.map(agent => ({ value: agent, label: AGENT_LABELS[agent] })),
+            <div className="ws-control"><span className="muted small">运行工具</span>
+              <CustomSelect value={agentFilter} onChange={setAgentFilter} ariaLabel="筛选运行工具" options={[
+                { value: "", label: "全部运行工具" },
+                ...agents.map(agent => ({ value: agent, label: AGENT_TOOL_LABELS[agent] })),
               ]} />
             </div>
             {(query || agentFilter) && <button className="btn small ghost" onClick={() => { setQuery(""); setAgentFilter(""); }}>清除筛选</button>}
@@ -192,7 +192,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
       <BoardLoading loading={loading && !error} viewMode={viewMode} />
       {inventory.warnings.length > 0 && <details className="package-warnings"><summary>部分来源无法读取（{inventory.warnings.length}）</summary>{inventory.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</details>}
       {/* 列表与卡片是互斥结构：容器与条目都用视图专属 key，切换时整体卸载重挂，
-          避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/Agent
+          避免 React 原地复用 DOM 只改 className 造成卡片轮廓闪一帧（会话/AgentTool
           看板同一问题的既定修法）。 */}
       <section key={viewMode === "cards" ? "packages-cards" : "packages-list"}
         className={viewMode === "cards" ? "ws-grid board-grid package-cards" : "package-list"} aria-label="插件包">
@@ -261,7 +261,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
       </section>
     </div>
     {uninstalling && <Modal title="卸载插件包" onClose={() => { if (!uninstallBusy) setUninstalling(null); }}>
-      <p>将通过 {uninstalling.agent ? AGENT_LABELS[uninstalling.agent] : "该 Agent"} 的原生命令卸载「{uninstalling.name}」。</p>
+      <p>将通过 {uninstalling.agent ? AGENT_TOOL_LABELS[uninstalling.agent] : "该 运行工具"} 的原生命令卸载「{uninstalling.name}」。</p>
       <p className="small muted">注册表中的安装条目随卸载一起消失，作用域内的启停配置不再生效；已有终端需要重新加载。源目录不受影响。</p>
       <DialogActions>
         <button className="btn" disabled={uninstallBusy} onClick={() => setUninstalling(null)}>取消</button>
@@ -274,7 +274,7 @@ export default function PackagesView({ navigate }: { navigate: (route: Route) =>
         setImporting(false);
         setPackageCatalogCache(null);
         showToast(message);
-        // Fresh entries come from each Agent's own registry after install;
+        // Fresh entries come from each agent tool's own registry after install;
         // stay on the refreshed board instead of guessing the new entry id.
         void refresh();
       }} />}

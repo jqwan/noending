@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import Router, { prepareRouteModule } from "./Router";
-import type { Agent } from "../types";
+import type { AgentTool } from "../types";
 
 const { detail, conversation, terminal, skill } = vi.hoisted(() => ({
   detail: vi.fn(() => <div>detail</div>),
@@ -15,7 +15,7 @@ vi.mock("../features/sessions/SessionTerminalView", () => ({ default: terminal }
 vi.mock("../features/skills/SkillDetailView", () => ({ default: skill }));
 vi.mock("../features/packages/PackageDetailView", () => ({ default: () => <div>已预载的插件包详情</div> }));
 vi.mock("../features/sessions/NewSessionView", () => ({
-  default: ({ agent, projectId, archivePathId }: { agent?: Agent; projectId?: string; archivePathId?: string }) => (
+  default: ({ agent, projectId, archivePathId }: { agent?: AgentTool; projectId?: string; archivePathId?: string }) => (
     <div>
       <output aria-label="新会话预置">{`${agent ?? ""}:${projectId ?? ""}:${archivePathId ?? ""}`}</output>
       <input aria-label="首条消息" defaultValue="" />
@@ -47,15 +47,15 @@ it("dispatches session overview, conversation and terminal routes with their ide
   const navigate = vi.fn();
   const goBack = vi.fn();
   const props = { navigate, goBack, actionSeq: 0 };
-  const sessionRoute = { view: "session" as const, sessionId: "s1", initialTitle: "T", initialAgent: "codex" as const };
+  const sessionRoute = { view: "session" as const, sessionId: "s1", initialTitle: "T", initialTool: "codex" as const };
   const { rerender } = render(<Router route={sessionRoute} {...props} />);
-  await waitFor(() => expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", navigate }), expect.anything()));
+  await waitFor(() => expect(detail).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialTool: "codex", navigate }), expect.anything()));
   expect(conversation).not.toHaveBeenCalled();
 
   rerender(<Router route={{ ...sessionRoute, entry: "conversation", initialTotal: 12 }} {...props} />);
-  await waitFor(() => expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialAgent: "codex", initialTotal: 12, navigate }), expect.anything()));
-  rerender(<Router route={{ view: "terminal", terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1" }} {...props} />);
-  await waitFor(() => expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialAgent: "codex", initialSessionId: "s1", navigate }), expect.anything()));
+  await waitFor(() => expect(conversation).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "s1", initialTitle: "T", initialTool: "codex", initialTotal: 12, navigate }), expect.anything()));
+  rerender(<Router route={{ view: "terminal", terminalId: "t1", initialTitle: "T", initialTool: "codex", initialSessionId: "s1" }} {...props} />);
+  await waitFor(() => expect(terminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "t1", initialTitle: "T", initialTool: "codex", initialSessionId: "s1", navigate }), expect.anything()));
 });
 
 it("dispatches the skill detail route", async () => {

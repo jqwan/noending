@@ -108,7 +108,7 @@ pub fn summary(conn: &Connection, kind: &str, id: &str) -> Result<SummaryFreshne
 #[derive(Serialize)]
 pub struct SourceCheck {
     pub id: String,
-    pub agent: crate::domain::Agent,
+    pub agent: crate::domain::AgentTool,
     pub path: String,
     pub check: repo::SyncCheck,
 }
@@ -200,7 +200,7 @@ pub fn view(db: &Db, kind: Option<&str>, id: Option<&str>) -> Result<FreshnessVi
         .query_map([], |r| {
             Ok(crate::domain::IngestSource {
                 id: r.get(0)?,
-                agent: crate::domain::Agent::parse(&r.get::<_, String>(1)?)
+                agent: crate::domain::AgentTool::parse(&r.get::<_, String>(1)?)
                     .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
                 path: r.get(2)?,
                 origin: r.get(3)?,

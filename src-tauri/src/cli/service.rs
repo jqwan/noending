@@ -41,17 +41,17 @@ pub(crate) enum Command {
     MailboxSend(crate::mailbox::Send),
     MailboxMark(crate::mailbox::Mark),
     MailboxWait(crate::mailbox::Wait),
-    AssistantMailboxList(crate::mailbox::AssistantList),
-    AssistantMailboxRead(crate::mailbox::AssistantRead),
-    AssistantMailboxSend(crate::mailbox::AssistantSend),
-    AssistantMailboxChange(crate::mailbox::AssistantChange),
-    AssistantList {
+    AgentMailboxList(crate::mailbox::AgentList),
+    AgentMailboxRead(crate::mailbox::AgentRead),
+    AgentMailboxSend(crate::mailbox::AgentSend),
+    AgentMailboxChange(crate::mailbox::AgentChange),
+    AgentList {
         name: Option<String>,
     },
-    AssistantGet {
+    AgentGet {
         id: String,
     },
-    AssistantSelf,
+    AgentSelf,
     RoomResolve {
         task: String,
     },
@@ -104,12 +104,12 @@ pub(crate) enum Command {
         kind: Option<Kind>,
         id: Option<String>,
     },
-    Agents,
+    RuntimeList,
     ResolveProject {
         path: String,
     },
     ResolveSession {
-        agent: String,
+        tool: String,
         native_id: String,
     },
     ExtractionContext {
@@ -141,7 +141,7 @@ pub(crate) enum Command {
         kind: Kind,
         project: Option<String>,
         scope: String,
-        agent: Option<String>,
+        tool: Option<String>,
         title: Option<String>,
         path: Option<String>,
         cursor: Option<String>,
@@ -151,7 +151,7 @@ pub(crate) enum Command {
         query: String,
         project: Option<String>,
         scope: String,
-        agent: Option<String>,
+        tool: Option<String>,
         cursor: Option<String>,
         limit: usize,
     },
@@ -242,8 +242,8 @@ impl Command {
             self,
             Self::MailboxSend(_)
                 | Self::MailboxMark(_)
-                | Self::AssistantMailboxSend(_)
-                | Self::AssistantMailboxChange(_)
+                | Self::AgentMailboxSend(_)
+                | Self::AgentMailboxChange(_)
                 | Self::RoomSend(_)
                 | Self::RoomStop(_)
                 | Self::RoomJoin { .. }
@@ -286,7 +286,7 @@ pub(crate) struct Service {
     /// service: one id per MCP server connection; CLI joins share the
     /// resident-listener kind.
     pub instance_id: String,
-    assistant_caller: crate::session_control::AssistantCaller,
+    agent_caller: crate::session_control::AgentCaller,
     _access: crate::workspace::home::HomeAccess,
 }
 impl Service {
@@ -305,13 +305,13 @@ impl Service {
             home,
             layer,
             instance_id,
-            assistant_caller: crate::session_control::AssistantCaller::from_environment(),
+            agent_caller: crate::session_control::AgentCaller::from_environment(),
             _access: access,
         }))
     }
 
-    fn assistant_session(&self, claimed: Option<&str>) -> CliResult<String> {
-        let session = self.assistant_caller.verify(&self.home)?;
+    fn agent_session(&self, claimed: Option<&str>) -> CliResult<String> {
+        let session = self.agent_caller.verify(&self.home)?;
         if claimed.is_some_and(|claimed| claimed != session) {
             return Err(CliError::new(
                 "identity_mismatch",
@@ -322,21 +322,21 @@ impl Service {
     }
 
     fn authorize_session_mailbox(&self, recipient: &str) -> CliResult<()> {
-        if crate::assistant::session_assistant_id(&self.db, recipient)?.is_some() {
-            self.assistant_session(Some(recipient))?;
+        if crate::agent::session_agent_id(&self.db, recipient)?.is_some() {
+            self.agent_session(Some(recipient))?;
         }
         Ok(())
     }
 
     fn session_mail_sender(&self, claimed: &str, recipient: &str) -> CliResult<(String, bool)> {
-        let sender = if self.assistant_caller.has_credentials() {
-            self.assistant_session(None)?
+        let sender = if self.agent_caller.has_credentials() {
+            self.agent_session(None)?
         } else {
             crate::mailbox::actor(&self.db, &self.home, Some(claimed))?
         };
-        let protected = crate::assistant::session_assistant_id(&self.db, &sender)?.is_some()
-            || crate::assistant::session_assistant_id(&self.db, recipient)?.is_some();
-        if protected && !self.assistant_caller.has_credentials() {
+        let protected = crate::agent::session_agent_id(&self.db, &sender)?.is_some()
+            || crate::agent::session_agent_id(&self.db, recipient)?.is_some();
+        if protected && !self.agent_caller.has_credentials() {
             return Err(CliError::new(
                 "session_access_required",
                 "智能体对话的收发信需要会话凭证",
@@ -353,7 +353,7 @@ impl Service {
         let project = self
             .db
             .tx(|tx| {
-                if crate::storage::assistant_profiles::path_for_project(tx, id)?.is_some() {
+                if crate::storage::agent_profiles::path_for_project(tx, id)?.is_some() {
                     return Ok(None);
                 }
                 update(tx).map(Some)
@@ -386,8 +386,8 @@ impl Service {
                 command,
             } => self.execute_once(&request_id, *command),
             Command::Receipt { id } => {
-                if self.assistant_caller.has_credentials() {
-                    let session = self.assistant_session(None)?;
+                if self.agent_caller.has_credentials() {
+                    let session = self.agent_session(None)?;
                     match super::receipts::show_for(&self.home, &id, Some(&session)) {
                         Err(error) if error.code == "not_found" => {}
                         result => return result,
@@ -429,39 +429,39 @@ impl Service {
                 self.authorize_session_mailbox(&p.session)?;
                 crate::mailbox::wait(&self.db, p)
             }
-            Command::AssistantList { name } => Ok(serde_json::to_value(
-                crate::assistant::list_public_assistants(&self.db, name.as_deref())?,
+            Command::AgentList { name } => Ok(serde_json::to_value(
+                crate::agent::list_public_agents(&self.db, name.as_deref())?,
             )?),
-            Command::AssistantGet { id } => {
+            Command::AgentGet { id } => {
                 let id = uuid::Uuid::parse_str(&id)
                     .map_err(|_| CliError::new("invalid_arguments", "智能体 ID 无效"))?;
-                let card = crate::assistant::public_card(&self.db, &self.home, id)?
+                let card = crate::agent::public_card(&self.db, &self.home, id)?
                     .ok_or_else(|| CliError::new("not_found", "智能体不存在"))?;
                 Ok(serde_json::to_value(card)?)
             }
-            Command::AssistantSelf => {
-                let caller = self.assistant_session(None)?;
-                let profile = crate::assistant::private_profile(&self.db, &self.home, &caller)?
+            Command::AgentSelf => {
+                let caller = self.agent_session(None)?;
+                let profile = crate::agent::private_profile(&self.db, &self.home, &caller)?
                     .ok_or_else(|| {
                         CliError::new("permission_denied", "当前对话不属于智能体档案")
                     })?;
                 Ok(serde_json::to_value(profile)?)
             }
-            Command::AssistantMailboxList(p) => {
-                let caller = self.assistant_session(p.from_session.as_deref())?;
-                crate::mailbox::assistant_list(&self.db, &self.home, &caller, p)
+            Command::AgentMailboxList(p) => {
+                let caller = self.agent_session(p.from_session.as_deref())?;
+                crate::mailbox::agent_list(&self.db, &self.home, &caller, p)
             }
-            Command::AssistantMailboxRead(p) => {
-                let caller = self.assistant_session(p.from_session.as_deref())?;
-                crate::mailbox::assistant_read(&self.db, &self.home, &caller, p)
+            Command::AgentMailboxRead(p) => {
+                let caller = self.agent_session(p.from_session.as_deref())?;
+                crate::mailbox::agent_read(&self.db, &self.home, &caller, p)
             }
-            Command::AssistantMailboxSend(p) => {
-                let caller = self.assistant_session(p.from_session.as_deref())?;
-                crate::mailbox::assistant_send(&self.db, &self.home, &caller, p)
+            Command::AgentMailboxSend(p) => {
+                let caller = self.agent_session(p.from_session.as_deref())?;
+                crate::mailbox::agent_send(&self.db, &self.home, &caller, p)
             }
-            Command::AssistantMailboxChange(p) => {
-                let caller = self.assistant_session(p.from_session.as_deref())?;
-                crate::mailbox::assistant_change(&self.db, &self.home, &caller, p)
+            Command::AgentMailboxChange(p) => {
+                let caller = self.agent_session(p.from_session.as_deref())?;
+                crate::mailbox::agent_change(&self.db, &self.home, &caller, p)
             }
             Command::RoomResolve { task } => crate::collaboration::room_view(&self.db, &task),
             Command::RoomShow { room } => crate::collaboration::room_view_by_room(&self.db, &room),
@@ -596,7 +596,7 @@ impl Service {
                 Ok(json!({"listening":false,"exit":code}))
             }
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","assistant_mailbox","room"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","runtime","agent","request","session_control","mailbox","agent_mailbox","room"]}),
             ),
             Command::Freshness { kind, id } => {
                 if kind.is_some() != id.is_some() {
@@ -614,20 +614,20 @@ impl Service {
                     id.as_deref(),
                 )?)?)
             }
-            Command::Agents => Ok(super::agents::list()),
-            Command::ResolveSession { agent, native_id } => {
-                let agent = crate::domain::Agent::parse(&agent)
-                    .ok_or_else(|| CliError::new("invalid_arguments", "Agent 无效"))?;
+            Command::RuntimeList => Ok(super::runtimes::list()),
+            Command::ResolveSession { tool, native_id } => {
+                let tool = crate::domain::AgentTool::parse(&tool)
+                    .ok_or_else(|| CliError::new("invalid_arguments", "运行工具 无效"))?;
                 if native_id.trim().is_empty() {
                     return Err(CliError::new("invalid_arguments", "原生会话 ID 不能为空"));
                 }
                 let session = self
                     .db
-                    .find_session_by_root_agent_id(agent, &native_id)?
+                    .find_session_by_root_agent_id(tool, &native_id)?
                     .ok_or_else(|| {
                         CliError::new(
                             "not_found",
-                            "当前 Home 未找到该 Agent 的原生会话，可能尚未同步",
+                            "当前 Home 未找到该 运行工具 的原生会话，可能尚未同步",
                         )
                     })?;
                 let mut value = session_value(&session);
@@ -657,12 +657,12 @@ impl Service {
                 context_id,
                 submission,
             } => context::interactive::submit(&self.db, &self.home, &context_id, submission),
-            Command::ExtractionSettings => Ok(serde_json::to_value(
+            Command::ExtractionSettings => Ok(super::extraction_settings::view(
                 crate::sync::extractor::ExtractionSettings::from_settings(&self.db)?,
-            )?),
-            Command::ConfigureExtraction { patch } => Ok(serde_json::to_value(
+            )),
+            Command::ConfigureExtraction { patch } => Ok(super::extraction_settings::view(
                 super::extraction_settings::update(&self.db, patch)?,
-            )?),
+            )),
             Command::ResolveProject { path } => {
                 existing_directory(&path)?;
                 let projection = self.layer.projection();
@@ -679,9 +679,9 @@ impl Service {
                     resolution.matched_path.as_deref(),
                 ) {
                     if let Some(id) =
-                        crate::assistant::resolve_archive(&self.db, &self.home, &project.id, path)?
+                        crate::agent::resolve_archive(&self.db, &self.home, &project.id, path)?
                     {
-                        result["assistant"] = json!({"id": id, "archive_directory":path});
+                        result["agent"] = json!({"id": id, "archive_directory":path});
                     }
                 }
                 Ok(result)
@@ -711,17 +711,17 @@ impl Service {
                 kind,
                 project,
                 scope,
-                agent,
+                tool,
                 title,
                 path,
                 cursor,
                 limit,
-            } => self.list(kind, project, scope, agent, title, path, cursor, limit),
+            } => self.list(kind, project, scope, tool, title, path, cursor, limit),
             Command::Search {
                 query,
                 project,
                 scope,
-                agent,
+                tool,
                 cursor,
                 limit,
             } => {
@@ -737,7 +737,7 @@ impl Service {
                     crate::search::sessions::SessionFilter {
                         project,
                         scope,
-                        agent: parse_agent(agent)?,
+                        agent: parse_tool(tool)?,
                     },
                     cursor.as_deref(),
                     limit,
@@ -973,18 +973,16 @@ impl Service {
             );
         }
         let session = match &command {
-            Command::AssistantMailboxSend(p) => {
-                Some(self.assistant_session(p.from_session.as_deref())?)
-            }
-            Command::AssistantMailboxChange(p) => {
-                let caller = self.assistant_session(p.from_session.as_deref())?;
-                crate::mailbox::own_assistant(&self.db, &caller, &p.assistant)?;
+            Command::AgentMailboxSend(p) => Some(self.agent_session(p.from_session.as_deref())?),
+            Command::AgentMailboxChange(p) => {
+                let caller = self.agent_session(p.from_session.as_deref())?;
+                crate::mailbox::own_agent(&self.db, &caller, &p.agent)?;
                 Some(caller)
             }
             Command::MailboxMark(p)
-                if crate::assistant::session_assistant_id(&self.db, &p.session)?.is_some() =>
+                if crate::agent::session_agent_id(&self.db, &p.session)?.is_some() =>
             {
-                Some(self.assistant_session(Some(&p.session))?)
+                Some(self.agent_session(Some(&p.session))?)
             }
             _ => None,
         };
@@ -1064,7 +1062,7 @@ impl Service {
         kind: Kind,
         project: Option<String>,
         scope: String,
-        agent: Option<String>,
+        tool: Option<String>,
         title: Option<String>,
         path: Option<String>,
         cursor: Option<String>,
@@ -1078,8 +1076,8 @@ impl Service {
                 "无效的范围或分页大小（1～50）",
             ));
         }
-        if kind == Kind::Project && (project.is_some() || agent.is_some())
-            || kind == Kind::Task && agent.is_some()
+        if kind == Kind::Project && (project.is_some() || tool.is_some())
+            || kind == Kind::Task && tool.is_some()
         {
             return Err(CliError::new(
                 "invalid_arguments",
@@ -1098,7 +1096,7 @@ impl Service {
                     .ok_or_else(|| CliError::new("invalid_arguments", "--path 需要绝对工作路径"))
             })
             .transpose()?;
-        let agent = parse_agent(agent)?;
+        let agent = parse_tool(tool)?;
         let sql=match kind {
             Kind::Session=>"SELECT s.id FROM sessions s LEFT JOIN workspace_paths wp ON wp.id=s.workspace_path_id WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM project_session_membership m WHERE m.session_id=s.id AND m.project_id=?2)) AND (?3 IS NULL OR s.agent=?3) AND (?4='all' OR (?4='archived' AND s.archived_at IS NOT NULL) OR (?4='unarchived' AND s.archived_at IS NULL)) AND (?6 IS NULL OR instr(lower(s.title),lower(?6))>0) AND (?7 IS NULL OR COALESCE(wp.canonical_path,s.cwd)=?7 COLLATE NOCASE) ORDER BY s.id LIMIT ?5",
             Kind::Task=>"SELECT s.id FROM workstreams s WHERE s.id>?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p WHERE p.workstream_id=s.id AND p.project_id=?2)) AND (?4='all' OR (?4='archived' AND s.visibility='archived') OR (?4='unarchived' AND s.visibility='normal')) AND ?3 IS NULL AND (?6 IS NULL OR instr(lower(s.title),lower(?6))>0) AND (?7 IS NULL OR EXISTS(SELECT 1 FROM workstream_projects p JOIN workspace_paths wp ON wp.project_id=p.project_id WHERE p.workstream_id=s.id AND wp.canonical_path=?7 COLLATE NOCASE)) ORDER BY s.id LIMIT ?5",
@@ -1246,15 +1244,14 @@ fn apply_detached_flags(command: &mut std::process::Command) {
     let _ = command;
 }
 
-fn parse_agent(agent: Option<String>) -> CliResult<Option<String>> {
-    agent
-        .map(|name| {
-            crate::domain::Agent::parse(&name)
-                .map(|a| a.as_str().to_string())
-                .ok_or_else(|| CliError::new("invalid_arguments", "Agent 无效"))
-        })
-        .transpose()
+fn parse_tool(tool: Option<String>) -> CliResult<Option<String>> {
+    tool.map(|name| {
+        crate::domain::AgentTool::parse(&name)
+            .map(|a| a.as_str().to_string())
+            .ok_or_else(|| CliError::new("invalid_arguments", "运行工具 无效"))
+    })
+    .transpose()
 }
 fn session_value(s: &crate::domain::Session) -> Value {
-    json!({"id":s.id,"title":s.title,"agent":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
+    json!({"id":s.id,"title":s.title,"tool":s.agent,"working_directory":s.cwd,"project_id":s.project_id,"archived_at":s.archived_at,"started_at":s.started_at,"last_activity_at":s.last_activity_at,"last_conversation_at":s.last_conversation_at})
 }

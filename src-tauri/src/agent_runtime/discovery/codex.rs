@@ -7,13 +7,13 @@
 use serde_json::Value;
 
 use super::{run_cli, warn, ModelCatalog, ModelOption};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 
 /// Codex documents no `off` thinking level; reasoning always runs.
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
 
 pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
-    match run_cli(Agent::Codex, &["debug", "models"]) {
+    match run_cli(AgentTool::Codex, &["debug", "models"]) {
         Ok(raw) => match parse(&raw) {
             Ok(models) if !models.is_empty() => (ModelCatalog::Dynamic(models), vec![]),
             Ok(_) => (ModelCatalog::Unavailable, warn("Codex 返回了空的模型目录")),

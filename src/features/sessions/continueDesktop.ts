@@ -4,9 +4,9 @@ import { showToast } from "../../components/Toast";
 import { capsOf } from "./sessionFormats";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { invalidateTargets } from "../../app/removedTargets";
-import type { Agent, AgentStatusEntry, TerminalResumeState, TerminalSummary } from "../../types";
+import type { AgentTool, AgentToolStatusEntry, TerminalResumeState, TerminalSummary } from "../../types";
 import { EVT_TERMINALS, type Route } from "../../app/routes";
-import { agentStatusResource } from "../agents/agentsCache";
+import { toolStatusResource } from "../agent-tools/agentToolsCache";
 
 /**
  * 「继续」的共享逻辑：按钮可用性（格式能力 + 桌面端在场）、终端优先入口、
@@ -16,15 +16,15 @@ import { agentStatusResource } from "../agents/agentsCache";
 
 /** A single continue entry always prefers CLI capability over desktop capability. */
 export function resolveSessionContinueMode(
-  session: { agent: Agent; source_kind?: string | null },
+  session: { agent: AgentTool; source_kind?: string | null },
 ): "terminal" | "desktop" {
   return capsOf(session.agent, session.source_kind).terminal ? "terminal" : "desktop";
 }
 
 /** 「继续」按钮的可用性与说明。格式判别只需要 agent 与 source_kind。 */
 export function desktopContinueState(
-  session: { agent: Agent; source_kind?: string | null; archived_at?: string | null; cwd_exists?: boolean },
-  status: AgentStatusEntry | null | undefined,
+  session: { agent: AgentTool; source_kind?: string | null; archived_at?: string | null; cwd_exists?: boolean },
+  status: AgentToolStatusEntry | null | undefined,
 ): { disabled: boolean; title: string } {
   if (session.archived_at) return { disabled: true, title: "已归档的会话不能继续，请先取消归档" };
   if (session.cwd_exists === false) return { disabled: true, title: "工作目录不存在，无法继续会话" };
@@ -71,13 +71,13 @@ export function terminalForContinue(sessionId: string, terminals: TerminalSummar
 
 /** Shared continue and confirmed restart. Restart requires a verified terminal ID. */
 export async function continueSessionTerminal(
-  session: { id: string; title?: string | null; agent: Agent; archived_at?: string | null },
+  session: { id: string; title?: string | null; agent: AgentTool; archived_at?: string | null },
   navigate: (r: Route) => void,
   terminalId?: string,
   mode: "continue" | "restart" = "continue",
 ): Promise<void> {
   // Recheck identity/liveness: a sidebar snapshot must never reconnect a
-  // terminal that the Agent has since switched to another native session.
+  // terminal that the AgentTool has since switched to another native session.
   const rows = (await api.terminalList()).filter(t => t.session_id === session.id);
   const existing = terminalId || mode === "restart"
     ? rows.find(t => t.terminal_id === terminalId)
@@ -92,7 +92,7 @@ export async function continueSessionTerminal(
   const launched = existing ? await api.terminalReconnect(existing.terminal_id, session.id) : await api.launchEmbeddedResume(session.id);
   if (!launched.terminal_id) throw new Error("启动已完成，但找不到内嵌终端记录");
   const destination: Route = { view: "terminal", terminalId: launched.terminal_id, initialSessionId: session.id,
-    initialAgent: session.agent, initialTitle: session.title ?? undefined };
+    initialTool: session.agent, initialTitle: session.title ?? undefined };
   navigate(destination);
   if (existing) invalidateTargets({ terminalIds: [existing.terminal_id], replacement: destination });
   else window.dispatchEvent(new CustomEvent(EVT_TERMINALS));
@@ -100,7 +100,7 @@ export async function continueSessionTerminal(
 
 /** Coalesce simultaneous sidebar/header clicks; errors leave exited output intact. */
 export async function openSessionTerminal(
-  session: { id: string; title?: string | null; agent: Agent; archived_at?: string | null },
+  session: { id: string; title?: string | null; agent: AgentTool; archived_at?: string | null },
   navigate: (r: Route) => void,
   terminalId?: string,
   mode: "continue" | "restart" = "continue",
@@ -112,13 +112,13 @@ export async function openSessionTerminal(
   finally { openingSessions.delete(session.id); }
 }
 
-/** Agent 状态表（桌面端名字与在场是「继续」置灰判断的输入）。读不到时返回
+/** AgentTool 状态表（桌面端名字与在场是「继续」置灰判断的输入）。读不到时返回
  *  null——在场未知不当作缺席。 */
-export function useAgentStatus(enabled = true): Record<string, AgentStatusEntry> | null {
-  const status = agentStatusResource.useValue("agents");
+export function useToolStatus(enabled = true): Record<string, AgentToolStatusEntry> | null {
+  const status = toolStatusResource.useValue("agent-tools");
   useEffect(() => {
     if (!enabled) return;
-    void agentStatusResource.revalidate("agents").catch(() => {});
+    void toolStatusResource.revalidate("agent-tools").catch(() => {});
   }, [enabled]);
   return status ?? null;
 }

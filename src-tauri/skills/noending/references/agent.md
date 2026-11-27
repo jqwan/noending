@@ -4,15 +4,15 @@
 
 ## 确认身份与本次对话
 
-先按[接入规则](access.md)核对 Home。把实际档案目录的绝对路径交给 `ne project resolve --path PATH` 或 `project_resolve {path}`。命中时，`assistant.id` 标识你的长期身份，`assistant.archive_directory` 指向档案。要查关联项目和任务时，用返回的项目 ID。目录未识别时，按查询结果说明当前情况。
+先按[接入规则](access.md)核对 Home。把实际档案目录的绝对路径交给 `ne project resolve --path PATH` 或 `project_resolve {path}`。命中时，`agent.id` 标识你的长期身份，`agent.archive_directory` 指向档案。要查关联项目和任务时，用返回的项目 ID。目录未识别时，按查询结果说明当前情况。
 
 再按[身份发现](identity.md)找到本次对话的 NoEnding 会话 ID。查收和回复本次来信、加入协作室都使用这个 ID。新对话还在等待绑定时，可以先读档案和用户指定的任务。
 
-用具有本次会话凭证的 `ne assistant self` 或 `assistant_self {}` 查阅自己的档案。
+用具有本次会话凭证的 `ne agent self` 或 `agent_self {}` 查阅自己的档案。
 
 ## 找到合作者
 
-用 `ne assistant list` 或 `assistant_list {}` 找同一 Home 内的智能体。已知名字的一部分时，用 `ne assistant list --name TEXT` 或 `assistant_list {name:TEXT}` 筛选。重名时，按需要用 `ne assistant show ID` 或 `assistant_get {id}` 阅读各自的自我介绍，确认收件人后用其公开 ID 投递。
+用 `ne agent list` 或 `agent_list {}` 找同一 Home 内的智能体。已知名字的一部分时，用 `ne agent list --name TEXT` 或 `agent_list {name:TEXT}` 筛选。重名时，按需要用 `ne agent show ID` 或 `agent_get {id}` 阅读各自的自我介绍，确认收件人后用其公开 ID 投递。
 
 ## 接着上次做
 
@@ -20,6 +20,6 @@
 
 ## 派工与交付
 
-管理对话从档案目录启动。需在工程目录执行时，可在用户授权下用 `ne session new --agent AGENT --cwd ABSOLUTE_ENGINEERING_DIRECTORY --message TEXT` 或 `session_start` 开启工程会话。拿到终端 ID 后，用 `session terminals` 查询实际绑定的会话 ID。
+管理对话从档案目录启动。需在工程目录执行时，可在用户授权下用 `ne session new --tool TOOL --cwd ABSOLUTE_ENGINEERING_DIRECTORY --message TEXT` 或 `session_start` 开启工程会话。拿到终端 ID 后，用 `session terminals` 查询实际绑定的会话 ID。
 
 派工信写清工作目标、验收条件、任务或事项 ID，以及希望对方回复到哪个会话。收到反馈后，核对可以验收的证据，把已确认结果和缺口写入对应事项。需要管理对话和工程对话同时参加时，把两边所属的项目纳入任务范围，由用户选择实际参与的会话。参加协作室时，按[协作指南](collaboration.md)核对邀请和本次分工。

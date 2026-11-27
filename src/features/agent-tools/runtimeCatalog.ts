@@ -1,5 +1,5 @@
 import { readViewPreference, writeViewPreference, viewState } from "../../hooks/useViewState";
-import { AGENT_LABELS, type Agent, type AgentRuntimeDiscovery } from "../../types";
+import { AGENT_TOOL_LABELS, type AgentTool, type AgentRuntimeDiscovery } from "../../types";
 
 export interface RuntimeCatalog {
   at: number;
@@ -8,7 +8,7 @@ export interface RuntimeCatalog {
   value: AgentRuntimeDiscovery;
 }
 
-const key = (agent: Agent) => `agent.catalog.${agent}`;
+const key = (agent: AgentTool) => `agent.catalog.${agent}`;
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string");
 const nullableString = (value: unknown) => value === null || typeof value === "string";
 
@@ -26,17 +26,17 @@ function isCatalog(raw: unknown): raw is RuntimeCatalog | null {
         && nullableString(model.display_name) && nullableString(model.provider) && strings(model.supported_efforts)));
 }
 
-export function readRuntimeCatalog(agent: Agent) {
+export function readRuntimeCatalog(agent: AgentTool) {
   return readViewPreference(key(agent), null, isCatalog);
 }
 
 /** A successful discovery replaces the entire catalog, including entries removed by the CLI. */
-export function saveRuntimeCatalog(agent: Agent, catalog: RuntimeCatalog) {
+export function saveRuntimeCatalog(agent: AgentTool, catalog: RuntimeCatalog) {
   writeViewPreference(key(agent), catalog);
 }
 
-export function removeRuntimeCatalog(agent?: Agent) {
-  for (const item of agent ? [agent] : Object.keys(AGENT_LABELS) as Agent[]) {
+export function removeRuntimeCatalog(agent?: AgentTool) {
+  for (const item of agent ? [agent] : Object.keys(AGENT_TOOL_LABELS) as AgentTool[]) {
     viewState.delete(key(item));
     try { localStorage.removeItem(`noending.view.${key(item)}`); } catch { /* Memory invalidation still works. */ }
   }

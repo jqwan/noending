@@ -14,7 +14,7 @@
 //!   transaction inside `Db::commit_ingest`, which re-checks the session's
 //!   lifecycle first.
 //!
-//! A session IS its root source. Child/side sources an Agent spawns alongside
+//! A session IS its root source. Child/side sources an agent tool spawns alongside
 //! (subagent transcripts, sidechains, derived pages) are recognized at
 //! discovery and skipped silently — recognition is what keeps e.g. codex
 //! subagent rollouts from becoming fake sessions. Concurrency is the storage
@@ -27,11 +27,11 @@ use std::path::PathBuf;
 use crate::adapters::{
     AgentAdapter, DiscoveredMember, DiscoveredMemberKind, DiscoveryBatch, PreparedRead,
 };
-use crate::domain::{Agent, Session, SourceAvailability};
+use crate::domain::{AgentTool, Session, SourceAvailability};
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-/// A Session's display title, in two tiers: the root's NATIVE title (the Agent
+/// A Session's display title, in two tiers: the root's NATIVE title (the agent tool
 /// app's own name — it may appear or be renamed as the conversation moves on,
 /// so each ingest writes it through) and a text-derived FALLBACK (the first
 /// real user text, then the first visible assistant text — fixed at the
@@ -81,7 +81,7 @@ fn ensure_logical_session(
         return Ok(None);
     }
 
-    if d.agent == Agent::Codex {
+    if d.agent == AgentTool::Codex {
         db.canonicalize_codex_identity(&d.source_member_id, &d.metadata)?;
     }
     let path_id =
@@ -166,7 +166,7 @@ fn resolve_batch(
     adapter: &dyn AgentAdapter,
     discovered: DiscoveryBatch,
 ) -> Result<ResolvedBatch> {
-    let agent = adapter.agent();
+    let agent = adapter.tool();
     let attacher = crate::workspace::session::workspace_attacher();
     let mut touched_session_ids = BTreeSet::new();
 
@@ -255,7 +255,7 @@ fn ingest_session_mode(
     };
     if result.is_ok() && outcome == "success" {
         if let Some(current) = db.get_session(&session.id)? {
-            if current.agent == Agent::Codex
+            if current.agent == AgentTool::Codex
                 && crate::adapters::adapter_for(current.agent)
                     .source_matches_cursor(&current, &current.source_cursor())?
             {
@@ -555,12 +555,12 @@ fn reconcile_all_inner<F: Fn(&Session)>(db: &Db, on_session: &F) -> Result<Recon
     })
 }
 
-/// Agent lifecycle notifications sync only the reported native root. This is
+/// agent tool lifecycle notifications sync only the reported native root. This is
 /// scoped to the reported identity so neighboring histories cannot bind to
 /// an owned terminal.
 pub fn reconcile_native<F>(
     db: &Db,
-    agent: Agent,
+    agent: AgentTool,
     native_id: &str,
     source_path: Option<&str>,
     on_session: &F,
@@ -578,9 +578,9 @@ where
     let mut roots = Vec::new();
     if let Some(path) = source_path {
         let path = PathBuf::from(path);
-        if agent == Agent::Antigravity && path.extension().is_some_and(|e| e == "db") {
+        if agent == AgentTool::Antigravity && path.extension().is_some_and(|e| e == "db") {
             roots.push(path);
-        } else if agent == Agent::Antigravity {
+        } else if agent == AgentTool::Antigravity {
             // agy reports its exported transcript, but the adapter reads the
             // native conversation DB beside brain/ (the CLI store only).
             if let Some(brain) = path
@@ -608,7 +608,7 @@ where
             .flat_map(|source| crate::adapters::source_discovery_roots(&source))
             .collect();
     }
-    let discovered = if agent == Agent::Codex {
+    let discovered = if agent == AgentTool::Codex {
         crate::adapters::codex::CodexAdapter::discover_native_batch(
             &roots,
             native_id,
@@ -844,7 +844,7 @@ pub fn refresh_session(db: &Db, session_id: &str) -> Result<i64> {
     let Some(session) = db.get_session(session_id)? else {
         return Ok(0);
     };
-    if session.agent == Agent::Codex {
+    if session.agent == AgentTool::Codex {
         return reconcile_native(
             db,
             session.agent,

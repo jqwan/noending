@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 mod support;
 
 use noending::adapters::{adapter_for, DiscoveredMember, DiscoveredMemberKind};
-use noending::domain::{Agent, Session};
+use noending::domain::{AgentTool, Session};
 use noending::error::Result;
 use noending::ingestion::{ingest_session, reconcile_all, session_title_sources};
 use noending::storage::session_paths::attach_session_workspace_path_conn;
@@ -136,13 +136,13 @@ fn discover_via_reconcile(
         .list_ingest_sources()
         .unwrap()
         .iter()
-        .any(|s| s.agent == Agent::Codex && s.path == root_str)
+        .any(|s| s.agent == AgentTool::Codex && s.path == root_str)
     {
-        db.add_ingest_source(Agent::Codex, &root_str).unwrap();
+        db.add_ingest_source(AgentTool::Codex, &root_str).unwrap();
     }
     let _ = shared_attacher();
     reconcile_all(db, &|_| {}).unwrap();
-    db.find_session_by_root_agent_id(Agent::Codex, agent_session_id)
+    db.find_session_by_root_agent_id(AgentTool::Codex, agent_session_id)
         .unwrap()
         .expect("discovered through the real adapter")
 }
@@ -204,7 +204,7 @@ fn a_different_spelling_of_the_same_cwd_does_not_move_the_session() {
     project(&db, "p1", "repo");
     let (s, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "spell-root",
             Some("t"),
             Some("/repo/app"),
@@ -277,7 +277,7 @@ fn an_explicit_attach_derives_the_project_from_the_new_path() {
     project(&db, "p2", "two");
     let (s, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "reattach-root",
             Some("t"),
             Some("/repo/two"),
@@ -310,7 +310,7 @@ fn workspace_path_move_follows_a_trashed_session() {
     project(&db, "p2", "two");
     let (session_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "trash-path-move-root",
             Some("t"),
             Some("/repo/one"),
@@ -366,7 +366,7 @@ fn changing_a_workspace_paths_project_refreshes_all_its_sessions() {
         };
         let (sid, _) = db
             .upsert_logical_session_unchecked(
-                Agent::Codex,
+                AgentTool::Codex,
                 &format!("root-{id}"),
                 Some("t"),
                 Some(cwd),
@@ -423,7 +423,7 @@ fn project_membership_changes_without_refreshing_session_rows() {
     };
     let (a, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "refresh-root",
             Some("t"),
             Some("/repo/app"),
@@ -445,7 +445,7 @@ fn project_membership_changes_without_refreshing_session_rows() {
     // No Session update or cache refresh is needed after a path's Project changes.
     assert_eq!(stored(&db, &a).project_id.as_deref(), Some("p2"));
     assert_eq!(
-        db.find_session_by_root_agent_id(Agent::Codex, "refresh-root")
+        db.find_session_by_root_agent_id(AgentTool::Codex, "refresh-root")
             .unwrap()
             .unwrap()
             .project_id
@@ -618,7 +618,7 @@ fn detaching_a_session_path_removes_project_membership_everywhere() {
     );
 }
 
-///  — a Session's title splits into two tiers: the NATIVE tier (the Agent
+///  — a Session's title splits into two tiers: the NATIVE tier (the AgentTool
 /// app's own name) and the FALLBACK tier (first user text, else first agent
 /// text). Within a tier the order is the whole point (a human prompt beats a
 /// machine reply), and the split lives in exactly one function
@@ -627,7 +627,7 @@ fn detaching_a_session_path_removes_project_membership_everywhere() {
 #[test]
 fn a_session_title_prefers_the_native_then_the_user_then_the_agent() {
     let member = |native: Option<&str>, user: Option<&str>, agent: Option<&str>| DiscoveredMember {
-        agent: Agent::Codex,
+        agent: AgentTool::Codex,
         source_member_id: "title-root".into(),
         kind: DiscoveredMemberKind::Root,
         parent_source_member_id: None,
@@ -698,7 +698,7 @@ fn a_pass_attaches_sessions_whose_directory_was_registered_later() {
     let orphan = |root: &str, cwd: &str| {
         let (id, _) = db
             .upsert_logical_session_unchecked(
-                Agent::Codex,
+                AgentTool::Codex,
                 root,
                 Some("t"),
                 Some(cwd),
@@ -748,7 +748,7 @@ fn the_source_verdict_follows_the_file_on_disk() {
     std::fs::write(&file, "transcript\n").unwrap();
     let session_at = |path: &Path| Session {
         id: "s".into(),
-        agent: Agent::Codex,
+        agent: AgentTool::Codex,
         root_agent_session_id: "root".into(),
         title: None,
         cwd: None,
@@ -773,7 +773,7 @@ fn the_source_verdict_follows_the_file_on_disk() {
         latest_message_seq: 0,
     };
 
-    let adapter = adapter_for(Agent::Codex);
+    let adapter = adapter_for(AgentTool::Codex);
     assert_eq!(
         adapter.inspect_session_source(&session_at(&file)).unwrap(),
         noending::domain::SourceAvailability::Present

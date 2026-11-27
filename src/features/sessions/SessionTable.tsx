@@ -2,16 +2,16 @@ import { useViewState } from "../../hooks/useViewState";
 import Icon from "../../components/Icon";
 import { memo, useMemo, useState } from "react";
 import { timeAgo } from "../../components/common";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import "./sessions.css";
-import { type AgentStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
+import { type AgentToolStatusEntry, type SessionListItem, type TerminalSummary, type TerminalResumeState } from "../../types";
 
 import {
   openSessionTerminal,
   terminalContinueState,
   desktopContinueState,
   resolveSessionContinueMode,
-  useAgentStatus,
+  useToolStatus,
 } from "./continueDesktop";
 import { api } from "../../api";
 import { sessionDetailCache, sessionContextCache } from "./sessionDetailCache";
@@ -234,7 +234,7 @@ export default function SessionCards({
 }) {
   const [visibleCount, setVisibleCount] = useViewState("sessions.visibleCount", 100);
   // 「继续」按钮的可用性需要桌面端在场事实：读一次 agent 状态。
-  const agentStatus = useAgentStatus();
+  const toolStatus = useToolStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
   const resumeStates = useTerminalResumeStates(sessions.slice(0, visibleCount)
@@ -269,7 +269,7 @@ export default function SessionCards({
             session={s}
             project={project}
             resumeState={resumeStates[s.id]}
-            agentStatus={agentStatus}
+            toolStatus={toolStatus}
             onOpen={onOpen}
             onResume={onResume}
             onTerminalResume={onTerminalResume}
@@ -301,7 +301,7 @@ export default function SessionCards({
           session={s}
           project={project}
           resumeState={resumeStates[s.id]}
-          agentStatus={agentStatus}
+          toolStatus={toolStatus}
           onOpen={onOpen}
           onResume={onResume}
           onTerminalResume={onTerminalResume}
@@ -329,7 +329,7 @@ interface SessionRowProps {
   session: SessionListItem;
   project: ProjectCell;
   resumeState?: TerminalResumeState;
-  agentStatus: Record<string, AgentStatusEntry> | null;
+  toolStatus: Record<string, AgentToolStatusEntry> | null;
   onOpen: (id: string) => void;
   onResume: (sessionId: string) => void;
   onTerminalResume?: (session: SessionListItem) => void;
@@ -346,7 +346,7 @@ const SessionListRowItem = memo(function SessionListRowItem({
   session: s,
   project,
   resumeState,
-  agentStatus,
+  toolStatus,
   onOpen,
   onResume,
   onTerminalResume,
@@ -372,7 +372,7 @@ const SessionListRowItem = memo(function SessionListRowItem({
     >
       <button className="session-open" onClick={() => onOpen(s.id)}>
         <span className="session-list-title" title={sessionDisplayTitle(s.title)}>
-          <AgentIcon agent={s.agent} size={16} />
+          <AgentToolIcon agent={s.agent} size={16} />
           <span>{sessionDisplayTitle(s.title)}</span>
         </span>
         <span className="session-list-meta">
@@ -396,7 +396,7 @@ const SessionListRowItem = memo(function SessionListRowItem({
         <SessionResumeButton
           session={s}
           resumeState={resumeState}
-          agentStatus={agentStatus}
+          toolStatus={toolStatus}
           onResume={onResume}
           onTerminalResume={onTerminalResume}
           navigate={navigate}
@@ -416,7 +416,7 @@ interface SessionCardProps {
   session: SessionListItem;
   project: ProjectCell;
   resumeState?: TerminalResumeState;
-  agentStatus: Record<string, AgentStatusEntry> | null;
+  toolStatus: Record<string, AgentToolStatusEntry> | null;
   onOpen: (id: string) => void;
   onResume: (sessionId: string) => void;
   onTerminalResume?: (session: SessionListItem) => void;
@@ -433,7 +433,7 @@ const SessionCardItem = memo(function SessionCardItem({
   session: s,
   project,
   resumeState,
-  agentStatus,
+  toolStatus,
   onOpen,
   onResume,
   onTerminalResume,
@@ -468,7 +468,7 @@ const SessionCardItem = memo(function SessionCardItem({
     >
       <header className="ws-card-head">
         <h3 className="ws-card-title" title={sessionDisplayTitle(s.title)}>
-          <AgentIcon agent={s.agent} size={16} />
+          <AgentToolIcon agent={s.agent} size={16} />
           <span className="truncate">{sessionDisplayTitle(s.title)}</span>
         </h3>
         {s.archived_at && (
@@ -510,7 +510,7 @@ const SessionCardItem = memo(function SessionCardItem({
           <SessionResumeButton
             session={s}
             resumeState={resumeState}
-            agentStatus={agentStatus}
+            toolStatus={toolStatus}
             onResume={onResume}
             onTerminalResume={onTerminalResume}
             navigate={navigate}
@@ -530,7 +530,7 @@ const SessionCardItem = memo(function SessionCardItem({
 /** Single inline continue action: terminal-capable formats use terminal, otherwise desktop. */
 export function SessionResumeButton({
   session,
-  agentStatus,
+  toolStatus,
   onResume,
   onTerminalResume,
   navigate,
@@ -539,7 +539,7 @@ export function SessionResumeButton({
   resumeState,
 }: {
   session: SessionListItem;
-  agentStatus: Record<string, AgentStatusEntry> | null;
+  toolStatus: Record<string, AgentToolStatusEntry> | null;
   onResume: (sessionId: string) => void;
   onTerminalResume?: (session: SessionListItem) => void;
   navigate?: (r: Route) => void;
@@ -594,7 +594,7 @@ export function SessionResumeButton({
     );
   }
 
-  const { disabled, title } = desktopContinueState(session, agentStatus?.[session.agent] ?? null);
+  const { disabled, title } = desktopContinueState(session, toolStatus?.[session.agent] ?? null);
   return (
     <button
       className="btn small ghost icon-button"

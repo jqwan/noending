@@ -1,16 +1,16 @@
 import React from "react";
-import type { Agent } from "../types";
+import type { AgentTool } from "../types";
 
 /**
  * Official brand logos for each agent.
  * Foreground vectors for Antigravity, Claude, Codex, DeepSeek, Pi, Qoder, WorkBuddy, ZCode.
  */
-export default function AgentIcon({
+export default function AgentToolIcon({
   agent,
   size,
   className = "",
 }: {
-  agent: Agent;
+  agent: AgentTool;
   size?: 14 | 16 | 18;
   className?: string;
 }) {

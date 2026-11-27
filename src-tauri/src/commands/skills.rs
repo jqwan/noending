@@ -21,7 +21,7 @@ impl Drop for CatalogReset {
 
 /// The NoEnding library is NoEnding-owned, so a Skill dropped into it is
 /// registered by location; discovery keeps its metadata and lists sources that
-/// currently have no Agent entry. Agent directories remain the only Locations.
+/// currently have no agent tool entry. agent tool directories remain the only Locations.
 fn sync_library_sources(db: &Db, managed_root: &Path) -> Result<()> {
     let mut registry = skills::load_skill_registry(db)?;
     if skills::discover_library_sources(managed_root, &mut registry)? {

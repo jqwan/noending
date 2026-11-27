@@ -133,13 +133,13 @@ export function connectWindowsClipboard(term: Terminal, clipboard: {
     else { term.focus(); void paste(true); }
   };
   const onKeyDown = (event: KeyboardEvent) => {
-    // F6 provides a way out without taking Tab/Escape away from the Agent.
+    // F6 provides a way out without taking Tab/Escape away from the AgentTool.
     if (event.key === "F6" && !event.isComposing) {
       event.preventDefault();
       element.closest(".main")?.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
     }
     // Prevent NoEnding's window-level navigation/palette shortcuts from also
-    // executing after xterm has delivered the same key to the Agent.
+    // executing after xterm has delivered the same key to the AgentTool.
     event.stopPropagation();
   };
   element.addEventListener("terminal-view-detached", closeMenu);

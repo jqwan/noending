@@ -1,9 +1,9 @@
 import { viewState } from "../../hooks/useViewState";
-import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
-import { clearRuntimeCatalog } from "../agents/useAgentRuntime";
+import { NATIVE_RUNTIME } from "../agent-tools/RuntimeFields";
+import { clearRuntimeCatalog } from "../agent-tools/useAgentRuntime";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runtimeFixture } from "../agents/runtimeFixtures";
+import { runtimeFixture } from "../agent-tools/runtimeFixtures";
 import NewSessionView from "./NewSessionView";
 import { api } from "../../api";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -11,7 +11,7 @@ import type { PathProbe, ProjectCardData, ProjectDetailData } from "../../types"
 
 const probeFixture: PathProbe = {raw: "/tmp/workspace", status: "ok", canonical_path: "/tmp/workspace", exists: true, git_state: "none", git_kind: null, project: null};
 
-const mockAgentStatus = {
+const mockToolStatus = {
   codex: {
     name: "Codex",
     detected: true,
@@ -106,10 +106,10 @@ vi.mock("../../api", () => ({
   api: {
     listProjectCards: vi.fn(),
     getProjectDetail: vi.fn(),
-    getAgentStatus: vi.fn(),
-    getAgentRuntimeSettings: vi.fn(),
-    refreshAgentRuntimeOptions: vi.fn(),
-    getDefaultAgent: vi.fn(),
+    getToolStatus: vi.fn(),
+    getToolRuntimeSettings: vi.fn(),
+    refreshToolRuntimeOptions: vi.fn(),
+    getDefaultTool: vi.fn(),
     previewNewSession: vi.fn(),
     launchEmbeddedNew: vi.fn(),
     getWorkspaceSettings: vi.fn(),
@@ -143,15 +143,15 @@ beforeEach(() => {
   viewState.clear();
   localStorage.clear();
   clearRuntimeCatalog();
-  vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
-  vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
+  vi.mocked(api.getToolRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
+  vi.mocked(api.refreshToolRuntimeOptions).mockReset().mockRejectedValue(new Error("catalog unavailable"));
   vi.mocked(open).mockReset().mockResolvedValue(null);
   vi.mocked(api.addProjectPath).mockReset();
   vi.mocked(api.launchEmbeddedNew).mockReset();
   vi.mocked(api.probeWorkspacePath).mockReset().mockResolvedValue(probeFixture);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([chatProject]);
-  vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
-  vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
+  vi.mocked(api.getToolStatus).mockReset().mockResolvedValue(mockToolStatus);
+  vi.mocked(api.getDefaultTool).mockReset().mockResolvedValue("codex");
   vi.mocked(api.getWorkspaceSettings).mockReset().mockResolvedValue({
     noending_home: "/tmp",
     default_workspace: "/tmp/workspace",
@@ -227,9 +227,9 @@ describe("NewSessionView explicit agent resolution", () => {
     expect((screen.getByLabelText("运行工具") as HTMLSelectElement).value).toBe("codex");
   });
 
-  it("keeps a manual Agent selection when the default Agent arrives late", async () => {
+  it("keeps a manual AgentTool selection when the default AgentTool arrives late", async () => {
     let resolveDefault!: (agent: "codex") => void;
-    vi.mocked(api.getDefaultAgent).mockReturnValue(new Promise((resolve) => { resolveDefault = resolve; }));
+    vi.mocked(api.getDefaultTool).mockReturnValue(new Promise((resolve) => { resolveDefault = resolve; }));
     render(<NewSessionView navigate={vi.fn()} />);
     fireEvent.change(screen.getByLabelText("运行工具"), { target: { value: "claude_code" } });
     resolveDefault("codex");
@@ -452,7 +452,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
 });
 
   it("remembers runtime per agent as soon as it changes without changing global overrides", async () => {
-    vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
+    vi.mocked(api.getToolRuntimeSettings).mockImplementation(async (agent) => ({
       ...runtimeFixture(agent),
       models: [{ id: "one-time-model", display_name: "One Time Model", provider: null, supported_efforts: ["low", "high"] }],
     }));
@@ -461,7 +461,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
     expect(screen.getByRole("heading", { name: "新建会话" })).toBeTruthy();
 
     const runtimeBtn = screen.getByRole("button", { name: "模型与推理设置" });
-    await waitFor(() => expect(api.getAgentRuntimeSettings).toHaveBeenCalled());
+    await waitFor(() => expect(api.getToolRuntimeSettings).toHaveBeenCalled());
     expect(runtimeBtn.textContent).toContain("工具默认");
     expect(runtimeBtn.textContent).not.toContain("One Time Model");
 
@@ -518,10 +518,10 @@ it("does not prepare another launch if the user leaves while startup fails", asy
   });
 
   it("offers only supported, detected, launch-enabled Agents", async () => {
-    vi.mocked(api.getAgentStatus).mockResolvedValue({
-      ...mockAgentStatus,
-      codex: { ...mockAgentStatus.codex, detected: false },
-      pi: { ...mockAgentStatus.pi, launch_enabled: false },
+    vi.mocked(api.getToolStatus).mockResolvedValue({
+      ...mockToolStatus,
+      codex: { ...mockToolStatus.codex, detected: false },
+      pi: { ...mockToolStatus.pi, launch_enabled: false },
     });
     render(<NewSessionView navigate={vi.fn()} />);
     await waitFor(() => expect((screen.getByLabelText("运行工具") as HTMLSelectElement).value).toBe("claude_code"));
@@ -532,7 +532,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
   });
 
   it("clears one-time parameters on an agent switch", async () => {
-    vi.mocked(api.getAgentRuntimeSettings).mockImplementation(async (agent) => ({
+    vi.mocked(api.getToolRuntimeSettings).mockImplementation(async (agent) => ({
       ...runtimeFixture(agent),
       models: [{ id: "codex-only", display_name: "Codex Only", provider: null, supported_efforts: ["low", "high"] }],
     }));
@@ -552,8 +552,8 @@ it("does not prepare another launch if the user leaves while startup fails", asy
    *  永不启用的发送按钮。 */
   it("explains an unusable agent inside the composer and points at the agent page", async () => {
     const navigate = vi.fn();
-    vi.mocked(api.getAgentStatus).mockResolvedValue(Object.fromEntries(
-      Object.entries(mockAgentStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }]),
+    vi.mocked(api.getToolStatus).mockResolvedValue(Object.fromEntries(
+      Object.entries(mockToolStatus).map(([agent, entry]) => [agent, { ...entry, detected: false }]),
     ));
     render(<NewSessionView navigate={navigate} />);
 
@@ -565,7 +565,7 @@ it("does not prepare another launch if the user leaves while startup fails", asy
     expect(screen.getByRole("button", { name: "发送" })).toHaveProperty("disabled", true);
 
     fireEvent.click(screen.getByRole("button", { name: "前往运行工具设置" }));
-    expect(navigate).toHaveBeenCalledWith({ view: "agents" });
+    expect(navigate).toHaveBeenCalledWith({ view: "agent-tools" });
   });
 });
 
@@ -573,12 +573,12 @@ it("starts from the registered archive when the project also has another directo
   const directory = "/tmp/noending/assistant/example";
   const archive = { id: "archive-project", name: "协调员", visibility: "normal" as const };
   vi.mocked(api.listProjectCards).mockResolvedValue([chatProject, {
-    ...chatProject, ...archive, kind: "single_directory", is_assistant: true,
+    ...chatProject, ...archive, kind: "single_directory", is_agent: true,
     representative_paths: ["/other"], search_paths: ["/other", directory],
   }]);
   vi.mocked(api.getProjectDetail).mockResolvedValue({
     project: archive,
-    assistant: { workspace_path_id: "wp-archive" },
+    agent: { workspace_path_id: "wp-archive" },
     workspace_paths: [{ id: "wp-archive", canonical_path: directory, exists: true }],
   } as ProjectDetailData);
   vi.mocked(api.launchEmbeddedNew).mockResolvedValue({ terminal_id: "archive-terminal", note: "", command_line: "", launched_via: "embedded" });
@@ -594,7 +594,7 @@ it("starts from the registered archive when the project also has another directo
   vi.mocked(api.previewNewSession).mockClear();
   vi.mocked(api.getProjectDetail).mockResolvedValue({
     project: archive,
-    assistant: { workspace_path_id: "wp-archive" },
+    agent: { workspace_path_id: "wp-archive" },
     workspace_paths: [{ id: "wp-archive", canonical_path: directory, exists: false }],
   } as ProjectDetailData);
   render(<NewSessionView projectId={archive.id} archivePathId="wp-archive" navigate={vi.fn()} />);
@@ -639,7 +639,7 @@ describe("NewSessionView saved choices and drafts", () => {
     expect(screen.getByLabelText("首条消息")).toHaveProperty("value", "");
     fireEvent.change(screen.getByLabelText("首条消息"), { target: { value: "聊天草稿" } });
 
-    // Project and Agent presets become the choices remembered without a preset.
+    // Project and agent tool presets become the choices remembered without a preset.
     restart();
     await waitFor(() => expect(api.previewNewSession).toHaveBeenLastCalledWith("claude_code", "/tmp/workspace", NATIVE_RUNTIME));
     expect(screen.getByLabelText("所属项目")).toHaveProperty("value", "chat");
@@ -658,8 +658,8 @@ describe("NewSessionView saved choices and drafts", () => {
     fireEvent.change(screen.getByLabelText("运行工具"), { target: { value: "pi" } });
 
     vi.mocked(api.listProjectCards).mockResolvedValue([chatProject, { ...project, search_paths: ["/repo/main"] }]);
-    vi.mocked(api.getAgentStatus).mockResolvedValue({ ...mockAgentStatus, pi: { ...mockAgentStatus.pi, launch_enabled: false } });
-    vi.mocked(api.getDefaultAgent).mockResolvedValue("claude_code");
+    vi.mocked(api.getToolStatus).mockResolvedValue({ ...mockToolStatus, pi: { ...mockToolStatus.pi, launch_enabled: false } });
+    vi.mocked(api.getDefaultTool).mockResolvedValue("claude_code");
     restart();
     await waitFor(() => expect(api.previewNewSession).toHaveBeenLastCalledWith("claude_code", "/repo/main", NATIVE_RUNTIME));
 

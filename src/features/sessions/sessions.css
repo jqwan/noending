@@ -18,7 +18,7 @@
    也保持同宽（正文位置一点没动）。 */
 .event { display: flex; flex-direction: column; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-sm); }
 /* 技术事件（system / compact / 其它）仍是「分隔线 + 弱化的整行」——它们是系统噪音，
-   不是对话的一方；用户与 Agent 的对话行改用气泡分区，不再画线。 */
+   不是对话的一方；用户与 AgentTool 的对话行改用气泡分区，不再画线。 */
 .event.is-tech { padding: 12px 8px; border-top: 1px solid var(--border-subtle); }
 .event.is-tech:first-of-type { border-top: 0; }
 .event .head { display: flex; gap: var(--space-md); align-items: baseline; margin-bottom: 4px; }
@@ -442,7 +442,7 @@ button.btn.ghost.terminal-exited,
 .terminal-menu-icon > .ui-icon { display: block; width: var(--icon-size-sm); height: var(--icon-size-sm); }
 .terminal-menu .menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* Agent activity never changes the terminal connection/action icon. */
+/* AgentTool activity never changes the terminal connection/action icon. */
 .terminal-activity-indicator {
   display: inline-flex; align-items: center; justify-content: center;
   width: 12px; height: 14px; flex: none; vertical-align: middle;

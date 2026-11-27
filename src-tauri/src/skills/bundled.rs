@@ -16,8 +16,8 @@ const INITIALIZED: &str = "skills.noending_initialized";
 
 pub(crate) const FILES: &[(&str, &str)] = &[
     (
-        "references/assistant.md",
-        include_str!("../../skills/noending/references/assistant.md"),
+        "references/agent.md",
+        include_str!("../../skills/noending/references/agent.md"),
     ),
     (
         "references/access.json",
@@ -140,6 +140,14 @@ pub fn prepare_noending_skill(db: &Db, home: &NoEndingHome, executable: &Path) -
     let bin = target.join("bin");
     directory(&references)?;
     directory(&bin)?;
+    let skill_entry = target.join("SKILL.md");
+    let previous_agent_reference = references.join("assistant.md");
+    if fs::symlink_metadata(&skill_entry).is_ok_and(|meta| meta.is_file())
+        && fs::read_to_string(&skill_entry)?.contains("(references/assistant.md)")
+        && fs::symlink_metadata(&previous_agent_reference).is_ok_and(|meta| meta.is_file())
+    {
+        fs::remove_file(previous_agent_reference)?;
+    }
     crate::cli::install_workspace_entry(&bin, &home.root, executable)
         .map_err(|e| other(e.to_string()))?;
     #[cfg(windows)]

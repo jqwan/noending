@@ -1,5 +1,5 @@
 //! Message submission is separate from raw xterm input. Never infer readiness
-//! from terminal output. PTY writes confirm transport only, not Agent acceptance.
+//! from terminal output. PTY writes confirm transport only, not agent tool acceptance.
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) enum MessageDelivery {
@@ -11,10 +11,10 @@ pub(super) enum MessageDelivery {
 /// Native default shortcuts, independent of asynchronous lifecycle snapshots.
 /// Antigravity's Enter follows its saved preference; Alt+M selects the opposite.
 pub(super) fn submit_key(
-    agent: crate::domain::Agent,
+    agent: crate::domain::AgentTool,
     delivery: MessageDelivery,
 ) -> Result<&'static str, DeliveryError> {
-    let settings = if agent == crate::domain::Agent::Antigravity {
+    let settings = if agent == crate::domain::AgentTool::Antigravity {
         let path = crate::platform::paths::resolve_antigravity_cli_dir()
             .ok_or_else(|| error("agent_settings_unavailable", "无法定位 Antigravity 配置"))?
             .join("settings.json");
@@ -44,29 +44,29 @@ pub(super) fn submit_key(
     native_submit_key(agent, delivery, cfg!(windows), settings.as_ref())
 }
 fn native_submit_key(
-    agent: crate::domain::Agent,
+    agent: crate::domain::AgentTool,
     delivery: MessageDelivery,
     windows: bool,
     settings: Option<&serde_json::Value>,
 ) -> Result<&'static str, DeliveryError> {
-    use crate::domain::Agent;
+    use crate::domain::AgentTool;
     let queue = matches!(delivery, MessageDelivery::Queue);
     Ok(match agent {
-        Agent::Codex => {
+        AgentTool::Codex => {
             if queue {
                 "\t"
             } else {
                 "\r"
             }
         }
-        Agent::ClaudeCode => {
+        AgentTool::ClaudeCode => {
             if queue {
                 "\x18\r"
             } else {
                 "\x18\x13"
             }
         }
-        Agent::Pi => {
+        AgentTool::Pi => {
             if queue {
                 if windows {
                     "\x11"
@@ -77,7 +77,7 @@ fn native_submit_key(
                 "\r"
             }
         }
-        Agent::Antigravity => {
+        AgentTool::Antigravity => {
             let enter_queues = match settings.and_then(|s| s.get("queuedMessages")) {
                 None => true,
                 Some(serde_json::Value::String(v)) if v == "queue" => true,
@@ -95,7 +95,7 @@ fn native_submit_key(
                 "\x1bm"
             }
         }
-        _ => return Err(error("unsupported_agent", "此 Agent 不支持终端消息投递")),
+        _ => return Err(error("unsupported_agent", "此 运行工具 不支持终端消息投递")),
     })
 }
 
@@ -126,11 +126,11 @@ pub(super) fn terminal_reply(data: &[u8]) -> bool {
         && parameters.iter().all(|byte| (0x20..=0x3f).contains(byte))
 }
 
-pub(super) fn reminder_submit_gap(agent: crate::domain::Agent) -> Option<std::time::Duration> {
+pub(super) fn reminder_submit_gap(agent: crate::domain::AgentTool) -> Option<std::time::Duration> {
     // On ConPTY, Codex's Windows key reader can receive pasted text as a key
     // burst. Leave room for its 120 ms Enter suppression window and input
     // dispatch before sending Enter or Tab as a separate key.
-    (cfg!(windows) && agent == crate::domain::Agent::Codex)
+    (cfg!(windows) && agent == crate::domain::AgentTool::Codex)
         .then_some(std::time::Duration::from_millis(180))
 }
 
@@ -154,7 +154,7 @@ pub(super) fn write_submit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::Agent::*;
+    use crate::domain::AgentTool::*;
     #[test]
     fn native_queue_and_steer_shortcuts_follow_platform_and_antigravity_preference() {
         use MessageDelivery::*;

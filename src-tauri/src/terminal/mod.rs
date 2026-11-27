@@ -5,10 +5,10 @@
 //! module owns that terminal for as long as the app runs. The frontend
 //! terminal view is an attach/detach client — the scrollback ring buffer
 //! here is the source of truth, so switching session subpages (a React
-//! remount) never touches the running Agent.
+//! remount) never touches the running agent tool.
 //!
 //! Deliberate product behavior: closing NoEnding kills the embedded Agents.
-//! An Agent that must outlive the app belongs in the external terminal,
+//! An agent tool that must outlive the app belongs in the external terminal,
 //! which keeps working exactly as before.
 
 mod activity;
@@ -29,8 +29,8 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::adapters::AgentCommand;
-use crate::domain::Agent;
+use crate::adapters::AgentToolCommand;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use crate::storage::{new_id, now};
 
@@ -67,16 +67,16 @@ pub struct TerminalBound {
 }
 
 /// The facts a terminal subpage needs to decide what it is looking at.
-/// `session_id` is None for a NEW-session terminal: the Agent has been
+/// `session_id` is None for a NEW-session terminal: the agent tool has been
 /// launched but its identity is unknown or its source has not been ingested.
-/// Only a prespecified or Agent-reported native ID establishes identity.
+/// Only a prespecified or agent tool-reported native ID establishes identity.
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalSummary {
     pub terminal_id: String,
     pub session_id: Option<String>,
     pub identity_revision: u64,
     pub activity: TerminalActivity,
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub cwd: Option<String>,
     pub created_at: String,
     pub live: bool,
@@ -158,7 +158,7 @@ impl Scrollback {
 struct TerminalRecord {
     summary: TerminalSummary,
     session_access: (String, std::time::Instant),
-    /// Current native root identity, supplied by the launch or an Agent event.
+    /// Current native root identity, supplied by the launch or an agent tool event.
     /// It also retains a switched-to identity while its source is not ingested.
     root_agent_session_id: Option<String>,
     identity_bridge: Option<std::sync::Arc<identity::IdentityBridge>>,
@@ -269,8 +269,8 @@ impl TerminalRegistry {
             .max_by(|a, b| a.created_at.cmp(&b.created_at))
     }
 
-    /// Whether `session_id` has a terminal whose Agent is still running.
-    /// NoEnding's Resume entry can reuse it; an Agent's internal Resume may
+    /// Whether `session_id` has a terminal whose agent tool is still running.
+    /// NoEnding's Resume entry can reuse it; an agent tool's internal Resume may
     /// independently associate another terminal with the same Session.
     pub fn has_live(&self, session_id: &str) -> bool {
         self.records
@@ -504,7 +504,7 @@ impl TerminalRegistry {
                 session.clone(),
             ));
         }
-        // A user input can start while the Agent is already Working. Conversely,
+        // A user input can start while the agent tool is already Working. Conversely,
         // a new model invocation alone is not a new input (notably Antigravity).
         if current.session_id.is_some()
             && !new_input
@@ -945,7 +945,7 @@ impl TerminalRegistry {
         let writer = {
             let record = record.lock().map_err(|_| other("终端不可用"))?;
             if !record.summary.live {
-                return Err(other("该终端中的 Agent 已退出"));
+                return Err(other("该终端中的 运行工具 已退出"));
             }
             record
                 .writer
@@ -957,7 +957,7 @@ impl TerminalRegistry {
             .lock()
             .map_err(|_| other("terminal record lock poisoned"))?;
         if !record.summary.live {
-            return Err(other("该终端中的 Agent 已退出"));
+            return Err(other("该终端中的 运行工具 已退出"));
         }
         let reply = messaging::terminal_reply(data);
         if !reply
@@ -1007,7 +1007,7 @@ impl TerminalRegistry {
         Ok(())
     }
 
-    /// App exit: end every embedded Agent. Children die with the PTY master
+    /// App exit: end every embedded agent tool. Children die with the PTY master
     /// on Unix anyway; killing explicitly makes it true on ConPTY too.
     pub fn kill_all(&self) {
         #[cfg(windows)]
@@ -1210,7 +1210,7 @@ impl TerminalRegistry {
     }
 }
 
-/// What an embedded New / Resume spawn needs beyond the `AgentCommand`. The
+/// What an embedded New / Resume spawn needs beyond the `AgentToolCommand`. The
 /// launcher builds this; [`spawn_embedded`] consumes it. Kept in this module
 /// so the dependency direction stays launcher → terminal.
 pub struct EmbeddedTarget<'a> {
@@ -1221,9 +1221,9 @@ pub struct EmbeddedTarget<'a> {
     pub session_id: Option<&'a str>,
     pub require_cwd: bool,
     /// Prespecified ID for NEW, or the known native ID for Resume. Future
-    /// Agent events replace this identity when its TUI switches conversations.
+    /// agent tool events replace this identity when its TUI switches conversations.
     pub root_agent_session_id: Option<&'a str>,
-    pub agent: Agent,
+    pub agent: AgentTool,
 }
 
 /// The embedded spawn step of `launch_prepared`: run the resume command
@@ -1231,7 +1231,7 @@ pub struct EmbeddedTarget<'a> {
 /// mirrors the launcher's injected `spawn`/`open` functions so tests can
 /// substitute it the same way.
 pub fn spawn_embedded(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     target: &EmbeddedTarget,
 ) -> Result<crate::platform::launcher::LaunchOutcome> {
     // Capture before spawning: a fast CLI can write its source before register.
@@ -1372,7 +1372,7 @@ mod tests {
         let _cleanup = Cleanup(&registry);
         // Pi's exact order: enter alternate screen and enable mouse, THEN
         // initialize Node raw input. Cooked ConPTY otherwise eats DECSET.
-        let cmd = AgentCommand { program: "node".into(), args: vec!["-e".into(),
+        let cmd = AgentToolCommand { program: "node".into(), args: vec!["-e".into(),
             "process.stdout.write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h'); process.stdin.setRawMode(true); process.stdout.write('MOUSE-READY\\x1b[4;3H\\x1b[?25l'); process.stdin.on('data',d=>process.stdout.write('HEX='+d.toString('hex'))); setInterval(()=>{},1000);".into()], cwd: None };
         let id = spawn_embedded(&cmd, &target(&registry, "windows-mouse"))
             .unwrap()
@@ -1407,7 +1407,7 @@ mod tests {
             "ConPTY dropped SGR encoding: {output:?}"
         );
         registry.write(&id, "\x1b[<64;3;4M").unwrap();
-        until("SGR wheel delivered to Agent", || {
+        until("SGR wheel delivered to AgentTool", || {
             read().contains("1b5b3c36343b333b344d").then_some(())
         });
     }
@@ -1424,7 +1424,7 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(&registry);
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "powershell".into(),
             args: vec!["-NoProfile".into(), "-Command".into(),
                 "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Write-Output ('CHILD=' + $PID); Write-Output 'READY'; $line = [Console]::ReadLine(); Write-Output ('ECHO=' + $line); Write-Output ('SIZE=' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight); Start-Sleep -Seconds 120".into()],
@@ -1468,7 +1468,7 @@ mod tests {
         });
         registry.close(&id).unwrap();
         assert!(registry.attach(&id).is_err());
-        until("Agent descendant terminated", || {
+        until("AgentTool descendant terminated", || {
             let output = std::process::Command::new("tasklist.exe")
                 .args(["/FI", &format!("PID eq {child_pid}"), "/FO", "CSV", "/NH"])
                 .creation_flags(0x08000000)
@@ -1491,7 +1491,7 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(&registry);
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "powershell".into(),
             args: vec!["-NoProfile".into(), "-Command".into(),
                 "[Console]::Write('READY'); [Console]::ReadLine() | Out-Null; [Console]::Write(('x' * 600000)); [Console]::Write('UNVIEWED-END')".into()],
@@ -1543,7 +1543,7 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(&registry);
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "powershell".into(),
             args: vec![
                 "-NoProfile".into(),
@@ -1603,8 +1603,8 @@ mod tests {
     /// `sh` exists on every CI this suite runs on (macOS; the spawn tests are
     /// unix-gated below — ConPTY coverage rides on the same code paths).
     #[cfg(unix)]
-    fn sh(script: &str) -> AgentCommand {
-        AgentCommand {
+    fn sh(script: &str) -> AgentToolCommand {
+        AgentToolCommand {
             program: "/bin/sh".into(),
             args: ["-c".to_string(), script.to_string()].to_vec(),
             cwd: None,
@@ -1617,7 +1617,7 @@ mod tests {
             session_id: Some(session),
             require_cwd: false,
             root_agent_session_id: None,
-            agent: Agent::Codex,
+            agent: AgentTool::Codex,
         }
     }
 
@@ -1663,7 +1663,7 @@ mod tests {
     /// native PTY supplies the platform handle without spawning a child.
     fn identity_terminal(
         registry: &TerminalRegistry,
-        agent: Agent,
+        agent: AgentTool,
         native_id: Option<&str>,
         session_id: Option<&str>,
     ) -> String {
@@ -1706,9 +1706,9 @@ mod tests {
     }
 
     #[test]
-    fn assistant_credential_requires_a_live_terminal_and_expires() {
+    fn agent_credential_requires_a_live_terminal_and_expires() {
         let registry = registry();
-        let terminal = identity_terminal(&registry, Agent::Codex, None, Some("session"));
+        let terminal = identity_terminal(&registry, AgentTool::Codex, None, Some("session"));
         let record = registry
             .records
             .lock()
@@ -1743,15 +1743,15 @@ mod tests {
     fn current_terminal_identity_waits_for_its_exact_binding_and_rejects_exited_or_stale_context() {
         let db = binding_db();
         let registry = TerminalRegistry::new(None);
-        let terminal = identity_terminal(&registry, Agent::Codex, Some("current-native"), None);
-        let other = ingested_native(&db, Agent::Codex, "other-native");
+        let terminal = identity_terminal(&registry, AgentTool::Codex, Some("current-native"), None);
+        let other = ingested_native(&db, AgentTool::Codex, "other-native");
         assert_eq!(
             crate::session_control::sender_session(&registry, &db, Some(&terminal), None)
                 .unwrap_err()
                 .code,
             "sender_unbound"
         );
-        let current = ingested_native(&db, Agent::Codex, "current-native");
+        let current = ingested_native(&db, AgentTool::Codex, "current-native");
         assert_eq!(
             crate::session_control::sender_session(&registry, &db, Some(&terminal), None).unwrap(),
             Some(current.id)
@@ -1800,7 +1800,7 @@ mod tests {
 
     fn ingested_native(
         db: &crate::storage::Db,
-        agent: Agent,
+        agent: AgentTool,
         native_id: &str,
     ) -> crate::domain::Session {
         let ts = now();
@@ -1857,8 +1857,8 @@ mod tests {
         use activity::{ActivitySignal, ActivityState::*};
         let db = binding_db();
         let registry = registry();
-        let first = identity_terminal(&registry, Agent::Codex, Some("a"), None);
-        let peer = identity_terminal(&registry, Agent::Codex, Some("peer-native"), None);
+        let first = identity_terminal(&registry, AgentTool::Codex, Some("a"), None);
+        let peer = identity_terminal(&registry, AgentTool::Codex, Some("peer-native"), None);
         let notify = |id: &str, native: &str, turn: &str, state, starts_turn| {
             let mut event = native_event(native);
             event.activity = Some(ActivitySignal {
@@ -1925,11 +1925,11 @@ mod tests {
         let registry = registry();
         let db = binding_db();
         let native = new_id();
-        let terminal = identity_terminal(&registry, Agent::Codex, None, None);
+        let terminal = identity_terminal(&registry, AgentTool::Codex, None, None);
         let root = std::env::temp_dir().join(format!("noending-owner-rollout-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
+            .add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
             .unwrap();
         let meta = serde_json::json!({"ordinal": 0, "type": "session_meta", "timestamp": now(), "payload": {
             "id": native, "timestamp": now(), "cwd": fixture_cwd(),
@@ -1946,7 +1946,7 @@ mod tests {
             crate::ingestion::reconcile_source(&db, &source, &|_| {}).unwrap();
         assert_eq!((discovered, messages), (1, 1));
         let session = db
-            .find_session_by_root_agent_id(Agent::Codex, &native)
+            .find_session_by_root_agent_id(AgentTool::Codex, &native)
             .unwrap()
             .unwrap();
         attach_fixture_paths(&db);
@@ -1974,10 +1974,10 @@ mod tests {
         let db = binding_db();
         let native = new_id();
         let unrelated = new_id();
-        let terminal = identity_terminal(&registry, Agent::Codex, None, None);
+        let terminal = identity_terminal(&registry, AgentTool::Codex, None, None);
         let root = std::env::temp_dir().join(format!("noending-native-sync-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
-        db.add_ingest_source(Agent::Codex, &root.to_string_lossy())
+        db.add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
             .unwrap();
         let write_rollout = |id: &str, text: Option<&str>| {
             let path = root.join(format!("rollout-2026-10-10T12-00-00-{id}.jsonl"));
@@ -1994,7 +1994,7 @@ mod tests {
             .unwrap();
         crate::ingestion::reconcile_native(
             &db,
-            Agent::Codex,
+            AgentTool::Codex,
             &native,
             Some(&path.to_string_lossy()),
             &|_| {},
@@ -2003,7 +2003,7 @@ mod tests {
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert!(
-            db.find_session_by_root_agent_id(Agent::Codex, &native)
+            db.find_session_by_root_agent_id(AgentTool::Codex, &native)
                 .unwrap()
                 .is_none(),
             "metadata alone must wait for a real message"
@@ -2012,7 +2012,7 @@ mod tests {
         assert_eq!(
             crate::ingestion::reconcile_native(
                 &db,
-                Agent::Codex,
+                AgentTool::Codex,
                 &native,
                 Some(&path.to_string_lossy()),
                 &|_| {}
@@ -2023,7 +2023,7 @@ mod tests {
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         let session = db
-            .find_session_by_root_agent_id(Agent::Codex, &native)
+            .find_session_by_root_agent_id(AgentTool::Codex, &native)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -2036,11 +2036,12 @@ mod tests {
             Some(session.id.as_str())
         );
         assert!(db
-            .find_session_by_root_agent_id(Agent::Codex, &unrelated)
+            .find_session_by_root_agent_id(AgentTool::Codex, &unrelated)
             .unwrap()
             .is_none());
         assert_eq!(
-            crate::ingestion::reconcile_native(&db, Agent::Codex, &native, None, &|_| {}).unwrap(),
+            crate::ingestion::reconcile_native(&db, AgentTool::Codex, &native, None, &|_| {})
+                .unwrap(),
             (1, 0)
         );
         std::fs::remove_dir_all(&root).unwrap();
@@ -2058,7 +2059,7 @@ mod tests {
                 session_id: None,
                 require_cwd: false,
                 root_agent_session_id: Some("spawned-native"),
-                agent: Agent::Pi,
+                agent: AgentTool::Pi,
             },
         )
         .unwrap();
@@ -2071,7 +2072,7 @@ mod tests {
                 .ok()
                 .filter(|snapshot| !snapshot.summary.live)
         });
-        let session = ingested_native(&db, Agent::Pi, "spawned-native");
+        let session = ingested_native(&db, AgentTool::Pi, "spawned-native");
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
@@ -2085,21 +2086,22 @@ mod tests {
     fn native_discovery_respects_pending_startup_then_allows_one_binding() {
         let registry = registry();
         let db = binding_db();
-        let session = ingested_native(&db, Agent::Codex, "shared-native");
+        let session = ingested_native(&db, AgentTool::Codex, "shared-native");
         let pending = registry.reserve_resume(&session.id).unwrap();
-        let conflicting = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
+        let conflicting =
+            identity_terminal(&registry, AgentTool::Codex, Some("shared-native"), None);
         registry.bind_discovered(&db);
         let stopped = registry.attach(&conflicting).unwrap().summary;
         assert!(!stopped.live);
         assert!(stopped.session_id.is_none());
         drop(pending);
-        let owner = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
+        let owner = identity_terminal(&registry, AgentTool::Codex, Some("shared-native"), None);
         registry.bind_discovered(&db);
         assert_eq!(
             registry.for_session(&session.id).unwrap().terminal_id,
             owner
         );
-        let duplicate = identity_terminal(&registry, Agent::Codex, Some("shared-native"), None);
+        let duplicate = identity_terminal(&registry, AgentTool::Codex, Some("shared-native"), None);
         registry.bind_discovered(&db);
         assert!(!registry.attach(&duplicate).unwrap().summary.live);
         assert!(registry
@@ -2115,10 +2117,10 @@ mod tests {
     fn native_switch_to_an_occupied_session_stops_incoming_terminal_and_preserves_owner() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::Pi, "native-a");
-        let b = ingested_native(&db, Agent::Pi, "native-b");
-        let incoming = identity_terminal(&registry, Agent::Pi, Some("native-a"), Some(&a.id));
-        let owner = identity_terminal(&registry, Agent::Pi, Some("native-b"), Some(&b.id));
+        let a = ingested_native(&db, AgentTool::Pi, "native-a");
+        let b = ingested_native(&db, AgentTool::Pi, "native-b");
+        let incoming = identity_terminal(&registry, AgentTool::Pi, Some("native-a"), Some(&a.id));
+        let owner = identity_terminal(&registry, AgentTool::Pi, Some("native-b"), Some(&b.id));
         assert!(registry
             .report_native_identity(&db, &incoming, &native_event("native-b"))
             .is_none());
@@ -2126,7 +2128,7 @@ mod tests {
         assert_eq!(registry.for_session(&b.id).unwrap().terminal_id, owner);
         assert!(registry.attach(&owner).unwrap().summary.live);
         registry.close(&owner).unwrap();
-        let free = identity_terminal(&registry, Agent::Pi, None, None);
+        let free = identity_terminal(&registry, AgentTool::Pi, None, None);
         assert_eq!(
             registry
                 .report_native_identity(&db, &free, &native_event("native-b"))
@@ -2141,7 +2143,7 @@ mod tests {
     fn native_switch_to_uningested_b_clears_a_and_waits_only_for_b() {
         let registry = registry();
         let db = binding_db();
-        for agent in [Agent::ClaudeCode, Agent::Antigravity] {
+        for agent in [AgentTool::ClaudeCode, AgentTool::Antigravity] {
             let a = ingested_native(&db, agent, "native-a");
             let terminal = identity_terminal(&registry, agent, Some("native-a"), Some(&a.id));
             let waiting = registry
@@ -2171,10 +2173,10 @@ mod tests {
         let registry = registry();
         let db = binding_db();
         for (agent, completion_source) in [
-            (Agent::ClaudeCode, "Stop"),
-            (Agent::Codex, "Stop"),
-            (Agent::Pi, "agent_end"),
-            (Agent::Antigravity, "Stop"),
+            (AgentTool::ClaudeCode, "Stop"),
+            (AgentTool::Codex, "Stop"),
+            (AgentTool::Pi, "agent_end"),
+            (AgentTool::Antigravity, "Stop"),
         ] {
             let a = ingested_native(&db, agent, "native-a");
             let b = ingested_native(&db, agent, "native-b");
@@ -2209,8 +2211,9 @@ mod tests {
     fn repeating_the_same_native_identity_does_not_advance_revision() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::Codex, "native-a");
-        let terminal = identity_terminal(&registry, Agent::Codex, Some("native-a"), Some(&a.id));
+        let a = ingested_native(&db, AgentTool::Codex, "native-a");
+        let terminal =
+            identity_terminal(&registry, AgentTool::Codex, Some("native-a"), Some(&a.id));
         let initial = registry.attach(&terminal).unwrap().summary;
         let repeated = registry
             .report_native_identity(&db, &terminal, &native_event("native-a"))
@@ -2235,8 +2238,8 @@ mod tests {
     fn delayed_native_lookup_cannot_overwrite_a_newer_identity() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::Codex, "native-a");
-        let terminal = identity_terminal(&registry, Agent::Codex, Some("native-a"), None);
+        let a = ingested_native(&db, AgentTool::Codex, "native-a");
+        let terminal = identity_terminal(&registry, AgentTool::Codex, Some("native-a"), None);
         let old_lookup = registry.attach(&terminal).unwrap().summary;
         let current = registry
             .report_native_identity(&db, &terminal, &native_event("native-b"))
@@ -2250,7 +2253,7 @@ mod tests {
             after_old_lookup.identity_revision,
             current.identity_revision
         );
-        let b = ingested_native(&db, Agent::Codex, "native-b");
+        let b = ingested_native(&db, AgentTool::Codex, "native-b");
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
@@ -2268,8 +2271,8 @@ mod tests {
     fn delayed_native_lookup_is_rejected_after_a_b_a_identity_changes() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::Codex, "native-a");
-        let terminal = identity_terminal(&registry, Agent::Codex, Some("native-a"), None);
+        let a = ingested_native(&db, AgentTool::Codex, "native-a");
+        let terminal = identity_terminal(&registry, AgentTool::Codex, Some("native-a"), None);
         let old_lookup = registry.attach(&terminal).unwrap().summary;
         // The old read finished before a purge; its callback is delivered after
         // A -> B -> A, while the latest A still has no current source row.
@@ -2298,7 +2301,7 @@ mod tests {
             after_old_lookup.identity_revision,
             current.identity_revision
         );
-        let new_a = ingested_native(&db, Agent::Codex, "native-a");
+        let new_a = ingested_native(&db, AgentTool::Codex, "native-a");
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
@@ -2316,7 +2319,7 @@ mod tests {
     fn unknown_native_identity_does_not_infer_from_prompt_cwd_or_time() {
         let registry = registry();
         let db = binding_db();
-        let source = ingested_native(&db, Agent::Codex, "external-native");
+        let source = ingested_native(&db, AgentTool::Codex, "external-native");
         let prompt = format!("{}\n完整首条消息", "long prompt".repeat(100));
         db.commit_ingest(
             &source.id,
@@ -2339,7 +2342,7 @@ mod tests {
         .unwrap();
         let ts = source.started_at.as_ref().unwrap();
         for native_id in [None, Some("not-in-the-store")] {
-            let terminal = identity_terminal(&registry, Agent::Codex, native_id, None);
+            let terminal = identity_terminal(&registry, AgentTool::Codex, native_id, None);
             {
                 let records = registry.records.lock().unwrap();
                 let mut record = records.get(&terminal).unwrap().lock().unwrap();
@@ -2359,12 +2362,13 @@ mod tests {
     fn native_identity_lookups_are_scoped_to_the_terminal_agent() {
         let registry = registry();
         let db = binding_db();
-        let codex = ingested_native(&db, Agent::Codex, "same-native");
-        let claude = ingested_native(&db, Agent::ClaudeCode, "same-native");
-        let codex_terminal = identity_terminal(&registry, Agent::Codex, Some("same-native"), None);
+        let codex = ingested_native(&db, AgentTool::Codex, "same-native");
+        let claude = ingested_native(&db, AgentTool::ClaudeCode, "same-native");
+        let codex_terminal =
+            identity_terminal(&registry, AgentTool::Codex, Some("same-native"), None);
         let claude_terminal =
-            identity_terminal(&registry, Agent::ClaudeCode, Some("same-native"), None);
-        let pi_terminal = identity_terminal(&registry, Agent::Pi, Some("same-native"), None);
+            identity_terminal(&registry, AgentTool::ClaudeCode, Some("same-native"), None);
+        let pi_terminal = identity_terminal(&registry, AgentTool::Pi, Some("same-native"), None);
         attach_fixture_paths(&db);
         registry.bind_discovered(&db);
         assert_eq!(
@@ -2399,8 +2403,8 @@ mod tests {
     fn native_notifications_and_delayed_lookups_cannot_resurrect_a_closed_terminal() {
         let registry = registry();
         let db = binding_db();
-        let session = ingested_native(&db, Agent::Pi, "native-a");
-        let terminal = identity_terminal(&registry, Agent::Pi, Some("native-a"), None);
+        let session = ingested_native(&db, AgentTool::Pi, "native-a");
+        let terminal = identity_terminal(&registry, AgentTool::Pi, Some("native-a"), None);
         let pending_lookup = registry.attach(&terminal).unwrap().summary;
         assert!(registry.close(&terminal).is_some());
         registry.finish_native_binding(&db, &pending_lookup, "native-a", &session);
@@ -2449,7 +2453,7 @@ mod tests {
     #[test]
     fn continue_ignores_exited_terminals_but_scrollback_stays_attachable() {
         let registry = registry();
-        let id = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let id = identity_terminal(&registry, AgentTool::Codex, Some("native"), Some("session"));
         {
             let records = registry.records.lock().unwrap();
             let mut record = records[&id].lock().unwrap();
@@ -2470,8 +2474,8 @@ mod tests {
     #[test]
     fn retained_terminal_list_includes_live_and_exited_in_creation_order() {
         let registry = registry();
-        let older = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
-        let newer = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let older = identity_terminal(&registry, AgentTool::Codex, Some("native"), Some("session"));
+        let newer = identity_terminal(&registry, AgentTool::Codex, Some("native"), Some("session"));
         {
             let records = registry.records.lock().unwrap();
             records[&older].lock().unwrap().summary.created_at = "2026-10-08T00:00:00Z".into();
@@ -2493,16 +2497,16 @@ mod tests {
     fn session_deletion_removes_only_its_terminals_after_successful_commit() {
         let db = binding_db();
         let registry = TerminalRegistry::new(None);
-        let a = ingested_native(&db, Agent::Codex, "delete-a");
-        let b = ingested_native(&db, Agent::Codex, "keep-b");
-        let live = identity_terminal(&registry, Agent::Codex, Some("delete-a"), Some(&a.id));
-        let exited = identity_terminal(&registry, Agent::Codex, Some("delete-a"), Some(&a.id));
+        let a = ingested_native(&db, AgentTool::Codex, "delete-a");
+        let b = ingested_native(&db, AgentTool::Codex, "keep-b");
+        let live = identity_terminal(&registry, AgentTool::Codex, Some("delete-a"), Some(&a.id));
+        let exited = identity_terminal(&registry, AgentTool::Codex, Some("delete-a"), Some(&a.id));
         registry.records.lock().unwrap()[&exited]
             .lock()
             .unwrap()
             .summary
             .live = false;
-        let keep = identity_terminal(&registry, Agent::Codex, Some("keep-b"), Some(&b.id));
+        let keep = identity_terminal(&registry, AgentTool::Codex, Some("keep-b"), Some(&b.id));
         let mail = db
             .mailbox_send(&a.id, None, "retained until deletion commits")
             .unwrap();
@@ -2537,11 +2541,11 @@ mod tests {
     #[test]
     fn reconnect_stops_all_bound_terminals_preserves_other_sessions_and_can_be_retried() {
         let registry = registry();
-        let old = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
-        let other = identity_terminal(&registry, Agent::Codex, Some("native"), Some("session"));
+        let old = identity_terminal(&registry, AgentTool::Codex, Some("native"), Some("session"));
+        let other = identity_terminal(&registry, AgentTool::Codex, Some("native"), Some("session"));
         let unrelated = identity_terminal(
             &registry,
-            Agent::Codex,
+            AgentTool::Codex,
             Some("other-native"),
             Some("other-session"),
         );
@@ -2564,9 +2568,9 @@ mod tests {
     fn reconnect_refuses_a_stale_identity_without_stopping_the_new_session() {
         let registry = registry();
         let db = binding_db();
-        let a = ingested_native(&db, Agent::Codex, "native-a");
-        let b = ingested_native(&db, Agent::Codex, "native-b");
-        let id = identity_terminal(&registry, Agent::Codex, Some("native-a"), Some(&a.id));
+        let a = ingested_native(&db, AgentTool::Codex, "native-a");
+        let b = ingested_native(&db, AgentTool::Codex, "native-b");
+        let id = identity_terminal(&registry, AgentTool::Codex, Some("native-a"), Some(&a.id));
         let expected = registry.attach(&id).unwrap().summary;
         registry.report_native_identity(&db, &id, &native_event("native-b"));
         assert!(registry.reserve_reconnect(&expected, &a.id).is_err());
@@ -2599,7 +2603,7 @@ mod tests {
     #[test]
     fn terminal_conpty_launch_runs_without_opening_the_terminal_page() {
         let registry = registry();
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "cmd.exe".into(),
             args: vec!["/c".into(), "echo NOENDING_CONPTY_READY".into()],
             cwd: None,
@@ -2766,7 +2770,7 @@ mod tests {
                 session_id: None,
                 require_cwd: false,
                 root_agent_session_id: Some("root-born-identity"),
-                agent: Agent::Pi,
+                agent: AgentTool::Pi,
             },
         )
         .unwrap();
@@ -2780,7 +2784,7 @@ mod tests {
         let db = crate::storage::Db::open(&root.join("db.sqlite")).unwrap();
         let (session_id, _) = db
             .upsert_logical_session(
-                Agent::Pi,
+                AgentTool::Pi,
                 "root-born-identity",
                 None,
                 Some("出生即有身份"),
@@ -2817,7 +2821,7 @@ mod tests {
                 session_id: Some("s-live"),
                 require_cwd: false,
                 root_agent_session_id: None,
-                agent: Agent::Codex,
+                agent: AgentTool::Codex,
             },
         )
         .unwrap();
@@ -2846,7 +2850,7 @@ mod tests {
         }
     }
     fn mailbox_terminal(
-        agent: Agent,
+        agent: AgentTool,
     ) -> (
         TerminalRegistry,
         crate::storage::Db,
@@ -2884,8 +2888,8 @@ mod tests {
 
         let reminder = "\x1b[200~本次对话有未读来信，请查收 NoEnding 信箱。\x1b[201~\t";
         for (wake_method, expected) in [(WAKE_TERMINAL, reminder), (WAKE_DESKTOP, "")] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-            let peer = ingested_native(&db, Agent::Codex, "collaboration-peer");
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+            let peer = ingested_native(&db, AgentTool::Codex, "collaboration-peer");
             let task = selected_task(&db, "协作任务");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             registry
@@ -2912,7 +2916,7 @@ mod tests {
     #[test]
     fn automatic_reminders_merge_new_mail_and_do_not_wait_for_agent_receipts_or_repeat_old_unread()
     {
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -2951,7 +2955,7 @@ mod tests {
     fn manual_reminders_use_steering_in_working_or_unconfirmed_states_and_skip_read_mail() {
         use activity::ActivityState::*;
         for state in [Working, Unknown, Interrupted, Failed] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
             let m = db
                 .mailbox_send(&session, None, "not pasted into terminal")
                 .unwrap();
@@ -2995,8 +2999,8 @@ mod tests {
     fn unknown_allows_auto_reminders_and_keeps_pending_requests_without_claiming_idle() {
         use activity::ActivityState::*;
         for immediate in [false, true] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+            let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             let mut event = native_event("mailbox-native");
             event.activity = Some(activity::ActivitySignal {
@@ -3068,7 +3072,7 @@ mod tests {
     fn failed_and_interrupted_disable_automatic_notifications_and_return_to_idle_when_viewed() {
         use activity::ActivityState::*;
         for state in [Interrupted, Failed] {
-            let (registry, db, id, _, _) = mailbox_terminal(Agent::Codex);
+            let (registry, db, id, _, _) = mailbox_terminal(AgentTool::Codex);
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             registry
                 .set_auto_notifications(&db, &id, identity, true)
@@ -3108,8 +3112,8 @@ mod tests {
     #[test]
     fn disabled_auto_notifications_allow_editing_both_senders_and_failed_reminders_leave_mail_unread(
     ) {
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-        let sender = ingested_native(&db, Agent::Pi, "sender");
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+        let sender = ingested_native(&db, AgentTool::Pi, "sender");
         let m = db.mailbox_send(&session, Some(&sender.id), "old").unwrap();
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
@@ -3159,7 +3163,7 @@ mod tests {
             }
         }
 
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
         db.mailbox_send(&session, None, "unread message").unwrap();
         let registry = Arc::new(registry);
         let db = Arc::new(db);
@@ -3198,7 +3202,7 @@ mod tests {
 
     #[test]
     fn pending_manual_checks_merge_and_override_automatic_queue_submission() {
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -3225,8 +3229,8 @@ mod tests {
     fn automatic_reminders_recheck_enabled_and_unread_before_first_write() {
         use notifications::ReminderKind::{Automatic, Manual};
         for (immediate, mark_read) in [(false, false), (true, false), (true, true)] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+            let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
             let registry = std::sync::Arc::new(registry);
             let db = std::sync::Arc::new(db);
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
@@ -3272,8 +3276,8 @@ mod tests {
     #[test]
     fn immediate_requests_merge_with_ordinary_mail_in_working_and_keep_mailbox_arrival_order() {
         use activity::ActivityState::*;
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-        let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+        let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -3329,8 +3333,8 @@ mod tests {
     fn immediate_requests_require_auto_notifications_and_steer_in_each_allowed_state() {
         use activity::ActivityState::*;
         for state in [Idle, Completed, Working, Unknown] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+            let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             db.mailbox_send_with_notification(&session, Some(&sender.id), "request", true)
                 .unwrap();
@@ -3365,8 +3369,8 @@ mod tests {
     #[test]
     fn read_or_deleted_immediate_requests_do_not_release_other_unread_mail_while_working() {
         use activity::ActivityState::*;
-        let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-        let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+        let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+        let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
         let identity = registry.attach(&id).unwrap().summary.identity_revision;
         registry
             .set_auto_notifications(&db, &id, identity, true)
@@ -3408,8 +3412,8 @@ mod tests {
     fn failed_and_interrupted_cancel_immediate_requests_until_user_enables_auto_again() {
         use activity::ActivityState::*;
         for state in [Interrupted, Failed] {
-            let (registry, db, id, session, bytes) = mailbox_terminal(Agent::Codex);
-            let sender = ingested_native(&db, Agent::Codex, "mailbox-sender");
+            let (registry, db, id, session, bytes) = mailbox_terminal(AgentTool::Codex);
+            let sender = ingested_native(&db, AgentTool::Codex, "mailbox-sender");
             let identity = registry.attach(&id).unwrap().summary.identity_revision;
             registry
                 .set_auto_notifications(&db, &id, identity, true)
@@ -3446,7 +3450,7 @@ mod tests {
     }
     #[test]
     fn native_inputs_trigger_history_sync_even_while_already_working_and_tools_do_not() {
-        let (registry, db, id, session, _) = mailbox_terminal(Agent::Codex);
+        let (registry, db, id, session, _) = mailbox_terminal(AgentTool::Codex);
         let mut event = native_event("mailbox-native");
         event.activity = Some(activity::ActivitySignal {
             state: activity::ActivityState::Working,

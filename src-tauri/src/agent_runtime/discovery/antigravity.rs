@@ -1,9 +1,9 @@
 //! `agy models` emits tab-separated model IDs and display names.
 use super::{run_cli, warn, ModelCatalog, ModelOption};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 
 pub(crate) fn discover() -> (ModelCatalog, Vec<String>) {
-    match run_cli(Agent::Antigravity, &["models"]) {
+    match run_cli(AgentTool::Antigravity, &["models"]) {
         Ok(raw) => {
             let models = parse(&raw);
             if models.is_empty() {

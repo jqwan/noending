@@ -1,9 +1,9 @@
-//! Plugin package discovery and import registration. Native Agent registries
+//! Plugin package discovery and import registration. Native agent tool registries
 //! and configuration files remain the only source of truth; discovery is an
-//! offline read and never launches an Agent CLI.
+//! offline read and never launches an agent tool CLI.
 //!
-//! A package belongs to one Agent. Entries are never merged across Agents by
-//! name; only an imported local source and an Agent install of that same
+//! A package belongs to one agent tool. Entries are never merged across Agents by
+//! name; only an imported local source and an agent tool install of that same
 //! canonical directory collapse into one entry.
 
 mod antigravity;
@@ -19,7 +19,7 @@ mod qoder;
 mod workbuddy;
 mod zcode;
 
-use crate::{domain::Agent, error::Result};
+use crate::{domain::AgentTool, error::Result};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -27,7 +27,7 @@ pub use imported::{preview_import, ImportKind, ImportOption, ImportPreview, Mark
 /// One agent's plugin selection inside a local marketplace install.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MarketplaceSelection {
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub plugins: Vec<String>,
 }
 pub use operations::{
@@ -35,7 +35,7 @@ pub use operations::{
     marketplace_install_args, set_enabled, uninstall, PackageAction, PackageOperationResult,
 };
 
-/// Reuse the native Agent roots captured for extension management.
+/// Reuse the native agent tool roots captured for extension management.
 pub use crate::skills::Roots;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -56,9 +56,9 @@ impl Scope {
     }
 }
 
-/// Native enablement as the owning Agent stores it. `Unset` means the Agent
+/// Native enablement as the owning agent tool stores it. `Unset` means the agent tool
 /// applies its default rule; it is not the same as disabled. `Unknown` means
-/// NoEnding found no enablement evidence at all — the Agent owns the state.
+/// NoEnding found no enablement evidence at all — the agent tool owns the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToggleState {
@@ -74,13 +74,13 @@ pub enum ToggleState {
 pub enum Origin {
     /// Installed from a marketplace (`name@market`).
     Market,
-    /// Shipped by the Agent application itself.
+    /// Shipped by the agent tool application itself.
     Bundled,
     /// Shipped by NoEnding (terminal identity hooks and similar). Pinned
     /// against snake_case's hump-splitting, which yields `no_ending_managed`.
     #[serde(rename = "noending_managed")]
     NoEndingManaged,
-    /// Installed from a local directory or fetched by the Agent from a URL.
+    /// Installed from a local directory or fetched by the agent tool from a URL.
     Local,
     /// Loaded into one DSH profile (the profile is DSH's isolation dimension).
     Profile,
@@ -113,7 +113,7 @@ pub struct ScopeState {
     pub scope: Scope,
     pub state: ToggleState,
     /// Native file that holds this scope's enablement. Derived from the
-    /// registry for scopes the Agent has never written, so the file may not
+    /// registry for scopes the agent tool has never written, so the file may not
     /// exist yet — `config_exists` distinguishes that from a broken path.
     pub config_path: String,
     pub config_exists: bool,
@@ -122,7 +122,7 @@ pub struct ScopeState {
 #[derive(Debug, Clone, Serialize)]
 pub struct PackageEntry {
     pub id: String,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentTool>,
     pub name: String,
     pub version: String,
     pub description: String,
@@ -178,7 +178,7 @@ pub(crate) fn zcode_dir(roots: &Roots) -> PathBuf {
 /// Offline discovery across every integrated provider. Each provider appends
 /// its own warnings and keeps going, so one broken registry never hides the
 /// others. User-level scope only: project-level plugin configuration belongs
-/// to each Agent.
+/// to each agent tool.
 pub fn discover(roots: &Roots) -> PackageInventory {
     let mut inventory = PackageInventory::default();
     inventory

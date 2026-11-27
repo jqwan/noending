@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn concurrent_terminals_route_both_native_events_to_their_own_listener() {
         let store = Store::new();
-        let original = AgentCommand {
+        let original = AgentToolCommand {
             program: "agy".into(),
             args: vec![
                 "--prompt-interactive".into(),
@@ -473,12 +473,22 @@ mod tests {
             ],
             cwd: Some(store.0.clone()),
         };
-        let first = prepare_at(&original, Agent::Antigravity, "terminal-a", Some(&store.0))
-            .unwrap()
-            .unwrap();
-        let second = prepare_at(&original, Agent::Antigravity, "terminal-b", Some(&store.0))
-            .unwrap()
-            .unwrap();
+        let first = prepare_at(
+            &original,
+            AgentTool::Antigravity,
+            "terminal-a",
+            Some(&store.0),
+        )
+        .unwrap()
+        .unwrap();
+        let second = prepare_at(
+            &original,
+            AgentTool::Antigravity,
+            "terminal-b",
+            Some(&store.0),
+        )
+        .unwrap()
+        .unwrap();
         let (send_a, recv_a) = mpsc::channel();
         let (send_b, recv_b) = mpsc::channel();
         first.bridge.activate(Arc::new(move |event| {

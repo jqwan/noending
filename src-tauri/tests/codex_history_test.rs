@@ -2,7 +2,7 @@
 //! of records previously keyed by a physical rollout ID.
 mod support;
 use noending_lib::{
-    domain::{Agent, IngestSource, Summary},
+    domain::{AgentTool, IngestSource, Summary},
     ingestion,
     storage::{new_id, Db},
 };
@@ -26,7 +26,7 @@ impl Fixture {
         let db = Db::open(&root.join("noending.db")).unwrap();
         let source = IngestSource {
             id: "source".into(),
-            agent: Agent::Codex,
+            agent: AgentTool::Codex,
             path: root.to_string_lossy().into_owned(),
             origin: "custom".into(),
         };
@@ -64,7 +64,7 @@ impl Fixture {
     }
     fn session(&self, thread: &str) -> noending_lib::domain::Session {
         self.db
-            .find_session_by_root_agent_id(Agent::Codex, thread)
+            .find_session_by_root_agent_id(AgentTool::Codex, thread)
             .unwrap()
             .unwrap()
     }
@@ -132,7 +132,10 @@ fn reverted_history_retains_only_the_referenced_prefix_and_then_appends_incremen
         let after = f.session(THREAD);
         assert_eq!(after.id, before.id);
         assert_eq!(Path::new(&after.source_path), path);
-        assert_eq!(f.db.sessions_for_ingestion(Agent::Codex).unwrap().len(), 1);
+        assert_eq!(
+            f.db.sessions_for_ingestion(AgentTool::Codex).unwrap().len(),
+            1
+        );
         assert_eq!(f.texts(THREAD), ["保留的旧消息", "重写后的新消息"]);
         assert!(support::search_messages(&f.db, "已回退的旧消息", 20)
             .unwrap()
@@ -202,7 +205,10 @@ fn an_independent_fork_inherits_history_without_sharing_identity() {
         f.session(VERSION).forked_from_session_id.as_deref(),
         Some(f.session(THREAD).id.as_str())
     );
-    assert_eq!(f.db.sessions_for_ingestion(Agent::Codex).unwrap().len(), 2);
+    assert_eq!(
+        f.db.sessions_for_ingestion(AgentTool::Codex).unwrap().len(),
+        2
+    );
 }
 #[test]
 fn nested_reverts_respect_earlier_cutoffs_and_missing_or_cyclic_dependencies_preserve_committed_history(
@@ -296,7 +302,7 @@ fn native_index_selects_the_active_version_and_ambiguous_unindexed_versions_are_
     assert!(f.sync().is_err());
     assert!(f
         .db
-        .sessions_for_ingestion(Agent::Codex)
+        .sessions_for_ingestion(AgentTool::Codex)
         .unwrap()
         .is_empty());
     f.index(THREAD, &first);
@@ -387,7 +393,7 @@ fn stored_rollout_aliases_merge_into_the_original_app_id_without_losing_summarie
     );
     let (alias, _) =
         f.db.upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             VERSION,
             None,
             Some("错误分支"),
@@ -478,7 +484,7 @@ fn a_lone_rollout_alias_keeps_its_app_id_and_summary_when_the_native_identity_is
     );
     let (alias, _) =
         f.db.upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             VERSION,
             None,
             Some("保留标题"),
@@ -498,7 +504,7 @@ fn a_lone_rollout_alias_keeps_its_app_id_and_summary_when_the_native_identity_is
     assert_eq!(f.session(THREAD).id, alias);
     assert!(f
         .db
-        .find_session_by_root_agent_id(Agent::Codex, VERSION)
+        .find_session_by_root_agent_id(AgentTool::Codex, VERSION)
         .unwrap()
         .is_none());
     assert_eq!(
@@ -536,7 +542,7 @@ fn failed_alias_absorption_rolls_back_app_owned_content_and_succeeds_on_retry() 
     );
     let (alias, _) =
         f.db.upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             VERSION,
             None,
             Some("物理版本"),

@@ -10,7 +10,7 @@ use chrono::{DateTime, Days, Utc};
 use serde::Serialize;
 
 use crate::adapters::ExecOptions;
-use crate::domain::{Agent, ContextUpdateError};
+use crate::domain::{AgentTool, ContextUpdateError};
 use crate::error::{AppError, ContextUpdateFailure};
 use crate::workspace::home::NoEndingHome;
 
@@ -77,7 +77,7 @@ impl ContextOperation {
     pub fn record_config(
         &mut self,
         raw_agent: &str,
-        parsed_agent: Option<Agent>,
+        parsed_agent: Option<AgentTool>,
         opts: Option<&ExecOptions>,
     ) {
         self.agent = Some(match parsed_agent {
@@ -244,15 +244,15 @@ fn safe_error(error: &AppError, stage: &str) -> (&'static str, &'static str) {
         return match context {
             ContextUpdateError::AiUnavailable(_) => (
                 "ai_unavailable",
-                "未配置可用的 Context Agent，请检查 Agent 设置。",
+                "未配置可用的 Context 运行工具，请检查 运行工具 设置。",
             ),
             ContextUpdateError::ModelCallFailed(_) => (
                 "model_call_failed",
-                "Agent 模型调用失败，请检查 CLI 状态后重试。",
+                "运行工具 模型调用失败，请检查 CLI 状态后重试。",
             ),
             ContextUpdateError::InvalidOutput(_) => (
                 "invalid_output",
-                "Agent 返回内容不符合 Context 格式，请重试。",
+                "运行工具 返回内容不符合 Context 格式，请重试。",
             ),
             ContextUpdateError::ConcurrencyConflict(_) => {
                 ("stale_snapshot", "内容已变化，请重新更新。")
@@ -284,20 +284,29 @@ pub fn cli_failure(
         K::Cancelled => ("cancelled", "摘要提取已取消。"),
         K::AgentUnavailable => (
             "cli_unavailable",
-            "找不到所选 Agent CLI，请检查 Agent 是否已安装。",
+            "找不到所选 运行工具 CLI，请检查 运行工具 是否已安装。",
         ),
         K::UnsupportedAgent => (
             "agent_unsupported",
-            "所选 Agent 不支持摘要提取，请更改 Agent。",
+            "所选 运行工具 不支持摘要提取，请更改 运行工具。",
         ),
         K::CommandInvalid => (
             "runtime_dir_unavailable",
             "无法使用 Context 专用运行目录，请检查 NoEnding Home。",
         ),
-        K::Start => ("cli_start_failed", "Agent CLI 无法启动，请检查安装和权限。"),
-        K::Wait => ("cli_wait_failed", "等待 Agent CLI 完成时发生错误，请重试。"),
-        K::Exit => ("cli_failed", "Agent CLI 执行失败，请检查 CLI 状态后重试。"),
-        K::Timeout => ("cli_timeout", "Agent CLI 超时，请重试或检查 CLI 状态。"),
+        K::Start => (
+            "cli_start_failed",
+            "运行工具 CLI 无法启动，请检查安装和权限。",
+        ),
+        K::Wait => (
+            "cli_wait_failed",
+            "等待 运行工具 CLI 完成时发生错误，请重试。",
+        ),
+        K::Exit => (
+            "cli_failed",
+            "运行工具 CLI 执行失败，请检查 CLI 状态后重试。",
+        ),
+        K::Timeout => ("cli_timeout", "运行工具 CLI 超时，请重试或检查 CLI 状态。"),
     }
 }
 
@@ -322,7 +331,7 @@ mod tests {
         op.fail_with(
             "output_validation",
             "invalid_output",
-            "Agent 返回内容不符合 Context 格式，请重试。",
+            "运行工具 返回内容不符合 Context 格式，请重试。",
         );
         let failure = op.fail(&crate::error::other(
             "prompt: secret; output: secret; stderr: secret",

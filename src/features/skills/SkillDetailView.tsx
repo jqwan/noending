@@ -20,7 +20,7 @@ import "./skills.css";
 
 const SOURCE_KIND_LABELS: Record<SkillSourceKind, string> = {
   library: "NoEnding 源库",
-  agent: "Agent 目录",
+  agent_tool: "运行工具目录",
   external: "外部目录",
 };
 
@@ -168,7 +168,7 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
               <button className="btn small" disabled={busy || loading} onClick={() => setRegistering(true)}>{row.registered ? "迁移到 NoEnding" : "托管到 NoEnding"}</button>
               {row.registered && <button className="btn small" disabled={busy || loading} onClick={() => { setError(""); setRemoveLinks(false); setUnregistering(true); }}>取消托管</button>}
             </div>
-            <span className="small muted">{row.registered ? "已引用原目录，可选择迁入 NoEnding 技能库。" : sourceKind === "agent" ? "源目录位于 Agent 加载位置，托管时可选择是否迁移。" : "源目录位于外部目录，托管时可选择是否迁移。"}</span>
+            <span className="small muted">{row.registered ? "已引用原目录，可选择迁入 NoEnding 技能库。" : sourceKind === "agent_tool" ? "源目录位于运行工具加载位置，托管时可选择是否迁移。" : "源目录位于外部目录，托管时可选择是否迁移。"}</span>
           </div>}
         </DetailSection>
 {row && <DetailSection sectionId="scopes" label="启用项目" title={<><Icon name="project" />启用项目{projectScopes !== null && `（${enabledProjects.length}）`}</>} actions={<>{canConfigure && (
@@ -211,7 +211,7 @@ export default function SkillDetailView({ resourceId, initialTitle, navigate }: 
       <>
         <p>将移除该 Skill 在用户级和所有项目中的全部加载入口。</p>
         <label className="skill-check"><input type="checkbox" checked={deleteSource || deleteRequired} disabled={busyAction === "uninstall" || previewing || deleteRequired} onChange={e => setDeleteSource(e.target.checked)} />同时删除源目录</label>
-        {deleteRequired && <p className="small muted">源目录位于 Agent 生效目录，必须删除源文件。</p>}
+        {deleteRequired && <p className="small muted">源目录位于 运行工具 生效目录，必须删除源文件。</p>}
         <p className="skill-path mono">{displayPath(preview?.source_path ?? row.path)}</p>
       </>
       {error && <Notice role="alert" >{error}</Notice>}

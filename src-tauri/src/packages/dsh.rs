@@ -8,7 +8,7 @@
 //! the Cordis patch layer and stays untouched (state reports Unknown).
 
 use super::{files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
             let (version, description) = package_meta(package_dir.as_deref());
             PackageEntry {
                 id: files::key(format!("package:dsh:{name}")),
-                agent: Some(Agent::Dsh),
+                agent: Some(AgentTool::Dsh),
                 name: name.to_string(),
                 version,
                 description,

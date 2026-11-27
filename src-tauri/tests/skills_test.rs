@@ -1,6 +1,6 @@
-//! Native customization contracts, isolated from the user's real Agent homes.
+//! Native customization contracts, isolated from the user's real AgentTool homes.
 use noending_lib::{
-    domain::Agent,
+    domain::AgentTool,
     skills::{self, Roots},
     storage::Db,
 };
@@ -168,7 +168,7 @@ fn skill_discovery_and_uninstall_leave_native_agent_configs_untouched() {
     let location = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|location| location.agent == Some(Agent::ClaudeCode))
+        .find(|location| location.agent == Some(AgentTool::ClaudeCode))
         .unwrap();
     skills::install_skill(&f.roots, None, &source, &location.id).unwrap();
     let inventory = skills::list_catalog(&f.roots, &[f.cwd.clone()]);
@@ -244,7 +244,7 @@ fn skill_scan_skips_plain_file_load_roots_without_following_or_modifying_them() 
                 .unwrap();
             assert_ne!(
                 location.agent,
-                Some(Agent::ClaudeCode),
+                Some(AgentTool::ClaudeCode),
                 "plain files cannot enable Claude Skills"
             );
         }
@@ -268,7 +268,7 @@ fn a_linked_skill_is_deduplicated_and_can_be_disabled_or_uninstalled_without_los
     let shared_loc = locations.iter().find(|l| l.agent.is_none()).unwrap();
     let claude_loc = locations
         .iter()
-        .find(|l| l.agent == Some(Agent::ClaudeCode))
+        .find(|l| l.agent == Some(AgentTool::ClaudeCode))
         .unwrap();
     skills::link_skill(&f.roots, None, &source, &shared_loc.id).unwrap();
     skills::link_skill(&f.roots, None, &source, &claude_loc.id).unwrap();
@@ -464,7 +464,7 @@ fn enable_all_does_not_add_a_shared_entry_for_an_agent_that_is_already_covered()
     let pi = skills::list(&f.roots, None)
         .locations
         .into_iter()
-        .find(|l| l.agent == Some(Agent::Pi))
+        .find(|l| l.agent == Some(AgentTool::Pi))
         .unwrap();
     skills::link_skill(&f.roots, None, &source, &pi.id).unwrap();
     skills::enable_skill_all(
@@ -621,7 +621,7 @@ fn project_level_enable_covers_every_workspace_and_disable_keeps_the_source() {
     assert!(scope.workspaces[0]
         .entries
         .iter()
-        .any(|entry| entry.agents.contains(&Agent::Antigravity)));
+        .any(|entry| entry.agents.contains(&AgentTool::Antigravity)));
     let inventory = skills::merge_inventories(
         cwds.iter()
             .map(|cwd| skills::list(&f.roots, Some(cwd)))
@@ -734,7 +734,7 @@ fn migration_moves_a_physical_user_skill_into_managed_storage() {
         .unwrap();
     assert_eq!(
         skills::skill_source_kind(&row, &managed),
-        skills::SkillSourceKind::Agent
+        skills::SkillSourceKind::AgentTool
     );
 
     let preview = skills::preview_skill_migration(&f.roots, &[], &managed, &id, None).unwrap();
@@ -1240,7 +1240,7 @@ fn an_agent_skills_root_cannot_be_imported_as_a_source() {
     );
     let error = skills::adopt_source(&f.roots, &[], &f.root.join("managed"), &shared)
         .err()
-        .expect("Agent roots are containers, not Skill sources");
+        .expect("AgentTool roots are containers, not Skill sources");
     assert!(error.to_string().contains("根目录"));
     assert!(
         skills::prepare_source(&f.roots, &[], &f.root.join("managed"), &shared, false).is_err()
@@ -1292,7 +1292,7 @@ fn referencing_an_agent_source_preserves_its_identity_files_and_native_enablemen
         assert_eq!(row.entry_links, vec![false]);
         assert_eq!(
             skills::skill_source_kind(row, &managed),
-            skills::SkillSourceKind::Agent
+            skills::SkillSourceKind::AgentTool
         );
         let disabled = if project_level {
             skills::disable_skill_project(&f.roots, &cwds, &id)
@@ -1715,6 +1715,7 @@ fn bundled_skill_keeps_project_enablement_and_support_files_across_refresh_and_s
     for relative in [
         "SKILL.md",
         "references/access.md",
+        "references/agent.md",
         "references/identity.md",
         "references/memory.md",
         "references/task.md",
@@ -1746,7 +1747,15 @@ fn bundled_skill_keeps_project_enablement_and_support_files_across_refresh_and_s
         &directory.join("custom-note.md"),
         "Keep a user supporting file.",
     );
+    let previous_agent_reference = directory.join("references/assistant.md");
+    f.write(&previous_agent_reference, "Old bundled reference.");
+    let entry = Path::new(&source.path);
+    let previous_entry = fs::read_to_string(entry)
+        .unwrap()
+        .replace("(references/agent.md)", "(references/assistant.md)");
+    f.write(entry, &previous_entry);
     skills::prepare_noending_skill(&db, &home, exe).unwrap();
+    assert!(!previous_agent_reference.exists());
     let current = skills::list(&f.roots, Some(&f.cwd));
     let enabled = current
         .resources

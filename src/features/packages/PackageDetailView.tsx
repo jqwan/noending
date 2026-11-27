@@ -9,7 +9,7 @@ import Icon from "../../components/Icon";
 import { Field, Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import PageHeader from "../../layout/PageHeader";
-import { AGENT_LABELS, type Agent, type PackageDetail } from "../../types";
+import { AGENT_TOOL_LABELS, type AgentTool, type PackageDetail } from "../../types";
 import { originLabel, shortVersion } from "./packagePresentation";
 import { packageDetailCache } from "./packageDetailCache";
 import "./packages.css";
@@ -17,7 +17,7 @@ import "./packages.css";
 type BusyAction = "" | "uninstall" | "toggle";
 
 export default function PackageDetailView({ packageId, initialTitle, navigate }: {
-  packageId: string; initialTitle?: string; agent?: Agent;
+  packageId: string; initialTitle?: string; agent?: AgentTool;
   navigate: (route: Route) => void;
 }) {
   const cached = packageDetailCache.get(packageId);
@@ -105,13 +105,13 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
     {!entry ? (loading ? <p className="small muted" role="status">正在读取插件包…</p> : null) : <DetailLayout panel={<><DetailSection sectionId="properties" label="属性" title={<><Icon name="file" />属性</>}>
 
           <DetailFields>
-            <Field label="Agent">
+            <Field label="运行工具">
               {entry.agent
-                ? <button type="button" className="link" title={`打开 Agent：${AGENT_LABELS[entry.agent]}`}
-                    onClick={() => navigate({ view: "agents", agent: entry.agent! })}>
-                    <span>{AGENT_LABELS[entry.agent]}</span>
+                ? <button type="button" className="link" title={`打开 运行工具：${AGENT_TOOL_LABELS[entry.agent]}`}
+                    onClick={() => navigate({ view: "agent-tools", agent: entry.agent! })}>
+                    <span>{AGENT_TOOL_LABELS[entry.agent]}</span>
                   </button>
-                : <span className="muted small">未安装到任何 Agent</span>}
+                : <span className="muted small">未安装到任何 运行工具</span>}
             </Field>
             <Field label="来源">
               <span>{originLabel(entry)}</span>
@@ -152,16 +152,16 @@ export default function PackageDetailView({ packageId, initialTitle, navigate }:
             ? <p className="small muted">未识别到包内 Skill 或 MCP 配置。</p>
             : <>
               {detail && detail.contents.skills.length > 0 && <div className="package-contents">
-                {detail.contents.skills.map(skill => <span key={skill} className="badge" title="包内 Skill（由所属 Agent 加载，NoEnding 只读展示）">Skill · {skill}</span>)}
+                {detail.contents.skills.map(skill => <span key={skill} className="badge" title="包内 Skill（由所属 运行工具 加载，NoEnding 只读展示）">Skill · {skill}</span>)}
               </div>}
               {detail && detail.contents.mcp_files.length > 0 && <div className="package-contents">
-                {detail.contents.mcp_files.map(file => <span key={file} className="badge" title="包内 MCP 配置（由所属 Agent 加载，NoEnding 只读展示）">MCP · {file}</span>)}
+                {detail.contents.mcp_files.map(file => <span key={file} className="badge" title="包内 MCP 配置（由所属 运行工具 加载，NoEnding 只读展示）">MCP · {file}</span>)}
               </div>}
-              <p className="small muted">包内资源由提供方 Agent 加载，NoEnding 只读展示。</p>
+              <p className="small muted">包内资源由提供方 运行工具 加载，NoEnding 只读展示。</p>
             </>}
         </DetailSection></DetailLayout>}
     {uninstalling && entry && <Modal title="卸载插件包" onClose={() => { if (!busy) setUninstalling(false); }}>
-      <p>将通过 {entry.agent ? AGENT_LABELS[entry.agent] : "该 Agent"} 的原生命令卸载该插件包。</p>
+      <p>将通过 {entry.agent ? AGENT_TOOL_LABELS[entry.agent] : "该 运行工具"} 的原生命令卸载该插件包。</p>
       <p className="small muted">注册表中的安装条目随卸载一起消失，作用域内的启停配置不再生效；已有终端需要重新加载。</p>
       {error && <Notice role="alert" >{error}</Notice>}
       <DialogActions>

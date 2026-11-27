@@ -27,7 +27,7 @@ const resource = (overrides: Partial<SkillResource> = {}): SkillResource => {
 const projectScope = (overrides: Partial<SkillProjectScope> = {}): SkillProjectScope => ({ project_id: "p1", project_name: "Alpha", workspaces: [], enabled: false, full: false, ...overrides });
 const projectCard = (overrides: Partial<ProjectCardData> = {}): ProjectCardData => ({ id: "p1", name: "Alpha", name_customized: false, visibility: "normal", kind: "single_directory", path_count: 1, missing_path_count: 0, workstream_count: 0, session_count: 0, representative_paths: ["/work/one"], search_paths: ["/work/one"], last_activity_at: null, updated_at: "", ...overrides });
 const bundle = (row: SkillResource, content: string, scopes: SkillProjectScope[] = [], sourceKind?: SkillSourceKind) =>
-  ({ detail: { resource: row, content }, locations: inventory.locations, scopes, source_kind: sourceKind ?? (row.entry_links.some(link => !link) ? "agent" : "external") });
+  ({ detail: { resource: row, content }, locations: inventory.locations, scopes, source_kind: sourceKind ?? (row.entry_links.some(link => !link) ? "agent_tool" : "external") });
 let inventory: SkillInventory;
 const navigation = vi.fn();
 function SkillTestApp({ initialProjectId }: { initialProjectId?: string }) {
@@ -130,7 +130,7 @@ it("normalizes only the path in Windows scan warnings", async () => {
   expect(screen.getByText("其他扫描提示")).toBeTruthy();
 });
 
-it("uninstalls a Skill and locks the keep-source option when the source is in an Agent directory", async () => {
+it("uninstalls a Skill and locks the keep-source option when the source is in an AgentTool directory", async () => {
   const skill = resource({ id: "review", name: "review", locations: ["shared"], entry_paths: ["/home/test/.agents/skills/review/SKILL.md"], entry_links: [true] });
   inventory = { locations: [{ ...loc, id: "shared", agent: null, path: "/home/test/.agents/skills" }], resources: [skill], warnings: [] };
   vi.mocked(api.getSkillDetail).mockResolvedValue(bundle(skill, "# Review\n\nRead changes."));

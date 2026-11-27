@@ -1,4 +1,4 @@
-//! Run-scoped CLI bridge. The extraction Agent submits through the same scope
+//! Run-scoped CLI bridge. The extraction agent tool submits through the same scope
 //! as an autonomous session. A process exit can only report what was saved.
 use super::{
     interactive::Scope,

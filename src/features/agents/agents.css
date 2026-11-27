@@ -1,80 +1,18 @@
-/* NoEnding - Agents Feature Styles */
+.agent-intro-body { overflow-wrap: anywhere; }
 
-/* ---------- Agents Page (Agent 面板优化) ---------- */
-.agents-page {
-  width: 100%;
-}
-
-.agents-content {
+.instructions-editor {
   display: flex;
   flex-direction: column;
-  gap: var(--space-lg);
-  width: 100%;
-}
-
-.agents-sync-status-strip {
-  padding: 4px 2px 10px;
-  border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 14px;
-}
-
-.board-toolbar .agents-sync-status-strip {
-  padding: var(--space-sm) 0 0;
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: none;
-  margin-top: 0;
-  margin-bottom: 0;
-}
-
-.agent-card.ws-card {
-  height: 100%;
-}
-
-.agent-card-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-icon);
-  flex: 1;
-}
-
-.agent-card-status-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-icon);
-  font-size: var(--font-size-sm);
-  line-height: 1.4;
-  min-height: 18px;
-}
-
-.agent-card-status-line .ui-icon {
-  width: var(--icon-size-xs);
-  height: var(--icon-size-xs);
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.agent-card-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: var(--space-sm);
-  margin-top: auto;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-subtle);
 }
 
-.agent-card-actions {
+.agent-editor-actions {
   display: flex;
-  align-items: center;
-  gap: var(--space-icon);
-  flex-shrink: 0;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
 }
 
-
-/* Agent Detail: Models and Effort Fact Display */
-.detail-section-body > .agent-catalog-status { margin: 0; }
-.agent-facts-group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-icon);
+.notice .agent-editor-actions {
+  margin-top: var(--space-sm);
 }

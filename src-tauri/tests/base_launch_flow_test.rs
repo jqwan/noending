@@ -1,7 +1,7 @@
 //! Base Experience launch tests: the simplified New / Resume flow, where New
 //! Session always runs `prepare_new_in → launch_prepared` (the UI-side
 //! direct-launch path is gone), even standalone with zero Workstreams. A
-//! launch carries launch facts only (Agent, cwd, runtime)
+//! launch carries launch facts only (AgentTool, cwd, runtime)
 //! — never a Context sync, a Context file or an injection. Preparation commits
 //! nothing; the capability is single-use and the
 //! spawn step is injected via `launch_prepared_with_in` so no Terminal opens.
@@ -9,11 +9,11 @@
 mod support;
 
 use noending::adapters::adapter_for;
-use noending::adapters::{AgentCommand, DesktopResume, ResumeRoute};
-use noending::domain::Agent;
+use noending::adapters::{AgentToolCommand, DesktopResume, ResumeRoute};
+use noending::domain::AgentTool;
 use noending::error::Result;
 use noending::launcher::{LaunchWorkspace, SessionLauncher};
-use noending::platform::exec_resolver::AgentInstallation;
+use noending::platform::exec_resolver::AgentToolInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
@@ -41,8 +41,8 @@ fn real_dir(tag: &str, name: &str) -> String {
 
 /// Point the resolver at a binary that certainly exists so `resolve_install`
 /// never touches PATH (`current_exe` is real on macOS, Windows and Linux).
-fn seed_installation(db: &Db, agent: Agent) {
-    db.save_installation(&AgentInstallation {
+fn seed_installation(db: &Db, agent: AgentTool) {
+    db.save_installation(&AgentToolInstallation {
         agent,
         executable_path: std::env::current_exe()
             .unwrap()
@@ -61,7 +61,7 @@ fn fake_open(_uri: &str) -> Result<()> {
     Ok(())
 }
 
-fn fake_spawn(_cmd: &AgentCommand) -> Result<LaunchOutcome> {
+fn fake_spawn(_cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
     Ok(LaunchOutcome {
         launched_via: FAKE_SPAWN_TAG.into(),
         command_line: "test spawn — no process started".into(),
@@ -75,11 +75,11 @@ const FAKE_SPAWN_TAG: &str = "test-spawn";
 #[test]
 fn standalone_new_session_launches_through_the_prepared_flow() {
     let db = open_db("standalone-new");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, None, &LaunchWorkspace::default())
+        .prepare_new_in(&db, AgentTool::Codex, None, &LaunchWorkspace::default())
         .expect("standalone prepare");
     assert_eq!(prepared.mode, "new");
     assert!(prepared.cwd.is_none());
@@ -105,10 +105,10 @@ fn standalone_new_session_launches_through_the_prepared_flow() {
 #[test]
 fn an_embedded_new_launch_spawns_unbound() {
     for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
+        AgentTool::Codex,
+        AgentTool::ClaudeCode,
+        AgentTool::Pi,
+        AgentTool::Antigravity,
     ] {
         let db = open_db("embedded-new");
         seed_installation(&db, agent);
@@ -148,10 +148,10 @@ fn new_launch_transports_long_messages_as_files_for_all_interactive_agents() {
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
+        AgentTool::Codex,
+        AgentTool::ClaudeCode,
+        AgentTool::Pi,
+        AgentTool::Antigravity,
     ] {
         seed_installation(&db, agent);
         let mut prepared = launcher
@@ -197,16 +197,16 @@ fn new_launch_transports_long_messages_as_files_for_all_interactive_agents() {
 }
 
 fn capture_embedded_new_message(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
     assert_eq!(
         target.root_agent_session_id.is_some(),
-        matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
+        matches!(target.agent, AgentTool::ClaudeCode | AgentTool::Pi)
     );
     assert_eq!(cmd.args.last().map(String::as_str), Some(FIRST_MESSAGE));
-    let expected_flag = if target.agent == Agent::Antigravity {
+    let expected_flag = if target.agent == AgentTool::Antigravity {
         "--prompt-interactive"
     } else {
         "--"
@@ -223,10 +223,10 @@ fn capture_embedded_new_message(
 #[test]
 fn embedded_new_launch_passes_the_first_user_message_to_each_cli() {
     for agent in [
-        Agent::Codex,
-        Agent::ClaudeCode,
-        Agent::Pi,
-        Agent::Antigravity,
+        AgentTool::Codex,
+        AgentTool::ClaudeCode,
+        AgentTool::Pi,
+        AgentTool::Antigravity,
     ] {
         let db = open_db(&format!("first-message-{}", agent.as_str()));
         seed_installation(&db, agent);
@@ -280,7 +280,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
     let ts = now();
     let (sid, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Antigravity,
+            AgentTool::Antigravity,
             "agy-ide-root-1",
             Some("AGY"),
             None,
@@ -292,7 +292,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
         .unwrap();
     support::ensure_session_source(
         &db,
-        Agent::Antigravity,
+        AgentTool::Antigravity,
         "agy-ide-root-1",
         &raw.to_string_lossy(),
     );
@@ -305,7 +305,7 @@ fn antigravity_desktop_sessions_require_the_desktop_app() {
         .unwrap();
 
     let prepared = launcher.prepare_resume_in(&db, &sid, &workspace);
-    let adapter = noending::adapters::adapter_for(Agent::Antigravity);
+    let adapter = noending::adapters::adapter_for(AgentTool::Antigravity);
     let session = db.get_session(&sid).unwrap().unwrap();
     let route = adapter.desktop_resume_route(&session);
     if adapter.desktop_app_present() {
@@ -340,7 +340,7 @@ fn the_continue_route_follows_the_source_format() {
     let ts = now();
     let (wb_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::WorkBuddy,
+            AgentTool::WorkBuddy,
             "wb-root-1",
             Some("WB"),
             None,
@@ -350,7 +350,12 @@ fn the_continue_route_follows_the_source_format() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_session_source(&db, Agent::WorkBuddy, "wb-root-1", &raw.to_string_lossy());
+    support::ensure_session_source(
+        &db,
+        AgentTool::WorkBuddy,
+        "wb-root-1",
+        &raw.to_string_lossy(),
+    );
 
     match launcher.prepare_resume_in(&db, &wb_id, &workspace) {
         Ok(prepared) => {
@@ -381,7 +386,7 @@ fn the_continue_route_follows_the_source_format() {
     std::fs::write(&raw, "").unwrap();
     let (cx_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "cx-root-1",
             Some("CX"),
             None,
@@ -391,7 +396,7 @@ fn the_continue_route_follows_the_source_format() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_session_source(&db, Agent::Codex, "cx-root-1", &raw.to_string_lossy());
+    support::ensure_session_source(&db, AgentTool::Codex, "cx-root-1", &raw.to_string_lossy());
     let prepared = launcher
         .prepare_resume_in(&db, &cx_id, &workspace)
         .expect("codex resume prepares through the terminal route");
@@ -407,7 +412,7 @@ fn the_continue_route_follows_the_source_format() {
 #[test]
 fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     let db = open_db("desktop-open-resume");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
 
@@ -416,7 +421,7 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
     let ts = now();
     let (sid, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "dx-root-1",
             Some("DX"),
             None,
@@ -426,7 +431,7 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
             Some(&ts),
         )
         .unwrap();
-    support::ensure_session_source(&db, Agent::Codex, "dx-root-1", &raw.to_string_lossy());
+    support::ensure_session_source(&db, AgentTool::Codex, "dx-root-1", &raw.to_string_lossy());
 
     let mut prepared = launcher
         .prepare_resume_in(&db, &sid, &workspace)
@@ -452,7 +457,7 @@ fn a_desktop_open_resume_dispatches_the_uri_instead_of_the_terminal() {
 fn antigravity_cli_source_is_terminal_resumable() {
     let session = |kind: &str, path: &str| noending::domain::Session {
         id: "s".into(),
-        agent: Agent::Antigravity,
+        agent: AgentTool::Antigravity,
         root_agent_session_id: "conv-1".into(),
         title: None,
         cwd: None,
@@ -476,7 +481,7 @@ fn antigravity_cli_source_is_terminal_resumable() {
         fact_generation: 0,
         latest_message_seq: 0,
     };
-    let adapter = adapter_for(Agent::Antigravity);
+    let adapter = adapter_for(AgentTool::Antigravity);
 
     assert!(matches!(
         adapter.continue_route(&session(
@@ -493,7 +498,7 @@ fn antigravity_cli_source_is_terminal_resumable() {
 /// frozen terminal id are the assertions: an embedded launch must come out
 /// of THIS seam, never the external one.
 fn fake_embedded_spawn(
-    _cmd: &AgentCommand,
+    _cmd: &AgentToolCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     if let Some(session_id) = target.session_id {
@@ -514,7 +519,7 @@ fn fake_embedded_spawn(
 /// New flow only: the embedded target must arrive unbound — the launcher
 /// hands out no session_id, ingestion binds the terminal later.
 fn unbound_embedded_spawn(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target.session_id.is_none());
@@ -524,7 +529,7 @@ fn unbound_embedded_spawn(
         .any(|arg| arg == "--" || arg == "--prompt-interactive"));
     assert_eq!(
         target.root_agent_session_id.is_some(),
-        matches!(target.agent, Agent::ClaudeCode | Agent::Pi)
+        matches!(target.agent, AgentTool::ClaudeCode | AgentTool::Pi)
     );
     if let Some(id) = target.root_agent_session_id {
         assert!(cmd
@@ -546,7 +551,7 @@ fn codex_resume_session(db: &Db, tag: &str) -> String {
     let ts = now();
     let (sid, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &format!("emb-root-{tag}"),
             Some("EMB"),
             None,
@@ -558,7 +563,7 @@ fn codex_resume_session(db: &Db, tag: &str) -> String {
         .unwrap();
     support::ensure_session_source(
         db,
-        Agent::Codex,
+        AgentTool::Codex,
         &format!("emb-root-{tag}"),
         &raw.to_string_lossy(),
     );
@@ -568,7 +573,7 @@ fn codex_resume_session(db: &Db, tag: &str) -> String {
 #[test]
 fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
     let db = open_db("embedded-resume");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "launch");
@@ -610,7 +615,7 @@ fn an_embedded_resume_launch_spawns_through_the_embedded_seam() {
 }
 
 fn unexpected_embedded_spawn(
-    _cmd: &AgentCommand,
+    _cmd: &AgentToolCommand,
     _target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     panic!("a pending resume must be refused before the spawn step");
@@ -619,7 +624,7 @@ fn unexpected_embedded_spawn(
 #[test]
 fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
     let db = open_db("embedded-resume-pending");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "pending");
@@ -645,7 +650,7 @@ fn an_embedded_resume_launch_refuses_an_existing_reservation_before_spawn() {
 }
 
 fn failed_embedded_spawn(
-    _cmd: &AgentCommand,
+    _cmd: &AgentToolCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target
@@ -664,7 +669,7 @@ fn failed_embedded_spawn(
 #[test]
 fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
     let db = open_db("embedded-resume-failed");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "failed");
@@ -696,7 +701,7 @@ fn an_embedded_resume_launch_releases_its_reservation_after_spawn_failure() {
 #[test]
 fn an_external_resume_does_not_consume_an_embedded_reservation() {
     let db = open_db("external-resume-pending");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "external");
@@ -726,7 +731,7 @@ fn an_external_resume_does_not_consume_an_embedded_reservation() {
 #[test]
 fn an_embedded_prepared_launch_without_a_surface_is_refused_not_downgraded() {
     let db = open_db("embedded-refused");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "refuse");
@@ -750,7 +755,7 @@ fn reconnect_fixture(
 ) -> noending::terminal::TerminalSummary {
     let session = db.get_session(sid).unwrap().unwrap();
     let result = noending::terminal::spawn_embedded(
-        &AgentCommand {
+        &AgentToolCommand {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec sleep 30".into()],
             cwd: None,
@@ -772,7 +777,7 @@ fn reconnect_fixture(
 
 #[cfg(unix)]
 fn controlled_reconnect_spawn(
-    _cmd: &AgentCommand,
+    _cmd: &AgentToolCommand,
     target: &noending::terminal::EmbeddedTarget,
 ) -> Result<LaunchOutcome> {
     assert!(target
@@ -780,7 +785,7 @@ fn controlled_reconnect_spawn(
         .reserve_resume(target.session_id.unwrap())
         .is_err());
     noending::terminal::spawn_embedded(
-        &AgentCommand {
+        &AgentToolCommand {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec sleep 30".into()],
             cwd: None,
@@ -793,7 +798,7 @@ fn controlled_reconnect_spawn(
 #[test]
 fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
     let db = open_db("reconnect");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect");
@@ -829,7 +834,7 @@ fn reconnect_replaces_the_old_terminal_after_a_successful_spawn() {
 #[test]
 fn reconnect_failure_keeps_the_stopped_terminal_and_releases_the_reservation() {
     let db = open_db("reconnect-fail");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect-fail");
@@ -859,7 +864,7 @@ fn reconnect_failure_keeps_the_stopped_terminal_and_releases_the_reservation() {
 #[test]
 fn reconnect_validates_archive_state_before_stopping_the_terminal() {
     let db = open_db("reconnect-archived");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "reconnect-archived");
@@ -890,7 +895,7 @@ fn reconnect_validates_archive_state_before_stopping_the_terminal() {
 #[test]
 fn resume_followup_uses_existing_identity_and_redacts_the_prompt() {
     let db = open_db("resume-followup");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let workspace = LaunchWorkspace::default();
     let sid = codex_resume_session(&db, "followup");

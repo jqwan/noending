@@ -188,14 +188,14 @@ fn fingerprint(definition: &str) -> String {
 }
 
 /// Fill in the defaults that depend on the *current* environment. Runs on every
-/// start, so a newly supported Agent, a relocated `CODEX_HOME`, or a second
+/// start, so a newly supported agent tool, a relocated `CODEX_HOME`, or a second
 /// official surface gaining its own store (Antigravity's `agy` CLI) needs no
 /// format change to be picked up.
 ///
 /// Reconciliation, not migration: it inserts missing rows only, creates no
 /// schema, and never overwrites registered custom sources.
 pub fn reconcile_runtime_defaults(conn: &Connection) -> Result<()> {
-    for agent in crate::domain::Agent::all() {
+    for agent in crate::domain::AgentTool::all() {
         for root in crate::platform::paths::agent_ingest_roots(*agent) {
             conn.execute(
                 "INSERT OR IGNORE INTO ingest_sources (id, agent, path, origin)
@@ -883,7 +883,7 @@ mod tests {
         );
     }
 
-    /// Default ingest sources cover every surface an Agent's conversations
+    /// Default ingest sources cover every surface an agent tool's conversations
     /// live on. Antigravity has two (IDE store + `agy` CLI store); the rows
     /// use the `UNIQUE(agent, path)` guard to keep re-runs
     /// idempotent, and a collision of the two would surface here as 1 ≠ 2.

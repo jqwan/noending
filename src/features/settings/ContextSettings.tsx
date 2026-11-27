@@ -4,10 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
-import { AGENT_LABELS, type AgentRuntimeOverrides, type ExtractionSettings } from "../../types";
-import { useAgentRuntime } from "../agents/useAgentRuntime";
-import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
+import AgentToolIcon from "../../components/AgentToolIcon";
+import { AGENT_TOOL_LABELS, type AgentRuntimeOverrides, type ExtractionSettings } from "../../types";
+import { useAgentRuntime } from "../agent-tools/useAgentRuntime";
+import { NATIVE_RUNTIME } from "../agent-tools/RuntimeFields";
 import RuntimePopover from "../sessions/RuntimePopover";
 import { extractionSettingsResource } from "./settingsResources";
 
@@ -105,7 +105,7 @@ export default function ContextSettings() {
     ? ""
     : settings.agent === "none"
     ? "停用后台提取"
-    : (AGENT_LABELS[settings.agent] ?? settings.agent);
+    : (AGENT_TOOL_LABELS[settings.agent] ?? settings.agent);
 
   return (
     <section className="ui-section">
@@ -134,7 +134,7 @@ export default function ContextSettings() {
         <div className="inset-card extraction-settings-card">
           <div className="extraction-controls-row">
             <div className="extraction-control-group">
-              <span className="extraction-control-label">提取 Agent</span>
+              <span className="extraction-control-label">提取 运行工具</span>
               <div
                 className={`picker-control new-session-agent has-custom-menu${agentMenuOpen ? " open" : ""}`}
                 ref={agentRef}
@@ -154,18 +154,18 @@ export default function ContextSettings() {
                 role="button"
                 aria-haspopup="menu"
                 aria-expanded={agentMenuOpen}
-                aria-label={`提取 Agent：${agentLabel}`}
+                aria-label={`提取 运行工具：${agentLabel}`}
                 title={agentLabel}
               >
                 {settings.agent !== "none" ? (
-                  <AgentIcon agent={settings.agent} size={16} />
+                  <AgentToolIcon agent={settings.agent} size={16} />
                 ) : (
                   <Icon name="minus" />
                 )}
                 <span className="picker-control-label">{agentLabel}</span>
                 <Icon name="chevronDown" className="picker-control-chevron" />
                 <select
-                  aria-label="提取 Agent"
+                  aria-label="提取 运行工具"
                   title={agentLabel}
                   value={settings.agent}
                   onChange={(e) => void handleAgentChange(e.target.value as ExtractionSettings["agent"])}
@@ -173,17 +173,17 @@ export default function ContextSettings() {
                 >
                   {EXTRACTION_AGENTS.map((a) => (
                     <option key={a} value={a}>
-                      {a === "none" ? "停用后台提取" : AGENT_LABELS[a]}
+                      {a === "none" ? "停用后台提取" : AGENT_TOOL_LABELS[a]}
                     </option>
                   ))}
                 </select>
 
                 {agentMenuOpen && (
-                  <PopupMenu className="picker-menu dropdown-down" role="menu" aria-label="提取 Agent 列表" onDismiss={() => setAgentMenuOpen(false)}>
+                  <PopupMenu className="picker-menu dropdown-down" role="menu" aria-label="提取 运行工具 列表" onDismiss={() => setAgentMenuOpen(false)}>
                     <div className="picker-menu-list">
                       {EXTRACTION_AGENTS.map((a) => {
                         const isSelected = a === settings.agent;
-                        const label = a === "none" ? "停用后台提取" : AGENT_LABELS[a];
+                        const label = a === "none" ? "停用后台提取" : AGENT_TOOL_LABELS[a];
                         return (
                           <PopupMenuItem selected={isSelected}
                             key={a}
@@ -196,7 +196,7 @@ export default function ContextSettings() {
                             title={label}
                           >
                             <span className="menu-item-icon">
-                              {a !== "none" ? <AgentIcon agent={a} size={16} /> : <Icon name="minus" />}
+                              {a !== "none" ? <AgentToolIcon agent={a} size={16} /> : <Icon name="minus" />}
                             </span>
                             <span className="menu-item-label">{label}</span>
 

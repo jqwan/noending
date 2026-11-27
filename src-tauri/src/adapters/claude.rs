@@ -1,6 +1,6 @@
 //! Claude Code Adapter: `~/.claude/projects/<encoded-cwd>/<session>.jsonl`.
 //! `CLAUDE_CONFIG_DIR` overrides the root. Raw transcripts stay untouched,
-//! always — NoEnding never deletes an Agent-owned source.
+//! always — NoEnding never deletes an agent tool-owned source.
 //!
 //! Member mapping: the main transcript is the ROOT member. Sub-agent
 //! transcripts (`<session-uuid>/subagents/agent-<agentId>.jsonl`, official
@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
+    detect_format, read_jsonl_delta, AgentToolCommand, DiscoveredMember, DiscoveredMemberKind,
     ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
-use crate::platform::exec_resolver::{self, AgentInstallation};
+use crate::platform::exec_resolver::{self, AgentToolInstallation};
 
 pub struct ClaudeAdapter;
 
@@ -177,7 +177,7 @@ impl ClaudeAdapter {
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::ClaudeCode,
+            agent: AgentTool::ClaudeCode,
             source_member_id: session_id.unwrap_or_else(|| file_name.clone()),
             kind: DiscoveredMemberKind::Root,
             parent_source_member_id: None,
@@ -259,7 +259,7 @@ impl ClaudeAdapter {
         };
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::ClaudeCode,
+            agent: AgentTool::ClaudeCode,
             source_member_id: agent_id.clone(),
             kind: DiscoveredMemberKind::Child,
             parent_source_member_id: Some(parent_session.to_string()),
@@ -314,12 +314,12 @@ fn interactive_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
 }
 
 impl crate::adapters::AgentAdapter for ClaudeAdapter {
-    fn agent(&self) -> Agent {
-        Agent::ClaudeCode
+    fn tool(&self) -> AgentTool {
+        AgentTool::ClaudeCode
     }
 
-    fn detect(&self) -> Option<AgentInstallation> {
-        exec_resolver::resolve_quiet(Agent::ClaudeCode)
+    fn detect(&self) -> Option<AgentToolInstallation> {
+        exec_resolver::resolve_quiet(AgentTool::ClaudeCode)
     }
 
     fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
@@ -366,7 +366,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
                 }
                 // Any .jsonl is a candidate; only the content fingerprint
                 // accepts it. One bad file never aborts the whole scan.
-                if detect_format(&p) != Some(Agent::ClaudeCode) {
+                if detect_format(&p) != Some(AgentTool::ClaudeCode) {
                     eprintln!(
                         "[discover] skip {} (content fingerprint is not claude_code)",
                         p.display()
@@ -405,10 +405,10 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 
     fn build_new_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args = interactive_args(opts);
         // The launcher's prespecified id: the session file is born with a
         // known identity, so the embedded terminal binds by exact match.
@@ -418,7 +418,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         if let Some(message) = opts.initial_message() {
             args.extend(["--".into(), message.into()]);
         }
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -427,15 +427,15 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 
     fn build_resume_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args = vec!["--resume".into(), agent_session_id.into()];
         args.extend(interactive_args(opts));
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -444,13 +444,13 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 
     fn build_resume_message_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
         message: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut command =
             self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
         if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
@@ -461,14 +461,14 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 
     fn build_exec_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args: Vec<String> = vec!["-p".into(), "--output-format".into(), "text".into()];
         args.extend(runtime_args(opts));
         args.push(prompt.to_string());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: None,
@@ -477,11 +477,11 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
 
     fn build_context_extraction_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         prompt: &str,
         runtime_dir: &Path,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args: Vec<String> = vec![
             "-p".into(),
             "--no-session-persistence".into(),
@@ -496,7 +496,7 @@ impl crate::adapters::AgentAdapter for ClaudeAdapter {
         // Variadic --tools/--allowedTools must not consume the prompt.
         args.push("--".into());
         args.push(prompt.to_string());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: Some(runtime_dir.to_path_buf()),
@@ -600,7 +600,7 @@ mod tests {
     fn root_session(path: &Path) -> Session {
         Session {
             id: "sess-claude".into(),
-            agent: Agent::ClaudeCode,
+            agent: AgentTool::ClaudeCode,
             root_agent_session_id: "s1".into(),
             title: None,
             cwd: None,

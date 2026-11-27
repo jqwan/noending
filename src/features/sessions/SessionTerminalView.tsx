@@ -15,12 +15,12 @@ import { openSessionTerminal } from "./continueDesktop";
 import { preferredTerminal, terminalDestination } from "./sessionNavigation";
 import { copyToClipboard, Modal } from "../../components/common";
 import DialogActions from "../../components/DialogActions";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import Icon from "../../components/Icon";
 import { api } from "../../api";
 import { showToast } from "../../components/Toast";
 import { sessionDisplayTitle } from "./SessionTable";
-import type { Agent, TerminalBound, TerminalSnapshot } from "../../types";
+import type { AgentTool, TerminalBound, TerminalSnapshot } from "../../types";
 import { type Route } from "../../app/routes";
 import { liveTerminals, disposeTerminal, applyNotificationInputOwnership } from "./terminalCache";
 import { observeTerminalTheme } from "./terminalTheme";
@@ -41,11 +41,11 @@ import { sessionDetailCache } from "./sessionDetailCache";
  * registry），本组件只是 attach/detach 客户端——切走再切回（remount）进程
  * 照跑，xterm 实例按 terminal_id 常驻，重挂零重建。
  *
- * 当前会话身份由后端从 Agent 的原生会话 ID 确认。CLI 内切换会话时，
+ * 当前会话身份由后端从 AgentTool 的原生会话 ID 确认。CLI 内切换会话时，
  * `terminal-bound` 推送新版身份（尚未摄入时为 null），视图随之更新标题与
  * 详情入口。身份版本阻止迟到快照或详情请求把界面退回旧会话。
  *
- * 已知的产品边界：关闭 NoEnding 会结束后端里的内嵌 Agent（后端 RunEvent::Exit
+ * 已知的产品边界：关闭 NoEnding 会结束后端里的内嵌 AgentTool（后端 RunEvent::Exit
  * 统一收割）。
  */
 
@@ -68,12 +68,12 @@ export function resetLiveTerminalsForTests(): void {
   for (const id of liveTerminals.keys()) disposeTerminal(id);
 }
 
-export default function SessionTerminalView({ terminalId, initialTitle, initialAgent, initialSessionId, navigate }: {
+export default function SessionTerminalView({ terminalId, initialTitle, initialTool, initialSessionId, navigate }: {
   /** 独立终端路由：内嵌新建与「先跳后启」的共同落点。 */
   terminalId: string;
   /** 会话页跳转带来的首帧占位；随后由版本化后端身份替换。 */
   initialTitle?: string;
-  initialAgent?: Agent;
+  initialTool?: AgentTool;
   initialSessionId?: string;
   navigate: (r: Route) => void;
 }) {
@@ -145,7 +145,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       const peers = remaining.filter(t => t.terminal_id !== terminalId && t.session_id === closed.session_id && !!closed.session_id);
       const next = closed.session_id ? preferredTerminal(closed.session_id, peers.filter(t => t.live)) ?? peers[0] : undefined;
       const destination: Route = next ? terminalDestination(next)
-        : closed.session_id ? { view: "session", sessionId: closed.session_id, ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialAgent: snapshot?.agent ?? initialAgent } : {}) }
+        : closed.session_id ? { view: "session", sessionId: closed.session_id, ...(closed.session_id === boundSessionId ? { initialTitle: boundTitle ?? undefined, initialTool: snapshot?.agent ?? initialTool } : {}) }
         : { view: "new-session" };
       if (mountedRef.current) navigate(destination);
       invalidateTargets({ terminalIds: [terminalId], replacement: destination });
@@ -381,14 +381,14 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   // 未绑定的终端以「新会话」为名；绑定后标题换成会话本名。agent 在
   // attach 回来前用路由种子，避免首帧丢失图标。
   const headerTitle = boundTitle ?? (boundSessionId ? "" : "新会话");
-  const headerAgent = snapshot?.agent ?? initialAgent ?? null;
+  const headerAgent = snapshot?.agent ?? initialTool ?? null;
   const meta = sessionMeta?.id === boundSessionId ? sessionMeta : null;
   const busy = operation !== null || terminalBusy;
   const recoveryUnavailable = state.kind !== "ready" ? "终端未连接"
     : !boundSessionId || identity.revision < 0 ? "终端尚未绑定会话"
     : meta?.archived ? "已归档的会话不能继续，请先取消归档" : null;
-  const recoveryLabel = operation === "restart" ? "正在重启 Agent" : operation === "continue" ? "正在继续会话"
-    : exited ? "继续会话" : "重启 Agent";
+  const recoveryLabel = operation === "restart" ? "正在重启 运行工具" : operation === "continue" ? "正在继续会话"
+    : exited ? "继续会话" : "重启 运行工具";
   const recoverTerminal = async (mode: "restart" | "continue") => {
     if (operationPending.current || terminalBusy || recoveryUnavailable || !boundSessionId || !headerAgent) return;
     if (mode === "restart" && restartConfirmation !== identityRef.current.revision) return;
@@ -409,7 +409,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   return (
     <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动查信提醒已开启，终端只读" : undefined}><div className="main fill detail-page">
       <PageHeader
-        title={headerTitle} icon={headerAgent ? <AgentIcon agent={headerAgent} size={18} /> : <Icon name="terminal" />}
+        title={headerTitle} icon={headerAgent ? <AgentToolIcon agent={headerAgent} size={18} /> : <Icon name="terminal" />}
         navigation={<SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}
               agent={headerAgent ?? undefined} sourceKind={meta?.sourceKind} archived={meta?.archived}
               terminalBusy={operation !== null} onTerminalBusyChange={setTerminalBusy} navigate={navigate} />}
@@ -431,11 +431,11 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
       />
 
       {restartConfirmation === identity.revision && !recoveryUnavailable && (
-        <Modal title="重启 Agent" onClose={() => setRestartConfirmation(null)}>
-          <p>将停止此会话的所有终端，再重新启动 Agent 继续原会话。正在执行的操作会中断，终端里未发送的草稿可能丢失。</p>
+        <Modal title="重启 运行工具" onClose={() => setRestartConfirmation(null)}>
+          <p>将停止此会话的所有终端，再重新启动 运行工具 继续原会话。正在执行的操作会中断，终端里未发送的草稿可能丢失。</p>
           <DialogActions>
             <button type="button" className="btn" onClick={() => setRestartConfirmation(null)}>取消</button>
-            <button type="button" className="btn danger" disabled={busy} onClick={() => void recoverTerminal("restart")}>重启 Agent</button>
+            <button type="button" className="btn danger" disabled={busy} onClick={() => void recoverTerminal("restart")}>重启 运行工具</button>
           </DialogActions>
         </Modal>
       )}
@@ -454,12 +454,12 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
         <>
           {snapshot.live && !boundSessionId && (
             <div className="terminal-exit-banner" role="status">
-              Agent 运行中。绑定会话后可查看详情。
+              AgentTool 运行中。绑定会话后可查看详情。
             </div>
           )}
           {exited && (
             <div className="terminal-exit-banner" role="status">
-              Agent 已退出
+              AgentTool 已退出
               {snapshot.exit_code !== null && <>（退出码 {snapshot.exit_code}）</>}。
             </div>
           )}

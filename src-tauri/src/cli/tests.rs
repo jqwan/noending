@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::{Agent, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate};
+use crate::domain::{AgentTool, ParsedSessionMessage, SessionMessageRole, SourceCursorUpdate};
 use crate::storage::{now, Db};
 use crate::workspace::home::NoEndingHome;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ impl Fixture {
         let id = self
             .db()
             .upsert_logical_session(
-                Agent::Codex,
+                AgentTool::Codex,
                 &crate::storage::new_id(),
                 None,
                 Some("测试会话"),
@@ -123,10 +123,10 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
     let other = f
         .db()
         .upsert_logical_session(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             native,
             None,
-            Some("同原生 ID 的其他 Agent"),
+            Some("同原生 ID 的其他 运行工具"),
             None,
             None,
             None,
@@ -142,7 +142,7 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
         f.call(&[
             "session",
             "resolve",
-            "--agent",
+            "--tool",
             "codex",
             "--native-id",
             native,
@@ -151,7 +151,7 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
     };
     let found = resolve();
     assert_eq!(found["id"], sid);
-    assert_eq!(found["agent"], "codex");
+    assert_eq!(found["tool"], "codex");
     assert_eq!(found["native_id"], *native);
     assert_eq!(found["project_id"], session.project_id.unwrap());
     assert!(found["archived_at"].is_null());
@@ -164,7 +164,7 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
             f.call(&[
                 "session",
                 "resolve",
-                "--agent",
+                "--tool",
                 spelling,
                 "--native-id",
                 native
@@ -179,7 +179,7 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
         ("codex", "unseen-native"),
     ] {
         assert_eq!(
-            f.call(&["session", "resolve", "--agent", agent, "--native-id", id])
+            f.call(&["session", "resolve", "--tool", agent, "--native-id", id])
                 .unwrap_err()
                 .code,
             "not_found"
@@ -187,16 +187,16 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
     }
     for args in [
         vec!["session", "resolve", "--native-id", native],
-        vec!["session", "resolve", "--agent", "codex"],
+        vec!["session", "resolve", "--tool", "codex"],
         vec![
             "session",
             "resolve",
-            "--agent",
+            "--tool",
             "unknown",
             "--native-id",
             native,
         ],
-        vec!["session", "resolve", "--agent", "codex", "--native-id", " "],
+        vec!["session", "resolve", "--tool", "codex", "--native-id", " "],
     ] {
         assert_eq!(f.call(&args).unwrap_err().code, "invalid_arguments");
     }
@@ -206,7 +206,7 @@ fn cli_resolves_exact_native_identity_across_agents_and_archive_states() {
             .call(&[
                 "session",
                 "resolve",
-                "--agent",
+                "--tool",
                 "codex",
                 "--native-id",
                 native
@@ -443,7 +443,7 @@ fn cli_lists_paginate_without_losing_sessions() {
     let claude = f
         .db()
         .upsert_logical_session(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             "cli-claude",
             None,
             Some("Claude 会话"),
@@ -459,7 +459,7 @@ fn cli_lists_paginate_without_losing_sessions() {
         .unwrap()
         .0;
     for spelling in ["claude", "claude_code"] {
-        let result = f.call(&["session", "list", "--agent", spelling]).unwrap();
+        let result = f.call(&["session", "list", "--tool", spelling]).unwrap();
         assert_eq!(result["items"].as_array().unwrap().len(), 1);
         assert_eq!(result["items"][0]["id"], claude);
     }
@@ -540,7 +540,7 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             "projectquery",
             "--project",
             pid,
-            "--agent",
+            "--tool",
             "codex",
         ])
         .unwrap();
@@ -554,7 +554,7 @@ fn cli_project_reads_and_task_project_edits_keep_unconsumed_material_pending() {
             "projectquery",
             "--project",
             pid,
-            "--agent",
+            "--tool",
             "claude"
         ])
         .unwrap()["items"],
@@ -996,14 +996,14 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
     let show = || f.call(&["summary", "config", "show"]).unwrap();
     assert_eq!(
         show(),
-        json!({"agent":"codex","runtime":{"model":null,"provider":null,"effort":null}})
+        json!({"tool":"codex","runtime":{"model":null,"provider":null,"effort":null}})
     );
     let selected = f
         .call(&[
             "summary",
             "config",
             "set",
-            "--agent",
+            "--tool",
             "pi",
             "--model",
             "local-model",
@@ -1030,7 +1030,7 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
         "summary",
         "config",
         "set",
-        "--agent",
+        "--tool",
         "claude",
         "--model",
         "selected-model",
@@ -1038,7 +1038,7 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
         "high",
     ])
     .unwrap();
-    assert_eq!(show()["agent"], "claude_code");
+    assert_eq!(show()["tool"], "claude_code");
     assert_eq!(
         show()["runtime"],
         json!({"model":"selected-model","provider":null,"effort":"high"})
@@ -1047,7 +1047,7 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
         "summary",
         "config",
         "set",
-        "--agent",
+        "--tool",
         "claude_code",
         "--model",
         "same-agent-model",
@@ -1063,10 +1063,10 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
             "--provider",
             "unsupported-provider",
         ],
-        vec!["summary", "config", "set", "--agent", "qoder"],
-        vec!["summary", "config", "set", "--agent", "unknown-agent"],
+        vec!["summary", "config", "set", "--tool", "qoder"],
+        vec!["summary", "config", "set", "--tool", "unknown-agent"],
         vec![
-            "summary", "config", "set", "--agent", "none", "--model", "unusable",
+            "summary", "config", "set", "--tool", "none", "--model", "unusable",
         ],
     ] {
         assert_eq!(f.call(&args).unwrap_err().code, "invalid_arguments");
@@ -1079,7 +1079,7 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
         "summary",
         "config",
         "set",
-        "--agent",
+        "--tool",
         "antigravity",
         "--model",
         "gemini-test",
@@ -1087,13 +1087,13 @@ fn extraction_configuration_edits_preserve_fields_reset_on_agent_change_and_reje
     .unwrap();
     assert_eq!(
         show(),
-        json!({"agent":"antigravity","runtime":{"model":"gemini-test","provider":null,"effort":null}})
+        json!({"tool":"antigravity","runtime":{"model":"gemini-test","provider":null,"effort":null}})
     );
-    f.call(&["summary", "config", "set", "--agent", "none"])
+    f.call(&["summary", "config", "set", "--tool", "none"])
         .unwrap();
     assert_eq!(
         show(),
-        json!({"agent":"none","runtime":{"model":null,"provider":null,"effort":null}})
+        json!({"tool":"none","runtime":{"model":null,"provider":null,"effort":null}})
     );
 }
 

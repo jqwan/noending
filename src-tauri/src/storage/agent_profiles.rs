@@ -1,4 +1,4 @@
-//! Maps each assistant project to the working directory created for it.
+//! Maps each agent project to the working directory created for it.
 use crate::{domain::WorkspacePath, error::Result};
 use rusqlite::{params, Connection, OptionalExtension};
 

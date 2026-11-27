@@ -1,18 +1,18 @@
 //! The invariant where it actually matters: argv.
 //!
 //! `None` must mean the argument is ABSENT. A rendered `-m ""` or a guessed
-//! default would hand the Agent a value NoEnding invented, which is exactly
+//! default would hand the AgentTool a value NoEnding invented, which is exactly
 //! what the runtime model forbids.
 
 use noending::adapters::{adapter_for, ExecOptions};
-use noending::domain::Agent;
-use noending::platform::exec_resolver::AgentInstallation;
+use noending::domain::AgentTool;
+use noending::platform::exec_resolver::AgentToolInstallation;
 use noending_lib as noending;
 
 /// Session argv applies only to Agents whose terminal integration is supported.
 /// A management CLI alone (such as DSH plugins) is not a session launcher.
-fn launchable() -> Vec<Agent> {
-    Agent::all()
+fn launchable() -> Vec<AgentTool> {
+    AgentTool::all()
         .iter()
         .copied()
         .filter(|a| adapter_for(*a).has_terminal_cli())
@@ -22,33 +22,33 @@ fn launchable() -> Vec<Agent> {
 /// Agents with a wired headless exec (`build_exec_command`). Antigravity
 /// launches interactively but has no one-shot integration yet, so its exec
 /// builder still refuses.
-fn headless_exec() -> Vec<Agent> {
-    vec![Agent::Codex, Agent::ClaudeCode, Agent::Pi]
+fn headless_exec() -> Vec<AgentTool> {
+    vec![AgentTool::Codex, AgentTool::ClaudeCode, AgentTool::Pi]
 }
 
-fn install(agent: Agent) -> AgentInstallation {
-    AgentInstallation {
+fn install(agent: AgentTool) -> AgentToolInstallation {
+    AgentToolInstallation {
         agent,
         executable_path: format!("/usr/local/bin/{}", agent.as_str()),
         version: Some("test".into()),
     }
 }
 
-fn exec_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
+fn exec_args(agent: AgentTool, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
         .build_exec_command(&install(agent), opts, "prompt text")
         .expect("build")
         .args
 }
 
-fn new_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
+fn new_args(agent: AgentTool, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
         .build_new_command(&install(agent), opts, None)
         .expect("build")
         .args
 }
 
-fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
+fn resume_args(agent: AgentTool, opts: &ExecOptions) -> Vec<String> {
     adapter_for(agent)
         .build_resume_command(&install(agent), opts, "agent-session-id", None, None)
         .expect("build")
@@ -56,7 +56,7 @@ fn resume_args(agent: Agent, opts: &ExecOptions) -> Vec<String> {
 }
 
 /// New / Resume go to a real interactive terminal, so an invented default
-/// there is the most visible way to break "Agent owns defaults".
+/// there is the most visible way to break "AgentTool owns defaults".
 #[test]
 fn every_launch_flow_leaves_runtime_defaults_to_the_cli() {
     for agent in launchable() {
@@ -81,14 +81,14 @@ fn every_launch_flow_leaves_runtime_defaults_to_the_cli() {
 #[test]
 fn resume_keeps_its_session_selector() {
     for (agent, selector) in [
-        (Agent::Codex, "resume"),
-        (Agent::ClaudeCode, "--resume"),
-        (Agent::Pi, "--session"),
-        (Agent::Antigravity, "--conversation"),
+        (AgentTool::Codex, "resume"),
+        (AgentTool::ClaudeCode, "--resume"),
+        (AgentTool::Pi, "--session"),
+        (AgentTool::Antigravity, "--conversation"),
     ] {
         let args = resume_args(agent, &ExecOptions::default());
         let at = args.iter().position(|a| a == selector).expect(selector);
-        if agent == Agent::Codex {
+        if agent == AgentTool::Codex {
             assert_eq!(args.last().map(String::as_str), Some("agent-session-id"));
         } else {
             assert_eq!(
@@ -120,9 +120,9 @@ fn codex_renders_model_and_reasoning_effort() {
         initial_message: None,
     };
     for args in [
-        exec_args(Agent::Codex, &opts),
-        new_args(Agent::Codex, &opts),
-        resume_args(Agent::Codex, &opts),
+        exec_args(AgentTool::Codex, &opts),
+        new_args(AgentTool::Codex, &opts),
+        resume_args(AgentTool::Codex, &opts),
     ] {
         let pos = args.iter().position(|a| a == "-m").expect("-m");
         assert_eq!(args[pos + 1], "gpt-5.6-sol");
@@ -141,9 +141,9 @@ fn claude_renders_model_and_effort() {
         initial_message: None,
     };
     for args in [
-        exec_args(Agent::ClaudeCode, &opts),
-        new_args(Agent::ClaudeCode, &opts),
-        resume_args(Agent::ClaudeCode, &opts),
+        exec_args(AgentTool::ClaudeCode, &opts),
+        new_args(AgentTool::ClaudeCode, &opts),
+        resume_args(AgentTool::ClaudeCode, &opts),
     ] {
         assert!(args
             .windows(2)
@@ -166,9 +166,9 @@ fn pi_renders_provider_model_and_thinking() {
         initial_message: None,
     };
     for args in [
-        exec_args(Agent::Pi, &opts),
-        new_args(Agent::Pi, &opts),
-        resume_args(Agent::Pi, &opts),
+        exec_args(AgentTool::Pi, &opts),
+        new_args(AgentTool::Pi, &opts),
+        resume_args(AgentTool::Pi, &opts),
     ] {
         assert!(args
             .windows(2)
@@ -188,7 +188,7 @@ fn an_override_value_is_passed_literally_as_one_argv_element() {
     // split, interpolate or quote them — quoting is the Platform layer's job.
     let value = "$(id) 'quote' two words";
     let args = exec_args(
-        Agent::Pi,
+        AgentTool::Pi,
         &ExecOptions {
             model: Some(value.into()),
             provider: None,
@@ -217,7 +217,7 @@ fn new_session_sends_the_first_message_in_interactive_mode() {
                 ..Default::default()
             };
             let args = new_args(agent, &opts);
-            let selector = if agent == Agent::Antigravity {
+            let selector = if agent == AgentTool::Antigravity {
                 "--prompt-interactive"
             } else {
                 "--"
@@ -249,7 +249,7 @@ fn new_session_omits_blank_messages_and_keeps_runtime_and_birth_identity() {
         );
     }
 
-    for agent in [Agent::ClaudeCode, Agent::Pi] {
+    for agent in [AgentTool::ClaudeCode, AgentTool::Pi] {
         let without_message = ExecOptions {
             model: Some("custom-model".into()),
             effort: Some("high".into()),
@@ -268,7 +268,7 @@ fn new_session_omits_blank_messages_and_keeps_runtime_and_birth_identity() {
 fn pi_keeps_at_prefixed_messages_textual_instead_of_attaching_files() {
     let message = "@someone 请检查代码\n保留消息内容";
     let args = new_args(
-        Agent::Pi,
+        AgentTool::Pi,
         &ExecOptions {
             initial_message: Some(message.into()),
             ..Default::default()
@@ -281,20 +281,20 @@ fn pi_keeps_at_prefixed_messages_textual_instead_of_attaching_files() {
     );
 }
 
-/// An Agent without terminal integration must fail loudly. Returning empty
+/// An AgentTool without terminal integration must fail loudly. Returning empty
 /// argv (or a guessed program) would look like a successful launch and hand the user a
-/// terminal that never opens — the failure mode "Agent owns defaults" exists
+/// terminal that never opens — the failure mode "AgentTool owns defaults" exists
 /// to prevent.
 #[test]
 fn agents_without_terminal_integration_refuse_to_build_a_command() {
-    let without_terminal: Vec<Agent> = Agent::all()
+    let without_terminal: Vec<AgentTool> = AgentTool::all()
         .iter()
         .copied()
         .filter(|a| !adapter_for(*a).has_terminal_cli())
         .collect();
     assert!(
         !without_terminal.is_empty(),
-        "the roster is expected to contain an Agent without terminal integration"
+        "the roster is expected to contain an AgentTool without terminal integration"
     );
 
     for agent in without_terminal {
@@ -320,10 +320,10 @@ fn terminal_new_and_resume_use_full_access_without_changing_background_policy() 
     for agent in launchable() {
         for args in [new_args(agent, &opts), resume_args(agent, &opts)] {
             match agent {
-                Agent::Codex => assert!(args
+                AgentTool::Codex => assert!(args
                     .iter()
                     .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")),
-                Agent::ClaudeCode => {
+                AgentTool::ClaudeCode => {
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     #[cfg(not(windows))]
                     {
@@ -335,13 +335,13 @@ fn terminal_new_and_resume_use_full_access_without_changing_background_policy() 
                     #[cfg(windows)]
                     assert!(!args.iter().any(|a| a == "--settings"));
                 }
-                Agent::Antigravity => {
+                AgentTool::Antigravity => {
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(args.iter().any(|a| a == "--sandbox=false"));
                 }
                 // Pi's native tools already run with the launching account's
                 // permissions; project trust is a separate setting.
-                Agent::Pi => {
+                AgentTool::Pi => {
                     assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| a == "--sandbox=false"));
                 }
@@ -371,12 +371,12 @@ fn terminal_new_and_resume_use_full_access_without_changing_background_policy() 
             }
         }
     }
-    assert!(exec_args(Agent::Codex, &opts)
+    assert!(exec_args(AgentTool::Codex, &opts)
         .windows(2)
         .any(|w| w == ["-s", "read-only"]));
-    let extraction = adapter_for(Agent::Codex)
+    let extraction = adapter_for(AgentTool::Codex)
         .build_context_extraction_command(
-            &install(Agent::Codex),
+            &install(AgentTool::Codex),
             &opts,
             "extract",
             std::path::Path::new("/runtime"),
@@ -415,7 +415,7 @@ fn resume_followups_remain_single_literal_prompt_arguments_without_changing_the_
                 )
                 .unwrap();
             assert_eq!(&command.args[..base.len()], base.as_slice(), "{agent:?}");
-            let expected = if agent == Agent::Pi && message.starts_with('@') {
+            let expected = if agent == AgentTool::Pi && message.starts_with('@') {
                 format!(" {message}")
             } else {
                 message.into()
@@ -423,7 +423,7 @@ fn resume_followups_remain_single_literal_prompt_arguments_without_changing_the_
             assert_eq!(command.args.last(), Some(&expected));
             assert_eq!(
                 command.args[base.len()],
-                if agent == Agent::Antigravity {
+                if agent == AgentTool::Antigravity {
                     "--prompt-interactive"
                 } else {
                     "--"

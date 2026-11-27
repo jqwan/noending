@@ -67,7 +67,7 @@ impl Db {
     /// Run only after a successful ingest of the verified effective history.
     /// Derived messages are rebuilt from source; app-owned content is retained.
     pub(crate) fn reconcile_codex_rollouts(&self, session: &Session) -> Result<()> {
-        if session.agent != Agent::Codex {
+        if session.agent != AgentTool::Codex {
             return Ok(());
         }
         self.tx(|tx| {

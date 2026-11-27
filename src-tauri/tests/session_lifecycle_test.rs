@@ -1,9 +1,9 @@
 //! Session archive, restore and permanent local deletion. Archive blocks continuation
-//! while preserving ingestion, summaries, ownership and Agent source files.
+//! while preserving ingestion, summaries, ownership and AgentTool source files.
 //! Permanent deletion removes session-owned data only, from archived sessions.
 //! Adapter source verdicts are exercised with temporary real files.
 
-use noending::domain::{Agent, SessionMessageRole, SourceAvailability};
+use noending::domain::{AgentTool, SessionMessageRole, SourceAvailability};
 use noending::lifecycle;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
@@ -79,8 +79,13 @@ fn seeded_session(db: &Db, dir: &TempDir, source: SourceKind) -> noending::domai
     if matches!(source, SourceKind::Directory) {
         std::fs::create_dir_all(&source_path).unwrap();
     }
-    support::ensure_session_source(db, Agent::Codex, &root_id, &source_path.to_string_lossy());
-    db.find_session_by_root_agent_id(Agent::Codex, &root_id)
+    support::ensure_session_source(
+        db,
+        AgentTool::Codex,
+        &root_id,
+        &source_path.to_string_lossy(),
+    );
+    db.find_session_by_root_agent_id(AgentTool::Codex, &root_id)
         .unwrap()
         .expect("seeded session")
 }
@@ -169,10 +174,10 @@ fn archive_keeps_every_fact_and_never_touches_the_source() {
     );
     assert!(trashed.is_archived());
 
-    // The Agent source is untouched — NoEnding never deletes it.
+    // The AgentTool source is untouched — NoEnding never deletes it.
     assert!(
         source_file.exists(),
-        "trash must never touch the Agent source"
+        "trash must never touch the AgentTool source"
     );
 
     // The flip itself rewrites nothing: messages, cursor and frontier
@@ -337,10 +342,10 @@ fn archived_session_is_purgeable_whatever_the_root_source_says() {
         assert!(db.get_session(&s.id).unwrap().is_none(), "{tag}");
         assert!(
             source_path.exists(),
-            "{tag}: the Agent source is never touched"
+            "{tag}: the AgentTool source is never touched"
         );
         assert!(
-            db.find_session_by_root_agent_id(Agent::Codex, &s.root_agent_session_id)
+            db.find_session_by_root_agent_id(AgentTool::Codex, &s.root_agent_session_id)
                 .unwrap()
                 .is_none(),
             "{tag}: the identity is free, so a rebuild produces a NEW session"
@@ -445,7 +450,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
         "the source was there all along — the purge never touches it"
     );
     assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, &root_id)
+        db.find_session_by_root_agent_id(AgentTool::Codex, &root_id)
             .unwrap()
             .is_none(),
         "the identity is free — nothing remembers the old session"
@@ -455,7 +460,7 @@ fn a_purged_root_may_be_reingested_as_a_new_session() {
     // Context or launch history.
     let (s2, is_new) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &root_id,
             Some("fresh start"),
             None,

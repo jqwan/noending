@@ -6,14 +6,14 @@ import { useEffect, useState } from "react";
 import { api } from "../../api";
 import { onEvent, EVT_SYNCED, EVT_TERMINALS, type Route } from "../../app/routes";
 import Icon from "../../components/Icon";
-import type { Agent, AgentStatusEntry, SessionListItem } from "../../types";
-import { AGENT_LABELS } from "../../types";
+import type { AgentTool, AgentToolStatusEntry, SessionListItem } from "../../types";
+import { AGENT_TOOL_LABELS } from "../../types";
 import SessionMiniList from "../sessions/SessionMiniList";
 import { CatalogStatus } from "./RuntimeFields";
 import { useAgentRuntime } from "./useAgentRuntime";
-import { extractVersion } from "./AgentsView";
+import { extractVersion } from "./AgentToolsView";
 
-export default function AgentConfiguration({
+export default function AgentToolConfiguration({
   agent,
   entry,
   reload,
@@ -21,8 +21,8 @@ export default function AgentConfiguration({
   packagesSection,
   sourcesSection,
 }: {
-  agent: Agent;
-  entry?: AgentStatusEntry;
+  agent: AgentTool;
+  entry?: AgentToolStatusEntry;
   reload: () => Promise<void>;
   navigate: (route: Route) => void;
   packagesSection?: React.ReactNode;
@@ -82,7 +82,7 @@ export default function AgentConfiguration({
                   className="btn ghost icon-button small" disabled={busy}
                   title="重新检测 CLI" aria-label="重新检测"
                   onClick={() => void action(async () => {
-                    runtime.setLoaded(await api.redetectAgent(agent));
+                    runtime.setLoaded(await api.redetectTool(agent));
                     runtime.invalidate();
                     await reload();
                   })}
@@ -93,7 +93,7 @@ export default function AgentConfiguration({
                 {entry.executable && <Field label="可执行文件路径" copyValue={entry.executable}>
                   <span className="mono" title={entry.executable}>{entry.executable}</span>
                 </Field>}
-              </> : <Field label="CLI"><span className="muted">该 Agent 不支持新建终端会话，可同步历史会话。</span></Field>}
+              </> : <Field label="CLI"><span className="muted">该 运行工具 不支持新建终端会话，可同步历史会话。</span></Field>}
               {entry?.desktop_app && <Field label="桌面应用">
                 {entry.desktop_app} · {entry.desktop_app_present ? "已检测到桌面应用" : "未检测到桌面应用"}
               </Field>}
@@ -117,7 +117,7 @@ export default function AgentConfiguration({
                 </>}>
 
               <p className="muted small" style={{ marginTop: 0 }}>
-                展示当前 Agent 支持的模型与思考强度。新建会话时可在发送前直接选择。
+                展示当前 AgentTool 支持的模型与思考强度。新建会话时可在发送前直接选择。
               </p>
               {runtime.options && <CatalogStatus options={runtime.options} />}
               {runtime.options && (
@@ -135,7 +135,7 @@ export default function AgentConfiguration({
                               <DetailListRow key={`${m.provider || ""}/${m.id}`}
                                 title={m.display_name ?? m.id}
                                 meta={m.provider && <span className="badge">{m.provider}</span>}
-                                description={<>思考档位：{efforts.length > 0 ? efforts.join(" / ") : (hasPerModelEfforts ? "不支持" : "由 Agent 自行决定")}</>}
+                                description={<>思考档位：{efforts.length > 0 ? efforts.join(" / ") : (hasPerModelEfforts ? "不支持" : "由 运行工具 自行决定")}</>}
                               />
                             );
                           })}
@@ -157,7 +157,7 @@ export default function AgentConfiguration({
               </>} actions={<>{Boolean(entry?.terminal_cli && entry?.detected) && (
                 <button
                   className="btn ghost icon-button small"
-                  title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                  title={`使用 ${AGENT_TOOL_LABELS[agent]} 新建会话`}
                   aria-label="新建会话"
                   onClick={() => navigate({ view: "new-session", agent })}
                 >
@@ -168,7 +168,7 @@ export default function AgentConfiguration({
 
             <SessionMiniList
               sessions={sessions}
-              emptyText="该 Agent 下还没有会话。"
+              emptyText="该 运行工具 下还没有会话。"
               navigate={navigate}
             />
           </DetailSection></DetailLayout>

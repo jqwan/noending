@@ -1,4 +1,4 @@
-import { AGENT_LABELS, type Agent, type TerminalSummary, type SessionListItem, type ProjectCardData, type TerminalResumeState } from "../types";
+import { AGENT_TOOL_LABELS, type AgentTool, type TerminalSummary, type SessionListItem, type ProjectCardData, type TerminalResumeState } from "../types";
 import { FORMAT_CAPS } from "../features/sessions/sessionFormats";
 import { terminalContinueState } from "../features/sessions/continueDesktop";
 
@@ -23,7 +23,7 @@ export const SIDEBAR_GROUP_OPTIONS: Array<{
   icon: "tasks" | "project" | "agent" | "chat";
 }> = [
   { key: "project", label: "项目", fullLabel: "按项目归类", icon: "project" },
-  { key: "agent", label: "Agent", fullLabel: "按 Agent 归类", icon: "agent" },
+  { key: "agent", label: "运行工具", fullLabel: "按运行工具归类", icon: "agent" },
   { key: "none", label: "会话", fullLabel: "不分组（全部会话）", icon: "chat" },
 ];
 
@@ -278,15 +278,15 @@ export function groupSidebarSessions(
     } else {
       const rawAgent = s.agent as string;
       const agentKey = rawAgent === "claude" ? "claude_code" : rawAgent;
-      if (agentKey && agentKey in AGENT_LABELS) {
+      if (agentKey && agentKey in AGENT_TOOL_LABELS) {
         groupId = agentKey;
-        groupTitle = AGENT_LABELS[agentKey as Agent];
+        groupTitle = AGENT_TOOL_LABELS[agentKey as AgentTool];
       } else if (agentKey) {
         groupId = agentKey;
         groupTitle = agentKey;
       } else {
         groupId = "__unknown_agent__";
-        groupTitle = "未知 Agent";
+        groupTitle = "未知 AgentTool";
       }
     }
 
@@ -311,7 +311,7 @@ export function groupSidebarSessions(
       : 0;
   }
 
-  // 2. 项目和 Agent 分组按创建时间或最近更新排序；无项目/未知 Agent 固定沉底
+  // 2. 项目和 AgentTool 分组按创建时间或最近更新排序；无项目/未知 AgentTool 固定沉底
   const groupsList = Array.from(groupsMap.values());
 
   if (groupBy === "project") {

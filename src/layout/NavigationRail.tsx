@@ -2,9 +2,9 @@ import { useEffect, useRef } from "react";
 import Icon, { type IconName } from "../components/Icon";
 import { withoutAction, type Route } from "../app/routes";
 import { isRemovedRoute } from "../app/removedTargets";
-import { preloadAgentsCache } from "../features/agents/agentsCache";
+import { preloadAgentToolsCache } from "../features/agent-tools/agentToolsCache";
 
-export type RailSection = "sessions" | "workstreams" | "projects" | "assistants" | "agents" | "skills" | "packages" | "settings";
+export type RailSection = "sessions" | "workstreams" | "projects" | "agents" | "agent-tools" | "skills" | "packages" | "settings";
 
 export function isSessionRoute(route: Route): boolean {
   return ["new-session", "sessions", "session", "terminal"].includes(route.view);
@@ -13,9 +13,9 @@ export function isSessionRoute(route: Route): boolean {
 function getRouteSection(route: Route): RailSection | null {
   if (isSessionRoute(route)) return "sessions";
   if (route.view === "workstreams" || route.view === "workstream") return "workstreams";
-  if (route.view === "projects") return route.assistantOnly ? "assistants" : "projects";
-  if (route.view === "project") return route.fromAssistants ? "assistants" : "projects";
-  if (route.view === "agents") return "agents";
+  if (route.view === "projects") return route.agentOnly ? "agents" : "projects";
+  if (route.view === "project") return route.fromAgents ? "agents" : "projects";
+  if (route.view === "agent-tools") return "agent-tools";
   if (route.view === "skills" || route.view === "skill") return "skills";
   if (route.view === "packages" || route.view === "package") return "packages";
   if (route.view === "settings") return "settings";
@@ -30,10 +30,10 @@ function getSectionRootRoute(section: RailSection): Route {
       return { view: "workstreams" };
     case "projects":
       return { view: "projects" };
-    case "assistants":
-      return { view: "projects", assistantOnly: true };
     case "agents":
-      return { view: "agents" };
+      return { view: "projects", agentOnly: true };
+    case "agent-tools":
+      return { view: "agent-tools" };
     case "skills":
       return { view: "skills" };
     case "packages":
@@ -82,8 +82,8 @@ export default function NavigationRail({ route, navigate }: {
     { section: "sessions", label: "会话", icon: "chat", active: currentSection === "sessions" },
     { section: "workstreams", label: "任务", icon: "tasks", active: ["workstreams", "workstream"].includes(route.view) },
     { section: "projects", label: "项目", icon: "project", active: currentSection === "projects" },
-    { section: "assistants", label: "智能体", icon: "spark", active: currentSection === "assistants" },
-    { section: "agents", label: "运行工具", icon: "agent", active: route.view === "agents" },
+    { section: "agents", label: "智能体", icon: "spark", active: currentSection === "agents" },
+    { section: "agent-tools", label: "运行工具", icon: "agent", active: route.view === "agent-tools" },
     { section: "skills", label: "技能", icon: "skill", active: currentSection === "skills" },
     { section: "packages", label: "插件包", icon: "puzzle", active: currentSection === "packages" },
   ];
@@ -100,8 +100,8 @@ export default function NavigationRail({ route, navigate }: {
             aria-current={item.active ? "page" : undefined}
             onClick={() => handleSectionClick(item.section)}
             onPointerEnter={() => {
-              if (item.section === "agents") {
-                void preloadAgentsCache();
+              if (item.section === "agent-tools") {
+                void preloadAgentToolsCache();
               }
             }}
           >

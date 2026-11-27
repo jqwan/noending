@@ -1,4 +1,4 @@
-//! Per-terminal native-session notifications from Agent lifecycle hooks.
+//! Per-terminal native-session notifications from agent tool lifecycle hooks.
 //!
 //! Nothing is inferred from terminal output or message text. Each embedded
 //! launch gets its own authenticated loopback listener and temporary, explicit
@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::activity::{ActivitySignal, ActivityState};
-use crate::adapters::AgentCommand;
-use crate::domain::Agent;
+use crate::adapters::AgentToolCommand;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 
 const HELPER_FLAG: &str = "--noending-identity-hook";
@@ -85,7 +85,7 @@ struct PendingEvent {
 }
 
 /// Keep this alive with the terminal record. The listener buffers events until
-/// `activate`, because an Agent can call its startup hook before registration.
+/// `activate`, because an agent tool can call its startup hook before registration.
 pub struct IdentityBridge {
     state: Arc<Mutex<BridgeState>>,
     resource_dir: PathBuf,
@@ -112,7 +112,7 @@ impl Drop for IdentityBridge {
 }
 
 pub struct PreparedIdentityBridge {
-    pub command: AgentCommand,
+    pub command: AgentToolCommand,
     pub bridge: IdentityBridge,
     pub environment: Vec<(String, String)>,
 }
@@ -120,11 +120,11 @@ pub struct PreparedIdentityBridge {
 /// Add lifecycle observation to supported CLIs without changing their prompt
 /// argument or replacing the user's hooks/extensions.
 pub fn prepare(
-    command: &AgentCommand,
-    agent: Agent,
+    command: &AgentToolCommand,
+    agent: AgentTool,
     terminal_id: &str,
 ) -> Result<Option<PreparedIdentityBridge>> {
-    let root = (agent == Agent::Antigravity)
+    let root = (agent == AgentTool::Antigravity)
         .then(|| {
             crate::platform::paths::resolve_antigravity_cli_dir()
                 .ok_or_else(|| other("无法定位 Antigravity CLI 配置目录"))
@@ -134,14 +134,14 @@ pub fn prepare(
 }
 
 fn prepare_at(
-    command: &AgentCommand,
-    agent: Agent,
+    command: &AgentToolCommand,
+    agent: AgentTool,
     terminal_id: &str,
     antigravity_root: Option<&Path>,
 ) -> Result<Option<PreparedIdentityBridge>> {
     if !matches!(
         agent,
-        Agent::ClaudeCode | Agent::Codex | Agent::Pi | Agent::Antigravity
+        AgentTool::ClaudeCode | AgentTool::Codex | AgentTool::Pi | AgentTool::Antigravity
     ) {
         return Ok(None);
     }
@@ -159,7 +159,7 @@ fn prepare_at(
 
     let mut environment = Vec::new();
     let args = match agent {
-        Agent::Antigravity => {
+        AgentTool::Antigravity => {
             let root = antigravity_root.ok_or_else(|| other("Antigravity CLI root missing"))?;
             antigravity::install_plugin(root, &std::env::current_exe()?)?;
             environment.push(antigravity::environment(
@@ -170,7 +170,7 @@ fn prepare_at(
             )?);
             Vec::new()
         }
-        Agent::ClaudeCode => {
+        AgentTool::ClaudeCode => {
             let plugin = bridge.resource_dir.join("claude-plugin");
             create_private_dir(&plugin)?;
             create_private_dir(&plugin.join(".claude-plugin"))?;
@@ -206,7 +206,7 @@ fn prepare_at(
             )?;
             vec!["--plugin-dir".into(), plugin.to_string_lossy().into_owned()]
         }
-        Agent::Pi => {
+        AgentTool::Pi => {
             let extension = bridge.resource_dir.join("identity-extension.mjs");
             let script = pi_extension(address, &token, terminal_id)?;
             write_private(&extension, script.as_bytes())?;
@@ -215,7 +215,7 @@ fn prepare_at(
                 extension.to_string_lossy().into_owned(),
             ]
         }
-        Agent::Codex => {
+        AgentTool::Codex => {
             let hook = hook_command(
                 address,
                 &token,
@@ -497,7 +497,7 @@ fn receive_events(
     state: Arc<Mutex<BridgeState>>,
     token: String,
     terminal_id: String,
-    agent: Agent,
+    agent: AgentTool,
 ) {
     let mut prompts = claude::InputTracker::default();
     loop {
@@ -541,7 +541,7 @@ fn receive_events(
                     // Claude startup hooks can finish after the CLI has
                     // switched again. Validate at consumption too, so a
                     // delayed old socket cannot restore an obsolete identity.
-                    if agent == Agent::ClaudeCode {
+                    if agent == AgentTool::ClaudeCode {
                         consume_claude_event(&state, &callback, &mut pending, &mut prompts);
                     } else {
                         callback(pending.event);
@@ -714,7 +714,7 @@ fn hook_activity(name: &str, value: &serde_json::Value) -> Option<ActivitySignal
 }
 
 /// Called before Tauri startup. Hook helpers do not open the app/NoEnding database or
-/// run an Agent. A stale/closed listener is harmless to the Agent lifecycle.
+/// run an agent tool. A stale/closed listener is harmless to the agent tool lifecycle.
 pub fn run_hook_helper_if_requested() -> Option<i32> {
     let mut args = std::env::args().skip(1);
     let arguments = match args.next().as_deref() {
@@ -813,7 +813,7 @@ fn claude_active_record() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))?;
     let path = root.join("sessions").join(format!("{pid}.json"));
-    // CLAUDE_CONFIG_DIR may be relative to the Agent cwd, while the bridge
+    // CLAUDE_CONFIG_DIR may be relative to the agent tool cwd, while the bridge
     // lives in the app process. The startup record may not yet exist.
     let absolute = if path.is_absolute() {
         path
@@ -864,8 +864,8 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn command() -> AgentCommand {
-        AgentCommand {
+    fn command() -> AgentToolCommand {
+        AgentToolCommand {
             program: "agent".into(),
             args: vec!["--".into(), "first user prompt\n$(literal)".into()],
             cwd: None,
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn identity_injection_preserves_original_arguments_and_cleans_up_resources() {
-        for agent in [Agent::ClaudeCode, Agent::Codex, Agent::Pi] {
+        for agent in [AgentTool::ClaudeCode, AgentTool::Codex, AgentTool::Pi] {
             let original = command();
             let prepared = prepare(&original, agent, "terminal").unwrap().unwrap();
             assert_eq!(prepared.command.args.last(), original.args.last());
@@ -928,7 +928,7 @@ mod tests {
             assert_eq!(prepared.command.program, original.program);
             assert!(prepared.bridge.resource_dir.exists());
             #[cfg(windows)]
-            if matches!(agent, Agent::Codex | Agent::ClaudeCode) {
+            if matches!(agent, AgentTool::Codex | AgentTool::ClaudeCode) {
                 assert_eq!(prepared.environment.len(), 1);
                 assert_eq!(prepared.environment[0].0, WINDOWS_HOOK_ENV);
                 assert!(Path::new(&prepared.environment[0].1).is_file());
@@ -937,7 +937,7 @@ mod tests {
             drop(prepared);
             assert!(!dir.exists());
         }
-        assert!(prepare(&command(), Agent::ZCode, "terminal")
+        assert!(prepare(&command(), AgentTool::ZCode, "terminal")
             .unwrap()
             .is_none());
     }
@@ -988,7 +988,7 @@ mod tests {
             "resume".into(),
             "12345678-1234-1234-1234-123456789012".into(),
         ]);
-        let command = AgentCommand {
+        let command = AgentToolCommand {
             program: r"C:\Users\中文\AppData\Roaming\npm\codex.cmd".into(),
             args: args.clone(),
             cwd: Some(directory.clone()),
@@ -1048,12 +1048,12 @@ mod tests {
         let executable = directory.join("codex");
         std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\0' \"$PWD\" \"$@\"\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let original = AgentCommand {
+        let original = AgentToolCommand {
             program: executable.to_string_lossy().into_owned(),
             args: vec!["resume".into(), "native-session-id".into()],
             cwd: Some(directory.clone()),
         };
-        let prepared = prepare(&original, Agent::Codex, "terminal")
+        let prepared = prepare(&original, AgentTool::Codex, "terminal")
             .unwrap()
             .unwrap();
         let wrapped = super::super::spawn::wrapped_command(&prepared.command, false);
@@ -1140,7 +1140,7 @@ console.log(JSON.stringify({args,status:result.status,output:result.stdout,error
         .unwrap();
         let mut args = codex_hook_args(&hook, true).unwrap();
         args.extend(["resume".into(), "native-session-id".into()]);
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: directory.join("codex.cmd").to_string_lossy().into_owned(),
             args: args.clone(),
             cwd: Some(directory.clone()),
@@ -1327,7 +1327,9 @@ console.log(JSON.stringify({args,status:result.status,output:result.stdout,error
     #[test]
     fn pi_extension_activity_roundtrips_without_stalling_or_premature_completion() {
         use std::process::{Command, Stdio};
-        let prepared = prepare(&command(), Agent::Pi, "terminal").unwrap().unwrap();
+        let prepared = prepare(&command(), AgentTool::Pi, "terminal")
+            .unwrap()
+            .unwrap();
         let (tx, rx) = mpsc::channel();
         prepared.bridge.activate(Arc::new(move |event| {
             tx.send(event).unwrap();
@@ -1516,7 +1518,7 @@ await run("message_start", {message:{role:"user", timestamp:42, content:[{type:"
                 state,
                 "token".into(),
                 "terminal".into(),
-                Agent::Codex,
+                AgentTool::Codex,
             )
         });
         let input = |source| {
@@ -1627,7 +1629,7 @@ await run("message_start", {message:{role:"user", timestamp:42, content:[{type:"
                 state,
                 "token".into(),
                 "terminal".into(),
-                Agent::ClaudeCode,
+                AgentTool::ClaudeCode,
             )
         });
         let (sender, receiver) = mpsc::channel();
@@ -1669,7 +1671,7 @@ await run("message_start", {message:{role:"user", timestamp:42, content:[{type:"
                 .native_id,
             "before"
         );
-        // The Agent can complete this native write only after its hook exits.
+        // The agent tool can complete this native write only after its hook exits.
         write_record(&path, "after", "interactive");
         let resumed = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(resumed.native_id, "after");

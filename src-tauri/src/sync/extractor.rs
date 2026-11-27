@@ -1,14 +1,14 @@
-//! Agent CLI invocation for explicit summary extraction. File and reply validation
+//! agent tool CLI invocation for explicit summary extraction. File and reply validation
 //! live in context::summary; snapshot validation and commits live in context.
 use crate::adapters::ExecOptions;
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-pub fn supports_extraction(agent: Agent) -> bool {
+pub fn supports_extraction(agent: AgentTool) -> bool {
     matches!(
         agent,
-        Agent::Codex | Agent::ClaudeCode | Agent::Pi | Agent::Antigravity
+        AgentTool::Codex | AgentTool::ClaudeCode | AgentTool::Pi | AgentTool::Antigravity
     )
 }
 
@@ -38,12 +38,12 @@ impl ExtractionSettings {
         }
     }
 
-    pub fn exec_options(&self) -> Result<Option<(Agent, ExecOptions)>> {
+    pub fn exec_options(&self) -> Result<Option<(AgentTool, ExecOptions)>> {
         if self.agent == "none" {
             return Ok(None);
         }
-        let agent = Agent::parse(&self.agent)
-            .ok_or_else(|| other(format!("未知的 Agent: {}", self.agent)))?;
+        let agent = AgentTool::parse(&self.agent)
+            .ok_or_else(|| other(format!("未知的 运行工具: {}", self.agent)))?;
         if !supports_extraction(agent) {
             return Err(other(format!("{} 不支持摘要提取", agent.as_str())));
         }
@@ -71,7 +71,7 @@ impl ExtractionSettings {
 
 /// Runs the explicit Context update through the user's agent CLI (headless).
 pub struct CliExtractor {
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub opts: ExecOptions,
     pub timeout_secs: u64,
 }
@@ -104,7 +104,7 @@ impl CliExtractor {
             .map(|(agent, opts)| Self::new(agent, opts)))
     }
 
-    pub fn new(agent: Agent, opts: ExecOptions) -> CliExtractor {
+    pub fn new(agent: AgentTool, opts: ExecOptions) -> CliExtractor {
         CliExtractor {
             agent,
             opts,
@@ -122,7 +122,7 @@ impl CliExtractor {
         }
     }
 
-    /// Run ONE headless Agent invocation and return cleaned stdout. Any failure
+    /// Run ONE headless agent tool invocation and return cleaned stdout. Any failure
     /// (CLI missing, timeout, non-zero exit) is returned as Err — the caller
     /// must NOT fall back to a heuristic.
     pub fn run(&self, prompt: &str) -> Result<String> {
@@ -134,7 +134,7 @@ impl CliExtractor {
     }
 
     /// Run the extraction-only policy in an explicit app-owned working
-    /// directory. Unlike `run`, this never calls the generic Assistant exec
+    /// directory. Unlike `run`, this never calls the generic headless command
     /// builder and never permits an inherited cwd.
     pub fn run_context(
         &self,

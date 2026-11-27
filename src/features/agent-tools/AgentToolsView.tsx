@@ -10,13 +10,13 @@ import { useViewPreference, preferenceValues, useViewScroll } from "../../hooks/
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api";
-import "./agents.css";
+import "./agent-tools.css";
 import { onEvent, EVT_SYNCED, type Route } from "../../app/routes";
-import { agentsCache, clearAgentsCache } from "./agentsCache";
+import { agentToolsCache, clearAgentToolsCache } from "./agentToolsCache";
 
-import AgentConfiguration from "./AgentConfiguration";
-import AgentPackagesSection from "../packages/AgentPackagesSection";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolConfiguration from "./AgentToolConfiguration";
+import AgentToolPackagesSection from "../packages/AgentToolPackagesSection";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import Icon from "../../components/Icon";
 import PageHeader from "../../layout/PageHeader";
 import { copyToClipboard, Modal, openPath, timeAgo } from "../../components/common";
@@ -24,27 +24,27 @@ import CustomSelect from "../../components/CustomSelect";
 import { showToast } from "../../components/Toast";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-export { clearAgentsCache };
+export { clearAgentToolsCache };
 import {
-  AGENT_LABELS,
-  type Agent,
-  type AgentStatusEntry,
+  AGENT_TOOL_LABELS,
+  type AgentTool,
+  type AgentToolStatusEntry,
   type IngestSource,
   type IngestTaskStatus,
 } from "../../types";
 
-const ALL_AGENTS = Object.keys(AGENT_LABELS) as Agent[];
+const ALL_TOOLS = Object.keys(AGENT_TOOL_LABELS) as AgentTool[];
 
 type OpenMethod = "terminal" | "desktop";
 
 type SurfaceMode = "tui" | "desktop";
 type ReadinessFilter = "all" | "ready" | "unready";
-type AgentSortKey = "recent" | "name" | "sessions";
+type ToolSortKey = "recent" | "name" | "sessions";
 
 interface SessionFormat {
   id: string;
   label: string;
-  agent: Agent;
+  agent: AgentTool;
   defaultPath?: string;
   methods: OpenMethod[];
 }
@@ -72,7 +72,7 @@ export function extractVersion(raw?: string | null): string {
   return match ? match[0] : raw.trim();
 }
 
-function formatCliStatus(agent: Agent, entry?: AgentStatusEntry): string {
+function formatCliStatus(agent: AgentTool, entry?: AgentToolStatusEntry): string {
   if (!entry?.terminal_cli) {
     return "无终端 CLI";
   }
@@ -80,8 +80,8 @@ function formatCliStatus(agent: Agent, entry?: AgentStatusEntry): string {
     return "未检测到CLI";
   }
   const ver = extractVersion(entry.version);
-  if (!ver) return `${AGENT_LABELS[agent]} CLI 已就绪`;
-  return `${AGENT_LABELS[agent]} CLI ${ver.startsWith("v") ? ver : `v${ver}`}`;
+  if (!ver) return `${AGENT_TOOL_LABELS[agent]} CLI 已就绪`;
+  return `${AGENT_TOOL_LABELS[agent]} CLI ${ver.startsWith("v") ? ver : `v${ver}`}`;
 }
 
 /** 排队中与执行中的任务都保持忙碌状态。 */
@@ -119,7 +119,7 @@ function SourceRow({
     title={<CompactPath path={src.path} />} titleHint={src.path}
     onOpen={() => void openPath(src.path)}
     meta={<>
-      {src.origin === "default" && <span className="badge" title="按当前 Agent 默认存储目录登记">默认</span>}
+      {src.origin === "default" && <span className="badge" title="按当前 运行工具 默认存储目录登记">默认</span>}
       {!src.exists && <span className="badge warn" title="目录不存在">目录不存在</span>}
     </>}
     actions={<>
@@ -131,16 +131,16 @@ function SourceRow({
   />;
 }
 
-export default function AgentsView({
+export default function AgentToolsView({
   navigate,
-  initialAgent,
+  initialTool,
 }: {
   navigate: (r: Route) => void;
-  initialAgent?: Agent;
+  initialTool?: AgentTool;
 }) {
-  const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(() => agentsCache.agentStatus);
-  const [sources, setSources] = useState<IngestSource[]>(() => agentsCache.sources ?? []);
-  const [status, setStatus] = useState<IngestTaskStatus | null>(() => agentsCache.status);
+  const [toolStatus, setToolStatus] = useState<Record<string, AgentToolStatusEntry> | null>(() => agentToolsCache.toolStatus);
+  const [sources, setSources] = useState<IngestSource[]>(() => agentToolsCache.sources ?? []);
+  const [status, setStatus] = useState<IngestTaskStatus | null>(() => agentToolsCache.status);
   const sync = useOperationState("sync");
   const [requestRunning, setRunning] = useState(false);
   const running = requestRunning || sync.busy || sync.checking;
@@ -150,18 +150,18 @@ export default function AgentsView({
   const [readinessFilter, setReadinessFilter] = useViewPreference<ReadinessFilter>("agents.readiness", "all", preferenceValues("all", "ready", "unready"));
   const [searchQuery, setSearchQuery] = useState("");
   const [viewMode, setViewMode] = useViewPreference<"cards" | "list">("agents.viewMode", "cards", preferenceValues("cards", "list"));
-  const [sessionCounts, setSessionCounts] = useState<Record<string, number>>(() => agentsCache.sessionCounts ?? {});
-  const [latestActivities, setLatestActivities] = useState<Partial<Record<Agent, string>>>(() => agentsCache.latestActivities ?? {});
-  const [sort, setSort] = useViewPreference<AgentSortKey>("agents.sort", "recent", preferenceValues("recent", "name", "sessions"));
-  const scrollRef = useViewScroll("agents.scroll", agentStatus !== null);
-  const showSkeleton = useLoadingDelay(agentStatus === null);
+  const [sessionCounts, setSessionCounts] = useState<Record<string, number>>(() => agentToolsCache.sessionCounts ?? {});
+  const [latestActivities, setLatestActivities] = useState<Partial<Record<AgentTool, string>>>(() => agentToolsCache.latestActivities ?? {});
+  const [sort, setSort] = useViewPreference<ToolSortKey>("agents.sort", "recent", preferenceValues("recent", "name", "sessions"));
+  const scrollRef = useViewScroll("agents.scroll", toolStatus !== null);
+  const showSkeleton = useLoadingDelay(toolStatus === null);
 
   const clearMessages = () => setError("");
 
   const reloadStatus = useCallback(async () => {
     try {
       const s = await api.getIngestionStatus();
-      agentsCache.status = s;
+      agentToolsCache.status = s;
       setStatus(s);
       setRunning(isTaskRunning(s));
     } catch (e) {
@@ -172,7 +172,7 @@ export default function AgentsView({
   const reloadSources = useCallback(async () => {
     try {
       const res = await api.listIngestSources();
-      agentsCache.sources = res;
+      agentToolsCache.sources = res;
       setSources(res);
     } catch (e) {
       setError(String(e));
@@ -181,9 +181,9 @@ export default function AgentsView({
 
   const reloadAgents = useCallback(async () => {
     try {
-      const res = await api.getAgentStatus();
-      agentsCache.agentStatus = res;
-      setAgentStatus(res);
+      const res = await api.getToolStatus();
+      agentToolsCache.toolStatus = res;
+      setToolStatus(res);
     } catch (e) {
       setError(String(e));
     }
@@ -192,11 +192,11 @@ export default function AgentsView({
   const reloadSessions = useCallback(async () => {
     try {
       const [counts, activities] = await Promise.all([
-        api.getSessionCountsByAgent(),
-        api.getAgentLatestActivities(),
+        api.getSessionCountsByTool(),
+        api.getToolLatestActivities(),
       ]);
-      agentsCache.sessionCounts = counts;
-      agentsCache.latestActivities = activities;
+      agentToolsCache.sessionCounts = counts;
+      agentToolsCache.latestActivities = activities;
       setSessionCounts(counts);
       setLatestActivities(activities);
     } catch (e) {
@@ -271,11 +271,11 @@ export default function AgentsView({
     }
   };
 
-  const handleScanAgent = async (agent: Agent) => {
+  const handleScanAgent = async (agent: AgentTool) => {
     clearMessages();
     const agentSources = sources.filter((s) => s.agent === agent);
     if (agentSources.length === 0) {
-      showToast(`${AGENT_LABELS[agent]} 暂无来源目录`);
+      showToast(`${AGENT_TOOL_LABELS[agent]} 暂无来源目录`);
       return;
     }
     setRunning(true);
@@ -283,7 +283,7 @@ export default function AgentsView({
       for (const source of agentSources) {
         await api.reconcileSource(source.id);
       }
-      showToast(`正在增量同步 ${AGENT_LABELS[agent]}…`);
+      showToast(`正在增量同步 ${AGENT_TOOL_LABELS[agent]}…`);
       await reloadStatus();
     } catch (e) {
       setRunning(false);
@@ -295,8 +295,8 @@ export default function AgentsView({
     clearMessages();
     setRunning(true);
     try {
-      if (initialAgent) {
-        for (const source of sources.filter((s) => s.agent === initialAgent)) await api.reconcileSource(source.id);
+      if (initialTool) {
+        for (const source of sources.filter((s) => s.agent === initialTool)) await api.reconcileSource(source.id);
       } else await api.reconcileAll();
       showToast("正在增量同步…");
       await reloadStatus();
@@ -306,13 +306,13 @@ export default function AgentsView({
     }
   };
 
-  const handlePickAndAddSource = async (agent: Agent, defaultPath?: string) => {
+  const handlePickAndAddSource = async (agent: AgentTool, defaultPath?: string) => {
     clearMessages();
     try {
       const picked = await openDialog({
         directory: true,
         multiple: false,
-        title: `选择 ${AGENT_LABELS[agent]} 会话来源目录`,
+        title: `选择 ${AGENT_TOOL_LABELS[agent]} 会话来源目录`,
         defaultPath: defaultPath || undefined,
       });
       if (!picked) return;
@@ -328,9 +328,9 @@ export default function AgentsView({
     }
   };
 
-  const surfaceCandidates = useMemo(() => ALL_AGENTS.filter((agent) => {
-    const entry = agentStatus?.[agent];
-    if (initialAgent) return agent === initialAgent;
+  const surfaceCandidates = useMemo(() => ALL_TOOLS.filter((agent) => {
+    const entry = toolStatus?.[agent];
+    if (initialTool) return agent === initialTool;
 
     if (surface === "tui") {
       return Boolean(entry?.terminal_cli);
@@ -339,21 +339,21 @@ export default function AgentsView({
       return Boolean(entry?.desktop_app);
     }
     return true;
-  }), [agentStatus, initialAgent, surface]);
+  }), [toolStatus, initialTool, surface]);
 
 
   const candidates = useMemo(() => {
     if (readinessFilter === "all") return surfaceCandidates;
     return surfaceCandidates.filter((agent) => {
-      const entry = agentStatus?.[agent];
+      const entry = toolStatus?.[agent];
       const isReady = surface === "tui"
         ? Boolean(entry?.detected)
         : Boolean(entry?.desktop_app_present);
       return readinessFilter === "ready" ? isReady : !isReady;
     });
-  }, [surfaceCandidates, readinessFilter, agentStatus, surface]);
+  }, [surfaceCandidates, readinessFilter, toolStatus, surface]);
 
-  const sorters: Record<AgentSortKey, (a: Agent, b: Agent) => number> = useMemo(() => ({
+  const sorters: Record<ToolSortKey, (a: AgentTool, b: AgentTool) => number> = useMemo(() => ({
     recent: (a, b) => {
       const timeA = latestActivities[a] ?? "";
       const timeB = latestActivities[b] ?? "";
@@ -366,46 +366,46 @@ export default function AgentsView({
         }
       }
       const readyA = Boolean(
-        surface === "tui" ? agentStatus?.[a]?.detected : agentStatus?.[a]?.desktop_app_present
+        surface === "tui" ? toolStatus?.[a]?.detected : toolStatus?.[a]?.desktop_app_present
       );
       const readyB = Boolean(
-        surface === "tui" ? agentStatus?.[b]?.detected : agentStatus?.[b]?.desktop_app_present
+        surface === "tui" ? toolStatus?.[b]?.detected : toolStatus?.[b]?.desktop_app_present
       );
       if (readyA !== readyB) return readyA ? -1 : 1;
-      return AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans");
+      return AGENT_TOOL_LABELS[a].localeCompare(AGENT_TOOL_LABELS[b], "zh-Hans");
     },
-    name: (a, b) => AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans"),
+    name: (a, b) => AGENT_TOOL_LABELS[a].localeCompare(AGENT_TOOL_LABELS[b], "zh-Hans"),
     sessions: (a, b) => {
       const countA = sessionCounts[a] ?? 0;
       const countB = sessionCounts[b] ?? 0;
       if (countA !== countB) return countB - countA;
       const readyA = Boolean(
-        surface === "tui" ? agentStatus?.[a]?.detected : agentStatus?.[a]?.desktop_app_present
+        surface === "tui" ? toolStatus?.[a]?.detected : toolStatus?.[a]?.desktop_app_present
       );
       const readyB = Boolean(
-        surface === "tui" ? agentStatus?.[b]?.detected : agentStatus?.[b]?.desktop_app_present
+        surface === "tui" ? toolStatus?.[b]?.detected : toolStatus?.[b]?.desktop_app_present
       );
       if (readyA !== readyB) return readyA ? -1 : 1;
-      return AGENT_LABELS[a].localeCompare(AGENT_LABELS[b], "zh-Hans");
+      return AGENT_TOOL_LABELS[a].localeCompare(AGENT_TOOL_LABELS[b], "zh-Hans");
     },
-  }), [latestActivities, agentStatus, sessionCounts, surface]);
+  }), [latestActivities, toolStatus, sessionCounts, surface]);
 
   const sortedCandidates = useMemo(() => {
     return [...candidates].sort(sorters[sort]);
   }, [candidates, sorters, sort]);
 
-  const search = useObjectMatches("agent", initialAgent ? "" : searchQuery, sortedCandidates, sortedCandidates);
+  const search = useObjectMatches("agent_tool", initialTool ? "" : searchQuery, sortedCandidates, sortedCandidates);
   const visibleAgents = search.pending || search.error ? [] : sortedCandidates.filter(agent => !search.ids || search.ids.has(agent));
 
-  if (initialAgent) {
-    const entry = agentStatus?.[initialAgent];
-    const agentSources = sources.filter((s) => s.agent === initialAgent);
-    const agentFormats = SESSION_FORMATS.filter((f) => f.agent === initialAgent);
+  if (initialTool) {
+    const entry = toolStatus?.[initialTool];
+    const agentSources = sources.filter((s) => s.agent === initialTool);
+    const agentFormats = SESSION_FORMATS.filter((f) => f.agent === initialTool);
 
     return (
       <DetailPanelProvider kind="agent"><div className="main agents-page agent-detail-page detail-page">
         <PageHeader
-          title={AGENT_LABELS[initialAgent]} icon={<AgentIcon agent={initialAgent} size={18} />}
+          title={AGENT_TOOL_LABELS[initialTool]} icon={<AgentToolIcon agent={initialTool} size={18} />}
           actions={
             <>
             <button
@@ -413,7 +413,7 @@ export default function AgentsView({
               disabled={running || agentSources.length === 0}
               onClick={handleScanAll}
               aria-label="增量同步全部"
-              title="增量同步当前 Agent 来源目录"
+              title="增量同步当前 运行工具 来源目录"
             >
               <Icon name="refresh" className={running ? "spinning" : ""} />
             </button>
@@ -428,13 +428,13 @@ export default function AgentsView({
             </div>
           )}
 
-          <AgentConfiguration
-            key={initialAgent}
-            agent={initialAgent}
+          <AgentToolConfiguration
+            key={initialTool}
+            agent={initialTool}
             entry={entry}
             reload={reloadAgents}
             navigate={navigate}
-            packagesSection={<AgentPackagesSection agent={initialAgent} navigate={navigate} />}
+            packagesSection={<AgentToolPackagesSection agent={initialTool} navigate={navigate} />}
             sourcesSection={
               <DetailSection sectionId="sources" label="历史会话来源" className="agent-detail-sources" title={<>
                   <Icon name="folder" />
@@ -453,7 +453,7 @@ export default function AgentsView({
                         borderTop: isMultiFormat && fIdx > 0 ? "1px solid var(--border-subtle)" : undefined,
                       }}
                     >
-                      {/* 多格式 Agent（如 Antigravity）展示格式区分标题 */}
+                      {/* 多格式 运行工具（如 Antigravity）展示格式区分标题 */}
                       {isMultiFormat && (
                         <div
                           className="row between"
@@ -498,7 +498,7 @@ export default function AgentsView({
                           className="btn small ghost"
                           style={{ marginTop: 8 }}
                           disabled={running}
-                          onClick={() => void handlePickAndAddSource(initialAgent, fmt.defaultPath)}
+                          onClick={() => void handlePickAndAddSource(initialTool, fmt.defaultPath)}
                         >
                           + 添加来源目录
                         </button>
@@ -539,7 +539,7 @@ export default function AgentsView({
     <div className="main board-page agents-page">
       <PageHeader
         title="运行工具" icon={<Icon name="agent" />}
-        navigation={<div className="settings-seg icon-seg" role="group" aria-label="Agent 运行界面">
+        navigation={<div className="settings-seg icon-seg" role="group" aria-label="运行工具运行界面">
               <button
                 className={surface === "tui" ? "on" : ""}
                 aria-pressed={surface === "tui"}
@@ -575,7 +575,7 @@ export default function AgentsView({
 
       <div className="board-scroll" ref={scrollRef}>
         {/* 顶部工具栏与筛选，使用 board-toolbar 固定吸顶 */}
-        <BoardToolbar searchLabel="搜索 Agent" placeholder="搜索 Agent…" query={searchQuery} onQueryChange={setSearchQuery} className="agents-board-toolbar">
+        <BoardToolbar searchLabel="搜索运行工具" placeholder="搜索运行工具…" query={searchQuery} onQueryChange={setSearchQuery} className="agents-board-toolbar">
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
               <div className="ws-control">
@@ -596,7 +596,7 @@ export default function AgentsView({
                 <span className="muted small">排序</span>
                 <CustomSelect
                   value={sort}
-                  onChange={(val) => setSort(val as AgentSortKey)}
+                  onChange={(val) => setSort(val as ToolSortKey)}
                   ariaLabel="排序"
                   options={[
                     { value: "recent", label: "最近活动" },
@@ -673,8 +673,8 @@ export default function AgentsView({
             </div>
           )}
 
-          {/* Agent 展示 */}
-          {agentStatus === null ? (
+          {/* 运行工具 展示 */}
+          {toolStatus === null ? (
             showSkeleton ? (
               viewMode === "cards" ? (
                 <div className="ws-grid board-grid" key="agents-skeleton-cards" role="status" aria-busy="true">
@@ -693,7 +693,7 @@ export default function AgentsView({
           ) : viewMode === "cards" ? (
             <div className="ws-grid board-grid" key="agents-cards">
               {visibleAgents.map((agent) => {
-                const entry = agentStatus?.[agent];
+                const entry = toolStatus?.[agent];
                 const agentSources = sources.filter((s) => s.agent === agent);
                 const hasCli = Boolean(entry?.terminal_cli);
                 const hasDesktop = Boolean(entry?.desktop_app);
@@ -705,20 +705,20 @@ export default function AgentsView({
                     className="ws-card full agent-card"
                     tabIndex={0}
                     role="button"
-                    aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
-                    onClick={() => navigate({ view: "agents", agent })}
+                    aria-label={`查看 ${AGENT_TOOL_LABELS[agent]} 运行工具详情`}
+                    onClick={() => navigate({ view: "agent-tools", agent })}
                     onKeyDown={(e) => {
                       if (e.target !== e.currentTarget) return;
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
-                        navigate({ view: "agents", agent });
+                        navigate({ view: "agent-tools", agent });
                       }
                     }}
                   >
                     <header className="ws-card-head">
-                      <h3 className="ws-card-title" title={AGENT_LABELS[agent]}>
-                        <AgentIcon agent={agent} size={18} />
-                        <span className="truncate">{AGENT_LABELS[agent]}</span>
+                      <h3 className="ws-card-title" title={AGENT_TOOL_LABELS[agent]}>
+                        <AgentToolIcon agent={agent} size={18} />
+                        <span className="truncate">{AGENT_TOOL_LABELS[agent]}</span>
                       </h3>
                       <div className="ws-card-side">
                         {hasCli && (
@@ -781,8 +781,8 @@ export default function AgentsView({
                           className="btn small ghost icon-button"
                           disabled={running}
                           onClick={() => void handleScanAgent(agent)}
-                          aria-label={`增量同步 ${AGENT_LABELS[agent]}`}
-                          title={`增量同步 ${AGENT_LABELS[agent]}`}
+                          aria-label={`增量同步 ${AGENT_TOOL_LABELS[agent]}`}
+                          title={`增量同步 ${AGENT_TOOL_LABELS[agent]}`}
                         >
                           <Icon name="refresh" />
                         </button>
@@ -791,8 +791,8 @@ export default function AgentsView({
                             type="button"
                             className="btn small ghost icon-button"
                             onClick={() => navigate({ view: "new-session", agent })}
-                            aria-label={`使用 ${AGENT_LABELS[agent]} 新建会话`}
-                            title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                            aria-label={`使用 ${AGENT_TOOL_LABELS[agent]} 新建会话`}
+                            title={`使用 ${AGENT_TOOL_LABELS[agent]} 新建会话`}
                           >
                             <Icon name="plus" />
                           </button>
@@ -806,7 +806,7 @@ export default function AgentsView({
           ) : (
             <div className="agent-list" key="agents-list">
               {visibleAgents.map((agent) => {
-                const entry = agentStatus?.[agent];
+                const entry = toolStatus?.[agent];
                 const agentSources = sources.filter((s) => s.agent === agent);
                 const hasCli = Boolean(entry?.terminal_cli);
                 const hasDesktop = Boolean(entry?.desktop_app);
@@ -816,17 +816,17 @@ export default function AgentsView({
                     key={`list-${agent}`}
                     id={`agent-card-${agent}`}
                     className="agent-list-row agent-card"
-                    aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
+                    aria-label={`查看 ${AGENT_TOOL_LABELS[agent]} 运行工具详情`}
                   >
                     <button
                       type="button"
                       className="agent-open"
-                      aria-label={`查看 ${AGENT_LABELS[agent]} Agent 详情`}
-                      onClick={() => navigate({ view: "agents", agent })}
+                      aria-label={`查看 ${AGENT_TOOL_LABELS[agent]} 运行工具详情`}
+                      onClick={() => navigate({ view: "agent-tools", agent })}
                     >
-                      <span className="agent-list-title" title={AGENT_LABELS[agent]}>
-                        <AgentIcon agent={agent} size={16} />
-                        <span>{AGENT_LABELS[agent]}</span>
+                      <span className="agent-list-title" title={AGENT_TOOL_LABELS[agent]}>
+                        <AgentToolIcon agent={agent} size={16} />
+                        <span>{AGENT_TOOL_LABELS[agent]}</span>
                         {hasCli && (
                           <span
                             className={`badge ${entry?.detected ? "accent" : ""}`}
@@ -873,8 +873,8 @@ export default function AgentsView({
                         className="btn small ghost icon-button"
                         disabled={running}
                         onClick={() => void handleScanAgent(agent)}
-                        aria-label={`增量同步 ${AGENT_LABELS[agent]}`}
-                        title={`增量同步 ${AGENT_LABELS[agent]}`}
+                        aria-label={`增量同步 ${AGENT_TOOL_LABELS[agent]}`}
+                        title={`增量同步 ${AGENT_TOOL_LABELS[agent]}`}
                       >
                         <Icon name="refresh" />
                       </button>
@@ -883,8 +883,8 @@ export default function AgentsView({
                           type="button"
                           className="btn small ghost icon-button"
                           onClick={() => navigate({ view: "new-session", agent })}
-                          aria-label={`使用 ${AGENT_LABELS[agent]} 新建会话`}
-                          title={`使用 ${AGENT_LABELS[agent]} 新建会话`}
+                          aria-label={`使用 ${AGENT_TOOL_LABELS[agent]} 新建会话`}
+                          title={`使用 ${AGENT_TOOL_LABELS[agent]} 新建会话`}
                         >
                           <Icon name="plus" />
                         </button>
@@ -897,9 +897,9 @@ export default function AgentsView({
           )}
 
           <ObjectSearchFeedback search={search} />
-          {agentStatus !== null && visibleAgents.length === 0 && !search.pending && !search.error && (
+          {toolStatus !== null && visibleAgents.length === 0 && !search.pending && !search.error && (
             <div className="card muted small" style={{ textAlign: "center", padding: "36px 20px" }}>
-              {searchQuery.trim() ? `未找到匹配「${searchQuery}」的 Agent。` : "未找到匹配的 Agent。"}
+              {searchQuery.trim() ? `未找到匹配「${searchQuery}」的 运行工具。` : "未找到匹配的 运行工具。"}
             </div>
           )}
         </div>

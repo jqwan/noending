@@ -83,7 +83,7 @@ it("forwards one native SGR mouse report per large wheel event with its modifier
   expect(send).toHaveBeenCalledTimes(3);
 });
 
-it("scrolls terminal history locally without sending input to the Agent", async () => {
+it("scrolls terminal history locally without sending input to the AgentTool", async () => {
   await write("history\r\n".repeat(40));
   wheel(-60);
   await waitFor(() => expect(term.buffer.active.viewportY).toBeLessThan(term.buffer.active.baseY));
@@ -121,7 +121,7 @@ it("uses the application's bracketed-paste mode for keyboard and native menu tex
   expect(paste.defaultPrevented).toBe(true);
 });
 
-it("keeps Ctrl+C as interrupt on macOS with a selection and passes Agent paste keys through", async () => {
+it("keeps Ctrl+C as interrupt on macOS with a selection and passes AgentTool paste keys through", async () => {
   const copy = vi.fn().mockResolvedValue(true);
   const readClipboard = vi.fn();
   stopKeyboard = connectTerminalKeyboard(term, { mac: true, writable: () => true, readClipboard, copy });

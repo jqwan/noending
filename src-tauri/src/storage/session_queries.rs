@@ -1,7 +1,7 @@
 //! List-specific projections: select only the fields displayed or filtered by
 //! the UI. Full entities remain available through get_session for detail/runtime.
 use super::{Db, SessionFilter};
-use crate::domain::{Agent, SessionListItem, SessionListScope};
+use crate::domain::{AgentTool, SessionListItem, SessionListScope};
 use crate::error::Result;
 use rusqlite::{Connection, Row};
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ impl Db {
         query_sessions(&self.read(), LIST_SELECT, &filter, limit, row_list_item)
     }
 
-    /// Counts used by Agent cards. No session bodies/metadata/associations are
+    /// Counts used by agent tool cards. No session bodies/metadata/associations are
     /// loaded, and counts have no preview limit.
     pub fn session_counts_by_agent(&self) -> Result<HashMap<String, i64>> {
         let conn = self.read();
@@ -80,7 +80,7 @@ impl Db {
         Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
     }
 
-    /// Latest session activity timestamp per agent for sorting in the Agent board.
+    /// Latest session activity timestamp per agent for sorting in the agent tool board.
     pub fn agent_latest_activities(&self) -> Result<HashMap<String, String>> {
         let conn = self.read();
         let mut statement = conn.prepare(
@@ -108,7 +108,7 @@ impl Db {
 pub(super) fn row_list_item(r: &Row<'_>) -> rusqlite::Result<SessionListItem> {
     Ok(SessionListItem {
         id: r.get("id")?,
-        agent: Agent::parse(&r.get::<_, String>("agent")?).unwrap_or(Agent::Codex),
+        agent: AgentTool::parse(&r.get::<_, String>("agent")?).unwrap_or(AgentTool::Codex),
         root_agent_session_id: r.get("root_agent_session_id")?,
         title: r.get("title")?,
         cwd: r.get("cwd")?,

@@ -5,10 +5,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./newSession.css";
 import { api } from "../../api";
 
-import { useAgentRuntime } from "../agents/useAgentRuntime";
+import { useAgentRuntime } from "../agent-tools/useAgentRuntime";
 import RuntimePopover from "./RuntimePopover";
 import { readNewSessionPreferences, updateNewSessionPreferences, lastNewSessionRuntime, rememberNewSessionRuntime } from "./newSessionPreferences";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import Icon from "../../components/Icon";
 import BrandLockup from "../../components/BrandLockup";
 import { showToast } from "../../components/Toast";
@@ -17,9 +17,9 @@ import { announceLaunch } from "../launcher/LaunchResultModal";
 import { useLaunchPreview } from "../launcher/useLaunchPreview";
 import { ellipsisPathMiddle } from "./SessionTable";
 import {
-  AGENT_LABELS,
-  type Agent,
-  type AgentStatusEntry,
+  AGENT_TOOL_LABELS,
+  type AgentTool,
+  type AgentToolStatusEntry,
   type AgentRuntimeOverrides,
   type ProjectCardData,
 } from "../../types";
@@ -28,8 +28,8 @@ import PageHeader from "../../layout/PageHeader";
 
 /** 新会话页：预览启动目录，打开终端时可携带首条消息。 */
 export type NewSessionViewProps = {
-  /** 单次指定 Agent，不修改全局默认设置。 */
-  agent?: Agent | null;
+  /** 单次指定 运行工具，不修改全局默认设置。 */
+  agent?: AgentTool | null;
   /** 预置选中的项目 ID；省略时恢复手动选择，首次使用选择默认工作目录所属项目。 */
   projectId?: string | null;
   archivePathId?: string;
@@ -39,18 +39,18 @@ export type NewSessionViewProps = {
 // Match the launcher's UTF-16 limit (String.length); keep long drafts intact.
 const INLINE_MESSAGE_LIMIT = 2000;
 
-/** 支持终端 CLI 启动的 Agent 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI Agent 不在此列） */
-const CLI_AGENTS: Agent[] = ["codex", "claude_code", "pi", "antigravity"];
+/** 支持终端 CLI 启动的 运行工具 集合（Qoder、WorkBuddy、DSH、ZCode 等纯桌面/无 CLI 运行工具 不在此列） */
+const CLI_AGENTS: AgentTool[] = ["codex", "claude_code", "pi", "antigravity"];
 
 export default function NewSessionView({
-  agent: initialAgent,
+  agent: initialTool,
   projectId: initialProjectId,
   archivePathId,
   navigate,
 }: NewSessionViewProps) {
   const allowedAgents = CLI_AGENTS;
   const [savedPreferences] = useState(readNewSessionPreferences);
-  const [defaultAgent, setDefaultAgent] = useState<Agent | null>(null);
+  const [defaultTool, setDefaultTool] = useState<AgentTool | null>(null);
   const [projects, setProjects] = useState<ProjectCardData[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     initialProjectId && initialProjectId !== "none" ? initialProjectId : ""
@@ -58,18 +58,18 @@ export default function NewSessionView({
   /** 这个项目是从默认工作目录推出来的，不是用户挑的。标签要认这层"默认"，
    *  否则用户会以为自己选过它。 */
   const [projectDefaulted, setProjectDefaulted] = useState(false);
-  const [agentStatus, setAgentStatus] = useState<Record<string, AgentStatusEntry> | null>(null);
-  const [selectedAgent, setSelectedAgent] = useState<Agent>(() => {
-    if (initialAgent && allowedAgents.includes(initialAgent)) {
-      return initialAgent;
+  const [toolStatus, setToolStatus] = useState<Record<string, AgentToolStatusEntry> | null>(null);
+  const [selectedTool, setSelectedTool] = useState<AgentTool>(() => {
+    if (initialTool && allowedAgents.includes(initialTool)) {
+      return initialTool;
     }
     return savedPreferences.agent && allowedAgents.includes(savedPreferences.agent) ? savedPreferences.agent : "codex";
   });
-  const [runtimeChoice, setRuntimeChoice] = useState(() => ({ agent: selectedAgent, value: lastNewSessionRuntime(selectedAgent) }));
-  const runtimeOverride = useMemo(() => runtimeChoice.agent === selectedAgent ? runtimeChoice.value
-    : lastNewSessionRuntime(selectedAgent), [runtimeChoice, selectedAgent]);
-  const setRuntimeOverride = (value: AgentRuntimeOverrides) => setRuntimeChoice({ agent: selectedAgent, value });
-  const runtime = useAgentRuntime(selectedAgent, true);
+  const [runtimeChoice, setRuntimeChoice] = useState(() => ({ agent: selectedTool, value: lastNewSessionRuntime(selectedTool) }));
+  const runtimeOverride = useMemo(() => runtimeChoice.agent === selectedTool ? runtimeChoice.value
+    : lastNewSessionRuntime(selectedTool), [runtimeChoice, selectedTool]);
+  const setRuntimeOverride = (value: AgentRuntimeOverrides) => setRuntimeChoice({ agent: selectedTool, value });
+  const runtime = useAgentRuntime(selectedTool, true);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -139,7 +139,7 @@ export default function NewSessionView({
         if (archivePathId) {
           const path = archiveProject?.workspace_paths.find(path => path.id === archivePathId && path.exists);
           if (!entryProject || archiveProject?.project.visibility !== "normal"
-            || archiveProject.assistant?.workspace_path_id !== archivePathId || !path) {
+            || archiveProject.agent?.workspace_path_id !== archivePathId || !path) {
             throw new Error("智能体档案目录不可用，请先在详情页修复");
           }
           setArchiveDirectory(path.canonical_path);
@@ -165,8 +165,8 @@ export default function NewSessionView({
         }
         if (cancelled) return;
         setProjects(cards);
-        if (initialAgent && allowedAgents.includes(initialAgent) && !agentChanged.current) {
-          updateNewSessionPreferences(current => ({ ...current, agent: initialAgent }));
+        if (initialTool && allowedAgents.includes(initialTool) && !agentChanged.current) {
+          updateNewSessionPreferences(current => ({ ...current, agent: initialTool }));
         }
         if (!projectChanged.current) {
           setSelectedProjectId(projectId);
@@ -196,45 +196,45 @@ export default function NewSessionView({
       });
 
     api
-      .getAgentStatus()
-      .then((status) => { if (!cancelled) setAgentStatus(status); })
+      .getToolStatus()
+      .then((status) => { if (!cancelled) setToolStatus(status); })
       .catch(console.error);
 
-    if (!initialAgent) {
+    if (!initialTool) {
       api
-        .getDefaultAgent()
+        .getDefaultTool()
         .then((def) => {
           if (!cancelled && def && allowedAgents.includes(def)) {
-            setDefaultAgent(def);
+            setDefaultTool(def);
             if (!agentChanged.current && (!savedPreferences.agent || !allowedAgents.includes(savedPreferences.agent))) {
-              setSelectedAgent(def);
+              setSelectedTool(def);
             }
           }
         })
         .catch(console.error);
     }
     return () => { cancelled = true; };
-  }, [initialAgent, initialProjectId, archivePathId, projectLoadAttempt]);
+  }, [initialTool, initialProjectId, archivePathId, projectLoadAttempt]);
 
-  const cliAgents = agentStatus
-    ? (Object.keys(AGENT_LABELS) as Agent[]).filter(
-        (a) => allowedAgents.includes(a) && agentStatus[a]?.terminal_cli && agentStatus[a]?.detected && agentStatus[a]?.launch_enabled
+  const cliAgents = toolStatus
+    ? (Object.keys(AGENT_TOOL_LABELS) as AgentTool[]).filter(
+        (a) => allowedAgents.includes(a) && toolStatus[a]?.terminal_cli && toolStatus[a]?.detected && toolStatus[a]?.launch_enabled
       )
     : allowedAgents;
 
-  const agentAvailable = allowedAgents.includes(selectedAgent) && (!agentStatus || Boolean(agentStatus[selectedAgent]?.terminal_cli && agentStatus[selectedAgent]?.detected && agentStatus[selectedAgent]?.launch_enabled));
+  const agentAvailable = allowedAgents.includes(selectedTool) && (!toolStatus || Boolean(toolStatus[selectedTool]?.terminal_cli && toolStatus[selectedTool]?.detected && toolStatus[selectedTool]?.launch_enabled));
   // 「一个都没探到」和「这个被关了」是两种处境，下一步也不同：前者要去装，后者要去开。
-  const anyAgentDetected = Boolean(agentStatus
-    && allowedAgents.some(a => agentStatus[a]?.terminal_cli && agentStatus[a]?.detected));
+  const anyAgentDetected = Boolean(toolStatus
+    && allowedAgents.some(a => toolStatus[a]?.terminal_cli && toolStatus[a]?.detected));
   useEffect(() => {
-    if (!agentStatus || !cliAgents.length || (agentChanged.current && agentAvailable)) return;
-    const preferred = [initialAgent, savedPreferences.agent, defaultAgent, cliAgents[0]]
-      .find((candidate): candidate is Agent => Boolean(candidate && cliAgents.includes(candidate)));
-    if (preferred && preferred !== selectedAgent) {
-      setSelectedAgent(preferred);
+    if (!toolStatus || !cliAgents.length || (agentChanged.current && agentAvailable)) return;
+    const preferred = [initialTool, savedPreferences.agent, defaultTool, cliAgents[0]]
+      .find((candidate): candidate is AgentTool => Boolean(candidate && cliAgents.includes(candidate)));
+    if (preferred && preferred !== selectedTool) {
+      setSelectedTool(preferred);
       setRuntimeChoice({ agent: preferred, value: lastNewSessionRuntime(preferred) });
     }
-  }, [agentStatus, agentAvailable, selectedAgent, initialAgent, savedPreferences.agent, defaultAgent, cliAgents.join(",")]);
+  }, [toolStatus, agentAvailable, selectedTool, initialTool, savedPreferences.agent, defaultTool, cliAgents.join(",")]);
 
   const selectedProject = projects.find((p) => p.id === selectedProjectId) ?? null;
 
@@ -328,9 +328,9 @@ export default function NewSessionView({
   // （`CwdSource::DefaultWorkspace`，不存在时还有 `Unresolved`），并且这个决定本来就
   // 要向用户说明。前端再拦一道就等于否定了标签里那句「默认工作目录」——所以这里不拦。
   const loadLaunchPreview = useCallback(async () => {
-    if (!selectedAgent || !agentAvailable || !archiveReady) return null;
-    return api.previewNewSession(selectedAgent, launchCwd, runtimeOverride);
-  }, [selectedAgent, launchCwd, runtimeOverride, agentAvailable, archiveReady]);
+    if (!selectedTool || !agentAvailable || !archiveReady) return null;
+    return api.previewNewSession(selectedTool, launchCwd, runtimeOverride);
+  }, [selectedTool, launchCwd, runtimeOverride, agentAvailable, archiveReady]);
 
   const { preview, preparing, error, setError, refresh, clear: clearPreview } =
     useLaunchPreview(loadLaunchPreview);
@@ -385,13 +385,13 @@ export default function NewSessionView({
   };
 
 
-  const handleAgentChange = (next: Agent) => {
+  const handleAgentChange = (next: AgentTool) => {
     agentChanged.current = true;
     updateNewSessionPreferences(current => ({ ...current, agent: next }));
-    if (next === selectedAgent) return;
+    if (next === selectedTool) return;
     clearPreview();
     setRuntimeChoice({ agent: next, value: lastNewSessionRuntime(next) });
-    setSelectedAgent(next);
+    setSelectedTool(next);
   };
 
   const handleMessageChange = (next: string) => {
@@ -408,7 +408,7 @@ export default function NewSessionView({
   const hasMessage = Boolean(message.trim());
   const messageUsesFile = message.length > INLINE_MESSAGE_LIMIT;
   const launchLabel = hasMessage ? "发送" : "打开终端";
-  const canSend = Boolean(selectedAgent && agentAvailable && archiveReady && preview && !preparing && !busy);
+  const canSend = Boolean(selectedTool && agentAvailable && archiveReady && preview && !preparing && !busy);
 
   /** 这一发落在哪个目录，必须说出来。后端 `CwdResolution` 分四档并备好 note，
    *  但对 New 流程而言 `default_workspace` 那档 `fallback` 是 false、`note` 是空——
@@ -433,7 +433,7 @@ export default function NewSessionView({
     setBusy(true);
     setError("");
     try {
-      const r = await api.launchEmbeddedNew(selectedAgent, launchCwd, hasMessage ? message : undefined, runtimeOverride);
+      const r = await api.launchEmbeddedNew(selectedTool, launchCwd, hasMessage ? message : undefined, runtimeOverride);
       announceLaunch("启动", r);
       if (r.terminal_id) {
         updateNewSessionPreferences(current => {
@@ -467,7 +467,7 @@ export default function NewSessionView({
   const currentDir = launchCwd || "";
   const dirLabel = currentDir ? ellipsisPathMiddle(currentDir, 28) : "默认工作目录";
 
-  const agentLabel = AGENT_LABELS[selectedAgent] ?? selectedAgent;
+  const agentLabel = AGENT_TOOL_LABELS[selectedTool] ?? selectedTool;
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
@@ -682,7 +682,7 @@ export default function NewSessionView({
                 <button
                   type="button"
                   className="new-session-notice-action"
-                  onClick={() => navigate({ view: "agents" })}
+                  onClick={() => navigate({ view: "agent-tools" })}
                 >
                   前往运行工具设置
                 </button>
@@ -736,21 +736,21 @@ export default function NewSessionView({
                   aria-label={`运行工具：${agentLabel}`}
                   title={agentLabel}
                 >
-                  <AgentIcon agent={selectedAgent} size={16} />
+                  <AgentToolIcon agent={selectedTool} size={16} />
                   <span className="picker-control-label">{agentLabel}</span>
                   <Icon name="chevronDown" className="picker-control-chevron" />
                   <select
                     aria-label="运行工具"
                     title={agentLabel}
-                    value={selectedAgent}
-                    onChange={(e) => handleAgentChange(e.target.value as Agent)}
+                    value={selectedTool}
+                    onChange={(e) => handleAgentChange(e.target.value as AgentTool)}
                     disabled={busy}
                     tabIndex={-1}
                   >
                     {cliAgents.map((a) => (
                       <option key={a} value={a}>
-                        {AGENT_LABELS[a]}
-                        {agentStatus && !agentStatus[a]?.detected ? " (未检测到 TUI)" : ""}
+                        {AGENT_TOOL_LABELS[a]}
+                        {toolStatus && !toolStatus[a]?.detected ? " (未检测到 TUI)" : ""}
                       </option>
                     ))}
                   </select>
@@ -759,8 +759,8 @@ export default function NewSessionView({
                     <PopupMenu className="picker-menu dropup" role="menu" aria-label="运行工具列表" onDismiss={() => setAgentMenuOpen(false)}>
                       <div className="picker-menu-list">
                         {cliAgents.map((a) => {
-                          const isSelected = a === selectedAgent;
-                          const notDetected = agentStatus && !agentStatus[a]?.detected;
+                          const isSelected = a === selectedTool;
+                          const notDetected = toolStatus && !toolStatus[a]?.detected;
                           return (
                             <PopupMenuItem selected={isSelected}
                               key={a}
@@ -770,13 +770,13 @@ export default function NewSessionView({
                                 handleAgentChange(a);
                                 setAgentMenuOpen(false);
                               }}
-                              title={AGENT_LABELS[a]}
+                              title={AGENT_TOOL_LABELS[a]}
                             >
                               <span className="menu-item-icon">
-                                <AgentIcon agent={a} size={16} />
+                                <AgentToolIcon agent={a} size={16} />
                               </span>
                               <span className="menu-item-label">
-                                {AGENT_LABELS[a]}
+                                {AGENT_TOOL_LABELS[a]}
                                 {notDetected && <span className="menu-item-extra muted"> (未检测到 TUI)</span>}
                               </span>
 
@@ -788,14 +788,14 @@ export default function NewSessionView({
                   )}
                 </div>
                 <RuntimePopover
-                  agent={selectedAgent}
+                  agent={selectedTool}
                   runtime={runtime}
                   value={runtimeOverride}
                   disabled={busy}
                   onChange={(v) => {
                     clearPreview();
                     setRuntimeOverride(v);
-                    rememberNewSessionRuntime(selectedAgent, v);
+                    rememberNewSessionRuntime(selectedTool, v);
                   }}
                 />
               </div>

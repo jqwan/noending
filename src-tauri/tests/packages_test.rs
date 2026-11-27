@@ -1,4 +1,4 @@
-//! Plugin package discovery contracts, isolated from the user's real Agent
+//! Plugin package discovery contracts, isolated from the user's real AgentTool
 //! homes. Native registry files are the only install evidence; the tests fix
 //! their shapes so silent upstream format changes fail here first.
 use noending_lib::{
@@ -106,7 +106,7 @@ fn codex_reads_the_config_registry_and_resolves_single_version_roots() {
     // Bundled plugins can be toggled natively but not removed...
     assert!(!chrome.capabilities.uninstall && chrome.capabilities.toggle);
     // ...and the toggle actually works: bundled markets are ordinary
-    // config.toml entries, writing `enabled` is the Agent's own switch.
+    // config.toml entries, writing `enabled` is the AgentTool's own switch.
     noending_lib::packages::set_enabled(&inventory, &chrome.id, &chrome.revision, true).unwrap();
     let raw = fs::read_to_string(f.root.join("home/.codex/config.toml")).unwrap();
     let doc = raw.parse::<toml_edit::Document>().unwrap();
@@ -163,7 +163,7 @@ fn claude_registry_is_the_install_evidence_and_settings_hold_the_toggle() {
         packages::ToggleState::Unset
     );
 
-    // Project/local installs stay Agent-managed and are not discovered.
+    // Project/local installs stay AgentTool-managed and are not discovered.
     assert!(inventory
         .packages
         .iter()
@@ -299,7 +299,7 @@ fn workbuddy_discovery_is_readonly_and_marks_builtin_market() {
     let inventory = f.discover();
     let find_skills = entry(&inventory, "workbuddy", "find-skills");
     assert_eq!(find_skills.origin, Origin::Market);
-    // No enablement evidence in this registry: the Agent owns the state.
+    // No enablement evidence in this registry: the AgentTool owns the state.
     assert_eq!(find_skills.scopes[0].state, packages::ToggleState::Unknown);
     assert_eq!(
         find_skills.capabilities,
@@ -345,28 +345,28 @@ fn detail_scans_package_contents_for_the_overview() {
 
 #[test]
 fn cli_args_pin_the_native_commands_per_agent() {
-    use noending_lib::domain::Agent;
+    use noending_lib::domain::AgentTool;
     use noending_lib::packages::{cli_args, PackageAction};
     let install = |agent, target| cli_args(agent, PackageAction::Install, target);
     let uninstall = |agent, target| cli_args(agent, PackageAction::Uninstall, target);
     // Install args exist only for local-directory agents; NoEnding never
     // triggers a marketplace download through Codex/Claude selectors.
-    assert!(install(Agent::Codex, "review@openai-curated").is_err());
-    assert!(install(Agent::ClaudeCode, "review@claude-plugins-official").is_err());
+    assert!(install(AgentTool::Codex, "review@openai-curated").is_err());
+    assert!(install(AgentTool::ClaudeCode, "review@claude-plugins-official").is_err());
     assert_eq!(
-        install(Agent::Pi, "./local-toolkit").unwrap(),
+        install(AgentTool::Pi, "./local-toolkit").unwrap(),
         ["install", "./local-toolkit"]
     );
     assert_eq!(
-        install(Agent::Antigravity, "./toolkit").unwrap(),
+        install(AgentTool::Antigravity, "./toolkit").unwrap(),
         ["plugin", "install", "./toolkit"]
     );
     assert_eq!(
-        uninstall(Agent::Codex, "review@openai-curated").unwrap(),
+        uninstall(AgentTool::Codex, "review@openai-curated").unwrap(),
         ["plugin", "remove", "review@openai-curated", "--json"]
     );
     assert_eq!(
-        uninstall(Agent::ClaudeCode, "review@claude-plugins-official").unwrap(),
+        uninstall(AgentTool::ClaudeCode, "review@claude-plugins-official").unwrap(),
         [
             "plugin",
             "uninstall",
@@ -375,10 +375,10 @@ fn cli_args_pin_the_native_commands_per_agent() {
             "user"
         ]
     );
-    assert!(cli_args(Agent::WorkBuddy, PackageAction::Install, "x").is_err());
-    assert!(install(Agent::Pi, "-rm-rf").is_err());
-    assert!(install(Agent::Pi, "").is_err());
-    assert!(install(Agent::Pi, "a\nb").is_err());
+    assert!(cli_args(AgentTool::WorkBuddy, PackageAction::Install, "x").is_err());
+    assert!(install(AgentTool::Pi, "-rm-rf").is_err());
+    assert!(install(AgentTool::Pi, "").is_err());
+    assert!(install(AgentTool::Pi, "a\nb").is_err());
 }
 
 #[test]
@@ -414,33 +414,33 @@ fn toggle_writes_the_native_flag_and_preserves_unrelated_config() {
 
 #[test]
 fn claude_and_antigravity_toggles_map_to_native_cli_commands() {
-    use noending_lib::domain::Agent;
+    use noending_lib::domain::AgentTool;
     use noending_lib::packages::{cli_args, PackageAction};
     // Claude and Antigravity enable/disable ride the Agents' own CLI
     // commands; NoEnding never hand-writes their settings files. Args are
     // pinned here as a pure contract — running set_enabled in a test would
     // launch the real binary (see the "mixed" pollution incident).
     assert_eq!(
-        cli_args(Agent::ClaudeCode, PackageAction::Enable, "review@m").unwrap(),
+        cli_args(AgentTool::ClaudeCode, PackageAction::Enable, "review@m").unwrap(),
         ["plugin", "enable", "review@m", "--json"]
     );
     assert_eq!(
-        cli_args(Agent::ClaudeCode, PackageAction::Disable, "review@m").unwrap(),
+        cli_args(AgentTool::ClaudeCode, PackageAction::Disable, "review@m").unwrap(),
         ["plugin", "disable", "review@m", "--json"]
     );
     // agy keys enable/disable on the bare plugin name (its own list output).
     assert_eq!(
-        cli_args(Agent::Antigravity, PackageAction::Enable, "review").unwrap(),
+        cli_args(AgentTool::Antigravity, PackageAction::Enable, "review").unwrap(),
         ["plugin", "enable", "review"]
     );
     assert_eq!(
-        cli_args(Agent::Antigravity, PackageAction::Disable, "review").unwrap(),
+        cli_args(AgentTool::Antigravity, PackageAction::Disable, "review").unwrap(),
         ["plugin", "disable", "review"]
     );
     // Codex has no native toggle subcommand; the mapping refuses instead of
     // silently writing files behind a fake command.
-    assert!(cli_args(Agent::Codex, PackageAction::Enable, "x@m").is_err());
-    assert!(cli_args(Agent::Pi, PackageAction::Enable, "x").is_err());
+    assert!(cli_args(AgentTool::Codex, PackageAction::Enable, "x@m").is_err());
+    assert!(cli_args(AgentTool::Pi, PackageAction::Enable, "x").is_err());
 }
 
 #[test]
@@ -457,7 +457,7 @@ fn import_preview_lists_one_option_per_installable_manifest() {
     assert_eq!(option.name, "toolkit");
     assert_eq!(option.description, "Preview me");
     assert_eq!(option.manifest, "plugin.json");
-    assert_eq!(option.agent, noending_lib::domain::Agent::Antigravity);
+    assert_eq!(option.agent, noending_lib::domain::AgentTool::Antigravity);
 
     // package.json at the root is a Pi package.
     let pi_dir = f.dir("external/pi-tool");
@@ -468,7 +468,7 @@ fn import_preview_lists_one_option_per_installable_manifest() {
             .unwrap()
             .options[0]
             .agent,
-        noending_lib::domain::Agent::Pi
+        noending_lib::domain::AgentTool::Pi
     );
 
     // Recognized formats NoEnding cannot install from a directory are named
@@ -508,12 +508,12 @@ fn import_preview_lists_one_option_per_installable_manifest() {
     assert_eq!(by_manifest.len(), 2);
     assert_eq!(
         by_manifest["plugin.json"].agent,
-        noending_lib::domain::Agent::Antigravity
+        noending_lib::domain::AgentTool::Antigravity
     );
     assert_eq!(by_manifest["plugin.json"].name, "a-plugin");
     assert_eq!(
         by_manifest["package.json"].agent,
-        noending_lib::domain::Agent::Pi
+        noending_lib::domain::AgentTool::Pi
     );
     assert_eq!(by_manifest["package.json"].name, "a-package");
 
@@ -531,7 +531,10 @@ fn import_preview_lists_one_option_per_installable_manifest() {
     f.dir("external/npm-of-claude/skills");
     let preview = packages::preview_import(npm_of_claude.to_str().unwrap()).unwrap();
     assert_eq!(preview.options.len(), 1);
-    assert_eq!(preview.options[0].agent, noending_lib::domain::Agent::Pi);
+    assert_eq!(
+        preview.options[0].agent,
+        noending_lib::domain::AgentTool::Pi
+    );
     assert_eq!(preview.options[0].manifest, "package.json");
     assert_eq!(preview.options[0].name, "pi-side");
 
@@ -554,7 +557,10 @@ fn package_json_options_require_real_pi_or_dsh_evidence() {
     f.dir("external/pi-only/skills/greet");
     let preview = packages::preview_import(plain.to_str().unwrap()).unwrap();
     assert_eq!(preview.options.len(), 1);
-    assert_eq!(preview.options[0].agent, noending_lib::domain::Agent::Pi);
+    assert_eq!(
+        preview.options[0].agent,
+        noending_lib::domain::AgentTool::Pi
+    );
 
     // The official DSH marker (dsh-app-boot: dsh.bundle) WITHOUT Pi
     // resources yields the DSH option alone — installing a bundle into Pi
@@ -566,15 +572,18 @@ fn package_json_options_require_real_pi_or_dsh_evidence() {
     );
     let preview = packages::preview_import(bundle.to_str().unwrap()).unwrap();
     assert_eq!(preview.options.len(), 1);
-    assert_eq!(preview.options[0].agent, noending_lib::domain::Agent::Dsh);
+    assert_eq!(
+        preview.options[0].agent,
+        noending_lib::domain::AgentTool::Dsh
+    );
 
     // A genuinely dual-purpose package offers both.
     f.dir("external/dsh-bundle/skills");
     let preview = packages::preview_import(bundle.to_str().unwrap()).unwrap();
-    let agents: Vec<noending_lib::domain::Agent> =
+    let agents: Vec<noending_lib::domain::AgentTool> =
         preview.options.iter().map(|o| o.agent).collect();
-    assert!(agents.contains(&noending_lib::domain::Agent::Pi));
-    assert!(agents.contains(&noending_lib::domain::Agent::Dsh));
+    assert!(agents.contains(&noending_lib::domain::AgentTool::Pi));
+    assert!(agents.contains(&noending_lib::domain::AgentTool::Dsh));
 
     // A dsh key that is NOT a bundle marker (profile tooling) does not
     // count; a package.json with neither evidence is not installable.
@@ -588,7 +597,7 @@ fn package_json_options_require_real_pi_or_dsh_evidence() {
     assert!(preview
         .options
         .iter()
-        .all(|o| o.agent != noending_lib::domain::Agent::Dsh));
+        .all(|o| o.agent != noending_lib::domain::AgentTool::Dsh));
     let bare = f.dir("external/bare-npm");
     f.write("external/bare-npm/package.json", r#"{"name": "bare"}"#);
     let message = format!(
@@ -601,11 +610,11 @@ fn package_json_options_require_real_pi_or_dsh_evidence() {
 
 #[test]
 fn dsh_install_and_uninstall_pin_the_desktop_plugin_command() {
-    use noending_lib::domain::Agent;
+    use noending_lib::domain::AgentTool;
     use noending_lib::packages::{cli_args, PackageAction};
 
     assert_eq!(
-        cli_args(Agent::Dsh, PackageAction::Install, "/external/bundle").unwrap(),
+        cli_args(AgentTool::Dsh, PackageAction::Install, "/external/bundle").unwrap(),
         [
             "plugin",
             "--profile",
@@ -616,7 +625,7 @@ fn dsh_install_and_uninstall_pin_the_desktop_plugin_command() {
     );
     assert_eq!(
         cli_args(
-            Agent::Dsh,
+            AgentTool::Dsh,
             PackageAction::Uninstall,
             "@deepseek-ai/dsh-base"
         )
@@ -635,7 +644,7 @@ fn dsh_install_and_uninstall_pin_the_desktop_plugin_command() {
     let f = Fixture::new();
     let plain = f.dir("external/pi-only");
     f.write("external/pi-only/package.json", r#"{"name": "pi-only"}"#);
-    assert!(packages::install_local(plain.to_str().unwrap(), &[Agent::Dsh]).is_err());
+    assert!(packages::install_local(plain.to_str().unwrap(), &[AgentTool::Dsh]).is_err());
 }
 
 #[test]
@@ -654,7 +663,7 @@ fn import_preview_enumerates_local_marketplace_plugins() {
     assert!(matches!(preview.kind, packages::ImportKind::Marketplace));
     assert_eq!(preview.options.len(), 1);
     let option = &preview.options[0];
-    assert_eq!(option.agent, noending_lib::domain::Agent::ClaudeCode);
+    assert_eq!(option.agent, noending_lib::domain::AgentTool::ClaudeCode);
     assert_eq!(option.name, "my-claude-market");
     assert_eq!(option.manifest, ".claude-plugin/marketplace.json");
     let names: Vec<&str> = option.plugins.iter().map(|p| p.name.as_str()).collect();
@@ -690,7 +699,7 @@ fn import_preview_enumerates_local_marketplace_plugins() {
     assert!(preview
         .options
         .iter()
-        .all(|option| option.agent != noending_lib::domain::Agent::Antigravity));
+        .all(|option| option.agent != noending_lib::domain::AgentTool::Antigravity));
 }
 
 #[test]
@@ -704,7 +713,7 @@ fn marketplace_commands_and_selection_validation_are_pure() {
     );
     assert_eq!(
         marketplace_install_args(
-            noending_lib::domain::Agent::ClaudeCode,
+            noending_lib::domain::AgentTool::ClaudeCode,
             "review",
             "/external/my-market",
             "my-market"
@@ -721,7 +730,7 @@ fn marketplace_commands_and_selection_validation_are_pure() {
     );
     assert_eq!(
         marketplace_install_args(
-            noending_lib::domain::Agent::Codex,
+            noending_lib::domain::AgentTool::Codex,
             "review",
             "/external/my-market",
             "my-market"
@@ -729,8 +738,10 @@ fn marketplace_commands_and_selection_validation_are_pure() {
         .unwrap(),
         ["plugin", "add", "review@my-market"]
     );
-    assert!(marketplace_install_args(noending_lib::domain::Agent::Pi, "x", "/p", "m").is_err());
-    assert!(marketplace_install_args(noending_lib::domain::Agent::Codex, "-x", "/p", "m").is_err());
+    assert!(marketplace_install_args(noending_lib::domain::AgentTool::Pi, "x", "/p", "m").is_err());
+    assert!(
+        marketplace_install_args(noending_lib::domain::AgentTool::Codex, "-x", "/p", "m").is_err()
+    );
 
     // Selection validation refuses unknown plugins, empty selections and
     // agents whose marketplace format is absent — all before any CLI runs.
@@ -743,7 +754,7 @@ fn marketplace_commands_and_selection_validation_are_pure() {
     let unknown = packages::install_local_marketplace(
         market.to_str().unwrap(),
         &[(
-            noending_lib::domain::Agent::ClaudeCode,
+            noending_lib::domain::AgentTool::ClaudeCode,
             vec!["ghost".into()],
         )],
     );
@@ -752,12 +763,15 @@ fn marketplace_commands_and_selection_validation_are_pure() {
     assert!(packages::install_local_marketplace(market.to_str().unwrap(), &[]).is_err());
     assert!(packages::install_local_marketplace(
         market.to_str().unwrap(),
-        &[(noending_lib::domain::Agent::ClaudeCode, vec![])]
+        &[(noending_lib::domain::AgentTool::ClaudeCode, vec![])]
     )
     .is_err());
     assert!(packages::install_local_marketplace(
         market.to_str().unwrap(),
-        &[(noending_lib::domain::Agent::Codex, vec!["review".into()])]
+        &[(
+            noending_lib::domain::AgentTool::Codex,
+            vec!["review".into()]
+        )]
     )
     .is_err());
     // A manifest without a name cannot be registered.
@@ -768,7 +782,10 @@ fn marketplace_commands_and_selection_validation_are_pure() {
     );
     assert!(packages::install_local_marketplace(
         anon.to_str().unwrap(),
-        &[(noending_lib::domain::Agent::ClaudeCode, vec!["x".into()])]
+        &[(
+            noending_lib::domain::AgentTool::ClaudeCode,
+            vec!["x".into()]
+        )]
     )
     .is_err());
 }
@@ -1020,7 +1037,7 @@ cp "$DSH_HOME/after.json" "$DSH_HOME/profiles/desktop/package.json"
     f.roots.dsh = Roots::current().unwrap().dsh;
     assert_eq!(f.roots.dsh, cwd.join("custom dsh home"));
     assert_eq!(
-        noending_lib::platform::paths::resolve_agent_data_dir(noending_lib::domain::Agent::Dsh),
+        noending_lib::platform::paths::resolve_agent_data_dir(noending_lib::domain::AgentTool::Dsh),
         Some(f.roots.dsh.clone())
     );
     let default_manifest = f.write(

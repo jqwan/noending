@@ -46,13 +46,13 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, replay_cursor_update, AgentCommand, DesktopResume, DiscoveredMember,
+    ms_epoch_to_rfc3339, replay_cursor_update, AgentToolCommand, DesktopResume, DiscoveredMember,
     DiscoveredMemberKind, ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute,
     SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
-use crate::platform::exec_resolver::AgentInstallation;
+use crate::platform::exec_resolver::AgentToolInstallation;
 
 pub struct DshAdapter;
 
@@ -245,7 +245,7 @@ fn parsed_line(v: &Value, is_root: bool, seed_length: i64) -> Option<ParsedLine>
                 return None;
             }
             if counterpart_id.is_some() {
-                // Agent-to-agent relay: never conversation.
+                // agent tool-to-agent relay: never conversation.
                 return None;
             }
             // `source.kind` is the row's authoritative author. A non-user
@@ -385,7 +385,7 @@ impl DshAdapter {
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::Dsh,
+            agent: AgentTool::Dsh,
             source_member_id: id.to_string(),
             kind,
             parent_source_member_id: parent.clone(),
@@ -427,8 +427,8 @@ impl DshAdapter {
 }
 
 impl crate::adapters::AgentAdapter for DshAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Dsh
+    fn tool(&self) -> AgentTool {
+        AgentTool::Dsh
     }
 
     // Plugin management can resolve `dsh`, but terminal sessions require a
@@ -439,7 +439,7 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
     /// Session detection stays unavailable: starting `dsh` requires a profile
     /// under `$DSH_HOME/profiles` that only the user knows.
-    fn detect(&self) -> Option<AgentInstallation> {
+    fn detect(&self) -> Option<AgentToolInstallation> {
         None
     }
 
@@ -584,30 +584,30 @@ impl crate::adapters::AgentAdapter for DshAdapter {
 
     fn build_new_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
     }
 
     fn build_resume_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
     }
 
     fn build_exec_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("dsh 需要指定 profile，NoEnding 无法替用户选择"))
     }
 }
@@ -673,7 +673,7 @@ mod tests {
     fn session_at(path: &Path) -> Session {
         Session {
             id: "sess-dsh".into(),
-            agent: Agent::Dsh,
+            agent: AgentTool::Dsh,
             root_agent_session_id: "session-x".into(),
             title: None,
             cwd: None,
@@ -719,7 +719,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
         let m = &found[0];
-        assert_eq!(m.agent, Agent::Dsh);
+        assert_eq!(m.agent, AgentTool::Dsh);
         assert_eq!(m.source_member_id, id);
         assert_eq!(m.kind, DiscoveredMemberKind::Root);
         assert_eq!(m.cwd.as_deref(), Some("/repo"));
@@ -1011,7 +1011,7 @@ mod tests {
     /// 插件 CLI 可用不代表 NoEnding 能启动终端会话。
     #[test]
     fn plugin_cli_does_not_enable_terminal_sessions() {
-        assert!(crate::platform::exec_resolver::cli_names(Agent::Dsh).contains(&"dsh"));
+        assert!(crate::platform::exec_resolver::cli_names(AgentTool::Dsh).contains(&"dsh"));
         assert!(!DshAdapter.has_terminal_cli());
         assert_eq!(DshAdapter.desktop_app_name(), Some("DeepSeek Harness"));
     }

@@ -12,7 +12,7 @@ import { clearProjectDetailCache } from "./projectDetailCache";
 
 export type LifecycleProject = Pick<Project, "id" | "name" | "visibility"> & {
   purpose?: ProjectPurpose | null;
-  is_assistant?: boolean;
+  is_agent?: boolean;
   session_count: number;
 };
 
@@ -20,19 +20,19 @@ function canDeleteProject(project: LifecycleProject) {
   return project.visibility === "archived" && !project.purpose && project.session_count === 0;
 }
 
-export function ProjectDeleteModal({ names, busy, onClose, onConfirm, removesAssistantDirectories, label = "项目" }: {
+export function ProjectDeleteModal({ names, busy, onClose, onConfirm, removesAgentDirectories, label = "项目" }: {
   names: string[];
   busy: boolean;
   onClose: () => void;
   onConfirm: () => void;
-  removesAssistantDirectories?: boolean;
+  removesAgentDirectories?: boolean;
   label?: "项目" | "智能体项目";
 }) {
   return (
     <Modal title={`永久删除${label}？`} onClose={() => { if (!busy) onClose(); }}>
       <p>确定永久删除 {names.length === 1 ? `「${names[0]}」` : `${names.length} 个${label}`}？</p>
       <p className="muted small">项目摘要和目录登记会被删除，任务关联会解除，任务本身会保留。此操作无法撤销。</p>
-      {removesAssistantDirectories
+      {removesAgentDirectories
         ? <p className="muted small">智能体设置、信箱、档案目录及其中的文件也会永久删除。</p>
         : <p className="muted small">磁盘目录和文件会保留。</p>}
       <DialogActions>
@@ -90,7 +90,7 @@ export function BulkProjectDeleteAction({ projects, label = "项目", replacemen
       title={`删除全部可删除的已归档${label}`}
       disabled={!deletable.length || busy} onClick={() => setTargets(deletable)}><Icon name="trash" /></button>
     {targets && createPortal(<ProjectDeleteModal names={targets.map(project => project.name)}
-      removesAssistantDirectories={targets.some(project => project.is_assistant)}
+      removesAgentDirectories={targets.some(project => project.is_agent)}
       label={label} busy={busy} onClose={() => setTargets(null)} onConfirm={() => void remove()} />, document.body)}
   </>;
 }
@@ -152,7 +152,7 @@ export default function ProjectLifecycleActions({ project, onChanged, onDeleted,
         </button>
       )}
       {!onRequestDelete && confirmDelete && <ProjectDeleteModal names={[project.name]} busy={busy}
-        removesAssistantDirectories={project.is_assistant}
+        removesAgentDirectories={project.is_agent}
         onClose={() => setConfirmDelete(false)} onConfirm={() => void perform(true)} />}
     </>
   );

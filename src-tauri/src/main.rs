@@ -1,4 +1,4 @@
-//! NoEnding — Local Agent Workspace desktop entry.
+//! NoEnding — Local agent tool Workspace desktop entry.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

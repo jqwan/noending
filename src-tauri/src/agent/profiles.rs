@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     domain::*,
     error::{other, AppError, Result},
-    storage::{assistant_profiles as repo, new_id, Db},
+    storage::{agent_profiles as repo, new_id, Db},
     workspace::{project, wiring::WorkspaceLayer},
 };
 use std::{
@@ -12,6 +12,7 @@ use std::{
 
 pub(crate) fn lock(home: &NoEndingHome) -> Result<std::fs::File> {
     fs::create_dir_all(&home.runtime_dir)?;
+    // Older desktops use the same Home and archive paths.
     Ok(crate::platform::file_lock::exclusive_wait(
         &home.runtime_dir.join("assistant-profiles.lock"),
         std::time::Duration::from_secs(10),
@@ -35,7 +36,7 @@ fn registered_path_conn(
 fn ensure_profile_parent(home: &NoEndingHome) -> Result<()> {
     fs::create_dir_all(directory(home))?;
     let actual = fs::canonicalize(directory(home))?;
-    let expected = fs::canonicalize(&home.root)?.join("assistant");
+    let expected = fs::canonicalize(&home.root)?.join(ARCHIVE_DIRECTORY_NAME);
     if crate::workspace::path_identity_of(&actual.to_string_lossy())
         != crate::workspace::path_identity_of(&expected.to_string_lossy())
     {
@@ -73,23 +74,20 @@ fn session_archive(conn: &rusqlite::Connection, session: &str) -> Result<Option<
     }
 }
 
-pub(crate) fn session_assistant_id(db: &Db, session: &str) -> Result<Option<uuid::Uuid>> {
+pub(crate) fn session_agent_id(db: &Db, session: &str) -> Result<Option<uuid::Uuid>> {
     session_archive(&db.read(), session)?
         .map(|path| archive_identity(&path).map(|(_, id)| id))
         .transpose()
 }
 
-pub(crate) fn list_public_assistants(
-    db: &Db,
-    name: Option<&str>,
-) -> Result<Vec<AssistantDirectoryEntry>> {
+pub(crate) fn list_public_agents(db: &Db, name: Option<&str>) -> Result<Vec<Agent>> {
     let filter = name.unwrap_or_default().trim().to_lowercase();
     let rows = repo::active_names_and_paths(&db.read())?;
     rows.into_iter()
         .filter(|(name, _)| filter.is_empty() || name.to_lowercase().contains(&filter))
         .map(|(name, path)| {
             let id = archive_id(&path).ok_or_else(|| other("智能体档案目录名称无效"))?;
-            Ok(AssistantDirectoryEntry { id, name })
+            Ok(Agent { id, name })
         })
         .collect()
 }
@@ -98,7 +96,7 @@ pub(crate) fn public_card(
     db: &Db,
     home: &NoEndingHome,
     id: uuid::Uuid,
-) -> Result<Option<AssistantCard>> {
+) -> Result<Option<AgentCard>> {
     let (name, path) = {
         let conn = db.read();
         let path_id = archive_path_id(home, id)?;
@@ -115,20 +113,23 @@ pub(crate) fn public_card(
         .ok()
         .map(|root| files::read_intro(&root))
         .unwrap_or_default();
-    Ok(Some(AssistantCard { id, name, intro }))
+    Ok(Some(AgentCard {
+        agent: Agent { id, name },
+        intro,
+    }))
 }
 
 pub(crate) fn private_profile(
     db: &Db,
     home: &NoEndingHome,
     session: &str,
-) -> Result<Option<AssistantPrivateProfile>> {
+) -> Result<Option<AgentPrivateProfile>> {
     let Some(path) = session_archive(&db.read(), session)? else {
         return Ok(None);
     };
     let id = archive_identity(&path)?.1;
     let root = validate_directory(home, &path)?;
-    Ok(Some(AssistantPrivateProfile {
+    Ok(Some(AgentPrivateProfile {
         id,
         files: files::inspect(&root),
     }))
@@ -152,7 +153,7 @@ fn validate_directory(home: &NoEndingHome, path: &WorkspacePath) -> Result<PathB
     }
     let canonical = fs::canonicalize(&expected)?;
     let parent = fs::canonicalize(directory(home))?;
-    let home_parent = fs::canonicalize(&home.root)?.join("assistant");
+    let home_parent = fs::canonicalize(&home.root)?.join(ARCHIVE_DIRECTORY_NAME);
     if crate::workspace::path_identity_of(&parent.to_string_lossy())
         != crate::workspace::path_identity_of(&home_parent.to_string_lossy())
         || canonical.parent() != Some(parent.as_path())
@@ -238,7 +239,7 @@ pub fn create_profile(
     db: &Db,
     home: &NoEndingHome,
     layer: &WorkspaceLayer,
-    input: AssistantCreate,
+    input: AgentCreate,
 ) -> Result<Project> {
     create_profile_with_roots(db, home, layer, input, &crate::skills::Roots::current()?)
 }
@@ -247,7 +248,7 @@ pub fn create_profile_with_roots(
     db: &Db,
     home: &NoEndingHome,
     layer: &WorkspaceLayer,
-    input: AssistantCreate,
+    input: AgentCreate,
     roots: &crate::skills::Roots,
 ) -> Result<Project> {
     let _access = home.acquire_access()?;
@@ -256,7 +257,7 @@ pub fn create_profile_with_roots(
     let id = new_id();
     ensure_profile_parent(home)?;
     let root = directory(home).join(&id);
-    let staging = home.runtime_dir.join(format!("assistant-create-{id}"));
+    let staging = home.runtime_dir.join(format!("agent-create-{id}"));
     fs::create_dir(&staging)?;
     let preparation = (|| {
         files::initialize(&staging, input.soul_md.as_deref(), input.role_md.as_deref())?;
@@ -288,11 +289,11 @@ pub fn create_profile_with_roots(
     })
 }
 
-pub(crate) fn project_assistant(
+pub(crate) fn project_agent(
     db: &Db,
     project_id: &str,
     paths: &[WorkspacePath],
-) -> Result<Option<ProjectAssistantDetail>> {
+) -> Result<Option<ProjectAgentDetail>> {
     let path_id = repo::path_for_project(&db.read(), project_id)?;
     path_id
         .map(|id| {
@@ -300,7 +301,7 @@ pub(crate) fn project_assistant(
                 .iter()
                 .find(|path| path.id == id)
                 .ok_or_else(|| other("智能体档案目录未登记"))?;
-            Ok(ProjectAssistantDetail {
+            Ok(ProjectAgentDetail {
                 files: files::inspect(Path::new(&path.canonical_path)),
                 id: archive_identity(path)?.1,
                 workspace_path_id: id,
@@ -314,8 +315,8 @@ pub fn update_profile(
     home: &NoEndingHome,
     project_id: &str,
     revision: &str,
-    patch: AssistantPatch,
-) -> Result<ProjectAssistant> {
+    patch: AgentPatch,
+) -> Result<ProjectAgent> {
     let _lock = lock(home)?;
     let path = registered_path(db, project_id)?;
     let root = validate_directory(home, &path)?;
@@ -327,7 +328,7 @@ pub fn prepare_profile_files(
     db: &Db,
     home: &NoEndingHome,
     project_id: &str,
-) -> Result<ProjectAssistant> {
+) -> Result<ProjectAgent> {
     let _lock = lock(home)?;
     let path = registered_path(db, project_id)?;
     let expected = expected_directory(home, &path)?;
@@ -387,9 +388,7 @@ pub(crate) fn refresh_identities(db: &Db, home: &NoEndingHome) -> Result<()> {
     for project_id in project_ids {
         if let Some(project) = crate::storage::workspace::get_project_conn(&conn, &project_id)? {
             if let Err(error) = sync_project_identity(&conn, home, &project) {
-                eprintln!(
-                    "[noending] could not update assistant identity for {project_id}: {error}"
-                );
+                eprintln!("[noending] could not update agent identity for {project_id}: {error}");
             }
         }
     }

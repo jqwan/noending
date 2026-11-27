@@ -1,4 +1,4 @@
-//! Summary reads and extraction, delegated to an Agent or performed by the
+//! Summary reads and extraction, delegated to an agent tool or performed by the
 //! current session. Both paths validate before a snapshot-guarded transaction.
 mod collaboration;
 pub(crate) mod diagnostics;
@@ -348,14 +348,14 @@ fn task_projects(conn: &rusqlite::Connection, id: &str) -> Result<Vec<String>> {
 /// A single settings snapshot is used for logging and CLI invocation.
 struct ContextLaunchConfig {
     raw_agent: String,
-    agent: Option<crate::domain::Agent>,
+    agent: Option<crate::domain::AgentTool>,
     opts: Option<crate::adapters::ExecOptions>,
 }
 
 impl ContextLaunchConfig {
     fn from_db(db: &Db) -> Result<Self> {
         let settings = ExtractionSettings::from_settings(db)?;
-        let agent = crate::domain::Agent::parse(&settings.agent);
+        let agent = crate::domain::AgentTool::parse(&settings.agent);
         let opts = settings.exec_options().ok().flatten().map(|(_, opts)| opts);
         let raw_agent = settings.agent;
         Ok(Self {
@@ -374,20 +374,20 @@ fn require_cli(
         operation.fail_with(
             "runtime_configuration",
             "agent_not_configured",
-            "未选择提取 Agent，请在设置 → 摘要提取中选择。",
+            "未选择提取 运行工具，请在设置 → 摘要提取中选择。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
-            "未选择 Context Agent".into(),
+            "未选择 Context 运行工具".into(),
         )));
     }
     let Some(agent) = launch.agent else {
         operation.fail_with(
             "runtime_configuration",
             "agent_configuration_invalid",
-            "Agent 配置无效，请重新选择 Agent。",
+            "运行工具 配置无效，请重新选择 运行工具。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
-            "Agent 配置无效".into(),
+            "运行工具 配置无效".into(),
         )));
     };
     let Some(opts) = launch.opts.as_ref() else {
@@ -397,7 +397,7 @@ fn require_cli(
             "提取运行参数无效，请检查设置 → 摘要提取。",
         );
         return Err(AppError::context(ContextUpdateError::AiUnavailable(
-            "Agent Runtime 配置不可用".into(),
+            "运行工具 Runtime 配置不可用".into(),
         )));
     };
     Ok(CliExtractor::new(agent, opts.clone()))

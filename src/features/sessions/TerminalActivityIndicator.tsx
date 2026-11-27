@@ -1,7 +1,7 @@
 import type { TerminalSummary } from "../../types";
 import { terminalActivityLabel } from "./terminalActivity";
 
-/** Agent activity is separate from the terminal connection/action icon. */
+/** agent tool activity is separate from the terminal connection/action icon. */
 export default function TerminalActivityIndicator({ terminal }: {
   terminal: TerminalSummary;
 }) {

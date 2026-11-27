@@ -63,7 +63,7 @@ export default function CollaborationMembers({
                 <Icon name={member.wake_method} />
               </span>
               <button type="button" className="link collab-member-name truncate" title={name}
-                onClick={() => navigate({ view: "session", sessionId: member.session_id, initialTitle: name, initialAgent: member.agent ?? undefined })}>{name}</button>
+                onClick={() => navigate({ view: "session", sessionId: member.session_id, initialTitle: name, initialTool: member.agent ?? undefined })}>{name}</button>
               {coordinator === member.session_id && <span className="collab-member-coordinator" role="img" aria-label="负责人" title="负责人"><Icon name="spark" /></span>}
               <div className="collab-member-actions">
                 {canWake && (

@@ -1,4 +1,4 @@
-//! Mail for a named assistant. Its archive path determines which sessions can work its inbox.
+//! Mail for a NoEnding agent. Its archive path determines which sessions can work its inbox.
 use crate::{
     error::{other, Result},
     workspace::home::NoEndingHome,
@@ -56,7 +56,7 @@ pub struct Change {
 pub struct Message {
     pub id: String,
     pub sender_session_id: Option<String>,
-    pub sender_assistant_id: Option<uuid::Uuid>,
+    pub sender_agent_id: Option<uuid::Uuid>,
     pub body: String,
     pub created_at: String,
     pub read_at: Option<String>,
@@ -87,10 +87,10 @@ fn row_message(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
         sender_session_id: row.get(1)?,
-        sender_assistant_id: row
+        sender_agent_id: row
             .get::<_, Option<String>>(9)?
             .as_deref()
-            .and_then(crate::assistant::archive_id),
+            .and_then(crate::agent::archive_id),
         body: row.get(2)?,
         created_at: row.get(3)?,
         read_at: row.get(4)?,
@@ -100,9 +100,9 @@ fn row_message(row: &Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
-fn inbox(conn: &Connection, home: &NoEndingHome, assistant: &str) -> Result<Inbox> {
-    let id = uuid::Uuid::parse_str(assistant).map_err(|_| other("智能体 ID 无效"))?;
-    let path_id = crate::assistant::archive_path_id(home, id)?;
+fn inbox(conn: &Connection, home: &NoEndingHome, agent: &str) -> Result<Inbox> {
+    let id = uuid::Uuid::parse_str(agent).map_err(|_| other("智能体 ID 无效"))?;
+    let path_id = crate::agent::archive_path_id(home, id)?;
     conn.query_row(
         "SELECT a.project_id,p.visibility='archived'
          FROM project_assistants a JOIN projects p ON p.id=a.project_id
@@ -148,11 +148,11 @@ fn message(conn: &Connection, inbox: &Inbox, id: &str) -> Result<Message> {
 }
 
 impl Db {
-    /// The desktop user passes no session. Agent-facing commands supply the resolved caller.
-    pub fn assistant_mailbox_list(
+    /// The desktop user passes no session. agent tool-facing commands supply the resolved caller.
+    pub fn agent_mailbox_list(
         &self,
         home: &NoEndingHome,
-        assistant: &str,
+        agent: &str,
         caller: Option<&str>,
         filter: Filter,
         cursor: Option<i64>,
@@ -163,7 +163,7 @@ impl Db {
         }
         let conn = self.read();
         let tx = conn.unchecked_transaction()?;
-        let inbox = inbox(&tx, home, assistant)?;
+        let inbox = inbox(&tx, home, agent)?;
         if let Some(session) = caller {
             require_conversation(&tx, &inbox, session, false)?;
         }
@@ -189,26 +189,26 @@ impl Db {
         })
     }
 
-    pub fn assistant_mailbox_read(
+    pub fn agent_mailbox_read(
         &self,
         home: &NoEndingHome,
-        assistant: &str,
+        agent: &str,
         caller: Option<&str>,
         message_id: &str,
     ) -> Result<Message> {
         let conn = self.read();
         let tx = conn.unchecked_transaction()?;
-        let inbox = inbox(&tx, home, assistant)?;
+        let inbox = inbox(&tx, home, agent)?;
         if let Some(session) = caller {
             require_conversation(&tx, &inbox, session, false)?;
         }
         message(&tx, &inbox, message_id)
     }
 
-    pub fn assistant_mailbox_send(
+    pub fn agent_mailbox_send(
         &self,
         home: &NoEndingHome,
-        assistant: &str,
+        agent: &str,
         sender: Option<&str>,
         body: &str,
     ) -> Result<Message> {
@@ -217,7 +217,7 @@ impl Db {
         }
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let inbox = inbox(&tx, home, assistant)?;
+        let inbox = inbox(&tx, home, agent)?;
         if inbox.archived {
             return Err(other("智能体已归档"));
         }
@@ -245,16 +245,16 @@ impl Db {
         Ok(saved)
     }
 
-    pub fn assistant_mailbox_change(
+    pub fn agent_mailbox_change(
         &self,
         home: &NoEndingHome,
-        assistant: &str,
+        agent: &str,
         caller: Option<&str>,
         change: &Change,
     ) -> Result<Message> {
         let mut conn = self.write();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let inbox = inbox(&tx, home, assistant)?;
+        let inbox = inbox(&tx, home, agent)?;
         if let Some(caller) = caller {
             require_conversation(
                 &tx,

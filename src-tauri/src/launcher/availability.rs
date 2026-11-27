@@ -38,7 +38,7 @@ pub struct TerminalResumeState {
     pub reason: Option<String>,
 }
 
-/// Resolve each Agent installation at most once per batch, including failed lookups.
+/// Resolve each agent tool installation at most once per batch, including failed lookups.
 /// This checks prerequisites only: credentials, networking and process startup can
 /// still fail later. Launch always revalidates current state.
 pub fn terminal_resume_states(

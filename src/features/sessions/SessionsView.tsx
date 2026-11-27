@@ -18,7 +18,7 @@ import SessionCards, {
   sessionDisplayTitle,
 } from "./SessionTable";
 import PermanentDeleteModal from "./PermanentDeleteModal";
-import { AGENT_LABELS, type Agent, type IngestSource, type Project, type SessionListItem } from "../../types";
+import { AGENT_TOOL_LABELS, type AgentTool, type IngestSource, type Project, type SessionListItem } from "../../types";
 import type { Route, SessionScope } from "../../app/routes";
 
 /**
@@ -42,8 +42,8 @@ export default function SessionsView({ navigate, scope }: {
 
   const [loadFailed, setLoadFailed] = useState(false);
   const [query, setQuery] = useViewState(`${statePrefix}.query`, "");
-  const [agent, setAgent] = useViewPreference<"all" | Agent>(
-    `${statePrefix}.agent`, "all", preferenceValues("all", ...Object.keys(AGENT_LABELS) as Agent[]),
+  const [agent, setAgent] = useViewPreference<"all" | AgentTool>(
+    `${statePrefix}.agent`, "all", preferenceValues("all", ...Object.keys(AGENT_TOOL_LABELS) as AgentTool[]),
   );
   const [projectId, setProjectId] = useViewState(`${statePrefix}.projectId`, "all");
   const [viewMode, setViewMode] = useViewPreference<"cards" | "list">(`${statePrefix}.viewMode`, "cards", preferenceValues("cards", "list"));
@@ -288,14 +288,14 @@ export default function SessionsView({ navigate, scope }: {
           <div className="toolbar ws-controls">
             <div className="ws-controls-group">
               <div className="ws-control">
-                <span className="muted small">Agent</span>
+                <span className="muted small">运行工具</span>
                 <CustomSelect
                   value={agent}
-                  onChange={(val) => setAgent(val as "all" | Agent)}
-                  ariaLabel="全部 Agent"
+                  onChange={(val) => setAgent(val as "all" | AgentTool)}
+                  ariaLabel="全部运行工具"
                   options={[
-                    { value: "all", label: "全部 Agent" },
-                    ...Object.entries(AGENT_LABELS).map(([k, v]) => ({
+                    { value: "all", label: "全部运行工具" },
+                    ...Object.entries(AGENT_TOOL_LABELS).map(([k, v]) => ({
                       value: k,
                       label: v,
                     })),
@@ -364,7 +364,7 @@ export default function SessionsView({ navigate, scope }: {
               hint={archivedMode ? "归档的会话会显示在这里，可以取消归档或永久删除。" : emptyHint}
               actions={!archivedMode ? (
                 <>
-                  <button className="btn small" onClick={() => navigate({ view: "agents" })}>
+                  <button className="btn small" onClick={() => navigate({ view: "agent-tools" })}>
                     配置会话来源
                   </button>
                   <button className="btn small" onClick={() => navigate({ view: "new-session" })}>新建会话</button>
@@ -386,7 +386,7 @@ export default function SessionsView({ navigate, scope }: {
               sessions={shown}
               projectNameById={projectNameById}
               viewMode={viewMode}
-              onOpen={(id) => { const s = shown.find(s => s.id === id); navigate({ view: "session", sessionId: id, initialTitle: sessionDisplayTitle(s?.title), initialAgent: s?.agent }); }}
+              onOpen={(id) => { const s = shown.find(s => s.id === id); navigate({ view: "session", sessionId: id, initialTitle: sessionDisplayTitle(s?.title), initialTool: s?.agent }); }}
               onResume={resume}
               onArchive={setArchiveSessionId}
               onRestore={(id) => { const target = sessions?.find((s) => s.id === id); if (target) void unarchive(target); }}
@@ -406,7 +406,7 @@ export default function SessionsView({ navigate, scope }: {
             <b>{sessionDisplayTitle(archiveTarget.title)}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。搜索、同步和摘要更新保持可用。
           </p>
           <div className="card hairline" style={{ marginBottom: 12 }}>
-            <p style={{ margin: 0 }}>Agent 原始会话不会被删除，之后可以从已归档恢复。</p>
+            <p style={{ margin: 0 }}>运行工具 原始会话不会被删除，之后可以从已归档恢复。</p>
           </div>
           <DialogActions>
             <button className="btn" onClick={() => setArchiveSessionId(null)} disabled={archiveBusy}>取消</button>
@@ -426,7 +426,7 @@ export default function SessionsView({ navigate, scope }: {
             确定要删除已归档的 <b>{sessions.length} 个会话</b> 的本地数据吗？
           </p>
           <div className="badge warn" style={{ display: "inline-block", marginBottom: 10 }}>
-            只删除 NoEnding 本地数据，不会删除 Agent 数据。
+            只删除 NoEnding 本地数据，不会删除 AgentTool 数据。
           </div>
           <p className="small" style={{ margin: "0 0 14px", maxWidth: "72ch" }}>
             每个会话都会删除 NoEnding 的本地副本；源文件不会被删除，所以源仍存在的会话

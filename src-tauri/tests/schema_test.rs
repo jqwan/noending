@@ -434,7 +434,7 @@ fn unsupported_version_markers_preserve_the_database() {
 
 /// The environment-dependent defaults are reconciled on EVERY start, not only
 /// when the database is created: a relocated `CODEX_HOME` or a newly supported
-/// Agent must not need a format change. Reconciliation only inserts what is
+/// AgentTool must not need a format change. Reconciliation only inserts what is
 /// missing.
 #[test]
 fn runtime_defaults_are_reconciled_on_every_start() {

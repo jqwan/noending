@@ -1,6 +1,6 @@
 //! Base Experience invariants: ingestion is facts-only.
 //!
-//! Ingestion is the AUTOMATIC half: Agent sources flow through the typed
+//! Ingestion is the AUTOMATIC half: AgentTool sources flow through the typed
 //! adapters, resolve against the logical Session graph, and land as messages,
 //! cursors and the fact generation. It NEVER calls AI and NEVER writes
 //! Context — the Session summary and Workstream state are written only by an
@@ -8,7 +8,7 @@
 //! the one path reconcilers and launch preparation share.
 
 use noending::domain::{
-    Agent, Session, SessionContextFields, SessionMessageRole, SourceCursorUpdate, Workstream,
+    AgentTool, Session, SessionContextFields, SessionMessageRole, SourceCursorUpdate, Workstream,
 };
 use noending::storage::{new_id, now, Db};
 use noending::{ingestion, lifecycle};
@@ -67,7 +67,7 @@ fn session_row(db: &Db, path: &std::path::Path) -> Session {
     let root_agent_session_id = format!("as-{}", new_id());
     let (id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_agent_session_id,
             None,
             None,
@@ -79,7 +79,7 @@ fn session_row(db: &Db, path: &std::path::Path) -> Session {
         .unwrap();
     support::ensure_session_source(
         db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         &root_agent_session_id,
         &path.to_string_lossy(),
     );
@@ -104,7 +104,7 @@ fn an_empty_replacement_generation_preserves_the_current_session_summary() {
     let db = open_db("empty-generation-context");
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "empty-generation-context",
         &[support::parsed_message(
             "old-message",
@@ -202,7 +202,7 @@ fn ingestion_writes_facts_and_zero_context() {
     let ws = ws_row(&db, "NoEnding");
 
     let ingested = ingestion::ingest_session(&db, &s).unwrap();
-    assert_eq!(ingested, 3, "every Agent event is ingested");
+    assert_eq!(ingested, 3, "every AgentTool event is ingested");
 
     // Facts landed: messages, projection, generation and cursor.
     assert_eq!(db.message_count(&s.id).unwrap(), 3);
@@ -377,7 +377,7 @@ fn the_conversation_reads_backward_from_the_newest_message() {
     let db = open_db("message-window");
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "message-window",
         &(1..=5)
             .map(|i| {
@@ -470,7 +470,7 @@ fn a_final_reply_carries_its_turn_and_the_range_fetch_returns_its_intermediates(
     let db = open_db("turn-blocks");
     support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "turn-blocks",
         &[support::parsed_message(
             "retired",
@@ -482,7 +482,7 @@ fn a_final_reply_carries_its_turn_and_the_range_fetch_returns_its_intermediates(
     first_ask.ts = Some("2026-10-05T10:00:00+08:00".into());
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "turn-blocks",
         &[
             first_ask,
@@ -573,7 +573,7 @@ fn conversation_marks_point_at_user_messages_and_paging_runs_both_ways() {
     ];
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "message-marks",
         &bodies
             .iter()
@@ -643,7 +643,7 @@ fn a_replaced_conversation_reports_a_new_generation_to_paging_readers() {
     let db = open_db("message-window-rewrite");
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "message-window-rewrite",
         &(1..=3)
             .map(|i| {
@@ -680,7 +680,7 @@ fn conversation_starting_with_intermediate_message_reports_no_older_messages_at_
     let db = open_db("intermediate-start");
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         "intermediate-start",
         &[
             support::parsed_message("m1", SessionMessageRole::Assistant, "思考或中间消息"),

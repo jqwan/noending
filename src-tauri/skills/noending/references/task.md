@@ -17,7 +17,7 @@
 - 目标：要解决的问题和希望达到的结果，必要的范围与验收要求融入其中。以用户明确要求为准，不因进展或顺带工作自行扩大目标。
 - 现状：已核实的整体阶段、主要缺口及关键阻碍；尚未验证的部分明确说明，不推测进展，不以局部完成代表整体完成。
 
-用户保留直接编辑描述的入口。Agent 更新现状前读取最新完整描述，保留用户确定的目标与有效要求，融合替换过时表述；在重要阶段或关键阻碍变化时更新，不逐轮追加。具体进展、验证记录和执行细节放任务事项。
+用户保留直接编辑描述的入口。你更新现状前读取最新完整描述，保留用户确定的目标与有效要求，融合替换过时表述；在重要阶段或关键阻碍变化时更新，不逐轮追加。具体进展、验证记录和执行细节放任务事项。
 
 ```text
 目标：统一详情页的布局和交互，复用公共组件，保持各页面视觉一致。
@@ -65,7 +65,7 @@
 | --- | --- | --- |
 | 核对数据目录 | `ne status` | `status` |
 | 定位项目 | `ne project resolve --path PATH` | `project_resolve {path}`，使用调用方实际绝对目录 |
-| 原生身份转 NoEnding 身份 | `ne session resolve --agent AGENT --native-id NATIVE_ID` | `session_resolve {agent, native_id}`，使用调用方已知的原生主会话 ID |
+| 原生身份转 NoEnding 身份 | `ne session resolve --tool TOOL --native-id NATIVE_ID` | `session_resolve {tool, native_id}`，使用调用方已知的原生主会话 ID |
 | 查询对象详情 | `ne task/session/project show ID`，三者选一 | `object_get {kind, id}` |
 | 项目任务 | `ne task list --project ID --scope all` | `object_list {kind: "task", project, scope: "all"}` |
 | 项目候选会话 | `ne session list --project ID --scope all` | `object_list {kind: "session", project, scope: "all"}` |

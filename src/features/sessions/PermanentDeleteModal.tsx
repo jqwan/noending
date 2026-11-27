@@ -22,7 +22,7 @@ function outcome(status: SourceAvailability): { warning: string | null; detail: 
       return {
         warning: "Root 源会话仍然存在：仅删除 NoEnding 本地副本。",
         detail:
-          "原始 Agent 会话文件不会被删除。下一次同步会从它重新同步；若需彻底删除请清理源会话文件。",
+          "原始 运行工具会话文件不会被删除。下一次同步会从它重新同步；若需彻底删除请清理源会话文件。",
         toast: "；源会话仍在，下次同步将重新摄入",
       };
     case "missing":

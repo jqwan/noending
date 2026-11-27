@@ -17,11 +17,11 @@
 use rusqlite::Connection;
 mod support;
 
-use noending::adapters::AgentCommand;
-use noending::domain::{Agent, Session};
+use noending::adapters::AgentToolCommand;
+use noending::domain::{AgentTool, Session};
 use noending::error::Result;
 use noending::launcher::{CwdSource, LaunchWorkspace, SessionLauncher};
-use noending::platform::exec_resolver::AgentInstallation;
+use noending::platform::exec_resolver::AgentToolInstallation;
 use noending::platform::launcher::LaunchOutcome;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
@@ -86,8 +86,8 @@ fn ws_with_paths(db: &Db, title: &str, dirs: &[String]) -> String {
     id
 }
 
-fn seed_installation(db: &Db, agent: Agent) {
-    db.save_installation(&AgentInstallation {
+fn seed_installation(db: &Db, agent: AgentTool) {
+    db.save_installation(&AgentToolInstallation {
         agent,
         executable_path: std::env::current_exe()
             .unwrap()
@@ -117,7 +117,7 @@ fn fake_open(_uri: &str) -> Result<()> {
     Ok(())
 }
 
-fn fake_spawn(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+fn fake_spawn(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
     Ok(LaunchOutcome {
         launched_via: "test-spawn".into(),
         command_line: format!(
@@ -144,7 +144,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
     let ts = now();
     let (id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &root_id,
             None,
             cwd,
@@ -154,7 +154,7 @@ fn session_row(db: &Db, cwd: Option<&str>, workspace_path_id: Option<&str>) -> S
             Some(&ts),
         )
         .unwrap();
-    support::ensure_session_source(db, Agent::Codex, &root_id, &raw.to_string_lossy());
+    support::ensure_session_source(db, AgentTool::Codex, &root_id, &raw.to_string_lossy());
     db.get_session(&id).unwrap().unwrap()
 }
 
@@ -169,13 +169,13 @@ fn is_stale(err: &str) -> bool {
 #[test]
 fn a_default_workspace_change_makes_a_prepared_launch_stale() {
     let db = open_db("default-ws");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let launcher = SessionLauncher;
     let before = real_dir("default-ws", "home-a/workspace");
     let after = real_dir("default-ws", "home-b/workspace");
 
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, None, &workspace(Some(&before)))
+        .prepare_new_in(&db, AgentTool::Codex, None, &workspace(Some(&before)))
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(before.as_str()));
 
@@ -210,7 +210,7 @@ fn a_default_workspace_change_makes_a_prepared_launch_stale() {
 #[test]
 fn a_resume_launches_in_the_sessions_own_cwd() {
     let db = open_db("resume-cwd");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let home_dir = real_dir("resume-cwd", "session-home");
     let s = session_row(&db, Some(&home_dir), None);
 
@@ -237,11 +237,11 @@ fn a_resume_launches_in_the_sessions_own_cwd() {
 }
 
 /// The preview's directory is authoritative and hashed, so background
-/// discovery cannot move the Agent between preview and launch.
+/// discovery cannot move the AgentTool between preview and launch.
 #[test]
 fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
     let db = open_db("resume-drift");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let original = real_dir("resume-drift", "original");
     let s = session_row(&db, Some(&original), None);
 
@@ -297,7 +297,7 @@ fn a_cwd_drift_after_preview_makes_a_resume_plan_stale() {
 #[test]
 fn a_resume_with_no_recorded_cwd_uses_default_workspace() {
     let db = open_db("resume-no-cwd");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let s = session_row(&db, None, None);
     let default_dir = real_dir("resume-no-cwd", "default");
     let workspace = LaunchWorkspace {
@@ -315,7 +315,7 @@ fn a_resume_with_no_recorded_cwd_uses_default_workspace() {
 #[test]
 fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
     let db = open_db("session-path");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let dir = real_dir("session-path", "repo");
     let first = db
         .tx(|tx| insert_workspace_path_conn(tx, &dir, PROJECT))
@@ -348,11 +348,11 @@ fn a_session_workspace_path_change_makes_a_resume_plan_stale() {
 
 /// a launch creates **no** Session,
 /// no WorkspacePath and no WorkstreamPath. Those appear only when the real
-/// Agent transcript is discovered.
+/// AgentTool transcript is discovered.
 #[test]
 fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     let db = open_db("phantom");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let primary = real_dir("phantom", "primary");
     let _task = ws_with_paths(&db, "watch it", &[primary.clone()]);
     let paths_before = count(&db, "SELECT COUNT(*) FROM workstream_projects");
@@ -362,7 +362,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     let prepared = launcher
         .prepare_new_in(
             &db,
-            Agent::Codex,
+            AgentTool::Codex,
             Some(&primary),
             &LaunchWorkspace::default(),
         )
@@ -390,7 +390,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM sessions"),
         0,
-        "the Agent's Session is discovered, never manufactured at launch"
+        "the AgentTool's Session is discovered, never manufactured at launch"
     );
     assert_eq!(
         count(&db, "SELECT COUNT(*) FROM workspace_paths"),
@@ -413,7 +413,7 @@ fn a_launch_creates_no_phantom_session_or_path_before_discovery() {
 #[test]
 fn the_prepared_payload_names_its_tier_for_every_flow() {
     let db = open_db("payload");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let primary = real_dir("payload", "primary");
     let default_ws = missing_dir("payload", "workspace");
     let launcher = SessionLauncher;
@@ -444,7 +444,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
     ];
     let missing = missing_dir("explicit", "unavailable");
     let prepared = launcher
-        .prepare_new_in(&db, Agent::Codex, Some(&missing), &home)
+        .prepare_new_in(&db, AgentTool::Codex, Some(&missing), &home)
         .unwrap();
     assert_eq!(prepared.cwd.as_deref(), Some(missing.as_str()));
     assert_eq!(prepared.cwd_resolution.source, CwdSource::Explicit);
@@ -452,7 +452,7 @@ fn the_prepared_payload_names_its_tier_for_every_flow() {
 
     for (at_launch, explicit, source, expected_cwd) in cases {
         let prepared = launcher
-            .prepare_new_in(&db, Agent::Codex, explicit, at_launch)
+            .prepare_new_in(&db, AgentTool::Codex, explicit, at_launch)
             .unwrap();
         assert_eq!(prepared.cwd_resolution.source, source);
         assert!(!prepared.cwd_resolution.fallback);
@@ -482,24 +482,24 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
         get_runtime_overrides, set_runtime_overrides, AgentRuntimeOverrides,
     };
     let db = open_db("one-time-runtime");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let l = SessionLauncher;
     let ws = workspace(Some(&real_dir("one-time-runtime", "cwd")));
     let saved = AgentRuntimeOverrides {
         model: Some("saved".into()),
         ..Default::default()
     };
-    set_runtime_overrides(&db, Agent::Codex, &saved).unwrap();
+    set_runtime_overrides(&db, AgentTool::Codex, &saved).unwrap();
     let custom = AgentRuntimeOverrides {
         model: Some("single".into()),
         effort: Some("low".into()),
         provider: None,
     };
     let prepared = l
-        .prepare_new_with_runtime_in(&db, Agent::Codex, None, &ws, Some(&custom))
+        .prepare_new_with_runtime_in(&db, AgentTool::Codex, None, &ws, Some(&custom))
         .unwrap();
     assert_eq!(
-        get_runtime_overrides(&db, Agent::Codex)
+        get_runtime_overrides(&db, AgentTool::Codex)
             .unwrap()
             .model
             .as_deref(),
@@ -508,14 +508,14 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
     // Saved defaults may change after preview; an explicit launch is independent.
     set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &AgentRuntimeOverrides {
             model: Some("changed".into()),
             ..Default::default()
         },
     )
     .unwrap();
-    fn assert_custom(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+    fn assert_custom(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
         assert!(cmd.args.windows(2).any(|w| w == ["-m", "single"]));
         assert!(cmd
             .args
@@ -528,13 +528,13 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
     let native = l
         .prepare_new_with_runtime_in(
             &db,
-            Agent::Codex,
+            AgentTool::Codex,
             None,
             &ws,
             Some(&AgentRuntimeOverrides::default()),
         )
         .unwrap();
-    fn assert_native(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+    fn assert_native(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
         assert!(!cmd
             .args
             .iter()
@@ -544,7 +544,7 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
     l.launch_prepared_with_in(&db, &native, &ws, assert_native, fake_open, None)
         .unwrap();
     assert_eq!(
-        get_runtime_overrides(&db, Agent::Codex)
+        get_runtime_overrides(&db, AgentTool::Codex)
             .unwrap()
             .model
             .as_deref(),
@@ -556,25 +556,25 @@ fn one_time_runtime_reaches_spawn_without_mutating_saved_settings() {
 fn disabling_new_launches_rejects_new_and_prepared_new_but_allows_resume() {
     use noending::agent_runtime::store::{launch_enabled, set_launch_enabled};
     let db = open_db("launch-preference");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let cwd = real_dir("launch-preference", "cwd");
     let ws = workspace(Some(&cwd));
     let l = SessionLauncher;
-    let prepared = l.prepare_new_in(&db, Agent::Codex, None, &ws).unwrap();
+    let prepared = l.prepare_new_in(&db, AgentTool::Codex, None, &ws).unwrap();
     let session = session_row(&db, Some(&cwd), None);
-    set_launch_enabled(&db, Agent::Codex, false).unwrap();
-    assert!(!launch_enabled(&db, Agent::Codex).unwrap());
-    assert!(db.get_installation(Agent::Codex).unwrap().is_some());
-    assert!(l.prepare_new_in(&db, Agent::Codex, None, &ws).is_err());
+    set_launch_enabled(&db, AgentTool::Codex, false).unwrap();
+    assert!(!launch_enabled(&db, AgentTool::Codex).unwrap());
+    assert!(db.get_installation(AgentTool::Codex).unwrap().is_some());
+    assert!(l.prepare_new_in(&db, AgentTool::Codex, None, &ws).is_err());
     assert!(l
         .launch_prepared_with_in(&db, &prepared, &ws, fake_spawn, fake_open, None)
         .is_err());
     let resume = l.prepare_resume_in(&db, &session.id, &ws).unwrap();
     l.launch_prepared_with_in(&db, &resume, &ws, fake_spawn, fake_open, None)
         .unwrap();
-    set_launch_enabled(&db, Agent::Codex, true).unwrap();
-    assert!(l.prepare_new_in(&db, Agent::Codex, None, &ws).is_ok());
-    assert!(set_launch_enabled(&db, Agent::Dsh, true).is_err());
+    set_launch_enabled(&db, AgentTool::Codex, true).unwrap();
+    assert!(l.prepare_new_in(&db, AgentTool::Codex, None, &ws).is_ok());
+    assert!(set_launch_enabled(&db, AgentTool::Dsh, true).is_err());
 }
 
 /// The sidebar/header projection and real preparation agree on source, cwd and
@@ -583,7 +583,7 @@ fn disabling_new_launches_rejects_new_and_prepared_new_but_allows_resume() {
 fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
     use noending::launcher::availability::terminal_resume_states;
     let db = open_db("availability");
-    seed_installation(&db, Agent::Codex);
+    seed_installation(&db, AgentTool::Codex);
     let cwd = real_dir("availability", "working");
     let mut session = session_row(&db, Some(&cwd), None);
     let plain = std::path::PathBuf::from(&session.source_path)
@@ -592,7 +592,7 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
     session.source_path = plain.to_string_lossy().into_owned();
     support::ensure_session_source(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &session.root_agent_session_id,
         &session.source_path,
     );
@@ -651,6 +651,6 @@ fn terminal_resume_availability_tracks_current_source_directory_and_archive() {
         .prepare_resume_in(&db, &session.id, &workspace)
         .unwrap_err();
     assert!(error.to_string().contains("已归档"), "{error}");
-    let desktop = support::ensure_session(&db, new_id(), Agent::WorkBuddy, "desktop-only");
+    let desktop = support::ensure_session(&db, new_id(), AgentTool::WorkBuddy, "desktop-only");
     assert!(!terminal_resume_states(&db, &[desktop.id.clone()]).unwrap()[&desktop.id].available);
 }

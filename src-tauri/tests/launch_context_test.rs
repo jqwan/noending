@@ -1,7 +1,7 @@
 //! storage/domain consistency, and prepared-launch identity tests
 //! (Issues #5, #6, #8).
 //!
-use noending::domain::{Agent, Session, SessionMessageRole, SourceCursorUpdate};
+use noending::domain::{AgentTool, Session, SessionMessageRole, SourceCursorUpdate};
 use noending::launcher;
 use noending::launcher::LaunchWorkspace;
 use noending::storage::{new_id, now, Db};
@@ -57,7 +57,12 @@ fn project_row(db: &Db, name: &str) -> noending::domain::Project {
 /// A Logical Session keyed by its root source's Resume identity, with a REAL
 /// root source file: resume preparation refuses a Session whose root source
 /// is not present on disk, so every fixture session is resumable.
-fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<String>) -> Session {
+fn session_row(
+    db: &Db,
+    agent: AgentTool,
+    started_at: Option<String>,
+    cwd: Option<String>,
+) -> Session {
     let root_id = format!("root-{}", new_id());
     let raw = std::env::temp_dir().join(format!("noending-raw-{}.jsonl", new_id()));
     std::fs::write(&raw, "").unwrap();
@@ -81,8 +86,8 @@ fn session_row(db: &Db, agent: Agent, started_at: Option<String>, cwd: Option<St
 fn list_sessions_all_filter_combinations() {
     let db = open_db("session-filter");
     let p = project_row(&db, "P");
-    let s_codex = session_row(&db, Agent::Codex, Some(now()), None);
-    let _s_pi = session_row(&db, Agent::Pi, Some(now()), None);
+    let s_codex = session_row(&db, AgentTool::Codex, Some(now()), None);
+    let _s_pi = session_row(&db, AgentTool::Pi, Some(now()), None);
     let path_id = db
         .tx(|tx| {
             noending::storage::workspace::insert_workspace_path_conn(
@@ -103,11 +108,11 @@ fn list_sessions_all_filter_combinations() {
         .list_sessions(noending::storage::SessionFilter {
             scope: Default::default(),
             project_id: None,
-            agent: Some(Agent::Codex),
+            agent: Some(AgentTool::Codex),
         })
         .unwrap();
     assert_eq!(agent_only.len(), 1, "agent-only filter (the old ?N bug)");
-    assert_eq!(agent_only[0].agent, Agent::Codex);
+    assert_eq!(agent_only[0].agent, AgentTool::Codex);
 
     let project_only = db
         .list_sessions(noending::storage::SessionFilter {
@@ -122,7 +127,7 @@ fn list_sessions_all_filter_combinations() {
         .list_sessions(noending::storage::SessionFilter {
             scope: Default::default(),
             project_id: Some(p.id.clone()),
-            agent: Some(Agent::Codex),
+            agent: Some(AgentTool::Codex),
         })
         .unwrap();
     assert_eq!(both.len(), 1);
@@ -137,7 +142,7 @@ fn list_sessions_all_filter_combinations() {
 #[test]
 fn message_ref_roundtrip() {
     let db = open_db("message-ref");
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
+    let s = session_row(&db, AgentTool::Codex, Some(now()), None);
     let source = SourceCursorUpdate {
         file_identity: "dev:1:ino:3".into(),
         generation: 0,
@@ -180,7 +185,7 @@ fn message_ref_roundtrip() {
 #[test]
 fn session_cursor_roundtrip() {
     let db = open_db("cursor-roundtrip");
-    let s = session_row(&db, Agent::Codex, Some(now()), None);
+    let s = session_row(&db, AgentTool::Codex, Some(now()), None);
     let source = SourceCursorUpdate {
         file_identity: "unix:dev:1:ino:42".into(),
         generation: 3,
@@ -224,7 +229,7 @@ fn session_cursor_roundtrip() {
 fn prepare_resume_without_writing() {
     let db = open_db("prep-resume-no-side-effects");
 
-    let session = session_row(&db, Agent::Codex, Some(now()), None);
+    let session = session_row(&db, AgentTool::Codex, Some(now()), None);
 
     let launcher = launcher::SessionLauncher;
 
@@ -249,7 +254,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
     let prepared = launcher
         .prepare_new_in(
             &db,
-            Agent::Codex,
+            AgentTool::Codex,
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -261,7 +266,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
             db,
             "new",
             None,
-            Agent::Codex,
+            AgentTool::Codex,
             &LaunchWorkspace::default(),
             &prepared.cwd_resolution,
         )
@@ -271,7 +276,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
 
     noending::agent_runtime::set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &noending::agent_runtime::AgentRuntimeOverrides {
             model: Some("gpt-5.6-sol".into()),
             ..Default::default()
@@ -284,12 +289,12 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
         "a runtime override changed after Preview: the fingerprint must change"
     );
 
-    // Overrides are per Agent: another Agent's configuration is not this
+    // Overrides are per AgentTool: another AgentTool's configuration is not this
     // launch's state.
     let codex_fingerprint = fingerprint_of(&db);
     noending::agent_runtime::set_runtime_overrides(
         &db,
-        Agent::Pi,
+        AgentTool::Pi,
         &noending::agent_runtime::AgentRuntimeOverrides {
             model: Some("qwen/qwen3.8-27b".into()),
             provider: Some("lmstudio".into()),
@@ -300,7 +305,7 @@ fn state_fingerprint_stale_detection_on_runtime_override_change() {
     assert_eq!(
         fingerprint_of(&db),
         codex_fingerprint,
-        "another Agent's override must not invalidate this launch"
+        "another AgentTool's override must not invalidate this launch"
     );
 }
 
@@ -313,7 +318,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
 
     noending::agent_runtime::set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &noending::agent_runtime::AgentRuntimeOverrides {
             model: Some("gpt-5.6-sol".into()),
             effort: Some("high".into()),
@@ -326,7 +331,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
     let prepared = launcher
         .prepare_new_in(
             &db,
-            Agent::Codex,
+            AgentTool::Codex,
             Some(&task_cwd(&db, &ws.id)),
             &LaunchWorkspace::default(),
         )
@@ -336,10 +341,10 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
 
     // The frozen intent feeds the same conversion New / Resume / exec use.
     let opts = prepared.runtime.exec_options();
-    let args = noending::adapters::adapter_for(Agent::Codex)
+    let args = noending::adapters::adapter_for(AgentTool::Codex)
         .build_new_command(
-            &noending::platform::exec_resolver::AgentInstallation {
-                agent: Agent::Codex,
+            &noending::platform::exec_resolver::AgentToolInstallation {
+                agent: AgentTool::Codex,
                 executable_path: "/usr/local/bin/codex".into(),
                 version: None,
             },
@@ -355,6 +360,7 @@ fn prepared_launch_freezes_the_runtime_override_intent() {
 
     // And clearing the override later does not retroactively change the
     // already-prepared intent — it just makes the preview stale.
-    noending::agent_runtime::set_runtime_overrides(&db, Agent::Codex, &Default::default()).unwrap();
+    noending::agent_runtime::set_runtime_overrides(&db, AgentTool::Codex, &Default::default())
+        .unwrap();
     assert_eq!(prepared.runtime.model.as_deref(), Some("gpt-5.6-sol"));
 }

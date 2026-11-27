@@ -1,14 +1,14 @@
-//! Agent Runtime Configuration — override semantics.
+//! AgentTool Runtime Configuration — override semantics.
 //!
 //! Invariant under test: NoEnding stores explicit overrides only. `None`
-//! means *Agent default* and must survive persistence as "no argument",
+//! means *AgentTool default* and must survive persistence as "no argument",
 //! never as a value NoEnding invented.
 
 use noending::agent_runtime::{
     capabilities_of, get_runtime_overrides, runtime_exec_options, set_runtime_overrides,
     validate_runtime_overrides, AgentRuntimeOverrides,
 };
-use noending::domain::Agent;
+use noending::domain::AgentTool;
 use noending::storage::{new_id, Db};
 use noending::sync::extractor::{CliExtractor, ExtractionSettings};
 use noending_lib as noending;
@@ -33,7 +33,7 @@ fn overrides(
 #[test]
 fn no_override_resolves_to_no_exec_options_at_all() {
     let db = temp_db();
-    for agent in Agent::all() {
+    for agent in AgentTool::all() {
         let opts = runtime_exec_options(&db, *agent).expect("defaults always resolve");
         assert_eq!(
             (opts.model, opts.provider, opts.effort),
@@ -42,7 +42,7 @@ fn no_override_resolves_to_no_exec_options_at_all() {
         );
     }
     db.set_setting("agent.runtime.codex", "{}").unwrap();
-    let opts = runtime_exec_options(&db, Agent::Codex).unwrap();
+    let opts = runtime_exec_options(&db, AgentTool::Codex).unwrap();
     assert_eq!((opts.model, opts.provider, opts.effort), (None, None, None));
 }
 
@@ -50,8 +50,8 @@ fn no_override_resolves_to_no_exec_options_at_all() {
 fn runtime_overrides_roundtrip_for_agents_with_and_without_providers() {
     let db = temp_db();
     for (agent, model, provider, effort) in [
-        (Agent::Codex, "gpt-5.6-sol", None, "high"),
-        (Agent::Pi, "qwen/qwen3.8-27b", Some("lmstudio"), "low"),
+        (AgentTool::Codex, "gpt-5.6-sol", None, "high"),
+        (AgentTool::Pi, "qwen/qwen3.8-27b", Some("lmstudio"), "low"),
     ] {
         set_runtime_overrides(&db, agent, &overrides(Some(model), provider, Some(effort))).unwrap();
         let opts = runtime_exec_options(&db, agent).unwrap();
@@ -69,7 +69,7 @@ fn runtime_overrides_roundtrip_for_agents_with_and_without_providers() {
 #[test]
 fn unsupported_fields_are_rejected_on_write_and_on_read() {
     let db = temp_db();
-    for agent in [Agent::Codex, Agent::ClaudeCode] {
+    for agent in [AgentTool::Codex, AgentTool::ClaudeCode] {
         let bad = overrides(None, Some("openai"), None);
         let err = validate_runtime_overrides(agent, &bad).unwrap_err();
         assert!(
@@ -92,17 +92,17 @@ fn unsupported_fields_are_rejected_on_write_and_on_read() {
     // launch instead of being silently ignored.
     db.set_setting("agent.runtime.claude_code", r#"{"provider":"openai"}"#)
         .unwrap();
-    assert!(runtime_exec_options(&db, Agent::ClaudeCode).is_err());
+    assert!(runtime_exec_options(&db, AgentTool::ClaudeCode).is_err());
 
     // A legitimate re-write replaces the whole row, so the Settings UI can
     // repair it without a delete step.
     set_runtime_overrides(
         &db,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         &overrides(Some("sonnet"), None, None),
     )
     .unwrap();
-    let repaired = runtime_exec_options(&db, Agent::ClaudeCode).unwrap();
+    let repaired = runtime_exec_options(&db, AgentTool::ClaudeCode).unwrap();
     assert_eq!(repaired.model.as_deref(), Some("sonnet"));
     assert_eq!(repaired.provider, None);
 }
@@ -112,19 +112,19 @@ fn overrides_never_leak_between_agents() {
     let db = temp_db();
     set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &overrides(Some("gpt-5.6-sol"), None, Some("high")),
     )
     .unwrap();
-    set_runtime_overrides(&db, Agent::Pi, &overrides(None, Some("lmstudio"), None)).unwrap();
+    set_runtime_overrides(&db, AgentTool::Pi, &overrides(None, Some("lmstudio"), None)).unwrap();
 
-    let claude = runtime_exec_options(&db, Agent::ClaudeCode).unwrap();
+    let claude = runtime_exec_options(&db, AgentTool::ClaudeCode).unwrap();
     assert_eq!(
         (claude.model, claude.provider, claude.effort),
         (None, None, None),
-        "an untouched Agent keeps its own defaults"
+        "an untouched AgentTool keeps its own defaults"
     );
-    let pi = runtime_exec_options(&db, Agent::Pi).unwrap();
+    let pi = runtime_exec_options(&db, AgentTool::Pi).unwrap();
     assert_eq!(
         pi.model, None,
         "codex's model override must not become pi's"
@@ -140,16 +140,21 @@ fn blank_input_is_agent_default_and_clears_the_row() {
     let db = temp_db();
     set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &overrides(Some("gpt-5.6-sol"), None, None),
     )
     .unwrap();
     assert!(db.get_setting("agent.runtime.codex").unwrap().is_some());
 
-    // "Use Agent default" for the only overridden field: row goes away.
-    set_runtime_overrides(&db, Agent::Codex, &overrides(Some("   "), None, Some(""))).unwrap();
+    // "Use AgentTool default" for the only overridden field: row goes away.
+    set_runtime_overrides(
+        &db,
+        AgentTool::Codex,
+        &overrides(Some("   "), None, Some("")),
+    )
+    .unwrap();
     assert!(db.get_setting("agent.runtime.codex").unwrap().is_none());
-    assert!(runtime_exec_options(&db, Agent::Codex)
+    assert!(runtime_exec_options(&db, AgentTool::Codex)
         .unwrap()
         .model
         .is_none());
@@ -159,32 +164,32 @@ fn blank_input_is_agent_default_and_clears_the_row() {
 fn a_corrupt_override_row_is_an_error_not_a_silent_default() {
     let db = temp_db();
     db.set_setting("agent.runtime.pi", "not json").unwrap();
-    let err = get_runtime_overrides(&db, Agent::Pi).unwrap_err();
+    let err = get_runtime_overrides(&db, AgentTool::Pi).unwrap_err();
     assert!(err.to_string().contains("Pi"), "names the agent: {err}");
-    assert!(runtime_exec_options(&db, Agent::Pi).is_err());
+    assert!(runtime_exec_options(&db, AgentTool::Pi).is_err());
 }
 
 /// The UI reads these spellings literally, so a rename is a breaking change.
 #[test]
 fn serialized_vocabulary_is_the_ui_contract() {
-    let caps = serde_json::to_value(capabilities_of(Agent::ClaudeCode)).unwrap();
+    let caps = serde_json::to_value(capabilities_of(AgentTool::ClaudeCode)).unwrap();
     assert_eq!(
         caps,
         serde_json::json!({ "model": "suggested", "provider": "unsupported", "effort": "suggested" })
     );
     assert_eq!(
-        serde_json::to_value(Agent::ClaudeCode).unwrap(),
+        serde_json::to_value(AgentTool::ClaudeCode).unwrap(),
         serde_json::json!("claude_code")
     );
     assert_eq!(
-        noending::agent_runtime::discovery::effort_levels_for(Agent::Pi)
+        noending::agent_runtime::discovery::effort_levels_for(AgentTool::Pi)
             .first()
             .map(String::as_str),
         Some("off"),
         "pi can switch thinking off"
     );
     assert!(
-        noending::agent_runtime::discovery::effort_levels_for(Agent::Codex)
+        noending::agent_runtime::discovery::effort_levels_for(AgentTool::Codex)
             .iter()
             .all(|e| e != "off")
     );
@@ -198,7 +203,7 @@ fn extraction_settings_persist_independently_and_name_the_actual_runtime() {
     let db = Db::open(&path).unwrap();
     set_runtime_overrides(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         &overrides(Some("session-only"), None, Some("low")),
     )
     .unwrap();
@@ -229,7 +234,7 @@ fn extraction_settings_persist_independently_and_name_the_actual_runtime() {
     assert_eq!(saved.runtime.model.as_deref(), Some("summary-model"));
     assert_eq!(saved.runtime.effort.as_deref(), Some("high"));
     assert_eq!(
-        get_runtime_overrides(&reopened, Agent::Codex).unwrap(),
+        get_runtime_overrides(&reopened, AgentTool::Codex).unwrap(),
         overrides(Some("session-only"), None, Some("low"))
     );
     ExtractionSettings {

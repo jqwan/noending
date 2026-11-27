@@ -5,7 +5,7 @@ use noending::storage::{
     workstream_projects as relations,
 };
 use noending::{
-    domain::Agent,
+    domain::AgentTool,
     storage::{new_id, Db},
     workspace::{project, workstream},
 };
@@ -30,7 +30,7 @@ impl Fixture {
                 .unwrap();
         let (sid, _) = db
             .upsert_logical_session_unchecked(
-                Agent::Codex,
+                AgentTool::Codex,
                 "native",
                 Some("Discussion"),
                 Some("/work"),

@@ -5,7 +5,7 @@
 //! path, so the domain stays free of fixture-only constructors.
 #![allow(dead_code)] // each test binary uses a subset
 
-use noending::domain::{Agent, Id, Project, Session, Workstream};
+use noending::domain::{AgentTool, Id, Project, Session, Workstream};
 use noending_lib as noending;
 
 /// A path-backed, app-named Project.
@@ -36,8 +36,8 @@ pub fn workstream(id: Id, title: impl Into<String>) -> Workstream {
 }
 
 /// An ownerless Logical Session with no source facts. `root_agent_session_id`
-/// is the source's Agent-side Resume identity.
-pub fn session(id: Id, agent: Agent, root_agent_session_id: impl Into<String>) -> Session {
+/// is the source's AgentTool-side Resume identity.
+pub fn session(id: Id, agent: AgentTool, root_agent_session_id: impl Into<String>) -> Session {
     Session {
         id,
         agent,
@@ -72,7 +72,7 @@ pub fn session(id: Id, agent: Agent, root_agent_session_id: impl Into<String>) -
 pub fn ensure_session(
     db: &noending::storage::Db,
     id: Id,
-    agent: Agent,
+    agent: AgentTool,
     root_agent_session_id: impl Into<String>,
 ) -> Session {
     let root_id = root_agent_session_id.into();
@@ -87,7 +87,7 @@ pub fn ensure_session(
 /// (source identity = the session's root id).
 pub fn ensure_session_source(
     db: &noending::storage::Db,
-    agent: Agent,
+    agent: AgentTool,
     root_agent_session_id: &str,
     source_path: &str,
 ) -> String {
@@ -129,7 +129,7 @@ pub fn parsed_message(
 /// invariants a real ingest does. Returns (session row, stored messages).
 pub fn seed_conversation(
     db: &noending::storage::Db,
-    agent: Agent,
+    agent: AgentTool,
     root_agent_session_id: &str,
     messages: &[noending::domain::ParsedSessionMessage],
 ) -> (Session, Vec<noending::domain::SessionMessage>) {

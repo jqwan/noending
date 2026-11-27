@@ -45,7 +45,7 @@ it.each(["history", "terminal"])("opens and copies a sender independently from p
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(navigate).not.toHaveBeenCalled();
   fireEvent.click(sender);
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "other", initialTitle: "发件会话", initialAgent: "codex" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "other", initialTitle: "发件会话", initialTool: "codex" });
   expect(screen.queryByRole("dialog")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: `查看来信：${message.body}` }));
   const dialog = screen.getByRole("dialog", { name: "来信" });

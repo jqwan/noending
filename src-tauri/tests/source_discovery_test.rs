@@ -1,7 +1,7 @@
 //! Default stores are bounded; explicit user directories keep their scope.
 use noending_lib::{
     adapters::{adapter_for, source_discovery_roots, DiscoveredMember, DiscoveredMemberKind},
-    domain::{ingest_origin, Agent, IngestSource},
+    domain::{ingest_origin, AgentTool, IngestSource},
     ingestion,
     storage::{new_id, Db},
 };
@@ -15,7 +15,7 @@ impl Fixture {
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
-    fn source(&self, agent: Agent) -> IngestSource {
+    fn source(&self, agent: AgentTool) -> IngestSource {
         IngestSource {
             id: "source".into(),
             agent,
@@ -38,13 +38,13 @@ fn discover(source: &IngestSource) -> Vec<DiscoveredMember> {
         .discover_members_in(&source_discovery_roots(source), &|_| false)
         .unwrap()
 }
-fn project_transcript(agent: Agent, id: &str) -> String {
-    let message = if agent == Agent::WorkBuddy {
+fn project_transcript(agent: AgentTool, id: &str) -> String {
+    let message = if agent == AgentTool::WorkBuddy {
         json!({"id":"m1","type":"message","role":"user","sessionId":id,"cwd":"/repo","timestamp":1783137449113i64,"content":[{"type":"input_text","text":"明确的会话消息"}]})
     } else {
         json!({"uuid":"m1","parentUuid":null,"type":"user","sessionId":id,"cwd":"/repo","timestamp":"2026-09-22T15:01:29Z","message":{"role":"user","content":[{"type":"text","text":"明确的会话消息"}]}})
     };
-    let prefix = if agent == Agent::Qoder {
+    let prefix = if agent == AgentTool::Qoder {
         format!(
             "{}\n",
             json!({"type":"workspace-directories","sessionId":id,"directories":["/repo"]})
@@ -56,7 +56,11 @@ fn project_transcript(agent: Agent, id: &str) -> String {
 }
 #[test]
 fn project_defaults_keep_root_and_child_transcripts_and_custom_directories() {
-    for agent in [Agent::ClaudeCode, Agent::Qoder, Agent::WorkBuddy] {
+    for agent in [
+        AgentTool::ClaudeCode,
+        AgentTool::Qoder,
+        AgentTool::WorkBuddy,
+    ] {
         let f = Fixture::new();
         let mut source = f.source(agent);
         let projects = f.0.join("projects");
@@ -111,7 +115,7 @@ fn codex(id: &str, extra: serde_json::Value) -> String {
 #[test]
 fn codex_defaults_keep_archive_compression_children_and_shared_title_index() {
     let f = Fixture::new();
-    let mut source = f.source(Agent::Codex);
+    let mut source = f.source(AgentTool::Codex);
     let live = "019f135a-621c-76a1-a76c-7c71021847aa";
     let archive = "01a0c943-53b8-7e82-8f84-0c2b33da8801";
     let child = "019fbbd3-47be-78f2-89fd-9deec2e4c6d9";
@@ -181,7 +185,7 @@ fn codex_defaults_keep_archive_compression_children_and_shared_title_index() {
 #[test]
 fn dsh_missing_default_sessions_never_walks_plugins() {
     let f = Fixture::new();
-    let source = f.source(Agent::Dsh);
+    let source = f.source(AgentTool::Dsh);
     let body = format!(
         "{}\n{}\n",
         json!({"type":"session","version":2,"id":"dsh-main","cwd":"/repo","createdAt":1788969915099i64}),
@@ -197,7 +201,7 @@ fn dsh_missing_default_sessions_never_walks_plugins() {
 #[test]
 fn explicit_full_incremental_and_native_fallback_share_default_scope() {
     let f = Fixture::new();
-    let source = f.source(Agent::Codex);
+    let source = f.source(AgentTool::Codex);
     let live = "019f135a-621c-76a1-a76c-7c71021847aa";
     let noise = "019fccd3-47be-78f2-89fd-9deec2e4c6d9";
     write(
@@ -212,7 +216,9 @@ fn explicit_full_incremental_and_native_fallback_share_default_scope() {
     db.write()
         .execute("DELETE FROM ingest_sources", [])
         .unwrap();
-    let registered = db.add_ingest_source(Agent::Codex, &source.path).unwrap();
+    let registered = db
+        .add_ingest_source(AgentTool::Codex, &source.path)
+        .unwrap();
     db.write()
         .execute(
             "UPDATE ingest_sources SET origin='default' WHERE id=?1",
@@ -220,7 +226,7 @@ fn explicit_full_incremental_and_native_fallback_share_default_scope() {
         )
         .unwrap();
     assert_eq!(
-        ingestion::reconcile_native(&db, Agent::Codex, noise, None, &|_| {}).unwrap(),
+        ingestion::reconcile_native(&db, AgentTool::Codex, noise, None, &|_| {}).unwrap(),
         (0, 0)
     );
     assert_eq!(
@@ -255,14 +261,14 @@ fn freshness_distinguishes_session_source_and_all_checks_and_preserves_success_a
     write(&a_file, &codex(a_id, json!({})));
     write(&b_file, &codex(b_id, json!({})));
     let a = db
-        .add_ingest_source(Agent::Codex, a_dir.to_str().unwrap())
+        .add_ingest_source(AgentTool::Codex, a_dir.to_str().unwrap())
         .unwrap();
     let b = db
-        .add_ingest_source(Agent::Codex, b_dir.to_str().unwrap())
+        .add_ingest_source(AgentTool::Codex, b_dir.to_str().unwrap())
         .unwrap();
     ingestion::reconcile_source(&db, &a, &|_| {}).unwrap();
     let sid = db
-        .find_session_by_root_agent_id(Agent::Codex, a_id)
+        .find_session_by_root_agent_id(AgentTool::Codex, a_id)
         .unwrap()
         .unwrap()
         .id;
@@ -332,7 +338,7 @@ fn freshness_distinguishes_session_source_and_all_checks_and_preserves_success_a
     assert_eq!(failed.sessions.failed, 1);
     std::fs::remove_file(&b_file).unwrap();
     let b_sid = db
-        .find_session_by_root_agent_id(Agent::Codex, b_id)
+        .find_session_by_root_agent_id(AgentTool::Codex, b_id)
         .unwrap()
         .unwrap()
         .id;

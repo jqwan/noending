@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 mod support;
 
-use noending::domain::{Agent, Session};
+use noending::domain::{AgentTool, Session};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::Db;
 use noending::workspace::home::NoEndingHome;
@@ -52,12 +52,12 @@ fn canonical(raw: &str) -> String {
     normalize_path(raw).expect("fixture path is normalizable")
 }
 
-/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// The row id is store-assigned (identity is the ROOT member's AgentTool-side
 /// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, tag: &str, cwd: &str, activity: &str) -> Session {
     let (row_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &format!("src-{tag}"),
             None,
             Some(cwd),
@@ -242,7 +242,7 @@ fn recent_paths_union_the_registry_with_session_cwd_history() {
     // resolved to the registered WorkspacePath.
     let (s3_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "src-m1",
             None,
             Some("/repo/main"),

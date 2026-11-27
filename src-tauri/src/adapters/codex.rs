@@ -1,7 +1,7 @@
 //! Codex Adapter: `sessions/YYYY/MM/DD/` and `archived_sessions/` under the
-//! Agent data root, containing `rollout-*.jsonl[.zst]`.
+//! agent tool data root, containing `rollout-*.jsonl[.zst]`.
 //! `CODEX_HOME` overrides the root. Raw data is read-only, always — NoEnding
-//! never deletes an Agent-owned source.
+//! never deletes an agent tool-owned source.
 //!
 //! Member mapping: normal root rollout → `Root`; `thread_source=subagent` →
 //! `Child` (a task thread Codex spawned); `thread_source=guardian_review` →
@@ -27,13 +27,13 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    json_str_field, read_jsonl_delta, truncate_text, AgentCommand, DesktopResume, DiscoveredMember,
-    DiscoveredMemberKind, DiscoveryBatch, ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute,
-    SessionMessageRole,
+    json_str_field, read_jsonl_delta, truncate_text, AgentToolCommand, DesktopResume,
+    DiscoveredMember, DiscoveredMemberKind, DiscoveryBatch, ExecOptions, MemberReadDelta,
+    ParsedLine, ResumeRoute, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
-use crate::platform::exec_resolver::{self, AgentInstallation};
+use crate::platform::exec_resolver::{self, AgentToolInstallation};
 
 pub struct CodexAdapter;
 
@@ -110,7 +110,7 @@ fn member_kind_of(thread_source: Option<&str>, forked: bool) -> DiscoveredMember
 
 #[derive(Default)]
 struct RolloutFacts {
-    format: Option<Agent>,
+    format: Option<AgentTool>,
     format_lines: usize,
     meta_seen: bool,
     meta_id: Option<String>,
@@ -206,7 +206,7 @@ impl RolloutFacts {
     }
 
     fn finish(self, path: &Path) -> Result<Option<DiscoveredMember>> {
-        if self.format != Some(Agent::Codex) {
+        if self.format != Some(AgentTool::Codex) {
             return Ok(None);
         }
         let Self {
@@ -236,7 +236,7 @@ impl RolloutFacts {
 
         let last_activity = last_activity.map(|t| t.to_rfc3339());
         Ok(Some(DiscoveredMember {
-            agent: Agent::Codex,
+            agent: AgentTool::Codex,
             source_member_id: session_id,
             kind,
             // Only fork provenance / topology hints; a root rollout has none.
@@ -280,7 +280,7 @@ impl CodexAdapter {
             facts.finish(path)?
         } else {
             Some(DiscoveredMember {
-                agent: Agent::Codex,
+                agent: AgentTool::Codex,
                 source_member_id: session.root_agent_session_id.clone(),
                 kind: DiscoveredMemberKind::Root,
                 parent_source_member_id: None,
@@ -525,12 +525,12 @@ fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
 }
 
 impl crate::adapters::AgentAdapter for CodexAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Codex
+    fn tool(&self) -> AgentTool {
+        AgentTool::Codex
     }
 
-    fn detect(&self) -> Option<AgentInstallation> {
-        exec_resolver::resolve_quiet(Agent::Codex)
+    fn detect(&self) -> Option<AgentToolInstallation> {
+        exec_resolver::resolve_quiet(AgentTool::Codex)
     }
 
     fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
@@ -625,10 +625,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn build_new_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
         args.extend(runtime_args(opts));
         if let Some(message) = opts.initial_message() {
@@ -636,7 +636,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
             // with a dash or matches a CLI command such as `resume`.
             args.extend(["--".into(), message.into()]);
         }
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -645,12 +645,12 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn build_resume_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // codex resume [OPTIONS] [SESSION_ID]
         let mut args = vec![
             "resume".into(),
@@ -658,7 +658,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         ];
         args.extend(runtime_args(opts));
         args.push(agent_session_id.into());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -667,13 +667,13 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn build_resume_message_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
         message: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut command =
             self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
         if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
@@ -684,10 +684,10 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn build_exec_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args: Vec<String> = vec![
             "exec".into(),
             "-s".into(),
@@ -696,7 +696,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         ];
         args.extend(runtime_args(opts));
         args.push(prompt.to_string());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: None, // headless analysis never touches user repos
@@ -705,11 +705,11 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
 
     fn build_context_extraction_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         prompt: &str,
         runtime_dir: &Path,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args: Vec<String> = vec![
             "exec".into(),
             "--ephemeral".into(),
@@ -719,7 +719,7 @@ impl crate::adapters::AgentAdapter for CodexAdapter {
         ];
         args.extend(runtime_args(opts));
         args.push(prompt.to_string());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: Some(runtime_dir.to_path_buf()),
@@ -980,7 +980,7 @@ mod rollout_tests {
     fn root_session(path: &Path) -> Session {
         Session {
             id: "sess-codex".into(),
-            agent: Agent::Codex,
+            agent: AgentTool::Codex,
             root_agent_session_id: SESSION_ID.into(),
             title: None,
             cwd: None,

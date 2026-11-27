@@ -1,4 +1,4 @@
-//! How an `AgentCommand` becomes a process inside a real PTY.
+//! How an `AgentToolCommand` becomes a process inside a real PTY.
 //!
 //! The adapters' argv stays declarative; the platform decision lives here,
 //! mirroring `platform::launcher` (which does the same job for *external*
@@ -7,13 +7,13 @@
 //! environment, so the agent (and everything it forks — git, editors, package
 //! managers) runs inside the user's login shell.
 
-use crate::adapters::AgentCommand;
+use crate::adapters::AgentToolCommand;
 use crate::error::{other, Result};
 
 /// ConPTY starts with a cursor query before the child can run. A fresh PTY
 /// has an empty screen at 1;1. Answer only this initial query, removing it
 /// from replay so a later xterm attachment cannot answer it a second time.
-/// Subsequent Agent VT queries remain the frontend terminal's responsibility.
+/// Subsequent agent tool VT queries remain the frontend terminal's responsibility.
 #[cfg(any(windows, test))]
 #[derive(Default)]
 pub(super) struct StartupQuery {
@@ -77,7 +77,7 @@ impl PtyPair {
     ) -> Result<Box<dyn portable_pty::Child + Send + Sync>> {
         self.slave.spawn_command(cmd.clone()).map_err(|e| {
             other(format!(
-                "在终端中启动 Agent 失败: {}",
+                "在终端中启动 运行工具 失败: {}",
                 spawn_error_detail(&e.to_string())
             ))
         })
@@ -134,11 +134,11 @@ fn login_shell() -> String {
 }
 
 /// The command the PTY actually runs: the agent CLI inside the user's login
-/// shell. Archive launches must enter their directory before the Agent starts.
+/// shell. Archive launches must enter their directory before the agent tool starts.
 /// Other launches report a stale directory and fall back to the user's home.
 #[cfg(unix)]
 pub(crate) fn wrapped_command(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     require_cwd: bool,
 ) -> portable_pty::CommandBuilder {
     use crate::platform::launcher::shell_quote;
@@ -174,7 +174,7 @@ pub(crate) fn wrapped_command(
 /// keeps startup fast. The guarded `Set-Location` reports directory failures.
 #[cfg(target_os = "windows")]
 pub(crate) fn wrapped_command(
-    cmd: &AgentCommand,
+    cmd: &AgentToolCommand,
     require_cwd: bool,
 ) -> portable_pty::CommandBuilder {
     use crate::platform::launcher::ps_quote;
@@ -210,7 +210,7 @@ pub(crate) fn wrapped_command(
     wrapped
 }
 
-/// portable-pty 0.9 kills the PowerShell wrapper alone on Windows. Its Agent
+/// portable-pty 0.9 kills the PowerShell wrapper alone on Windows. Its agent tool
 /// and descendants must share the existing close/exit lifetime contract.
 #[cfg(windows)]
 pub(crate) fn process_tree_killer(
@@ -268,7 +268,7 @@ mod tests {
         } else {
             ("printf", "agent-started")
         };
-        let cmd = crate::adapters::AgentCommand {
+        let cmd = crate::adapters::AgentToolCommand {
             program: program.into(),
             args: vec![content.into()],
             cwd: Some(directory.clone()),
@@ -354,7 +354,7 @@ mod tests {
         let cwd =
             std::env::temp_dir().join(format!("noending quote's {}", crate::storage::new_id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "Write-Output".into(),
             args: vec!["中文，你好 😀 '$literal'".into()],
             cwd: Some(cwd.clone()),
@@ -366,7 +366,7 @@ mod tests {
             .creation_flags(0x08000000)
             .output()
             .unwrap();
-        let cwd_cmd = AgentCommand {
+        let cwd_cmd = AgentToolCommand {
             program: "powershell".into(),
             args: vec![
                 "-NoProfile".into(),
@@ -410,7 +410,7 @@ mod tests {
             "$(printf injected) $HOME `printf injected`",
             "中文",
         ];
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "/bin/sh".into(),
             args: ["-c", r#"printf '%s\0' "$PWD" "$@""#, "--"]
                 .into_iter()

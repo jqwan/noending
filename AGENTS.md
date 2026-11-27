@@ -2,14 +2,14 @@
 
 ## 项目概况
 
-NoEnding 是一个本地多 Agent 工作区，使用以下技术构建：
+NoEnding 是一个本地智能体工作区，使用以下技术构建：
 
 * Tauri 2
 * Rust + SQLite
 * React + TypeScript
-* Agent 适配器：支持列表以 `domain/models.rs` 中的 `Agent` 和
+* 运行工具适配器：支持列表以 `domain/models.rs` 中的 `AgentTool` 和
   `adapters/mod.rs` 中的 `all_adapters()` 为准，该列表会变化。
-  并非所有 Agent 都提供 CLI；部分适配器仅用于历史摄入，
+  并非所有运行工具都提供 CLI；部分适配器仅用于历史摄入，
   因此其 `detect()` 始终不成功是设计行为，不是缺陷。
 
 核心概念包括 `Workstream`、`Session`、`Project` 和 `WorkspacePath`。
@@ -18,15 +18,16 @@ NoEnding 是一个本地多 Agent 工作区，使用以下技术构建：
 
 后端代码位于 `src-tauri/src/`，主要模块：
 
-* `adapters/` — Agent 集成
+* `Agent` 表示 NoEnding 中有长期身份的智能体，`AgentTool` 表示 Codex 等接入工具。
+* `adapters/` — 运行工具集成
 * `domain/` — 与平台无关的领域模型（Session / SessionMember / SessionMessage 等）
 * `platform/` — 操作系统相关行为
 * `workspace/` — 工作区与项目逻辑
 * `ingestion/` — 会话发现与摄入
 * `sync/` — 同步与提取
 * `context/` — 显式 Context 更新服务与读取投影
-* `agent_runtime/` — Agent 运行配置（默认值由 Agent 管理，覆盖值由 NoEnding 管理）
-* `assistant/` — 项目的可选智能体属性、档案目录里的 `AGENTS.md`
+* `agent_runtime/` — 模型、供应商和推理强度等运行配置（默认值由运行工具管理，覆盖值由 NoEnding 管理）
+* `agent/` — 智能体身份、档案和公开名片
 * `search/` — FTS5 搜索
 * `launcher/` — 新建与恢复会话的启动流程
 * `lifecycle/` — 会话生命周期

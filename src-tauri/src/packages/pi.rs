@@ -3,7 +3,7 @@
 //! entry reports Enabled and no toggle capability.
 
 use super::{files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
             };
             PackageEntry {
                 id: files::key(format!("package:pi:{source}")),
-                agent: Some(Agent::Pi),
+                agent: Some(AgentTool::Pi),
                 name: source.clone(),
                 version: String::new(),
                 description: String::new(),

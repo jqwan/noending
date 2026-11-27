@@ -11,8 +11,8 @@ import PageHeader from "../../layout/PageHeader";
 import { Field, submitsOnEnter, timeAgo, useRefreshSignal, Modal, openPath, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError } from "../workstreams/WorkspacePaths";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
-import AssistantMailbox from "../assistants/AssistantMailbox";
-import ProjectAssistantSection, { AssistantReadOnlyDocument } from "../assistants/ProjectAssistantSection";
+import AgentMailbox from "../agents/AgentMailbox";
+import ProjectAgentSection, { AgentReadOnlyDocument } from "../agents/ProjectAgentSection";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
 import { showToast } from "../../components/Toast";
@@ -25,8 +25,8 @@ import { notifyDataChanged } from "../../app/routes";
 import { httpsRemoteUrl } from "./remoteUrl";
 import { projectKindLabels, projectPurposeLabels, isDirectoryGroupProject } from "./projectKind";
 import {
-  type AssistantFileName,
-  type ProjectAssistant,
+  type AgentFileName,
+  type ProjectAgent,
   type ProjectDetailData,
 } from "../../types";
 import type { ProjectEntry, Route } from "../../app/routes";
@@ -40,12 +40,12 @@ import type { ProjectEntry, Route } from "../../app/routes";
 import { projectDetailCache } from "./projectDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 
-export default function ProjectDetail({ projectId, initialTitle, navigate, entry, fromAssistants }: {
+export default function ProjectDetail({ projectId, initialTitle, navigate, entry, fromAgents }: {
   projectId: string;
   initialTitle?: string;
   navigate: (r: Route) => void;
   entry?: ProjectEntry;
-  fromAssistants?: boolean;
+  fromAgents?: boolean;
 }) {
   const [data, setData] = useState<ProjectDetailData | null>(() => projectDetailCache.get(projectId) ?? null);
   const [gone, setGone] = useState(false);
@@ -95,25 +95,25 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
 
   const detail = data;
   const project = detail?.project ?? null;
-  const assistant = detail?.assistant;
-  const assistantView = entry === "assistant" && Boolean(assistant);
-  const icon = (detail ? assistantView : entry === "assistant") ? "spark" : "project";
-  const archiveBoard: Route = { view: "projects", scope: "archived", ...(fromAssistants && { assistantOnly: true }) };
-  const onAssistantSaved = (updated: ProjectAssistant, file?: AssistantFileName) => {
+  const agent = detail?.agent;
+  const agentView = entry === "agent" && Boolean(agent);
+  const icon = (detail ? agentView : entry === "agent") ? "spark" : "project";
+  const archiveBoard: Route = { view: "projects", scope: "archived", ...(fromAgents && { agentOnly: true }) };
+  const onAgentSaved = (updated: ProjectAgent, file?: AgentFileName) => {
     if (removedTargets.projects.has(projectId)) return;
     ++seqRef.current;
     setData(current => {
-      if (!current?.assistant) return current;
-      const assistant = current.assistant;
+      if (!current?.agent) return current;
+      const agent = current.agent;
       const next = {
         ...current,
-        assistant: {
-          ...assistant,
-          agents: !file || file === "agents" ? updated.agents : assistant.agents,
-          guide_is_default: !file || file === "agents" ? updated.guide_is_default : assistant.guide_is_default,
-          claude_md_missing: file ? assistant.claude_md_missing : updated.claude_md_missing,
-          soul: file === "soul" || (!file && assistant.soul.state === "missing") ? updated.soul : assistant.soul,
-          role: file === "role" || (!file && assistant.role.state === "missing") ? updated.role : assistant.role,
+        agent: {
+          ...agent,
+          agents: !file || file === "agents" ? updated.agents : agent.agents,
+          guide_is_default: !file || file === "agents" ? updated.guide_is_default : agent.guide_is_default,
+          claude_md_missing: file ? agent.claude_md_missing : updated.claude_md_missing,
+          soul: file === "soul" || (!file && agent.soul.state === "missing") ? updated.soul : agent.soul,
+          role: file === "role" || (!file && agent.role.state === "missing") ? updated.role : agent.role,
         },
       };
       projectDetailCache.set(projectId, next);
@@ -133,12 +133,12 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
       return a.canonical_path.localeCompare(b.canonical_path);
     });
   }, [detail]);
-  const displayedPaths = assistantView
-    ? sortedWorkspacePaths.filter(path => path.id === assistant?.workspace_path_id)
+  const displayedPaths = agentView
+    ? sortedWorkspacePaths.filter(path => path.id === agent?.workspace_path_id)
     : sortedWorkspacePaths;
-  const directoryLabel = assistantView ? "档案目录" : "工作目录";
-  const displayedSessions = assistantView
-    ? detail?.sessions.filter(session => session.workspace_path_id === assistant?.workspace_path_id) ?? []
+  const directoryLabel = agentView ? "档案目录" : "工作目录";
+  const displayedSessions = agentView
+    ? detail?.sessions.filter(session => session.workspace_path_id === agent?.workspace_path_id) ?? []
     : detail?.sessions ?? [];
   const unusedMissingPaths = detail?.workspace_paths.filter(path => {
     if (path.exists) return false;
@@ -246,7 +246,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
     navigate({
       view: "project", projectId, initialTitle: project.name,
       ...(next && { entry: next }),
-      ...(fromAssistants && { fromAssistants }),
+      ...(fromAgents && { fromAgents }),
     });
   };
 
@@ -254,13 +254,13 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
     <DetailPanelProvider kind="project"><div className="main project-detail detail-page">
       <PageHeader
         title={project.name} icon={<Icon name={icon} />}
-        navigation={assistant && <div className="settings-seg icon-seg" role="group" aria-label="项目子页">
-          <button type="button" className={assistantView ? "" : "on"} aria-pressed={!assistantView}
+        navigation={agent && <div className="settings-seg icon-seg" role="group" aria-label="项目子页">
+          <button type="button" className={agentView ? "" : "on"} aria-pressed={!agentView}
             aria-label="项目详情" title="项目详情" onClick={() => openEntry()}>
             <Icon name="project" />
           </button>
-          <button type="button" className={assistantView ? "on" : ""} aria-pressed={assistantView}
-            aria-label="智能体详情" title="智能体详情" onClick={() => openEntry("assistant")}>
+          <button type="button" className={agentView ? "on" : ""} aria-pressed={agentView}
+            aria-label="智能体详情" title="智能体详情" onClick={() => openEntry("agent")}>
             <Icon name="spark" />
           </button>
         </div>}
@@ -270,16 +270,16 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             onClick={() => { setNameInput(project.name); setRenameError(""); setRenaming(true); }}>
             <Icon name="edit" />
           </button>
-          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, is_assistant: Boolean(assistant), session_count: detail.sessions.length }}
+          <ProjectLifecycleActions project={{ ...project, purpose: detail.purpose, is_agent: Boolean(agent), session_count: detail.sessions.length }}
             onChanged={() => { clearProjectCardsCache(); refresh(); }}
-            replacement={fromAssistants ? archiveBoard : undefined}
+            replacement={fromAgents ? archiveBoard : undefined}
             onDeleted={() => navigate(archiveBoard)} />
           </>
         }
       />
 
       <DetailLayout panel={<>
-        {!assistantView && (
+        {!agentView && (
           <DetailSection sectionId="properties" label="属性" title={<>
               <Icon name="info" />
               <span>属性</span>
@@ -292,7 +292,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
                 {projectKindLabels[detail.kind]}
               </span>
               {detail.purpose && <span className="badge accent">{projectPurposeLabels[detail.purpose]}</span>}
-              {assistant && <span className="badge accent">智能体</span>}
+              {agent && <span className="badge accent">智能体</span>}
               <span className="badge">{project.visibility === "archived" ? "已归档" : "未归档"}</span>
               {project.name_customized && <span className="small muted">自定义名称</span>}
             </div>
@@ -330,22 +330,22 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
         )}
           <DetailSection sectionId="workspace-paths" label={directoryLabel} className="project-workspace-paths" title={<>
               <Icon name="folder" />
-              <span>{assistantView ? directoryLabel : `${directoryLabel}（${displayedPaths.length}）`}</span>
-            </>} actions={!assistantView && unusedMissingPaths.length > 0 && <button type="button" className="btn ghost icon-button small"
+              <span>{agentView ? directoryLabel : `${directoryLabel}（${displayedPaths.length}）`}</span>
+            </>} actions={!agentView && unusedMissingPaths.length > 0 && <button type="button" className="btn ghost icon-button small"
               title="清理失效目录" aria-label="清理失效目录" disabled={cleanupBusy} onClick={() => setConfirmCleanup(true)}>
               <Icon name="trash" />
             </button>}>
 
             {displayedPaths.length === 0 && (
               <div className="detail-empty">
-                {assistantView ? "尚未登记档案目录。" : "这个项目目前没有登记目录。"}
+                {agentView ? "尚未登记档案目录。" : "这个项目目前没有登记目录。"}
               </div>
             )}
             <DetailList label={`${directoryLabel}列表`}>
             {displayedPaths.map((p) => (
               <DetailListRow key={p.id} icon={<Icon name="folder" />}
                 title={<CompactPath path={p.canonical_path} />}
-                titleHint={p.canonical_path} openLabel={assistantView ? "打开档案目录" : undefined} onOpen={() => void openPath(p.canonical_path)}
+                titleHint={p.canonical_path} openLabel={agentView ? "打开档案目录" : undefined} onOpen={() => void openPath(p.canonical_path)}
                 meta={<>
                   {!p.exists && <MissingBadge />}
                   <GitStateBadge state={p.git_state} kind={p.git_kind} />
@@ -357,14 +357,14 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
           <SkillScopeConfig projectId={projectId} navigate={navigate}
             workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
       </>}>
-        {assistant && <div hidden={!assistantView}>
-          <AssistantReadOnlyDocument file="intro" document={assistant.intro} onRefresh={refresh} />
-          <AssistantMailbox key={assistant.id} assistantId={assistant.id} name={project.name}
-            active={assistantView} archived={project.visibility === "archived"} sessions={displayedSessions} />
-          <ProjectAssistantSection projectId={projectId} assistant={assistant} active={assistantView}
-            archived={project.visibility === "archived"} onSaved={onAssistantSaved} onRefresh={refresh} />
+        {agent && <div hidden={!agentView}>
+          <AgentReadOnlyDocument file="intro" document={agent.intro} onRefresh={refresh} />
+          <AgentMailbox key={agent.id} agentId={agent.id} name={project.name}
+            active={agentView} archived={project.visibility === "archived"} sessions={displayedSessions} />
+          <ProjectAgentSection projectId={projectId} agent={agent} active={agentView}
+            archived={project.visibility === "archived"} onSaved={onAgentSaved} onRefresh={refresh} />
         </div>}
-        {!assistantView && <>
+        {!agentView && <>
           <ProjectSummary key={projectId} projectId={projectId} sessions={detail.sessions} />
           <DetailSection sectionId="tasks" label="关联任务" title={<>
                 <Icon name="tasks" />
@@ -389,19 +389,19 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             )}
           </DetailSection>
         </>}
-          <DetailSection sectionId="sessions" label={assistantView ? "对话记录" : "会话"} className="project-sessions-section" title={<>
+          <DetailSection sectionId="sessions" label={agentView ? "对话记录" : "会话"} className="project-sessions-section" title={<>
                 <Icon name="chat" />
-                <span>{assistantView ? "对话记录" : "会话"}（{displayedSessions.length}）</span>
+                <span>{agentView ? "对话记录" : "会话"}（{displayedSessions.length}）</span>
               </>} actions={project.visibility !== "archived" && !isDirectoryGroupProject(detail) && (
                 <NewProjectSessionButton projectId={project.id} navigate={navigate}
-                  archivePathId={assistantView ? assistant?.workspace_path_id : undefined} />
+                  archivePathId={agentView ? agent?.workspace_path_id : undefined} />
               )}>
             <SessionMiniList sessions={displayedSessions}
-              emptyText={assistantView ? "还没有和这位智能体的对话。" : "这个项目下还没有会话。"} navigate={navigate} />
+              emptyText={agentView ? "还没有和这位智能体的对话。" : "这个项目下还没有会话。"} navigate={navigate} />
           </DetailSection>
       </DetailLayout>
 
-      {!assistantView && newTaskOpen && (
+      {!agentView && newTaskOpen && (
         <WorkstreamFormModal
           key={projectId}
           initialProjectId={projectId}
@@ -432,7 +432,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
           </DialogActions>
         </Modal>
       )}
-      {!assistantView && confirmCleanup && <Modal title="清理失效目录？" onClose={() => { if (!cleanupBusyRef.current) setConfirmCleanup(false); }}>
+      {!agentView && confirmCleanup && <Modal title="清理失效目录？" onClose={() => { if (!cleanupBusyRef.current) setConfirmCleanup(false); }}>
         <p>清理 {unusedMissingPaths.length} 个缺失且没有会话引用的目录登记？</p>
         <p className="small muted">仅移除 NoEnding 中的登记，不删除磁盘内容，项目本身保留。执行时会重新检查目录及会话引用。</p>
         <DialogActions>

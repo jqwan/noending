@@ -14,8 +14,8 @@ use std::sync::Mutex;
 mod support;
 
 use noending::domain::{
-    git_state, Agent, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose, Session,
-    WorkspaceObservation, WorkspacePath,
+    git_state, AgentTool, GitDetection, GitWorktreeKind, Project, ProjectKind, ProjectPurpose,
+    Session, WorkspaceObservation, WorkspacePath,
 };
 use noending::storage::workspace::{insert_workspace_path_conn, rename_project_conn};
 use noending::storage::Db;
@@ -75,8 +75,8 @@ fn home_path(rel: &str) -> String {
         .to_string()
 }
 
-/// Chat scratch directories under an Agent app's own root share ONE bucket
-/// Project named after the Agent; lookalikes outside the roots keep their own
+/// Chat scratch directories under an AgentTool app's own root share ONE bucket
+/// Project named after the AgentTool; lookalikes outside the roots keep their own
 /// projects, and a different app means a different bucket.
 #[test]
 fn chat_directories_under_an_app_root_share_one_bucket_project() {
@@ -100,7 +100,7 @@ fn chat_directories_under_an_app_root_share_one_bucket_project() {
         .unwrap();
     assert_eq!(
         name, "Qoder Chat",
-        "the bucket is named after the Agent, not the first chat dir"
+        "the bucket is named after the AgentTool, not the first chat dir"
     );
     assert_eq!(git_id, None);
     assert_eq!(
@@ -199,12 +199,12 @@ fn paths_of(db: &Db, project_id: &str) -> Vec<WorkspacePath> {
     db.list_workspace_paths_for_project(project_id).unwrap()
 }
 
-/// The row id is store-assigned (identity is the ROOT member's Agent-side
+/// The row id is store-assigned (identity is the ROOT member's AgentTool-side
 /// id), so callers use the returned Session instead of a fixture id.
 fn session(db: &Db, id: &str, cwd: &str, path_id: &str) -> Session {
     let (row_id, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &format!("src-{id}"),
             None,
             Some(&canon(cwd)),
@@ -1691,7 +1691,7 @@ fn project_detail_has_the_frozen_shape() {
     assert_eq!(
         keys,
         vec![
-            "assistant",
+            "agent",
             "cleanable_missing_path_ids",
             "kind",
             "project",
@@ -2023,10 +2023,10 @@ fn refresh_does_not_ingest_sessions() {
     std::fs::write(source.join("rollout-2026-10-09-external.jsonl"),
         concat!(r#"{"ordinal":0,"type":"session_meta","payload":{"id":"external-root","cwd":"/work/a"}}"#, "\n",
         r#"{"ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"external transcript"}]}}"#, "\n")).unwrap();
-    db.add_ingest_source(Agent::Codex, &source.to_string_lossy())
+    db.add_ingest_source(AgentTool::Codex, &source.to_string_lossy())
         .unwrap();
     assert_eq!(
-        noending::adapters::adapter_for(Agent::Codex)
+        noending::adapters::adapter_for(AgentTool::Codex)
             .discover_members_in(&[source], &|_| false)
             .unwrap()
             .len(),

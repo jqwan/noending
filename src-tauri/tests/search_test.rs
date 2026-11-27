@@ -5,7 +5,7 @@
 //! conversation messages are indexed — and a trashed session's rows are hidden
 //! by the read-side lifecycle guard, not only by the unindex-on-trash write.
 
-use noending::domain::{Agent, SessionMessageRole};
+use noending::domain::{AgentTool, SessionMessageRole};
 use noending::lifecycle;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
@@ -91,7 +91,7 @@ fn search_finds_long_and_short_messages_and_session_titles_after_reopen() {
     let short = "先做迁移";
     let (_session, stored) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "root-search-1",
         &[
             support::parsed_message("m1", SessionMessageRole::User, long),
@@ -100,7 +100,7 @@ fn search_finds_long_and_short_messages_and_session_titles_after_reopen() {
     );
     let (session, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "root-doc-1",
             Some("quant script debug"),
             None,
@@ -114,7 +114,7 @@ fn search_finds_long_and_short_messages_and_session_titles_after_reopen() {
     // An untitled session is still documented, under the agent's name.
     let (untitled, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "root-doc-2",
             None,
             None,
@@ -167,7 +167,7 @@ fn archive_keeps_session_and_messages_searchable() {
     let db = open_db("lifecycle");
     let (_session, stored) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "root-lifecycle-1",
         &[support::parsed_message(
             "m1",
@@ -224,7 +224,7 @@ fn the_read_side_guard_hides_rows_without_a_live_session() {
     let db = open_db("stale-guard");
     let (session, stored) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "root-stale-1",
         &[support::parsed_message(
             "m1",
@@ -296,7 +296,7 @@ fn search_indexes_content_without_tokenizing_routing_metadata() {
     let db = open_db("metadata-unindexed");
     let (session, messages) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "routingnativeonly",
         &[support::parsed_message(
             "routingmessageonly",
@@ -332,7 +332,7 @@ fn message_search_uses_external_prose_and_keeps_fts_consistent_after_retirement(
     let prose = format!("uniqueposting {}", "正文只保留一份。".repeat(4000));
     let (session, stored) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "external-prose",
         &[support::parsed_message(
             "m1",
@@ -375,7 +375,7 @@ fn message_search_uses_external_prose_and_keeps_fts_consistent_after_retirement(
     // Cascading removal also retires postings before their source prose goes.
     let (cascade, _) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "external-cascade",
         &[support::parsed_message(
             "cascade",
@@ -415,7 +415,7 @@ fn navigation_lookup_matches_objects_and_paths_but_excludes_content() {
     db.upsert_workstream(&task).unwrap();
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "nav-session",
         &[support::parsed_message(
             "m",
@@ -503,11 +503,14 @@ fn navigation_lookup_includes_agents_without_detection_and_reports_truncation() 
     use noending::search::objects::ObjectKind;
     let db = open_db("navigation-agents");
     let initial = lookup(&db, "").unwrap();
-    assert!(initial.items.iter().all(|h| h.kind == ObjectKind::Agent));
+    assert!(initial
+        .items
+        .iter()
+        .all(|h| h.kind == ObjectKind::AgentTool));
     let qoder = lookup(&db, "qcoder").unwrap();
     assert_eq!(qoder.items.len(), 1);
-    assert_eq!(qoder.items[0].agent, Some(Agent::Qoder));
-    assert_eq!(qoder.items[0].kind, ObjectKind::Agent);
+    assert_eq!(qoder.items[0].agent, Some(AgentTool::Qoder));
+    assert_eq!(qoder.items[0].kind, ObjectKind::AgentTool);
     for i in 0..30 {
         let task = support::workstream(format!("nav-{i:02}"), format!("Codex task {i}"));
         db.upsert_workstream(&task).unwrap();
@@ -517,10 +520,10 @@ fn navigation_lookup_includes_agents_without_detection_and_reports_truncation() 
     assert!(result.items.len() < 31);
     assert_eq!(
         result.items[0].kind,
-        ObjectKind::Agent,
-        "exact Agent names remain ahead of broad prefix matches"
+        ObjectKind::AgentTool,
+        "exact AgentTool names remain ahead of broad prefix matches"
     );
-    assert_eq!(result.items[0].agent, Some(Agent::Codex));
+    assert_eq!(result.items[0].agent, Some(AgentTool::Codex));
     let narrow = lookup(&db, "Codex task 29").unwrap();
     assert!(!narrow.has_more);
     assert_eq!(narrow.items.len(), 1);
@@ -530,7 +533,7 @@ fn navigation_lookup_includes_agents_without_detection_and_reports_truncation() 
             .unwrap()
             .items
             .iter()
-            .all(|h| h.kind == ObjectKind::Agent),
+            .all(|h| h.kind == ObjectKind::AgentTool),
         "default suggestions must not preload task records"
     );
 }
@@ -575,7 +578,7 @@ fn board_matches_are_complete_and_exclude_non_identity_fields() {
         .unwrap()
         .is_empty());
     assert!(
-        matching_ids(&db, ObjectKind::Agent, "claude", &["codex".into()])
+        matching_ids(&db, ObjectKind::AgentTool, "claude", &["codex".into()])
             .unwrap()
             .is_empty()
     );
@@ -596,14 +599,14 @@ fn board_matches_are_complete_and_exclude_non_identity_fields() {
     assert_eq!(
         matching_ids(
             &db,
-            ObjectKind::Agent,
+            ObjectKind::AgentTool,
             "claude",
             &["claude_code".into(), "codex".into()]
         )
         .unwrap(),
         vec!["claude_code"]
     );
-    let (session, _) = support::seed_conversation(&db, Agent::Codex, "native-exact-id", &[]);
+    let (session, _) = support::seed_conversation(&db, AgentTool::Codex, "native-exact-id", &[]);
     for query in [session.id.as_str(), "native-exact-id"] {
         assert_eq!(
             matching_ids(&db, ObjectKind::Session, query, &[session.id.clone()]).unwrap(),

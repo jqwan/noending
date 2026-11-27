@@ -218,7 +218,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     .unwrap_or((None, None));
                 Command::Freshness { kind, id }
             }
-            "agent" if action == "list" && words.len() == 2 => Command::Agents,
+            "runtime" if action == "list" && words.len() == 2 => Command::RuntimeList,
             "sync" if words.len() == 1 => {
                 let source = options.take("source");
                 let session = options.take("session");
@@ -229,7 +229,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
             }
             "source" if action == "list" && words.len() == 2 => Command::Sources,
             "session" if action == "resolve" && words.len() == 2 => Command::ResolveSession {
-                agent: options.required("agent")?,
+                tool: options.required("tool")?,
                 native_id: options.required("native-id")?,
             },
             "session" if action == "identity" && words.len() == 2 => Command::SessionControl {
@@ -243,7 +243,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                 query: options.required("query")?,
                 project: options.take("project"),
                 scope: options.take("scope").unwrap_or_else(|| "unarchived".into()),
-                agent: options.take("agent"),
+                tool: options.take("tool"),
                 cursor: options.take("cursor"),
                 limit: options.number("limit", 20)?,
             },
@@ -265,7 +265,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                 Command::SessionControl {
                     command: crate::session_control::ControlCommand::Start(
                         crate::session_control::StartSession {
-                            agent: options.required("agent")?,
+                            tool: options.required("tool")?,
                             cwd: options.take("cwd"),
                             message: options.message()?,
                             runtime,
@@ -273,21 +273,21 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     ),
                 }
             }
-            "assistant" if action == "list" && words.len() == 2 => Command::AssistantList {
+            "agent" if action == "list" && words.len() == 2 => Command::AgentList {
                 name: options.take("name"),
             },
-            "assistant" if action == "show" => Command::AssistantGet { id: id(&words)? },
-            "assistant" if action == "self" && words.len() == 2 => Command::AssistantSelf,
-            "assistant-mailbox" if words.len() == 2 => {
-                let assistant = if action == "send" {
-                    options.required("assistant")?
+            "agent" if action == "show" => Command::AgentGet { id: id(&words)? },
+            "agent" if action == "self" && words.len() == 2 => Command::AgentSelf,
+            "agent-mailbox" if words.len() == 2 => {
+                let agent = if action == "send" {
+                    options.required("agent")?
                 } else {
-                    options.take("assistant").unwrap_or_else(|| "self".into())
+                    options.take("agent").unwrap_or_else(|| "self".into())
                 };
                 let from_session = options.take("from-session");
                 match action {
-                    "list" => Command::AssistantMailboxList(crate::mailbox::AssistantList {
-                        assistant,
+                    "list" => Command::AgentMailboxList(crate::mailbox::AgentList {
+                        agent,
                         from_session,
                         state: serde_json::from_value(json!(options
                             .take("state")
@@ -296,28 +296,28 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         cursor: options.optional_number("cursor")?,
                         limit: options.number("limit", 50)?,
                     }),
-                    "read" => Command::AssistantMailboxRead(crate::mailbox::AssistantRead {
-                        assistant,
+                    "read" => Command::AgentMailboxRead(crate::mailbox::AgentRead {
+                        agent,
                         from_session,
                         message_id: options.required("message-id")?,
                     }),
-                    "send" => Command::AssistantMailboxSend(crate::mailbox::AssistantSend {
-                        assistant,
+                    "send" => Command::AgentMailboxSend(crate::mailbox::AgentSend {
+                        agent,
                         from_session,
                         message: options
                             .message()?
                             .ok_or_else(|| invalid("缺少 --message 或 --file"))?,
                     }),
                     "mark-read" | "claim" | "release" | "complete" => {
-                        use crate::mailbox::AssistantOperation;
+                        use crate::mailbox::AgentOperation;
                         let operation = match action {
-                            "mark-read" => AssistantOperation::Read,
-                            "claim" => AssistantOperation::Claim,
-                            "release" => AssistantOperation::Release,
-                            _ => AssistantOperation::Complete,
+                            "mark-read" => AgentOperation::Read,
+                            "claim" => AgentOperation::Claim,
+                            "release" => AgentOperation::Release,
+                            _ => AgentOperation::Complete,
                         };
-                        Command::AssistantMailboxChange(crate::mailbox::AssistantChange {
-                            assistant,
+                        Command::AgentMailboxChange(crate::mailbox::AgentChange {
+                            agent,
                             from_session,
                             message_id: options.required("message-id")?,
                             revision: options
@@ -327,7 +327,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                             operation,
                         })
                     }
-                    _ => return Err(invalid("使用 assistant-mailbox --help 查看用法")),
+                    _ => return Err(invalid("使用 agent-mailbox --help 查看用法")),
                 }
             }
             "mailbox" if action == "list" && words.len() == 2 => {
@@ -526,7 +526,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                         kind,
                         project: options.take("project"),
                         scope: options.take("scope").unwrap_or_else(|| "unarchived".into()),
-                        agent: options.take("agent"),
+                        tool: options.take("tool"),
                         title: options.take("title"),
                         path: options.take("path"),
                         cursor: options.take("cursor"),
@@ -618,7 +618,7 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                 "show" => Command::ExtractionSettings,
                 "set" => {
                     let patch = super::extraction_settings::Patch {
-                        agent: options.take("agent"),
+                        tool: options.take("tool"),
                         model: options.take("model"),
                         provider: options.take("provider"),
                         effort: options.take("effort"),
@@ -698,25 +698,25 @@ fn read_submission(options: &mut Options) -> CliResult<crate::context::summary::
 
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
-        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne assistant --help", "ne assistant-mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne runtime list", "ne sync --help", "ne mailbox --help", "ne agent --help", "ne agent-mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
-        Some("assistant") => vec!["ne assistant list [--name TEXT]", "ne assistant show ID", "ne assistant self"],
-        Some("assistant-mailbox") => vec![
-            "ne assistant-mailbox list [--state all|unread|pending|in_progress|completed] [--cursor N] [--limit 50]",
-            "ne assistant-mailbox read --message-id ID",
-            "ne assistant-mailbox send --assistant ID --message TEXT (or --file FILE)",
-            "ne assistant-mailbox mark-read|claim|release|complete --message-id ID --revision N"
+        Some("agent") => vec!["ne agent list [--name TEXT]", "ne agent show ID", "ne agent self"],
+        Some("agent-mailbox") => vec![
+            "ne agent-mailbox list [--state all|unread|pending|in_progress|completed] [--cursor N] [--limit 50]",
+            "ne agent-mailbox read --message-id ID",
+            "ne agent-mailbox send --agent ID --message TEXT (or --file FILE)",
+            "ne agent-mailbox mark-read|claim|release|complete --message-id ID --revision N"
         ],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
-        Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
+        Some("session") => vec!["ne session identity", "ne session resolve --tool TOOL --native-id NATIVE_ID", "ne session new --tool TOOL [--cwd ABSOLUTE_PATH] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--tool TOOL] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
         Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]"],
         Some("project") => vec!["ne project resolve [--path ABSOLUTE_DIRECTORY]", "ne project archive ID", "ne project unarchive ID", "ne project rename ID --name TEXT", "ne project list [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne project show ID", "ne project summary ID [--item-id ID | --item NUMBER] [--revision REVISION]"],
-        Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--agent codex|claude_code|pi|antigravity|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],
+        Some("summary") => vec!["ne summary context session|task|project ID [--mode update|regenerate]", "ne summary read CONTEXT_ID --input NAME [--cursor 0] [--limit 8]", "ne summary search-input CONTEXT_ID --input NAME --query TEXT [--cursor 0] [--limit 8]", "ne summary submit CONTEXT_ID --file FILE","ne summary config show", "ne summary config set [--tool codex|claude_code|pi|antigravity|none] [--model TEXT] [--provider TEXT] [--effort TEXT]", "ne summary search --query TEXT [--kind session|task|project] [--project ID] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]","ne summary update session|task|project ID", "ne summary regenerate session|task|project ID"],
         Some("sync") => vec!["ne sync [--source SOURCE_ID | --session SESSION_ID]"],
-        Some("agent") => vec!["ne agent list"],
+        Some("runtime") => vec!["ne runtime list"],
         Some("source") => vec!["ne source list"],
-        Some("search")=>vec!["ne search --query TEXT [--project ID] [--agent AGENT] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
+        Some("search")=>vec!["ne search --query TEXT [--project ID] [--tool TOOL] [--scope unarchived|archived|all] [--cursor CURSOR] [--limit 20]"],
         Some("request")=>vec!["ne request show ID", "写操作可用 --request-id ID 重试相同操作；查询操作不接受该选项"],
         Some("path")=>vec!["ne path register --path ABSOLUTE_EXISTING_DIRECTORY"],
         Some("freshness")=>vec!["ne freshness [--session ID | --task ID | --project ID]"],

@@ -31,10 +31,10 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DesktopResume, DiscoveredMember,
+    detect_format, read_jsonl_delta, AgentToolCommand, DesktopResume, DiscoveredMember,
     DiscoveredMemberKind, ExecOptions, ParsedLine, ResumeRoute, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct QoderAdapter;
@@ -261,7 +261,7 @@ impl QoderAdapter {
         let agent_session_id = session_id.unwrap_or_else(|| file_name.clone());
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::Qoder,
+            agent: AgentTool::Qoder,
             source_member_id: agent_session_id,
             kind: DiscoveredMemberKind::Root,
             parent_source_member_id: None,
@@ -298,7 +298,7 @@ impl QoderAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
         Ok(Some(DiscoveredMember {
-            agent: Agent::Qoder,
+            agent: AgentTool::Qoder,
             source_member_id: format!("{root_id}:subagent:{stem}"),
             kind: DiscoveredMemberKind::Child,
             parent_source_member_id: Some(root_id.clone()),
@@ -378,13 +378,13 @@ fn desktop_surface(
 }
 
 impl crate::adapters::AgentAdapter for QoderAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Qoder
+    fn tool(&self) -> AgentTool {
+        AgentTool::Qoder
     }
 
     /// Always `None`: Qoder ships no CLI, so there is nothing to detect and
     /// nothing to launch. Ingestion does not consult this.
-    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
+    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentToolInstallation> {
         None
     }
 
@@ -428,7 +428,7 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
                     }
                     continue;
                 }
-                if detect_format(&p) != Some(Agent::Qoder) {
+                if detect_format(&p) != Some(AgentTool::Qoder) {
                     continue;
                 }
                 match Self::parse_root_member(&p) {
@@ -462,30 +462,30 @@ impl crate::adapters::AgentAdapter for QoderAdapter {
 
     fn build_new_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法新建会话"))
     }
 
     fn build_resume_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法恢复会话"))
     }
 
     fn build_exec_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("Qoder 没有可启动的 CLI，无法一次性执行"))
     }
 
@@ -598,7 +598,7 @@ mod tests {
             r#"{"type":"attachment","uuid":"a1","timestamp":"2026-09-22T15:01:29.552Z","sessionId":"s-main","attachment":{"type":"skill_listing"}}"#,
             r#"{"type":"assistant","uuid":"u2","timestamp":"2026-09-22T15:01:31.000Z","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"好，我先看现状。"},{"type":"tool_use","name":"Read"}]}}"#,
             r#"{"type":"user","uuid":"u3","timestamp":"2026-09-22T15:01:32.000Z","cwd":"/repo","sessionId":"s-main","toolUseResult":{"ok":true},"message":{"role":"user","content":[{"type":"tool_result","content":"file contents"}]}}"#,
-            r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-22T15:01:40.000Z","isSidechain":true,"cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"子 Agent 的自述"}]}}"#,
+            r#"{"type":"assistant","uuid":"u4","timestamp":"2026-09-22T15:01:40.000Z","isSidechain":true,"cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"子 运行工具 的自述"}]}}"#,
         ]
         .join("\n")
             + "\n"
@@ -633,7 +633,7 @@ mod tests {
     fn root_session(path: &Path) -> Session {
         Session {
             id: "sess-qoder".into(),
-            agent: Agent::Qoder,
+            agent: AgentTool::Qoder,
             root_agent_session_id: "s-main".into(),
             title: None,
             cwd: None,
@@ -671,7 +671,7 @@ mod tests {
         // No Qoder marker in the head, exactly like the real ones.
         std::fs::write(
             children.join("agent-aExplore-abc123.jsonl"),
-            r#"{"type":"assistant","uuid":"c1","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"子 Agent 的结论"}]}}
+            r#"{"type":"assistant","uuid":"c1","cwd":"/repo","sessionId":"s-main","message":{"role":"assistant","content":[{"type":"text","text":"子 运行工具 的结论"}]}}
 "#,
         )
         .unwrap();

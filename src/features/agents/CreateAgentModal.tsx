@@ -3,9 +3,9 @@ import { api } from "../../api";
 import { Modal } from "../../components/common";
 import DialogActions from "../../components/DialogActions";
 import Notice from "../../components/Notice";
-import type { CreateAssistantInput } from "../../types";
+import type { CreateAgentInput } from "../../types";
 
-export default function CreateAssistantModal({
+export default function CreateAgentModal({
   open,
   onClose,
   onCreated,
@@ -33,12 +33,12 @@ export default function CreateAssistantModal({
     setBusy(true);
     setError("");
     try {
-      const input: CreateAssistantInput = {
+      const input: CreateAgentInput = {
         name: trimmedName,
         soul_md: soul.trim() ? soul : undefined,
         role_md: role.trim() ? role : undefined,
       };
-      const project = await api.createAssistantProfile(input);
+      const project = await api.createAgentProfile(input);
       onCreated(project.id, project.name);
     } catch (err) {
       setError(String(err));
@@ -54,8 +54,8 @@ export default function CreateAssistantModal({
         if (!busy) onClose();
       }}
     >
-      <div className="assistant-modal">
-        <form onSubmit={handleSubmit} className="assistant-form">
+      <div className="agent-modal">
+        <form onSubmit={handleSubmit} className="agent-form">
         {error && <Notice tone="error">{error}</Notice>}
         <div className="form-group" style={{ marginBottom: "var(--space-md)" }}>
           <label className="label bold" htmlFor={`${formId}-name`}>

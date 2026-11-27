@@ -1,6 +1,6 @@
 //! Assistant profiles share the normal project lifecycle.
 use noending::{
-    assistant,
+    agent,
     domain::{Project, WorkspacePath},
     storage::{new_id, Db},
     workspace::{home::NoEndingHome, project, wiring::WorkspaceLayer},
@@ -16,7 +16,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("assistant-workspace-{}", new_id()));
+        let root = std::env::temp_dir().join(format!("agent-workspace-{}", new_id()));
         let home = NoEndingHome::new(root.to_str().unwrap(), None).unwrap();
         home.ensure_dirs().unwrap();
         let db = Db::open(&home.db_path).unwrap();
@@ -57,15 +57,15 @@ fn profile_roots(f: &Fixture) -> noending::skills::Roots {
 struct Profile {
     project: Project,
     workspace_path: WorkspacePath,
-    files: assistant::ProjectAssistant,
+    files: agent::ProjectAgent,
 }
 
 fn create_profile(f: &Fixture, name: &str) -> Profile {
-    let project = assistant::create_profile_with_roots(
+    let project = agent::create_profile_with_roots(
         f.db(),
         &f.home,
         &f.layer,
-        noending::assistant::AssistantCreate {
+        noending::agent::AgentCreate {
             name: name.into(),
             soul_md: Some(format!("角色代号：{name}")),
             role_md: None,
@@ -74,23 +74,23 @@ fn create_profile(f: &Fixture, name: &str) -> Profile {
     )
     .unwrap();
     let detail = f.project_detail(&project.id).unwrap();
-    let assistant = detail.assistant.unwrap();
+    let agent = detail.agent.unwrap();
     let workspace_path = detail
         .workspace_paths
         .into_iter()
-        .find(|path| path.id == assistant.workspace_path_id)
+        .find(|path| path.id == agent.workspace_path_id)
         .unwrap();
     Profile {
         project,
         workspace_path,
-        files: assistant.files,
+        files: agent.files,
     }
 }
 
 fn profile_session(f: &Fixture, profile: &Profile, native: &str) -> String {
     f.db()
         .upsert_logical_session_unchecked(
-            noending::domain::Agent::Codex,
+            noending::domain::AgentTool::Codex,
             native,
             Some("Manager"),
             Some(&profile.workspace_path.canonical_path),
@@ -103,7 +103,7 @@ fn profile_session(f: &Fixture, profile: &Profile, native: &str) -> String {
         .0
 }
 #[test]
-fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_reconcile() {
+fn agent_profiles_keep_independent_projects_and_survive_rename_reopen_and_reconcile() {
     let mut f = Fixture::new();
     let first = create_profile(&f, "Atlas");
     let private = f.root.join("atlas-only");
@@ -148,14 +148,14 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     assert!(f
         .project_detail(&second.project.id)
         .unwrap()
-        .assistant
+        .agent
         .is_some());
     let root = PathBuf::from(&first.workspace_path.canonical_path);
     let identity_path = root.join("IDENTITY.md");
     let identity_id = f
         .project_detail(&first.project.id)
         .unwrap()
-        .assistant
+        .agent
         .unwrap()
         .id;
     assert_eq!(
@@ -170,14 +170,14 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     f.db = Some(Db::open(&f.home.db_path).unwrap());
     let reopened = f.project_detail(&first.project.id).unwrap();
     assert_eq!(reopened.project.name, "Atlas 改名");
-    let assistant = reopened.assistant.unwrap();
-    assert_eq!(assistant.id, identity_id);
+    let agent = reopened.agent.unwrap();
+    assert_eq!(agent.id, identity_id);
     assert_eq!(
         std::fs::read_to_string(&identity_path).unwrap(),
         format!("# 身份\n\n- 名称：Atlas 改名\n- 智能体 ID：`{identity_id}`\n")
     );
-    assert_eq!(assistant.files.soul.content, "角色代号：Atlas");
-    assert_eq!(assistant.workspace_path_id, first.workspace_path.id);
+    assert_eq!(agent.files.soul.content, "角色代号：Atlas");
+    assert_eq!(agent.workspace_path_id, first.workspace_path.id);
     assert_eq!(
         std::fs::read_to_string(root.join("notes.txt")).unwrap(),
         "保留用户资料"
@@ -185,7 +185,7 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
     project::reconcile_workspace_paths(f.db(), &f.layer.projection(), usize::MAX).unwrap();
     let reconciled = f.project_detail(&first.project.id).unwrap();
     assert_eq!(
-        reconciled.assistant.unwrap().workspace_path_id,
+        reconciled.agent.unwrap().workspace_path_id,
         first.workspace_path.id
     );
     let sibling = PathBuf::from(&first.workspace_path.canonical_path).join("resources");
@@ -203,7 +203,7 @@ fn assistant_profiles_keep_independent_projects_and_survive_rename_reopen_and_re
         noending::commands::project::project_cards(f.db(), f.layer.projection().policy())
             .unwrap()
             .iter()
-            .filter(|card| card.is_assistant)
+            .filter(|card| card.is_agent)
             .count(),
         2
     );
@@ -239,23 +239,23 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
 
     let custom_guide = "先查看发布验收任务。\n";
     let guide_revision = profile.files.agents.revision.as_deref().unwrap();
-    let edited_guide = assistant::update_profile(
+    let edited_guide = agent::update_profile(
         f.db(),
         &f.home,
         &profile.project.id,
         guide_revision,
-        assistant::AssistantPatch::Agents {
+        agent::AgentPatch::Agents {
             content: custom_guide.into(),
         },
     )
     .unwrap();
     assert_eq!(edited_guide.agents.content, custom_guide);
-    assert!(assistant::update_profile(
+    assert!(agent::update_profile(
         f.db(),
         &f.home,
         &profile.project.id,
         guide_revision,
-        assistant::AssistantPatch::Agents {
+        agent::AgentPatch::Agents {
             content: "过期草稿".into()
         },
     )
@@ -266,7 +266,7 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     let external = f
         .project_detail(&profile.project.id)
         .unwrap()
-        .assistant
+        .agent
         .unwrap()
         .files;
     assert!(!external.guide_is_default);
@@ -274,7 +274,7 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     assert_eq!(external.agents.content, custom_guide);
     assert!(external.claude_md_missing);
     assert_eq!(external.role.state, "missing");
-    let prepared = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
+    let prepared = agent::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
     assert!(prepared.guide_is_default);
     assert_eq!(
         std::fs::read_to_string(&identity).unwrap(),
@@ -291,37 +291,37 @@ fn reset_restores_the_managed_guide_and_fills_missing_archive_files() {
     assert_eq!(prepared.soul.revision, profile.files.soul.revision);
 
     std::fs::write(root.join("SOUL.md"), "外部更新自我定义").unwrap();
-    assert!(assistant::update_profile(
+    assert!(agent::update_profile(
         f.db(),
         &f.home,
         &profile.project.id,
         prepared.soul.revision.as_deref().unwrap(),
-        assistant::AssistantPatch::Soul {
+        agent::AgentPatch::Soul {
             content: "过期草稿".into()
         },
     )
     .is_err());
-    let edited = assistant::update_profile(
+    let edited = agent::update_profile(
         f.db(),
         &f.home,
         &profile.project.id,
         prepared.role.revision.as_deref().unwrap(),
-        assistant::AssistantPatch::Role {
+        agent::AgentPatch::Role {
             content: "接手后核对交付\n".into(),
         },
     )
     .unwrap();
-    let repaired = assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
+    let repaired = agent::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
     assert_eq!(repaired.role.content, "接手后核对交付\n");
     assert_eq!(repaired.soul.content, "外部更新自我定义");
     assert_eq!(repaired.role.revision, edited.role.revision);
 
-    let cleared = assistant::update_profile(
+    let cleared = agent::update_profile(
         f.db(),
         &f.home,
         &profile.project.id,
         edited.role.revision.as_deref().unwrap(),
-        assistant::AssistantPatch::Role {
+        agent::AgentPatch::Role {
             content: String::new(),
         },
     )
@@ -353,7 +353,7 @@ fn an_identity_write_failure_rolls_back_the_rename() {
 }
 
 #[test]
-fn assistant_written_documents_are_read_from_disk_and_survive_guide_reset() {
+fn agent_written_documents_are_read_from_disk_and_survive_guide_reset() {
     let f = Fixture::new();
     let profile = create_profile(&f, "Curator");
     let project_id = &profile.project.id;
@@ -362,7 +362,7 @@ fn assistant_written_documents_are_read_from_disk_and_survive_guide_reset() {
     let intro_path = root.join("INTRO.md");
     assert_eq!(profile.files.user.state, "missing");
     assert_eq!(profile.files.intro.state, "missing");
-    let prepared = assistant::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
+    let prepared = agent::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
     assert_eq!(prepared.user.state, "missing");
     assert_eq!(prepared.intro.state, "missing");
     assert!(!user_path.exists());
@@ -372,17 +372,12 @@ fn assistant_written_documents_are_read_from_disk_and_survive_guide_reset() {
     let introduction = "## 什么时候找我\n\n我可以帮你核对发布验收。\n";
     std::fs::write(&user_path, impressions).unwrap();
     std::fs::write(&intro_path, introduction).unwrap();
-    let files = f
-        .project_detail(project_id)
-        .unwrap()
-        .assistant
-        .unwrap()
-        .files;
+    let files = f.project_detail(project_id).unwrap().agent.unwrap().files;
     assert_eq!(files.user.state, "current");
     assert_eq!(files.user.content, impressions);
     assert_eq!(files.intro.state, "current");
     assert_eq!(files.intro.content, introduction);
-    let prepared = assistant::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
+    let prepared = agent::prepare_profile_files(f.db(), &f.home, project_id).unwrap();
     assert_eq!(prepared.user.revision, files.user.revision);
     assert_eq!(prepared.intro.revision, files.intro.revision);
     assert_eq!(std::fs::read_to_string(&user_path).unwrap(), impressions);
@@ -390,8 +385,8 @@ fn assistant_written_documents_are_read_from_disk_and_survive_guide_reset() {
 }
 
 #[test]
-fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_candidates() {
-    use noending::{domain::Agent, workspace::workstream};
+fn agent_project_lists_sessions_by_workspace_and_supplies_collaboration_candidates() {
+    use noending::{domain::AgentTool, workspace::workstream};
 
     let f = Fixture::new();
     let profile = create_profile(&f, "Coordinator");
@@ -399,7 +394,7 @@ fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_cand
     let alternate_session = f
         .db()
         .upsert_logical_session_unchecked(
-            Agent::Pi,
+            AgentTool::Pi,
             "second-archive-session",
             None,
             Some(&profile.workspace_path.canonical_path),
@@ -428,7 +423,7 @@ fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_cand
     let archive = f
         .project_detail(&profile.project.id)
         .unwrap()
-        .assistant
+        .agent
         .unwrap();
     let resolve = |path: &str| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_ne"))
@@ -442,20 +437,20 @@ fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_cand
         value["data"].clone()
     };
     let resolved = resolve(&profile.workspace_path.canonical_path);
-    assert_eq!(resolved["assistant"]["id"], archive.id.to_string());
-    assert_ne!(resolved["assistant"]["id"], profile.project.id);
+    assert_eq!(resolved["agent"]["id"], archive.id.to_string());
+    assert_ne!(resolved["agent"]["id"], profile.project.id);
     assert_eq!(
-        resolved["assistant"]["archive_directory"],
+        resolved["agent"]["archive_directory"],
         profile.workspace_path.canonical_path
     );
     assert!(resolve(&additional_path.canonical_path)
-        .get("assistant")
+        .get("agent")
         .is_none());
 
     let other_session = f
         .db()
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "additional-directory-session",
             None,
             Some(&additional_path.canonical_path),
@@ -471,7 +466,7 @@ fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_cand
     let no_cwd = f
         .db()
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             "native-no-cwd",
             None,
             None,
@@ -520,7 +515,7 @@ fn assistant_project_lists_sessions_by_workspace_and_supplies_collaboration_cand
 }
 
 #[test]
-fn assistant_project_with_an_archived_session_cannot_be_deleted() {
+fn agent_project_with_an_archived_session_cannot_be_deleted() {
     let f = Fixture::new();
     let first = create_profile(&f, "Alpha");
     let session = profile_session(&f, &first, "role-session");
@@ -541,7 +536,7 @@ fn assistant_project_with_an_archived_session_cannot_be_deleted() {
 }
 
 #[test]
-fn assistant_creation_prepares_native_skills_despite_a_single_agent_user_entry() {
+fn agent_creation_prepares_native_skills_despite_a_single_agent_user_entry() {
     let f = Fixture::new();
     let roots = profile_roots(&f);
     noending::skills::prepare_noending_skill(f.db(), &f.home, &std::env::current_exe().unwrap())
@@ -557,7 +552,8 @@ fn assistant_creation_prepares_native_skills_despite_a_single_agent_user_entry()
         .locations
         .iter()
         .find(|location| {
-            location.scope == "user" && location.agent == Some(noending::domain::Agent::ClaudeCode)
+            location.scope == "user"
+                && location.agent == Some(noending::domain::AgentTool::ClaudeCode)
         })
         .unwrap();
     noending::skills::enable_skill(&roots, None, &source.id, Some(&source.path), &claude.id)
@@ -579,7 +575,7 @@ fn assistant_creation_prepares_native_skills_despite_a_single_agent_user_entry()
     assert!(user_skill.is_file());
 
     noending::skills::disable_skill_project(&roots, &[cwd.clone()], &source.id).unwrap();
-    assistant::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
+    agent::prepare_profile_files(f.db(), &f.home, &profile.project.id).unwrap();
     assert!(!shared_skill.exists());
     assert!(!cwd.join(".claude/skills/noending/SKILL.md").exists());
     assert!(user_skill.is_file());
@@ -587,16 +583,16 @@ fn assistant_creation_prepares_native_skills_despite_a_single_agent_user_entry()
 }
 
 #[test]
-fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
+fn agent_failed_skill_preparation_leaves_no_published_role_or_directory() {
     let f = Fixture::new();
     let first = create_profile(&f, "Existing");
     // Simulate an explicit user uninstall of this fixture's managed Skill.
     std::fs::remove_dir_all(f.home.root.join("skills/noending")).unwrap();
-    let failure = assistant::create_profile_with_roots(
+    let failure = agent::create_profile_with_roots(
         f.db(),
         &f.home,
         &f.layer,
-        assistant::AssistantCreate {
+        agent::AgentCreate {
             name: "Unpublished".into(),
             soul_md: None,
             role_md: None,
@@ -612,7 +608,7 @@ fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
             .collect::<Vec<_>>(),
         [first.project.id.as_str()]
     );
-    let published = std::fs::read_dir(assistant::directory(&f.home))
+    let published = std::fs::read_dir(agent::directory(&f.home))
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
@@ -629,7 +625,7 @@ fn assistant_failed_skill_preparation_leaves_no_published_role_or_directory() {
             .unwrap()
             .file_name()
             .to_string_lossy()
-            .starts_with("assistant-create-")));
+            .starts_with("agent-create-")));
 }
 
 #[test]
@@ -652,14 +648,14 @@ fn missing_generated_working_directory_can_be_recovered_while_the_profile_exists
         .get_workspace_path(&p.workspace_path.id)
         .unwrap()
         .is_some());
-    assistant::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
+    agent::prepare_profile_files(f.db(), &f.home, &p.project.id).unwrap();
     assert!(std::path::Path::new(&p.workspace_path.canonical_path)
         .join("AGENTS.md")
         .is_file());
 }
 
 #[test]
-fn assistant_project_archive_is_shared_and_deleting_it_removes_only_the_owned_directory() {
+fn agent_project_archive_is_shared_and_deleting_it_removes_only_the_owned_directory() {
     let f = Fixture::new();
     let profile = create_profile(&f, "Curator");
     let peer = create_profile(&f, "Reviewer");
@@ -686,15 +682,15 @@ fn assistant_project_archive_is_shared_and_deleting_it_removes_only_the_owned_di
     let cards = noending::commands::project::project_cards(f.db(), policy).unwrap();
     assert!(cards
         .iter()
-        .any(|card| card.id == *project_id && card.is_assistant));
+        .any(|card| card.id == *project_id && card.is_agent));
     assert!(cards
         .iter()
-        .any(|card| card.id == ordinary_path.project_id && !card.is_assistant));
+        .any(|card| card.id == ordinary_path.project_id && !card.is_agent));
     let detail = project::project_detail(f.db(), project_id, policy)
         .unwrap()
         .unwrap();
     assert_eq!(
-        detail.assistant.unwrap().workspace_path_id,
+        detail.agent.unwrap().workspace_path_id,
         profile.workspace_path.id
     );
     assert!(detail.purpose.is_none());
@@ -724,7 +720,7 @@ fn assistant_project_archive_is_shared_and_deleting_it_removes_only_the_owned_di
     assert!(f
         .project_detail(&profile.project.id)
         .unwrap()
-        .assistant
+        .agent
         .is_some());
     f.db()
         .write()
@@ -745,7 +741,7 @@ fn assistant_project_archive_is_shared_and_deleting_it_removes_only_the_owned_di
 
 #[cfg(unix)]
 #[test]
-fn assistant_deletion_rejects_a_replaced_working_directory_without_touching_its_target() {
+fn agent_deletion_rejects_a_replaced_working_directory_without_touching_its_target() {
     let f = Fixture::new();
     let profile = create_profile(&f, "Coordinator");
     let directory = PathBuf::from(&profile.workspace_path.canonical_path);
@@ -765,21 +761,21 @@ fn assistant_deletion_rejects_a_replaced_working_directory_without_touching_its_
     assert!(f
         .project_detail(&profile.project.id)
         .unwrap()
-        .assistant
+        .agent
         .is_some());
 }
 
 #[test]
-fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
-    use noending::storage::assistant_mailbox::{Action, Change, Filter};
+fn agent_mail_has_one_handler_and_survives_detached_conversations() {
+    use noending::storage::agent_mailbox::{Action, Change, Filter};
     use std::sync::{Arc, Barrier};
 
     let f = Fixture::new();
     let profile = create_profile(&f, "发布协调员");
-    let assistant = f
+    let agent = f
         .project_detail(&profile.project.id)
         .unwrap()
-        .assistant
+        .agent
         .unwrap()
         .id
         .to_string();
@@ -788,7 +784,7 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     let ordinary = f
         .db()
         .upsert_logical_session_unchecked(
-            noending::domain::Agent::Codex,
+            noending::domain::AgentTool::Codex,
             "outside-inbox",
             None,
             None,
@@ -801,31 +797,31 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
         .0;
     let letter = f
         .db()
-        .assistant_mailbox_send(&f.home, &assistant, Some(&ordinary), "核对发布结果")
+        .agent_mailbox_send(&f.home, &agent, Some(&ordinary), "核对发布结果")
         .unwrap();
     let another = f
         .db()
-        .assistant_mailbox_send(&f.home, &assistant, None, "准备下次交付")
+        .agent_mailbox_send(&f.home, &agent, None, "准备下次交付")
         .unwrap();
     assert!(f
         .db()
-        .assistant_mailbox_list(&f.home, &assistant, Some(&ordinary), Filter::All, None, 10)
+        .agent_mailbox_list(&f.home, &agent, Some(&ordinary), Filter::All, None, 10)
         .is_err());
     assert!(f
         .db()
-        .assistant_mailbox_send(&f.home, &assistant, Some(&first), "循环")
+        .agent_mailbox_send(&f.home, &agent, Some(&first), "循环")
         .is_err());
     let page = f
         .db()
-        .assistant_mailbox_list(&f.home, &assistant, Some(&first), Filter::Pending, None, 1)
+        .agent_mailbox_list(&f.home, &agent, Some(&first), Filter::Pending, None, 1)
         .unwrap();
     assert_eq!(page.items[0].id, another.id);
     assert_eq!(page.unread, 2);
     let second_page = f
         .db()
-        .assistant_mailbox_list(
+        .agent_mailbox_list(
             &f.home,
-            &assistant,
+            &agent,
             Some(&second),
             Filter::Pending,
             page.next_cursor,
@@ -847,12 +843,12 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
         let handles = [&first, &second].map(|session| {
             let barrier = barrier.clone();
             let claim = &claim;
-            let assistant = &assistant;
+            let agent = &agent;
             let home = &f.home;
             scope.spawn(move || {
                 let db = Db::open(&home.db_path).unwrap();
                 barrier.wait();
-                db.assistant_mailbox_change(home, assistant, Some(session), claim)
+                db.agent_mailbox_change(home, agent, Some(session), claim)
             })
         });
         handles.map(|handle| handle.join().unwrap())
@@ -864,39 +860,34 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     let other = if handler == first { &second } else { &first };
     assert!(f
         .db()
-        .assistant_mailbox_change(
+        .agent_mailbox_change(
             &f.home,
-            &assistant,
+            &agent,
             Some(other),
             &change(Action::Complete, 2, None)
         )
         .is_err());
     let read = f
         .db()
-        .assistant_mailbox_change(
-            &f.home,
-            &assistant,
-            Some(other),
-            &change(Action::Read, 2, None),
-        )
+        .agent_mailbox_change(&f.home, &agent, Some(other), &change(Action::Read, 2, None))
         .unwrap();
     assert!(read.read_at.is_some());
     assert_eq!(read.handler_session_id.as_deref(), Some(handler.as_str()));
 
     assert!(f
         .db()
-        .assistant_mailbox_change(
+        .agent_mailbox_change(
             &f.home,
-            &assistant,
+            &agent,
             None,
             &change(Action::Transfer, 3, Some(ordinary))
         )
         .is_err());
     let transferred = f
         .db()
-        .assistant_mailbox_change(
+        .agent_mailbox_change(
             &f.home,
-            &assistant,
+            &agent,
             None,
             &change(Action::Transfer, 3, Some(other.clone())),
         )
@@ -907,9 +898,9 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     );
     let completed = f
         .db()
-        .assistant_mailbox_change(
+        .agent_mailbox_change(
             &f.home,
-            &assistant,
+            &agent,
             Some(other),
             &change(Action::Complete, 4, None),
         )
@@ -917,13 +908,13 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     assert!(completed.completed_at.is_some());
     assert!(f
         .db()
-        .assistant_mailbox_change(&f.home, &assistant, None, &change(Action::Release, 5, None))
+        .agent_mailbox_change(&f.home, &agent, None, &change(Action::Release, 5, None))
         .is_err());
 
     f.db()
-        .assistant_mailbox_change(
+        .agent_mailbox_change(
             &f.home,
-            &assistant,
+            &agent,
             Some(&handler),
             &Change {
                 message_id: another.id.clone(),
@@ -939,7 +930,7 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
         .unwrap();
     let released = f
         .db()
-        .assistant_mailbox_read(&f.home, &assistant, Some(other), &another.id)
+        .agent_mailbox_read(&f.home, &agent, Some(other), &another.id)
         .unwrap();
     assert!(released.handler_session_id.is_none());
     assert_eq!(released.revision, 3);
@@ -948,14 +939,7 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     assert_ne!(renamed.name, profile.project.name);
     let page = f
         .db()
-        .assistant_mailbox_list(
-            &f.home,
-            &assistant,
-            Some(other),
-            Filter::Completed,
-            None,
-            10,
-        )
+        .agent_mailbox_list(&f.home, &agent, Some(other), Filter::Completed, None, 10)
         .unwrap();
     assert_eq!(
         page.items[0].handler_session_id.as_deref(),
@@ -971,7 +955,7 @@ fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
     assert_eq!(merged.survivor, survivor.id);
     assert_eq!(
         f.db()
-            .assistant_mailbox_read(&f.home, &assistant, Some(other), &letter.id)
+            .agent_mailbox_read(&f.home, &agent, Some(other), &letter.id)
             .unwrap()
             .completed_at,
         completed.completed_at

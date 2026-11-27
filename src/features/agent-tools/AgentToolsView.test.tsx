@@ -3,10 +3,10 @@ import { clearRuntimeCatalog } from "./useAgentRuntime";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeFixture } from "./runtimeFixtures";
-import AgentsView, { clearAgentsCache } from "./AgentsView";
+import AgentToolsView, { clearAgentToolsCache } from "./AgentToolsView";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
-import type { AgentStatusEntry, IngestSource, IngestTaskStatus } from "../../types";
+import type { AgentToolStatusEntry, IngestSource, IngestTaskStatus } from "../../types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
@@ -21,11 +21,11 @@ vi.mock("../../api", () => ({
     getOperationStatus: vi.fn().mockResolvedValue([]), matchObjects: vi.fn().mockResolvedValue([]),
     listPackages: vi.fn(async () => ({ packages: [], warnings: [] })),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
-    getAgentStatus: vi.fn(),
-    getAgentRuntimeSettings: vi.fn(),
-    refreshAgentRuntimeOptions: vi.fn(),
-    redetectAgent: vi.fn(),
-    getDefaultAgent: vi.fn(),
+    getToolStatus: vi.fn(),
+    getToolRuntimeSettings: vi.fn(),
+    refreshToolRuntimeOptions: vi.fn(),
+    redetectTool: vi.fn(),
+    getDefaultTool: vi.fn(),
     listIngestSources: vi.fn(),
     addIngestSource: vi.fn(),
     removeIngestSource: vi.fn(),
@@ -36,12 +36,12 @@ vi.mock("../../api", () => ({
     setResumeOpenMethod: vi.fn(),
     listWorkstreamCards: vi.fn(),
     listSessions: vi.fn(),
-    getSessionCountsByAgent: vi.fn(),
-    getAgentLatestActivities: vi.fn(),
+    getSessionCountsByTool: vi.fn(),
+    getToolLatestActivities: vi.fn(),
   },
 }));
 
-const mockAgentStatus: Record<string, AgentStatusEntry> = {
+const mockToolStatus: Record<string, AgentToolStatusEntry> = {
   codex: {
     name: "Codex",
     detected: true,
@@ -121,14 +121,14 @@ beforeEach(() => {
   viewState.clear();
   localStorage.clear();
   clearRuntimeCatalog();
-  clearAgentsCache();
-  vi.mocked(api.getAgentRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
-  vi.mocked(api.refreshAgentRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
-  vi.mocked(api.redetectAgent).mockReset().mockResolvedValue(runtimeFixture());
+  clearAgentToolsCache();
+  vi.mocked(api.getToolRuntimeSettings).mockReset().mockImplementation(async (agent) => runtimeFixture(agent));
+  vi.mocked(api.refreshToolRuntimeOptions).mockReset().mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "listed-model", display_name: "Listed", provider: null, supported_efforts: ["low"] }] });
+  vi.mocked(api.redetectTool).mockReset().mockResolvedValue(runtimeFixture());
   vi.mocked(api.addIngestSource).mockReset();
   vi.mocked(open).mockReset().mockResolvedValue(null);
-  vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue(mockAgentStatus);
-  vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue("codex");
+  vi.mocked(api.getToolStatus).mockReset().mockResolvedValue(mockToolStatus);
+  vi.mocked(api.getDefaultTool).mockReset().mockResolvedValue("codex");
   vi.mocked(api.listIngestSources).mockReset().mockResolvedValue(mockSources);
   vi.mocked(api.getIngestionStatus).mockReset().mockResolvedValue(mockIngestStatus);
   vi.mocked(api.reconcileSource).mockReset().mockResolvedValue({ queued: true });
@@ -137,15 +137,15 @@ beforeEach(() => {
   vi.mocked(api.removeIngestSource).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSessions).mockReset().mockResolvedValue([]);
-  vi.mocked(api.getSessionCountsByAgent).mockReset().mockResolvedValue({});
-  vi.mocked(api.getAgentLatestActivities).mockReset().mockResolvedValue({});
+  vi.mocked(api.getSessionCountsByTool).mockReset().mockResolvedValue({});
+  vi.mocked(api.getToolLatestActivities).mockReset().mockResolvedValue({});
 });
 
 afterEach(cleanup);
 
-describe("AgentsView", () => {
+describe("AgentToolsView", () => {
   it("renders synchronization counts, configured source counts and both Antigravity formats", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentToolsView navigate={vi.fn()} />);
 
     expect(await screen.findByRole("heading", { name: "运行工具" })).toBeTruthy();
     // 验证口径：展示为同步发现 X 条记录，而非新会话数
@@ -158,13 +158,13 @@ describe("AgentsView", () => {
     expect(screen.getByRole("option", { name: "未就绪" })).toBeTruthy();
     fireEvent.keyDown(document, { key: "Escape" });
 
-    expect(screen.getByRole("button", { name: "查看 Antigravity Agent 详情" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "查看 Antigravity 运行工具详情" })).toBeTruthy();
     expect(screen.queryByText("~/.gemini/antigravity-cli")).toBeNull();
   });
 
 
   it("opens modal on re-ingest explaining safe rescan", async () => {
-    render(<AgentsView navigate={vi.fn()} initialAgent="claude_code" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="claude_code" />);
 
     const reingestButtons = await screen.findAllByRole("button", { name: "全量同步" });
     fireEvent.click(reingestButtons[0]);
@@ -190,7 +190,7 @@ describe("AgentsView", () => {
       exists: true,
     });
 
-    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="codex" />);
 
     const addButtons = await screen.findAllByRole("button", { name: "+ 添加来源目录" });
     fireEvent.click(addButtons[0]);
@@ -202,7 +202,7 @@ describe("AgentsView", () => {
   });
 
   it("filters Agents by terminal and desktop availability and readiness", async () => {
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentToolsView navigate={vi.fn()} />);
 
     // Top-right surface buttons exist with TUI active by default
     const tuiBtn = await screen.findByRole("button", { name: "TUI" });
@@ -259,7 +259,7 @@ describe("AgentsView", () => {
       },
     ]);
 
-    render(<AgentsView navigate={vi.fn()} initialAgent="claude_code" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="claude_code" />);
 
     await screen.findByRole("button", { name: "增量同步" });
 
@@ -282,7 +282,7 @@ describe("AgentsView", () => {
 
   it("opens agent details from the overview, triggers card sync, and separates Antigravity source formats", async () => {
     const navigate = vi.fn();
-    const view = render(<AgentsView navigate={navigate} />);
+    const view = render(<AgentToolsView navigate={navigate} />);
     await screen.findByText("Claude Code");
 
     // Card incremental sync
@@ -291,74 +291,74 @@ describe("AgentsView", () => {
     await waitFor(() => expect(api.reconcileSource).toHaveBeenCalledWith("src-1"));
 
     // Navigate to details
-    fireEvent.click(await screen.findByRole("button", { name: "查看 Antigravity Agent 详情" }));
-    expect(navigate).toHaveBeenCalledWith({ view: "agents", agent: "antigravity" });
+    fireEvent.click(await screen.findByRole("button", { name: "查看 Antigravity 运行工具详情" }));
+    expect(navigate).toHaveBeenCalledWith({ view: "agent-tools", agent: "antigravity" });
     view.unmount();
 
-    render(<AgentsView navigate={navigate} initialAgent="antigravity" />);
+    render(<AgentToolsView navigate={navigate} initialTool="antigravity" />);
     expect(await screen.findByText("Desktop 格式")).toBeTruthy();
     expect(screen.getByText("CLI 格式")).toBeTruthy();
     expect(screen.getByText("~/.gemini/antigravity-cli")).toBeTruthy();
   });
 
   it("restores the catalog after restart, replaces successful results and keeps them on failure", async () => {
-    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="codex" />);
     expect(await screen.findByText("模型与思考等级")).toBeTruthy();
-    expect(api.refreshAgentRuntimeOptions).not.toHaveBeenCalled();
+    expect(api.refreshToolRuntimeOptions).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
     await screen.findByText(/来自 CLI · 1 个模型/);
     expect(await screen.findByText("Listed")).toBeTruthy();
     expect(screen.getByText(/思考档位：low/)).toBeTruthy();
     cleanup();
     viewState.clear(); // Restart memory, retain persistent preferences.
-    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="codex" />);
     expect(await screen.findByText("Listed")).toBeTruthy();
-    expect(api.refreshAgentRuntimeOptions).toHaveBeenCalledTimes(1);
+    expect(api.refreshToolRuntimeOptions).toHaveBeenCalledTimes(1);
 
-    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "replacement", display_name: "Replacement", provider: null, supported_efforts: ["high"] }] });
+    vi.mocked(api.refreshToolRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "dynamic", models: [{ id: "replacement", display_name: "Replacement", provider: null, supported_efforts: ["high"] }] });
     fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
     await screen.findByText("Replacement");
     expect(screen.queryByText("Listed")).toBeNull();
     expect(screen.getByText(/思考档位：high/)).toBeTruthy();
 
-    vi.mocked(api.refreshAgentRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "unavailable", models: [], warnings: ["CLI offline"] });
+    vi.mocked(api.refreshToolRuntimeOptions).mockResolvedValue({ ...runtimeFixture(), model_source: "unavailable", models: [], warnings: ["CLI offline"] });
     fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Error: CLI offline");
     expect(screen.getByText("Replacement")).toBeTruthy();
     cleanup();
     viewState.clear();
-    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    render(<AgentToolsView navigate={vi.fn()} initialTool="codex" />);
     expect(await screen.findByText("Replacement")).toBeTruthy();
   });
 
   it("displays agent detail sessions with new session action and repairs unreadable defaults", async () => {
     const navigate = vi.fn();
-    render(<AgentsView navigate={navigate} initialAgent="codex" />);
+    render(<AgentToolsView navigate={navigate} initialTool="codex" />);
     expect(await screen.findByText("模型与思考等级")).toBeTruthy();
     expect(screen.getByText("会话（0）")).toBeTruthy();
-    expect(screen.getByText("该 Agent 下还没有会话。")).toBeTruthy();
+    expect(screen.getByText("该 运行工具 下还没有会话。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "新建会话" }));
     expect(navigate).toHaveBeenCalledWith({ view: "new-session", agent: "codex" });
 
     // Displays alert when runtime settings fail to load
     cleanup();
-    vi.mocked(api.getAgentRuntimeSettings).mockRejectedValueOnce(new Error("配置损坏"));
-    render(<AgentsView navigate={vi.fn()} initialAgent="codex" />);
+    vi.mocked(api.getToolRuntimeSettings).mockRejectedValueOnce(new Error("配置损坏"));
+    render(<AgentToolsView navigate={vi.fn()} initialTool="codex" />);
     expect((await screen.findByRole("alert")).textContent).toContain("配置损坏");
   });
 
   it("displays normalized CLI status, session count and toggles between card and list view", async () => {
-    vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({ codex: 602 });
-    vi.mocked(api.getAgentStatus).mockResolvedValue({
-      ...mockAgentStatus,
-      pi: { ...mockAgentStatus.pi, detected: false, version: null },
+    vi.mocked(api.getSessionCountsByTool).mockResolvedValue({ codex: 602 });
+    vi.mocked(api.getToolStatus).mockResolvedValue({
+      ...mockToolStatus,
+      pi: { ...mockToolStatus.pi, detected: false, version: null },
     });
-    render(<AgentsView navigate={vi.fn()} />);
+    render(<AgentToolsView navigate={vi.fn()} />);
     await screen.findByText("Claude Code");
     expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
     expect(screen.getByText("Codex CLI v0.1.0")).toBeTruthy();
     expect(screen.getByText("602 个会话")).toBeTruthy();
-    expect(within(screen.getByRole("button", { name: "查看 Pi Agent 详情" })).getByText("未检测到CLI")).toBeTruthy();
+    expect(within(screen.getByRole("button", { name: "查看 Pi 运行工具详情" })).getByText("未检测到CLI")).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
     expect(screen.queryByText(/仅同步历史/)).toBeNull();
 
@@ -373,37 +373,37 @@ describe("AgentsView", () => {
   });
 
   it("offers history controls without launch settings for ingestion-only agents", async () => {
-    render(<AgentsView navigate={vi.fn()} initialAgent="dsh" />);
-    await screen.findByText("该 Agent 不支持新建终端会话，可同步历史会话。");
+    render(<AgentToolsView navigate={vi.fn()} initialTool="dsh" />);
+    await screen.findByText("该 运行工具 不支持新建终端会话，可同步历史会话。");
     expect(screen.queryByText("模型与思考等级")).toBeNull();
-    expect(api.getAgentRuntimeSettings).not.toHaveBeenCalled();
+    expect(api.getToolRuntimeSettings).not.toHaveBeenCalled();
   });
 
 });
 
 it("uses lookup aliases while keeping the selected capability filter", async () => {
   vi.mocked(api.matchObjects).mockResolvedValue(["claude_code"]);
-  render(<AgentsView navigate={vi.fn()} />);
-  await screen.findByRole("button", { name: "查看 Claude Code Agent 详情" });
-  fireEvent.change(screen.getByRole("textbox", {name:"搜索 Agent"}), {target:{value:"claude"}});
-  await screen.findByRole("button", { name: "查看 Claude Code Agent 详情" });
-  expect(screen.queryByRole("button", {name:"查看 Codex Agent 详情"})).toBeNull();
-  expect(api.matchObjects).toHaveBeenCalledWith("agent","claude", expect.any(Array));
+  render(<AgentToolsView navigate={vi.fn()} />);
+  await screen.findByRole("button", { name: "查看 Claude Code 运行工具详情" });
+  fireEvent.change(screen.getByRole("textbox", {name:"搜索运行工具"}), {target:{value:"claude"}});
+  await screen.findByRole("button", { name: "查看 Claude Code 运行工具详情" });
+  expect(screen.queryByRole("button", {name:"查看 Codex 运行工具详情"})).toBeNull();
+  expect(api.matchObjects).toHaveBeenCalledWith("agent_tool","claude", expect.any(Array));
   fireEvent.click(screen.getByRole("button", { name: "桌面端" }));
-  expect(screen.queryByRole("button", { name: "查看 Claude Code Agent 详情" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "查看 Claude Code 运行工具详情" })).toBeNull();
 });
 
 it("sorts agents by recent activity, name, and session count", async () => {
-  vi.mocked(api.getAgentLatestActivities).mockResolvedValue({
+  vi.mocked(api.getToolLatestActivities).mockResolvedValue({
     pi: "2026-10-17T01:00:00Z",
     claude_code: "2026-10-16T01:00:00Z",
   });
-  vi.mocked(api.getSessionCountsByAgent).mockResolvedValue({
+  vi.mocked(api.getSessionCountsByTool).mockResolvedValue({
     antigravity: 10,
     codex: 5,
   });
-  const { container } = render(<AgentsView navigate={vi.fn()} />);
-  await screen.findByRole("button", { name: "查看 Pi Agent 详情" });
+  const { container } = render(<AgentToolsView navigate={vi.fn()} />);
+  await screen.findByRole("button", { name: "查看 Pi 运行工具详情" });
 
   // Default is "recent": Pi is latest active -> first card
   const cards = container.querySelectorAll(".agent-card");
@@ -427,8 +427,8 @@ it("sorts agents by recent activity, name, and session count", async () => {
 
 it("syncs all registered sources and keeps the button busy while queued", async () => {
   vi.mocked(api.listIngestSources).mockResolvedValue(mockSources);
-  vi.mocked(api.getAgentStatus).mockResolvedValue({});
-  render(<AgentsView navigate={vi.fn()} />);
+  vi.mocked(api.getToolStatus).mockResolvedValue({});
+  render(<AgentToolsView navigate={vi.fn()} />);
   const button = await screen.findByRole("button", { name: "增量同步全部" });
   vi.mocked(api.getIngestionStatus).mockResolvedValue({ scope: "reconcile_all", started_at: null, finished_at: null, discovered: 0, messages: 0, error: null });
   fireEvent.click(button);
@@ -439,9 +439,9 @@ it("syncs all registered sources and keeps the button busy while queued", async 
   expect(api.reconcileSource).not.toHaveBeenCalled();
 });
 
-it("keeps the Agent detail's sync scoped to its own sources", async () => {
+it("keeps the AgentTool detail's sync scoped to its own sources", async () => {
   vi.mocked(api.listIngestSources).mockResolvedValue(mockSources);
-  render(<AgentsView navigate={vi.fn()} initialAgent="antigravity" />);
+  render(<AgentToolsView navigate={vi.fn()} initialTool="antigravity" />);
   const button = await screen.findByRole("button", { name: "增量同步全部" });
   await screen.findByText("~/.gemini/antigravity-cli");
   fireEvent.click(button);
@@ -452,12 +452,12 @@ it("keeps the Agent detail's sync scoped to its own sources", async () => {
 });
 
 it("renders immediately without flash when cached data is available", async () => {
-  const view1 = render(<AgentsView navigate={vi.fn()} />);
+  const view1 = render(<AgentToolsView navigate={vi.fn()} />);
   await screen.findByText("Claude Code CLI v1.0.0");
   view1.unmount();
 
   // Second render has data in cache immediately, rendering without delay or placeholder
-  const view2 = render(<AgentsView navigate={vi.fn()} />);
+  const view2 = render(<AgentToolsView navigate={vi.fn()} />);
   expect(screen.getByText("Claude Code CLI v1.0.0")).toBeTruthy();
   expect(screen.getByRole("button", { name: /^状态：/ })).toBeTruthy();
   view2.unmount();

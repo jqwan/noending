@@ -35,7 +35,7 @@ afterEach(() => {
   localStorage.removeItem("noending.terminal.windows.screenReader");
 });
 const write = (text: string) => new Promise<void>(resolve => term.write(text, resolve));
-it("leaves native window close available without delivering Alt+F4 to the Agent", () => {
+it("leaves native window close available without delivering Alt+F4 to the AgentTool", () => {
   expect(key("F4", { altKey: true, keyCode: 115 }).defaultPrevented).toBe(false);
   expect(data).toEqual([]);
 });
@@ -95,7 +95,7 @@ it("copies wrapped selections, then leaves Ctrl+C without selection as interrupt
   expect(data).toEqual(["\x03"]);
 });
 
-it("keeps Agent keys away from window shortcuts and lets Chromium input events deliver punctuation", () => {
+it("keeps AgentTool keys away from window shortcuts and lets Chromium input events deliver punctuation", () => {
   const app = vi.fn();
   window.addEventListener("keydown", app);
   key("k", { ctrlKey: true, keyCode: 75 });
@@ -119,7 +119,7 @@ it("uses Windows copy/paste right-click while preserving mouse-aware TUI right b
   expect(read).toHaveBeenCalledTimes(1);
 });
 
-it("offers keyboard-accessible paste and screen reading without stealing Agent keys", () => {
+it("offers keyboard-accessible paste and screen reading without stealing AgentTool keys", () => {
   key("F10", { shiftKey: true });
   const menu = document.querySelector('[role="menu"]')!;
   expect(menu).not.toBeNull();

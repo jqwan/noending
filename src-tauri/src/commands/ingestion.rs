@@ -37,7 +37,7 @@ pub enum IngestScope {
     ReconcileSource(String),
     RefreshSession(String),
     ReconcileNative {
-        agent: crate::domain::Agent,
+        agent: crate::domain::AgentTool,
         native_id: String,
         source_path: Option<String>,
     },
@@ -258,7 +258,7 @@ fn spawn_worker(app: AppHandle) {
         } {
             let (discovered, messages, error) = run_scope(&app, &scope);
             // Resolve pending terminals only by their prespecified or
-            // Agent-reported native identity after source ingestion.
+            // agent tool-reported native identity after source ingestion.
             {
                 let state = app.state::<AppState>();
                 let _ = super::with_db(&state, |db| {
@@ -378,7 +378,7 @@ mod tests {
     fn full_history_scan_never_swallows_native_binding_work() {
         let coordinator = IngestionCoordinator::default();
         let native = IngestScope::ReconcileNative {
-            agent: crate::domain::Agent::Codex,
+            agent: crate::domain::AgentTool::Codex,
             native_id: "native".into(),
             source_path: None,
         };
@@ -400,36 +400,44 @@ mod tests {
 
     #[test]
     fn native_sync_bursts_keep_one_followup_with_the_latest_path_without_merging_other_sessions() {
-        use crate::domain::Agent;
+        use crate::domain::AgentTool;
         let coordinator = IngestionCoordinator::default();
         let scope = |agent, native_id: &str, path: Option<&str>| IngestScope::ReconcileNative {
             agent,
             native_id: native_id.into(),
             source_path: path.map(str::to_owned),
         };
-        assert!(coordinator.enqueue(scope(Agent::Codex, "thread", Some("old.jsonl"))));
+        assert!(coordinator.enqueue(scope(AgentTool::Codex, "thread", Some("old.jsonl"))));
         assert_eq!(
             coordinator.next(),
-            Some(scope(Agent::Codex, "thread", Some("old.jsonl")))
+            Some(scope(AgentTool::Codex, "thread", Some("old.jsonl")))
         );
         // A notification arriving during the running pass must survive that pass.
-        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", Some("old.jsonl"))));
-        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", Some("new.jsonl"))));
-        assert!(!coordinator.enqueue(scope(Agent::Codex, "thread", None)));
-        assert!(!coordinator.enqueue(scope(Agent::Codex, "another-thread", Some("other.jsonl"))));
-        assert!(!coordinator.enqueue(scope(Agent::Pi, "thread", Some("pi.jsonl"))));
+        assert!(!coordinator.enqueue(scope(AgentTool::Codex, "thread", Some("old.jsonl"))));
+        assert!(!coordinator.enqueue(scope(AgentTool::Codex, "thread", Some("new.jsonl"))));
+        assert!(!coordinator.enqueue(scope(AgentTool::Codex, "thread", None)));
+        assert!(!coordinator.enqueue(scope(
+            AgentTool::Codex,
+            "another-thread",
+            Some("other.jsonl")
+        )));
+        assert!(!coordinator.enqueue(scope(AgentTool::Pi, "thread", Some("pi.jsonl"))));
         coordinator.finish(1, 2, None, false);
         assert_eq!(
             coordinator.next(),
-            Some(scope(Agent::Codex, "thread", Some("new.jsonl")))
+            Some(scope(AgentTool::Codex, "thread", Some("new.jsonl")))
         );
         assert_eq!(
             coordinator.next(),
-            Some(scope(Agent::Codex, "another-thread", Some("other.jsonl")))
+            Some(scope(
+                AgentTool::Codex,
+                "another-thread",
+                Some("other.jsonl")
+            ))
         );
         assert_eq!(
             coordinator.next(),
-            Some(scope(Agent::Pi, "thread", Some("pi.jsonl")))
+            Some(scope(AgentTool::Pi, "thread", Some("pi.jsonl")))
         );
         assert_eq!(coordinator.next(), None);
     }

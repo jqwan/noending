@@ -25,14 +25,14 @@ vi.mock("../../api", () => ({
     getProjectContextState: vi.fn(),
     updateProjectContext: vi.fn(),
     regenerateProjectContext: vi.fn(),
-    getAgentStatus: vi.fn(),
+    getToolStatus: vi.fn(),
     continueSessionDesktop: vi.fn(),
-    updateAssistantProfile: vi.fn(),
-    prepareAssistantFiles: vi.fn(),
-    assistantMailboxList: vi.fn(),
-    assistantMailboxRead: vi.fn(),
-    assistantMailboxSend: vi.fn(),
-    assistantMailboxChange: vi.fn(),
+    updateAgentProfile: vi.fn(),
+    prepareAgentFiles: vi.fn(),
+    agentMailboxList: vi.fn(),
+    agentMailboxRead: vi.fn(),
+    agentMailboxSend: vi.fn(),
+    agentMailboxChange: vi.fn(),
     archiveProject: vi.fn(),
     deleteProjectPermanently: vi.fn(),
   },
@@ -69,18 +69,18 @@ beforeEach(() => {
   vi.mocked(api.updateProjectContext).mockReset();
   vi.mocked(api.regenerateProjectContext).mockReset();
   vi.mocked(api.getProjectDetail).mockReset();
-  vi.mocked(api.updateAssistantProfile).mockReset();
-  vi.mocked(api.prepareAssistantFiles).mockReset();
-  vi.mocked(api.assistantMailboxList).mockReset().mockResolvedValue({ items: [], unread: 0, next_cursor: null });
-  vi.mocked(api.assistantMailboxRead).mockReset();
-  vi.mocked(api.assistantMailboxSend).mockReset();
-  vi.mocked(api.assistantMailboxChange).mockReset();
+  vi.mocked(api.updateAgentProfile).mockReset();
+  vi.mocked(api.prepareAgentFiles).mockReset();
+  vi.mocked(api.agentMailboxList).mockReset().mockResolvedValue({ items: [], unread: 0, next_cursor: null });
+  vi.mocked(api.agentMailboxRead).mockReset();
+  vi.mocked(api.agentMailboxSend).mockReset();
+  vi.mocked(api.agentMailboxChange).mockReset();
   vi.mocked(api.archiveProject).mockReset();
   vi.mocked(api.deleteProjectPermanently).mockReset();
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.createWorkstream).mockReset();
   vi.mocked(api.cleanMissingProjectPaths).mockReset();
-  vi.mocked(api.getAgentStatus).mockResolvedValue({
+  vi.mocked(api.getToolStatus).mockResolvedValue({
     codex: {
       name: "codex",
       detected: true,
@@ -151,12 +151,12 @@ function mockDetail(): ProjectDetailData {
   };
 }
 
-function assistantProject(): ProjectDetailData & { assistant: NonNullable<ProjectDetailData["assistant"]> } {
+function agentProject(): ProjectDetailData & { agent: NonNullable<ProjectDetailData["agent"]> } {
   const detail = mockDetail();
   return { ...detail, sessions: [...detail.sessions, {
     ...detail.sessions[0], id: "archive-session", title: "档案会话", workspace_path_id: "wp-linked",
     cwd: "/a/linked/worktree",
-  }], assistant: {
+  }], agent: {
     id: "archive-id",
     guide_is_default: true,
     claude_md_missing: false,
@@ -171,7 +171,7 @@ function assistantProject(): ProjectDetailData & { assistant: NonNullable<Projec
 
 describe("ProjectDetail", () => {
   it("switches project subpages in the title bar with shared sessions and skills", async () => {
-    const detail = assistantProject();
+    const detail = agentProject();
     detail.workspace_paths[0].exists = false;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
@@ -187,12 +187,12 @@ describe("ProjectDetail", () => {
     expect(within(workingDirectories).getByTitle("/z/main/worktree")).toBeTruthy();
     const tabs = within(screen.getByRole("group", { name: "项目子页" }));
     const projectTab = tabs.getByRole("button", { name: "项目详情", pressed: true });
-    const assistantTab = tabs.getByRole("button", { name: "智能体详情", pressed: false });
-    fireEvent.click(assistantTab);
-    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", entry: "assistant" });
+    const agentTab = tabs.getByRole("button", { name: "智能体详情", pressed: false });
+    fireEvent.click(agentTab);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", entry: "agent" });
 
-    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
-    expect(tabs.getByRole("button", { name: "智能体详情", pressed: true })).toBe(assistantTab);
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />));
+    expect(tabs.getByRole("button", { name: "智能体详情", pressed: true })).toBe(agentTab);
     expect(screen.getByText("核对交付")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "项目摘要" })).toBeNull();
     expect(screen.queryByRole("region", { name: "关联任务" })).toBeNull();
@@ -218,27 +218,27 @@ describe("ProjectDetail", () => {
     expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1" });
   });
 
-  it("writes to the stable assistant address and assigns the letter to an archive conversation", async () => {
-    const detail = assistantProject();
-    const assistant = detail.assistant!;
+  it("writes to the stable agent address and assigns the letter to an archive conversation", async () => {
+    const detail = agentProject();
+    const agent = detail.agent!;
     const letter = {
       id: "letter", sender_session_id: null, body: "核对发布结果", created_at: "2026-11-27T07:00:00Z",
       read_at: null, handler_session_id: null, completed_at: null, revision: 1,
     };
-    const session = detail.sessions.find(row => row.workspace_path_id === assistant.workspace_path_id)!;
+    const session = detail.sessions.find(row => row.workspace_path_id === agent.workspace_path_id)!;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-    vi.mocked(api.assistantMailboxSend).mockImplementation(async () => {
-      vi.mocked(api.assistantMailboxList).mockResolvedValue({ items: [letter], unread: 1, next_cursor: null });
+    vi.mocked(api.agentMailboxSend).mockImplementation(async () => {
+      vi.mocked(api.agentMailboxList).mockResolvedValue({ items: [letter], unread: 1, next_cursor: null });
       return letter;
     });
-    vi.mocked(api.assistantMailboxChange).mockResolvedValue({ ...letter, handler_session_id: session.id, revision: 2 });
-    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+    vi.mocked(api.agentMailboxChange).mockResolvedValue({ ...letter, handler_session_id: session.id, revision: 2 });
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "写信给Test Project" }));
     const compose = screen.getByRole("dialog", { name: "写信给Test Project" });
     fireEvent.change(within(compose).getByRole("textbox", { name: "信件正文" }), { target: { value: letter.body } });
     fireEvent.click(within(compose).getByRole("button", { name: "发信" }));
-    expect(api.assistantMailboxSend).toHaveBeenCalledWith(assistant.id, letter.body);
+    expect(api.agentMailboxSend).toHaveBeenCalledWith(agent.id, letter.body);
 
     const inbox = screen.getByRole("region", { name: "智能体信箱" });
     fireEvent.click(await within(inbox).findByRole("button", { name: /^核对发布结果/ }));
@@ -247,136 +247,136 @@ describe("ProjectDetail", () => {
     fireEvent.click(within(reader).getByRole("button", { name: /^接手对话：/ }));
     fireEvent.click(screen.getByRole("option", { name: "档案会话" }));
     fireEvent.click(within(reader).getByRole("button", { name: "指定接手对话" }));
-    expect(api.assistantMailboxChange).toHaveBeenCalledWith(assistant.id, {
+    expect(api.agentMailboxChange).toHaveBeenCalledWith(agent.id, {
       message_id: "letter", revision: 1, operation: "transfer", target_session: session.id,
     });
     expect(await within(reader).findByText("处理中 · 由 档案会话 处理")).toBeTruthy();
     expect(within(inbox).getByText("未读")).toBeTruthy();
 
-    vi.mocked(api.assistantMailboxList).mockResolvedValue({ items: [], unread: 0, next_cursor: null });
-    vi.mocked(api.assistantMailboxRead).mockResolvedValue({
+    vi.mocked(api.agentMailboxList).mockResolvedValue({ items: [], unread: 0, next_cursor: null });
+    vi.mocked(api.agentMailboxRead).mockResolvedValue({
       ...letter, handler_session_id: session.id, completed_at: letter.created_at, revision: 3,
     });
     await act(async () => { window.dispatchEvent(new Event("noending:sync")); });
-    expect(api.assistantMailboxRead).toHaveBeenCalledWith(assistant.id, letter.id);
+    expect(api.agentMailboxRead).toHaveBeenCalledWith(agent.id, letter.id);
     expect(await within(reader).findByText("已处理 · 由 档案会话 处理")).toBeTruthy();
   });
 
-  it("refreshes the assistant-written introduction and renders it above the inbox", async () => {
-    const detail = assistantProject();
+  it("refreshes the agent-written introduction and renders it above the inbox", async () => {
+    const detail = agentProject();
     const intro = { content: "### 什么时候找我\n\n- 我可以帮你核对发布验收。", revision: "intro-hash", state: "current" } as const;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
     await screen.findByRole("button", { name: "智能体详情" });
     expect(screen.queryByRole("region", { name: "自我介绍" })).toBeNull();
-    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />));
 
     const section = screen.getByRole("region", { name: "自我介绍" });
     const mailbox = screen.getByRole("region", { name: "智能体信箱" });
     expect(section.compareDocumentPosition(mailbox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(section).getByText("智能体还没有写自我介绍。")).toBeTruthy();
 
-    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...detail.assistant, intro } });
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, agent: { ...detail.agent, intro } });
     fireEvent.click(within(section).getByRole("button", { name: "刷新自我介绍" }));
     expect(await within(section).findByRole("heading", { name: "什么时候找我" })).toBeTruthy();
     expect(within(section).getByRole("listitem").textContent).toBe("我可以帮你核对发布验收。");
     expect(within(section).queryByRole("button", { name: /编辑|添加/ })).toBeNull();
   });
 
-  it("refreshes the assistant's impressions from disk and keeps the section read-only", async () => {
-    const detail = assistantProject();
+  it("refreshes the agent's impressions from disk and keeps the section read-only", async () => {
+    const detail = agentProject();
     const user = { content: "用户多次先问交付结论，再追问风险。", revision: "user-hash", state: "current" } as const;
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />);
 
     const section = await screen.findByRole("region", { name: "用户印象" });
     expect(within(section).getByText("智能体还没有记录对用户的印象。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
-    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...detail.assistant, user } });
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, agent: { ...detail.agent, user } });
     fireEvent.click(within(section).getByRole("button", { name: "刷新用户印象" }));
     expect(await within(section).findByText(user.content)).toBeTruthy();
     expect(within(section).queryByRole("button", { name: /编辑|添加/ })).toBeNull();
   });
 
-  it("edits the guide only on the assistant subpage and restores the default after confirmation", async () => {
-    const detail = assistantProject();
+  it("edits the guide only on the agent subpage and restores the default after confirmation", async () => {
+    const detail = agentProject();
     const content = "先查看发布验收任务。";
-    const edited = { ...detail.assistant, guide_is_default: false, agents: { ...detail.assistant.agents, content, revision: "edited-guide" } };
+    const edited = { ...detail.agent, guide_is_default: false, agents: { ...detail.agent.agents, content, revision: "edited-guide" } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-    vi.mocked(api.updateAssistantProfile).mockImplementation(async () => {
-      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: edited });
+    vi.mocked(api.updateAgentProfile).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, agent: edited });
       return edited;
     });
-    vi.mocked(api.prepareAssistantFiles).mockImplementation(async () => {
+    vi.mocked(api.prepareAgentFiles).mockImplementation(async () => {
       vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-      return detail.assistant;
+      return detail.agent;
     });
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} />);
     await screen.findByRole("button", { name: "智能体详情" });
     expect(screen.queryByRole("region", { name: "运行指南" })).toBeNull();
-    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />));
 
     const guide = screen.getByRole("region", { name: "运行指南" });
     fireEvent.click(within(guide).getByRole("button", { name: "编辑运行指南" }));
     const editor = within(guide).getByRole("textbox", { name: "AGENTS.md" });
-    expect(editor).toHaveProperty("value", detail.assistant.agents.content);
+    expect(editor).toHaveProperty("value", detail.agent.agents.content);
     fireEvent.change(editor, { target: { value: content } });
     fireEvent.click(within(guide).getByRole("button", { name: "保存修改" }));
-    expect(api.updateAssistantProfile).toHaveBeenCalledWith("p1", "guide-hash", { file: "agents", content });
+    expect(api.updateAgentProfile).toHaveBeenCalledWith("p1", "guide-hash", { file: "agents", content });
     expect(await within(guide).findByText(content)).toBeTruthy();
 
     await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} />));
     expect(screen.queryByRole("region", { name: "运行指南" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
-    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />));
+    await act(async () => rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />));
 
     fireEvent.click(within(guide).getByRole("button", { name: "重置运行指南" }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "重置运行指南？" })).getByRole("button", { name: "确认重置" }));
-    expect(await within(guide).findByText(detail.assistant.agents.content)).toBeTruthy();
+    expect(await within(guide).findByText(detail.agent.agents.content)).toBeTruthy();
     expect(within(guide).queryByRole("button", { name: "重置运行指南" })).toBeNull();
   });
 
   it("keeps the ROLE.md draft across subpages and detects external writes", async () => {
-    const detail = assistantProject();
-    const remote = { ...detail, assistant: { ...detail.assistant, role: { ...detail.assistant.role, content: "外部修改", revision: "hash-2" } } };
+    const detail = agentProject();
+    const remote = { ...detail, agent: { ...detail.agent, role: { ...detail.agent.role, content: "外部修改", revision: "hash-2" } } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
-    vi.mocked(api.updateAssistantProfile).mockRejectedValueOnce(new Error("版本冲突"));
-    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
+    vi.mocked(api.updateAgentProfile).mockRejectedValueOnce(new Error("版本冲突"));
+    const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" fromAgents />);
     fireEvent.click(await screen.findByRole("button", { name: "编辑角色与职责" }));
     const input = screen.getByRole("textbox", { name: "ROLE.md" });
     fireEvent.change(input, { target: { value: "本地草稿" } });
     fireEvent.click(screen.getByRole("button", { name: "项目详情" }));
-    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", fromAssistants: true });
-    rerender(<ProjectDetail projectId="p1" navigate={navigate} fromAssistants />);
+    expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project", fromAgents: true });
+    rerender(<ProjectDetail projectId="p1" navigate={navigate} fromAgents />);
     expect(screen.queryByRole("textbox", { name: "ROLE.md" })).toBeNull();
     vi.mocked(api.getProjectDetail).mockResolvedValue(remote);
     await act(async () => notifyDataChanged(["projects"]));
-    rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
+    rerender(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" fromAgents />);
     expect(await screen.findByText(/ROLE.md 已在外部修改/)).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "本地草稿");
     fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
     expect(await screen.findByText(/保存 ROLE.md 失败/)).toBeTruthy();
-    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-1", { file: "role", content: "本地草稿" });
-    const saved = { ...detail.assistant, role: { ...detail.assistant.role, content: "本地草稿", revision: "hash-3" } };
-    vi.mocked(api.updateAssistantProfile).mockResolvedValue(saved);
-    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: { ...remote.assistant, ...saved } });
+    expect(api.updateAgentProfile).toHaveBeenLastCalledWith("p1", "hash-1", { file: "role", content: "本地草稿" });
+    const saved = { ...detail.agent, role: { ...detail.agent.role, content: "本地草稿", revision: "hash-3" } };
+    vi.mocked(api.updateAgentProfile).mockResolvedValue(saved);
+    vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, agent: { ...remote.agent, ...saved } });
     fireEvent.click(screen.getByRole("button", { name: "覆盖文件修改" }));
     expect(await screen.findByText("本地草稿")).toBeTruthy();
     expect(screen.getByTitle("/a/linked/worktree")).toBeTruthy();
-    expect(api.updateAssistantProfile).toHaveBeenLastCalledWith("p1", "hash-2", { file: "role", content: "本地草稿" });
+    expect(api.updateAgentProfile).toHaveBeenLastCalledWith("p1", "hash-2", { file: "role", content: "本地草稿" });
   });
 
   it("confirms a single guide reset and lists the missing files it will create", async () => {
-    const detail = assistantProject();
-    const emptyRole = { ...detail.assistant, role: { ...detail.assistant.role, content: "" } };
+    const detail = agentProject();
+    const emptyRole = { ...detail.agent, role: { ...detail.agent.role, content: "" } };
     vi.mocked(api.getProjectDetail).mockResolvedValue({
-      ...detail, assistant: { ...detail.assistant, claude_md_missing: true, role: { content: "", revision: null, state: "missing" } },
+      ...detail, agent: { ...detail.agent, claude_md_missing: true, role: { content: "", revision: null, state: "missing" } },
     });
-    vi.mocked(api.prepareAssistantFiles).mockImplementation(async () => {
-      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, assistant: emptyRole });
+    vi.mocked(api.prepareAgentFiles).mockImplementation(async () => {
+      vi.mocked(api.getProjectDetail).mockResolvedValue({ ...detail, agent: emptyRole });
       return emptyRole;
     });
-    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="agent" />);
 
     const reset = await screen.findByRole("button", { name: "重置运行指南" });
     expect(within(screen.getByRole("region", { name: "角色与职责" })).queryByRole("button", { name: /补建/ })).toBeNull();
@@ -389,12 +389,12 @@ describe("ProjectDetail", () => {
       "补建 CLAUDE.md。",
     ]);
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
-    expect(api.prepareAssistantFiles).not.toHaveBeenCalled();
+    expect(api.prepareAgentFiles).not.toHaveBeenCalled();
     fireEvent.click(reset);
     fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "重置运行指南？" })).toBeNull());
     expect(screen.queryByRole("button", { name: "重置运行指南" })).toBeNull();
-    expect(api.prepareAssistantFiles).toHaveBeenCalledWith("p1");
+    expect(api.prepareAgentFiles).toHaveBeenCalledWith("p1");
     expect(screen.getByText("价值观")).toBeTruthy();
     expect(screen.getByText("尚未设定角色与职责。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "编辑角色与职责" }));
@@ -402,7 +402,7 @@ describe("ProjectDetail", () => {
   });
 
   it("uses project deletion and returns to the originating archive filter", async () => {
-    const detail = assistantProject();
+    const detail = agentProject();
     const archived = { ...detail, sessions: [], project: { ...detail.project, visibility: "archived" as const } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     vi.mocked(api.archiveProject).mockImplementation(async () => {
@@ -410,14 +410,14 @@ describe("ProjectDetail", () => {
       return archived.project;
     });
     vi.mocked(api.deleteProjectPermanently).mockResolvedValue({ warnings: [] });
-    render(<ProjectDetail projectId="p1" navigate={navigate} fromAssistants />);
+    render(<ProjectDetail projectId="p1" navigate={navigate} fromAgents />);
     fireEvent.click(await screen.findByRole("button", { name: "归档项目" }));
     fireEvent.click(await screen.findByRole("button", { name: "永久删除项目" }));
     expect(screen.getByText(/档案目录及其中的文件也会永久删除/)).toBeTruthy();
     expect(api.deleteProjectPermanently).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "projects", scope: "archived", assistantOnly: true }));
-    expect(api.deleteProjectPermanently).toHaveBeenCalledWith("p1", { view: "projects", scope: "archived", assistantOnly: true });
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ view: "projects", scope: "archived", agentOnly: true }));
+    expect(api.deleteProjectPermanently).toHaveBeenCalledWith("p1", { view: "projects", scope: "archived", agentOnly: true });
   });
 
   it("does not offer new sessions in chat-directory projects", async () => {

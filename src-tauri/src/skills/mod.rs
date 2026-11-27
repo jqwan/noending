@@ -1,4 +1,4 @@
-//! Skill discovery and management. Agent load directories remain authoritative.
+//! Skill discovery and management. agent tool load directories remain authoritative.
 mod bundled;
 mod files;
 mod inventory;
@@ -6,7 +6,7 @@ mod operations;
 mod registry;
 
 use crate::{
-    domain::Agent,
+    domain::AgentTool,
     error::{other, Result},
 };
 use serde::{Deserialize, Serialize};
@@ -68,17 +68,17 @@ impl Roots {
             claude: override_or("CLAUDE_CONFIG_DIR", home.join(".claude")),
             pi: override_or("PI_CODING_AGENT_DIR", home.join(".pi/agent")),
             dsh: paths::dsh_home_override()
-                .unwrap_or_else(|| home.join(paths::agent_default_dir(Agent::Dsh))),
+                .unwrap_or_else(|| home.join(paths::agent_default_dir(AgentTool::Dsh))),
             home,
         })
     }
 }
 
-/// An Agent load directory. Never a Skill source; NoEnding's source library is not a Location.
+/// An agent tool load directory. Never a Skill source; NoEnding's source library is not a Location.
 #[derive(Debug, Clone, Serialize)]
 pub struct Location {
     pub id: String,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentTool>,
     pub scope: String,
     pub path: String,
     pub label: String,
@@ -90,7 +90,7 @@ pub struct Resource {
     pub name: String,
     pub description: String,
     /// Canonical source `SKILL.md` path. Configuration entries live in
-    /// `entry_paths`; this never points at a link inside an Agent directory
+    /// `entry_paths`; this never points at a link inside an agent tool directory
     /// unless that physical directory is the source itself.
     pub path: String,
     /// Configuration locations aligned with `entry_paths`, never source storage.
@@ -148,7 +148,12 @@ pub(crate) fn key(value: impl AsRef<[u8]>) -> String {
     format!("{:x}", Sha256::digest(value.as_ref()))
 }
 
-pub(crate) fn location(agent: Option<Agent>, scope: &str, path: PathBuf, label: &str) -> Location {
+pub(crate) fn location(
+    agent: Option<AgentTool>,
+    scope: &str,
+    path: PathBuf,
+    label: &str,
+) -> Location {
     let path = path.to_string_lossy().into_owned();
     Location {
         id: key(format!("skill:{agent:?}:{scope}:{path}")),

@@ -1,9 +1,9 @@
 //! Claude Code keeps an install registry at `plugins/installed_plugins.json`;
 //! cached versions alone are not evidence of an install. NoEnding manages the
-//! user-level scope only — project/local installs belong to the Agent.
+//! user-level scope only — project/local installs belong to the agent tool.
 
 use super::{files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -31,7 +31,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
     for (key, installs) in plugins {
         let (name, marketplace) = key.rsplit_once('@').unwrap_or((key, ""));
         for install in installs.as_array().into_iter().flatten() {
-            // Project and local installs stay Agent-managed; NoEnding lists
+            // Project and local installs stay agent tool-managed; NoEnding lists
             // the user scope only.
             if install
                 .get("scope")
@@ -59,7 +59,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
             let capabilities = Capabilities::full();
             entries.push(PackageEntry {
                 id: files::key(format!("package:claude_code:{key}")),
-                agent: Some(Agent::ClaudeCode),
+                agent: Some(AgentTool::ClaudeCode),
                 name: name.to_string(),
                 version: install
                     .get("version")

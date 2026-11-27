@@ -1,7 +1,7 @@
 // Mirror of the Rust domain API shapes (commands.rs). Change these only
 // together with the Rust struct they mirror.
 
-export type Agent =
+export type AgentTool =
   | "codex"
   | "claude_code"
   | "pi"
@@ -13,7 +13,7 @@ export type Agent =
 
 export interface SkillScope { project_id?: string | null; workspace_path_id?: string | null }
 export interface SkillLocation {
-  id: string; agent: Agent | null; scope: "user" | "project";
+  id: string; agent: AgentTool | null; scope: "user" | "project";
   path: string; label: string;
 }
 export interface SkillResource {
@@ -22,11 +22,11 @@ export interface SkillResource {
   revision: string; registered: boolean; error: string | null;
 }
 export interface SkillInventory { resources: SkillResource[]; locations: SkillLocation[]; warnings: string[] }
-interface SkillScopeEntry { path: string; link: boolean; label: string; agents: Agent[] }
+interface SkillScopeEntry { path: string; link: boolean; label: string; agents: AgentTool[] }
 interface SkillProjectWorkspaceScope { workspace_path_id: string; path: string; entries: SkillScopeEntry[] }
 export interface SkillProjectScope { project_id: string; project_name: string; workspaces: SkillProjectWorkspaceScope[]; enabled: boolean; full: boolean }
 export interface SkillResourceDetail { resource: SkillResource; content: string }
-export type SkillSourceKind = "library" | "agent" | "external";
+export type SkillSourceKind = "library" | "agent_tool" | "external";
 export interface SkillDetailBundle { detail: SkillResourceDetail; locations: SkillLocation[]; scopes: SkillProjectScope[]; source_kind: SkillSourceKind | null }
 export interface SkillUninstallPreview { delete_source_required: boolean; entry_count: number; source_path: string }
 export interface SkillRegistrationPreview { source_path: string; target_path: string; entry_count: number; physical_entries: number }
@@ -49,7 +49,7 @@ interface PackageScopeState {
 interface PackageCapabilities { uninstall: boolean; toggle: boolean }
 export interface PackageEntry {
   id: string;
-  agent: Agent | null;
+  agent: AgentTool | null;
   name: string;
   version: string;
   description: string;
@@ -67,7 +67,7 @@ export interface PackageInventory { packages: PackageEntry[]; warnings: string[]
 export interface PackageOperationResult { message: string }
 interface PackageMarketplacePlugin { name: string; description: string }
 interface PackageImportOption {
-  agent: Agent;
+  agent: AgentTool;
   manifest: string;
   /** Package name, or the marketplace's own name. */
   name: string;
@@ -106,7 +106,7 @@ export interface ProjectCardData {
   visibility: "normal" | "archived";
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
-  is_assistant?: boolean;
+  is_agent?: boolean;
   path_count: number;
   missing_path_count: number;
   workstream_count: number;
@@ -187,7 +187,7 @@ export interface ProjectDetailData {
   project: Project;
   kind: ProjectKind;
   purpose?: ProjectPurpose | null;
-  assistant?: (ProjectAssistant & { id: string; workspace_path_id: string }) | null;
+  agent?: (ProjectAgent & { id: string; workspace_path_id: string }) | null;
   workspace_paths: WorkspacePath[];
   cleanable_missing_path_ids?: string[];
   workstreams: ProjectWorkstreamRow[];
@@ -230,11 +230,11 @@ export interface WorkstreamCardData {
 
 /** Global lookup opens existing objects; it never returns message/summary content. */
 export interface NavigationItem {
-  kind: "project" | "workstream" | "session" | "agent" | "skill";
+  kind: "project" | "workstream" | "session" | "agent_tool" | "skill";
   ref_id: string;
   title: string;
   hint: string;
-  agent: Agent | null;
+  agent: AgentTool | null;
   archived: boolean;
 }
 
@@ -247,8 +247,8 @@ export interface NavigationResults {
  *  一个会话就是它的根源：来源、游标和事实前沿都在这一行上。 */
 export interface Session {
   id: string;
-  agent: Agent;
-  /** Root 成员的 Agent 侧 Resume 身份；终端绑定与 Resume 的唯一依据。 */
+  agent: AgentTool;
+  /** Root 成员的 AgentTool 侧 Resume 身份；终端绑定与 Resume 的唯一依据。 */
   root_agent_session_id: string;
   title: string | null;
   cwd: string | null;
@@ -302,7 +302,7 @@ export interface SessionMessage {
   role: SessionMessageRole;
   content: string;
   ts: string | null;
-  /** 仅 Assistant 有意义：是否该轮的最终回复（下一条投影消息不再是 Agent 回复）。 */
+  /** 只用于模型回复：是否该轮的最终回复（下一条投影消息不再是 模型回复）。 */
   turn_final: boolean;
   source_identity_hash: string;
 }
@@ -310,11 +310,11 @@ export interface SessionMessage {
 /** Adapter 对源可用性的严格结论：任何异常都不等于 missing。 */
 export type SourceAvailability = "present" | "missing" | "unavailable";
 
-/** 无状态本地删除预览：删除只清 NoEnding 本地数据，Agent 源文件不动。 */
+/** 无状态本地删除预览：删除只清 NoEnding 本地数据，AgentTool 源文件不动。 */
 export interface LocalDeletePreview {
   session_id: string;
   session_title: string | null;
-  agent: Agent;
+  agent: AgentTool;
   root_agent_session_id: string;
   /** 删除预览时的 Root 源新鲜结论。这是**文案依据**而非门槛：present 的源会在下次
    *  同步作为新会话重新入库，所以弹窗要如实说明，而不是禁用按钮。 */
@@ -332,7 +332,7 @@ export interface PermanentDeleteResult {
 
 export interface IngestSource {
   id: string;
-  agent: Agent;
+  agent: AgentTool;
   path: string;
   origin: "default" | "user";
   exists: boolean;
@@ -346,7 +346,7 @@ export interface WorkstreamContext {
 // Explicit Context update (read + one-click update)
 //
 // 两个显式 AI 更新入口：Session 摘要与 Workstream 状态。读命令纯读取
-// （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 Agent。
+// （不摄入、不调用模型）；更新命令每次用户动作最多启动一次 AgentTool。
 
 export interface TaskItem {
   id: string;
@@ -485,7 +485,7 @@ export interface SessionDetail {
   session: Session;
   /** Conversation：根源的 user/assistant 消息，带当前会话顺序编号。 */
   messages: SessionWindowMessage[];
-  /** 会话消息统计：用户消息与 Agent 回复总数。 */
+  /** 会话消息统计：用户消息与 模型回复总数。 */
   message_stats?: SessionMessageStats;
   workspace_path: SessionWorkspacePath | null;
   ingested_message_sequence: number;
@@ -543,7 +543,7 @@ export interface SessionMessageWindow {
 }
 
 /**
- * cwd 的解析层级——Agent 的启动目录由谁决定。后端 `CwdSource`，
+ * cwd 的解析层级——AgentTool 的启动目录由谁决定。后端 `CwdSource`，
  * `rename_all = "snake_case"`。
  */
 type CwdSource =
@@ -584,7 +584,7 @@ export interface TerminalSummary {
   /** 单个终端内单调递增的身份版本，覆盖绑定、切换及清空。 */
   identity_revision: number;
   activity?: TerminalActivity;
-  agent: Agent;
+  agent: AgentTool;
   cwd: string | null;
   created_at: string;
   live: boolean;
@@ -617,7 +617,7 @@ export interface TerminalOutput {
   data: string;
 }
 
-export const AGENT_LABELS: Record<Agent, string> = {
+export const AGENT_TOOL_LABELS: Record<AgentTool, string> = {
   codex: "Codex",
   claude_code: "Claude Code",
   pi: "Pi",
@@ -628,11 +628,11 @@ export const AGENT_LABELS: Record<Agent, string> = {
   antigravity: "Antigravity",
 };
 
-// Agent Runtime Configuration
+// AgentTool Runtime Configuration
 
 type RuntimeFieldCapability = "unsupported" | "free_form" | "suggested" | "discoverable";
 
-/** null 一律表示 Agent default：NoEnding 不传该参数，由 Agent 自己决定。 */
+/** null 一律表示 AgentTool default：NoEnding 不传该参数，由 AgentTool 自己决定。 */
 export interface AgentRuntimeOverrides {
   model: string | null;
   provider: string | null;
@@ -644,7 +644,7 @@ export interface ExtractionSettings {
   runtime: AgentRuntimeOverrides;
 }
 
-/** dynamic = 来自 Agent CLI；suggested = NoEnding 建议值；unavailable = 获取失败。 */
+/** dynamic = 来自 AgentTool CLI；suggested = NoEnding 建议值；unavailable = 获取失败。 */
 type ModelSource = "not_loaded" | "dynamic" | "suggested" | "unavailable";
 
 interface RuntimeModelOption {
@@ -655,7 +655,7 @@ interface RuntimeModelOption {
 }
 
 export interface AgentRuntimeSettings {
-  agent: Agent;
+  agent: AgentTool;
   detected: boolean;
   executable: string | null;
   version: string | null;
@@ -667,12 +667,12 @@ export interface AgentRuntimeSettings {
   warnings: string[];
 }
 
-/** refresh_agent_runtime_options 的结果：不含安装状态，只含建议信息。 */
+/** refresh_tool_runtime_options 的结果：不含安装状态，只含建议信息。 */
 export type AgentRuntimeDiscovery = Omit<AgentRuntimeSettings,
   "agent" | "detected" | "executable" | "version" | "overrides">;
 
-/** get_agent_status 的一行：CLI 安装状态 + 两个启动面（终端 / 桌面应用）的能力与在场。 */
-export interface AgentStatusEntry {
+/** get_tool_status 的一行：CLI 安装状态 + 两个启动面（终端 / 桌面应用）的能力与在场。 */
+export interface AgentToolStatusEntry {
   launch_enabled: boolean;
   name: string;
   detected: boolean;
@@ -680,7 +680,7 @@ export interface AgentStatusEntry {
   version: string | null;
   /** 有无可由 NoEnding 启动的终端 CLI。 */
   terminal_cli: boolean;
-  /** 接入的桌面应用名；null = 该 Agent 没有接入桌面端。 */
+  /** 接入的桌面应用名；null = 该 AgentTool 没有接入桌面端。 */
   desktop_app: string | null;
   desktop_app_present: boolean;
 }
@@ -691,7 +691,7 @@ export interface MailboxMessage {
   recipient_session_id: string;
   sender_session_id: string | null;
   /** 界面读取时附带当前发件会话信息；缺失且有发件 ID 表示会话已删除。 */
-  sender?: { title: string | null; agent: Agent };
+  sender?: { title: string | null; agent: AgentTool };
   body: string;
   created_at: string;
   read_at: string | null;
@@ -715,7 +715,7 @@ export interface OperationStatus {
   kind: "sync" | "summary";
   state: "queued" | "running";
   targets: { kind: string; id: string }[];
-  agent: Agent | null;
+  agent: AgentTool | null;
   project_summary_progress?: { processed: number; remaining: number; summary_saved: boolean };
 }
 
@@ -747,7 +747,7 @@ export interface CollaborationMessage {
 export interface CollaborationMemberState {
   session_id: string;
   title: string | null;
-  agent: Agent | null;
+  agent: AgentTool | null;
   project_id: string | null;
   wake_method: CollaborationWakeMethod;
   wake_status: CollaborationWakeStatus;
@@ -791,7 +791,7 @@ export interface CollaborationCandidate {
   session_id: string;
   project_id: string | null;
   title: string | null;
-  agent: Agent | null;
+  agent: AgentTool | null;
   /** 该会话实际支持的唤醒方式，不由前端假定都有 CLI。 */
   wake_modes: CollaborationWakeMethod[];
   /** 非空表示不可加入：仅展示原因，不能勾选。 */
@@ -815,26 +815,26 @@ export interface CollaborationStartedMember {
   wake_method: CollaborationWakeMethod;
 }
 
-export interface AssistantFile {
+export interface AgentFile {
   content: string;
   revision: string | null;
   state: "missing" | "current" | "unavailable";
 }
 
-export type AssistantFileName = "agents" | "soul" | "role";
-export type AssistantPatch = { file: AssistantFileName; content: string };
+export type AgentFileName = "agents" | "soul" | "role";
+export type AgentPatch = { file: AgentFileName; content: string };
 
-export interface ProjectAssistant {
+export interface ProjectAgent {
   guide_is_default: boolean;
   claude_md_missing: boolean;
-  agents: AssistantFile;
-  soul: AssistantFile;
-  role: AssistantFile;
-  user: AssistantFile;
-  intro: AssistantFile;
+  agents: AgentFile;
+  soul: AgentFile;
+  role: AgentFile;
+  user: AgentFile;
+  intro: AgentFile;
 }
 
-export interface AssistantMailboxMessage {
+export interface AgentMailboxMessage {
   id: string;
   sender_session_id: string | null;
   body: string;
@@ -845,20 +845,20 @@ export interface AssistantMailboxMessage {
   revision: number;
 }
 
-export interface AssistantMailboxPage {
-  items: AssistantMailboxMessage[];
+export interface AgentMailboxPage {
+  items: AgentMailboxMessage[];
   unread: number;
   next_cursor: number | null;
 }
 
-export interface AssistantMailboxChange {
+export interface AgentMailboxChange {
   message_id: string;
   revision: number;
   operation: "read" | "release" | "complete" | "transfer";
   target_session?: string;
 }
 
-export interface CreateAssistantInput {
+export interface CreateAgentInput {
   name: string;
   soul_md?: string;
   role_md?: string;

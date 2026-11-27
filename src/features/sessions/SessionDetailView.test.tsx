@@ -22,7 +22,7 @@ vi.mock("../../api", () => ({
     mailboxList: vi.fn().mockResolvedValue({items:[],total:0,unread:0,next_cursor:null}),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
-    getAgentStatus: vi.fn().mockResolvedValue({}),
+    getToolStatus: vi.fn().mockResolvedValue({}),
     launchEmbeddedResume: vi.fn(),
     continueSessionDesktop: vi.fn(),
     getSessionDetail: vi.fn(),
@@ -61,7 +61,7 @@ beforeEach(() => {
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
   vi.mocked(api.mailboxList).mockResolvedValue({items:[],total:0,unread:0,next_cursor:null});
-  vi.mocked(api.getAgentStatus).mockResolvedValue({});
+  vi.mocked(api.getToolStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "", fields: null, revision: 0, ingest_generation: 0, processed_through_seq: 0, latest_message_seq: 0, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, updated_at: null, pending: false });
   vi.mocked(api.updateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 1 });
   vi.mocked(api.regenerateSessionContext).mockResolvedValue({ session_id: "", status: "updated", revision: 2 });
@@ -160,7 +160,7 @@ it("renders session message stats in the sidebar", async () => {
 
   expect(screen.getByText("会话统计")).toBeTruthy();
   expect(screen.getByText("用户消息 5")).toBeTruthy();
-  expect(screen.getByText("Agent 回复 8")).toBeTruthy();
+  expect(screen.getByText("运行工具 回复 8")).toBeTruthy();
 });
 
 // 执行信息
@@ -225,7 +225,7 @@ it("previews the newest messages and links to the whole conversation", async () 
     sessionId: "me",
     entry: "conversation",
     initialTitle: "未命名会话",
-    initialAgent: "codex",
+    initialTool: "codex",
     initialTotal: 420,
   });
 });
@@ -246,7 +246,7 @@ it("handles fork origin provenance: linked session, missing source, and non-fork
     forked_from: session("orig", { title: "原始会话" }),
   }));
   fireEvent.click(screen.getByRole("button", { name: "分叉自：原始会话" }));
-  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig", initialTitle: "原始会话", initialAgent: "codex" });
+  expect(navigate).toHaveBeenCalledWith({ view: "session", sessionId: "orig", initialTitle: "原始会话", initialTool: "codex" });
   unmount();
 
   // 2. Missing source session
@@ -448,7 +448,7 @@ it("restores cached session details and summary together while refreshing on rem
   await act(async () => { resolveDetail(data); resolveContext(context); });
 });
 
-it("copies a labeled NoEnding session ID and preserves the raw Agent ID", async () => {
+it("copies a labeled NoEnding session ID and preserves the raw AgentTool ID", async () => {
   const writeText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
 
@@ -464,8 +464,8 @@ it("copies a labeled NoEnding session ID and preserves the raw Agent ID", async 
   fireEvent.click(copySessionIdBtn);
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("NoEnding ID：session-123"));
 
-  // Copy icon button for "Agent 会话 ID"
-  const copyAgentIdBtn = screen.getByRole("button", { name: "复制 Agent 会话 ID" });
+  // Copy icon button for "运行工具会话 ID"
+  const copyAgentIdBtn = screen.getByRole("button", { name: "复制 运行工具会话 ID" });
   expect(copyAgentIdBtn).toBeDefined();
   fireEvent.click(copyAgentIdBtn);
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("agent-root-456"));
@@ -497,10 +497,10 @@ it("keeps the known session title throughout a delayed detail load", async () =>
   let resolve!: (value: SessionDetail) => void;
   vi.mocked(api.getSessionDetail).mockReturnValueOnce(new Promise(done => { resolve = done; }));
   const navigate = vi.fn();
-  render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialAgent="codex" navigate={navigate} />);
+  render(<SessionDetailView sessionId="s1" initialTitle="稳定标题" initialTool="codex" navigate={navigate} />);
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("稳定标题");
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
-  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialAgent: "codex" }));
+  expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ initialTitle: "稳定标题", initialTool: "codex" }));
   await act(async () => resolve(detail(session("s1", { title: "稳定标题" }))));
   expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("稳定标题");
 });

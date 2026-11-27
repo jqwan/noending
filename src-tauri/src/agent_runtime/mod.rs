@@ -1,11 +1,11 @@
-//! Agent Runtime Configuration.
+//! agent tool Runtime Configuration.
 //!
-//! Invariant: **Agent owns defaults, NoEnding owns overrides.**
+//! Invariant: **agent tool owns defaults, NoEnding owns overrides.**
 //!
-//! NoEnding never parses an Agent's own configuration (`~/.codex/config.toml`,
+//! NoEnding never parses an agent tool's own configuration (`~/.codex/config.toml`,
 //! `~/.claude/settings.json`, `~/.pi/…`, project config, env, profiles,
 //! managed policy) and never computes an "effective default model". A field
-//! left as `None` means *Agent default* and is implemented by **not passing
+//! left as `None` means *agent tool default* and is implemented by **not passing
 //! the corresponding CLI argument at all** — default is a launch intent, not
 //! a resolved value.
 //!
@@ -21,7 +21,7 @@ use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::ExecOptions;
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::Result;
 use crate::storage::Db;
 
@@ -31,7 +31,7 @@ pub use capabilities::{
 pub use discovery::{discover_runtime_options, AgentRuntimeDiscovery, ModelCatalog, ModelOption};
 pub use store::{get_runtime_overrides, set_runtime_overrides};
 
-/// Explicit user overrides for one Agent. `None` = Agent default = no CLI argument.
+/// Explicit user overrides for one agent tool. `None` = agent tool default = no CLI argument.
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
 )]
@@ -50,7 +50,7 @@ fn clean(v: Option<&str>) -> Option<String> {
 
 impl AgentRuntimeOverrides {
     /// Drop blank values so `Some("")` can never mean anything other than
-    /// *Agent default* on either side of the storage boundary.
+    /// *agent tool default* on either side of the storage boundary.
     pub fn normalized(&self) -> AgentRuntimeOverrides {
         AgentRuntimeOverrides {
             model: clean(self.model.as_deref()),
@@ -70,7 +70,7 @@ impl AgentRuntimeOverrides {
     }
 
     /// The single conversion every consumer shares: New Session, Resume,
-    /// Context Eval and the Assistant all reach the CLI through this.
+    /// Context evaluation and summary extraction all reach the CLI through this.
     pub fn exec_options(&self) -> ExecOptions {
         let o = self.normalized();
         ExecOptions {
@@ -83,19 +83,19 @@ impl AgentRuntimeOverrides {
     }
 }
 
-/// Resolve the stored override intent for an Agent, ready to freeze into a
+/// Resolve the stored override intent for an agent tool, ready to freeze into a
 /// launch.
 ///
 /// There is no default resolution here: an unset override yields `None`
 /// fields, which adapters render as no CLI argument. Validation runs on read,
 /// so a hand-edited illegal row fails Prepare instead of reaching the CLI.
-pub fn runtime_overrides_for_launch(db: &Db, agent: Agent) -> Result<AgentRuntimeOverrides> {
+pub fn runtime_overrides_for_launch(db: &Db, agent: AgentTool) -> Result<AgentRuntimeOverrides> {
     let overrides = get_runtime_overrides(db, agent)?.normalized();
     validate_runtime_overrides(agent, &overrides)?;
     Ok(overrides)
 }
 
-/// Resolve the runtime `ExecOptions` for an Agent from stored overrides.
-pub fn runtime_exec_options(db: &Db, agent: Agent) -> Result<ExecOptions> {
+/// Resolve the runtime `ExecOptions` for an agent tool from stored overrides.
+pub fn runtime_exec_options(db: &Db, agent: AgentTool) -> Result<ExecOptions> {
     Ok(runtime_overrides_for_launch(db, agent)?.exec_options())
 }

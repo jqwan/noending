@@ -24,7 +24,7 @@ pub(crate) const SESSION_ACCESS_ENV: &str = "NOENDING_SESSION_ACCESS";
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StartSession {
-    pub agent: String,
+    pub tool: String,
     pub cwd: Option<String>,
     pub message: Option<String>,
     pub runtime: Option<AgentRuntimeOverrides>,
@@ -35,14 +35,14 @@ pub struct StartSession {
 pub enum ControlCommand {
     List { session: Option<String> },
     Identity { claimed: Option<String> },
-    VerifyAssistantSession { access: String },
+    VerifyAgentSession { access: String },
     Start(StartSession),
 }
 impl ControlCommand {
     pub(crate) fn is_write(&self) -> bool {
         !matches!(
             self,
-            Self::List { .. } | Self::Identity { .. } | Self::VerifyAssistantSession { .. }
+            Self::List { .. } | Self::Identity { .. } | Self::VerifyAgentSession { .. }
         )
     }
 }
@@ -96,7 +96,7 @@ fn require_ordinary_launch(home: &NoEndingHome, cwd: Option<&str>) -> CliResult<
     let cwd = cwd
         .map(std::path::Path::new)
         .unwrap_or(&home.default_workspace);
-    let archives = crate::assistant::directory(home);
+    let archives = crate::agent::directory(home);
     let under_archives = is_within(&cwd.to_string_lossy(), &archives.to_string_lossy())
         || std::fs::canonicalize(cwd)
             .ok()
@@ -142,12 +142,12 @@ fn request_as(
 
 /// A CLI invocation or one MCP connection inherits the credential once. Its
 /// first verified binding fixes its session until the process reconnects.
-pub(crate) struct AssistantCaller {
+pub(crate) struct AgentCaller {
     credentials: Option<(String, String)>,
     binding: std::sync::Mutex<Option<(String, u64)>>,
 }
 
-impl AssistantCaller {
+impl AgentCaller {
     pub(crate) fn from_environment() -> Self {
         let credentials = std::env::var(CALLER_TERMINAL_ENV)
             .ok()
@@ -172,7 +172,7 @@ impl AssistantCaller {
         })?;
         let current = request_as(
             home,
-            ControlCommand::VerifyAssistantSession {
+            ControlCommand::VerifyAgentSession {
                 access: access.clone(),
             },
             None,
@@ -350,7 +350,7 @@ pub(crate) fn dispatch(
         ControlCommand::Identity { claimed } => Ok(
             json!({"session_id":sender_session(&registry,&state.db,sender_terminal,claimed.as_deref())?}),
         ),
-        ControlCommand::VerifyAssistantSession { access } => {
+        ControlCommand::VerifyAgentSession { access } => {
             let terminal = sender_terminal
                 .ok_or_else(|| CliError::new("session_access_required", "缺少会话凭证来源"))?;
             registry.bind_discovered(&state.db);
@@ -376,7 +376,7 @@ pub(crate) fn dispatch(
                 app.clone(),
                 state,
                 registry,
-                options.agent,
+                options.tool,
                 options.cwd,
                 message,
                 options.runtime,

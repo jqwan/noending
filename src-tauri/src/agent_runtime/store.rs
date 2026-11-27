@@ -1,11 +1,11 @@
 //! Persistence for NoEnding-owned runtime overrides.
 //!
 //! Only explicit overrides are stored. The settings row is deleted once every
-//! field returns to *Agent default*, so "no row" and "all fields null" mean
-//! exactly the same thing. Agent native defaults and model catalogs are
+//! field returns to *agent tool default*, so "no row" and "all fields null" mean
+//! exactly the same thing. agent tool native defaults and model catalogs are
 //! dynamic and are never persisted here.
 
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
@@ -13,11 +13,11 @@ use super::AgentRuntimeOverrides;
 
 const KEY_PREFIX: &str = "agent.runtime.";
 
-fn key(agent: Agent) -> String {
+fn key(agent: AgentTool) -> String {
     format!("{}{}", KEY_PREFIX, agent.as_str())
 }
 
-pub fn get_runtime_overrides(db: &Db, agent: Agent) -> Result<AgentRuntimeOverrides> {
+pub fn get_runtime_overrides(db: &Db, agent: AgentTool) -> Result<AgentRuntimeOverrides> {
     let Some(raw) = db.get_setting(&key(agent))? else {
         return Ok(AgentRuntimeOverrides::default());
     };
@@ -34,7 +34,7 @@ pub fn get_runtime_overrides(db: &Db, agent: Agent) -> Result<AgentRuntimeOverri
 
 pub fn set_runtime_overrides(
     db: &Db,
-    agent: Agent,
+    agent: AgentTool,
     overrides: &AgentRuntimeOverrides,
 ) -> Result<()> {
     super::validate_runtime_overrides(agent, overrides)?;
@@ -48,16 +48,16 @@ pub fn set_runtime_overrides(
 }
 
 /// A launch preference, independent of executable detection and history sources.
-pub fn launch_enabled(db: &Db, agent: Agent) -> Result<bool> {
+pub fn launch_enabled(db: &Db, agent: AgentTool) -> Result<bool> {
     Ok(db
         .get_setting(&format!("agent.launch.{}.enabled", agent.as_str()))?
         .as_deref()
         != Some("false"))
 }
 
-pub fn set_launch_enabled(db: &Db, agent: Agent, enabled: bool) -> Result<()> {
+pub fn set_launch_enabled(db: &Db, agent: AgentTool, enabled: bool) -> Result<()> {
     if !crate::adapters::adapter_for(agent).has_terminal_cli() {
-        return Err(other("该 Agent 不支持新建终端会话"));
+        return Err(other("该 运行工具 不支持新建终端会话"));
     }
     let key = format!("agent.launch.{}.enabled", agent.as_str());
     if enabled {

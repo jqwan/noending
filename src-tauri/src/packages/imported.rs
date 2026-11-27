@@ -3,12 +3,12 @@
 //! a pure read and `install_local` goes straight to the native CLIs, so no
 //! "imported but installed nowhere" state can exist.
 
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use std::path::{Path, PathBuf};
 
 /// Marketplace manifests: a directory carrying one is a plugin COLLECTION
-/// consumed through the Agent's own marketplace machinery, not a single
+/// consumed through the agent tool's own marketplace machinery, not a single
 /// package. Shapes verified against real registered marketplaces: Claude
 /// `.claude-plugin/marketplace.json` and Codex `.agents/plugins/marketplace.json`.
 const MARKETPLACES: [(&str, MarketKind); 2] = [
@@ -23,16 +23,16 @@ pub(super) enum MarketKind {
 }
 
 impl MarketKind {
-    pub(super) fn agent(self) -> Agent {
+    pub(super) fn agent(self) -> AgentTool {
         match self {
-            MarketKind::Claude => Agent::ClaudeCode,
-            MarketKind::Codex => Agent::Codex,
+            MarketKind::Claude => AgentTool::ClaudeCode,
+            MarketKind::Codex => AgentTool::Codex,
         }
     }
 }
 
 /// Root manifests in detection priority order. The format determines the
-/// Agent that can install the directory.
+/// agent tool that can install the directory.
 const MANIFESTS: [(&str, ManifestKind); 4] = [
     ("plugin.json", ManifestKind::Antigravity),
     (".claude-plugin/plugin.json", ManifestKind::Claude),
@@ -56,11 +56,11 @@ pub(super) enum ManifestKind {
 }
 
 impl ManifestKind {
-    pub(super) fn install_target(self) -> Result<Agent> {
+    pub(super) fn install_target(self) -> Result<AgentTool> {
         match self {
-            ManifestKind::Antigravity => Ok(Agent::Antigravity),
-            ManifestKind::Pi => Ok(Agent::Pi),
-            ManifestKind::Dsh => Ok(Agent::Dsh),
+            ManifestKind::Antigravity => Ok(AgentTool::Antigravity),
+            ManifestKind::Pi => Ok(AgentTool::Pi),
+            ManifestKind::Dsh => Ok(AgentTool::Dsh),
             ManifestKind::Claude => Err(other(
                 "这是 Claude 单插件目录；Claude 不支持直装，请通过本地市场目录（.claude-plugin/marketplace.json）导入",
             )),
@@ -171,7 +171,7 @@ pub struct MarketplacePlugin {
 /// a marketplace whose plugins are enumerated for multi-select.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ImportOption {
-    pub agent: Agent,
+    pub agent: AgentTool,
     /// Relative manifest path backing this option.
     pub manifest: String,
     /// Package name, or the marketplace's own name.

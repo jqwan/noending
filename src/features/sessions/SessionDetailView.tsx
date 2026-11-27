@@ -11,7 +11,7 @@ import "./sessions.css";
 import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import { contextUpdateErrorCopyText, contextUpdateErrorDetails, copyToClipboard, useRefreshSignal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import SessionMessage, { messageData } from "./SessionMessage";
@@ -20,7 +20,7 @@ import SessionHeaderActions from "./SessionHeaderActions";
 import PermanentDeleteModal from "./PermanentDeleteModal";
 import { sessionDisplayTitle } from "./SessionTable";
 import {
-  type Agent,
+  type AgentTool,
   type SessionContextView,
   type SessionDetail,
 } from "../../types";
@@ -38,12 +38,12 @@ export { sessionDetailCache, sessionContextCache };
 export default function SessionDetailView({
   sessionId,
   initialTitle,
-  initialAgent,
+  initialTool,
   navigate,
 }: {
   sessionId: string;
   initialTitle?: string;
-  initialAgent?: Agent;
+  initialTool?: AgentTool;
   navigate: (r: Route) => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(() => sessionDetailCache.get(sessionId) ?? null);
@@ -96,7 +96,7 @@ export default function SessionDetailView({
   useEffect(refresh, [refresh]);
   useRefreshSignal(refresh);
 
-  const fallbackAgent = initialAgent;
+  const fallbackAgent = initialTool;
   const fallbackRawTitle = initialTitle;
   const fallbackDisplayTitle = fallbackRawTitle ? sessionDisplayTitle(fallbackRawTitle) : "";
 
@@ -108,11 +108,11 @@ export default function SessionDetailView({
   if (!detail) {
     return (
       <div className="main session-detail" role="status">
-        <PageHeader title={fallbackDisplayTitle} icon={fallbackAgent ? <AgentIcon agent={fallbackAgent} size={18} /> : <Icon name="chat" />} navigation={<SessionSubpageTabs sessionId={sessionId} title={fallbackDisplayTitle} agent={fallbackAgent} navigate={navigate} />}>
+        <PageHeader title={fallbackDisplayTitle} icon={fallbackAgent ? <AgentToolIcon agent={fallbackAgent} size={18} /> : <Icon name="chat" />} navigation={<SessionSubpageTabs sessionId={sessionId} title={fallbackDisplayTitle} agent={fallbackAgent} navigate={navigate} />}>
           {failed && (
             <>
               <p className="muted small">
-                这个 Session 可能已经被 Agent 自己清理。本地数据没有被修改，可以重试。
+                这个 Session 可能已经被 AgentTool 自己清理。本地数据没有被修改，可以重试。
               </p>
               <div className="invite">
                 <button className="btn small" onClick={refresh}>重试</button>
@@ -131,7 +131,7 @@ export default function SessionDetailView({
   }
   const { session } = detail;
 
-  /** 一次点击 → 最多启动一次 Agent → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
+  /** 一次点击 → 最多启动一次 运行工具 → 一份新的 Markdown 摘要。失败按后端原因给可行动文案。 */
   const updateSummary = async (regenerate = false) => {
     if (ctxBusy || operation.busy || operation.checking) return;
     const updateSessionId = sessionId;
@@ -207,7 +207,7 @@ export default function SessionDetailView({
   return (
     <DetailPanelProvider kind="session"><div className="main session-detail detail-page">
       <PageHeader
-        title={title} icon={<AgentIcon agent={session.agent} size={18} />}
+        title={title} icon={<AgentToolIcon agent={session.agent} size={18} />}
         navigation={<SessionSubpageTabs
               sessionId={sessionId}
               title={title}
@@ -234,7 +234,7 @@ export default function SessionDetailView({
         )}
       />
 
-      {/* 右栏承载只读事实（Agent、条数、会话信息），左栏是内容本身（摘要）。 */}
+      {/* 右栏承载只读事实（运行工具、条数、会话信息），左栏是内容本身（摘要）。 */}
       <DetailLayout panel={<SessionDetailPanel key={sessionId} detail={detail} navigate={navigate} />}><MailboxHistory sessionId={sessionId} navigate={navigate} />
 <DetailSection sectionId="summary" label="会话摘要" title={<>
                 <Icon name="spark" />
@@ -327,7 +327,7 @@ export default function SessionDetailView({
                       sessionId,
                       entry: "conversation",
                       initialTitle: title,
-                      initialAgent: session.agent,
+                      initialTool: session.agent,
                       initialTotal: detail.ingested_message_sequence,
                     })
                   }

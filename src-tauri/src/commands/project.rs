@@ -34,7 +34,7 @@ pub struct ProjectCardData {
     pub visibility: String,
     pub kind: ProjectKind,
     pub purpose: Option<ProjectPurpose>,
-    pub is_assistant: bool,
+    pub is_agent: bool,
     pub path_count: i64,
     /// Paths last observed as gone from disk; the card's "有目录缺失" signal.
     pub missing_path_count: i64,
@@ -116,7 +116,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
         }
     }
 
-    let assistant_projects = {
+    let agent_projects = {
         let mut st = conn.prepare("SELECT project_id FROM project_assistants")?;
         let rows = st.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<BTreeSet<_>, _>>()?
@@ -170,7 +170,7 @@ pub fn project_cards(db: &Db, policy: &dyn WorkspacePolicy) -> Result<Vec<Projec
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),
                     policy,
                 ),
-                is_assistant: assistant_projects.contains(&p.id),
+                is_agent: agent_projects.contains(&p.id),
                 kind: project_kind(
                     &p,
                     search_paths.get(&p.id).map(Vec::as_slice).unwrap_or(&[]),

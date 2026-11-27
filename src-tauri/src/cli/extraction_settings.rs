@@ -1,42 +1,47 @@
 //! Partial edits reuse the same extraction configuration validation as the UI.
 use super::{CliError, CliResult};
-use crate::{domain::Agent, storage::Db, sync::extractor::ExtractionSettings};
+use crate::{domain::AgentTool, storage::Db, sync::extractor::ExtractionSettings};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Patch {
-    pub agent: Option<String>,
+    pub tool: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub effort: Option<String>,
 }
 impl Patch {
     pub fn is_empty(&self) -> bool {
-        self.agent.is_none()
+        self.tool.is_none()
             && self.model.is_none()
             && self.provider.is_none()
             && self.effort.is_none()
     }
 }
+pub(super) fn view(settings: ExtractionSettings) -> Value {
+    json!({"tool": settings.agent, "runtime": settings.runtime})
+}
+
 pub(super) fn update(db: &Db, patch: Patch) -> CliResult<ExtractionSettings> {
     if patch.is_empty() {
         return Err(CliError::new(
             "invalid_arguments",
-            "需要提供 Agent、模型、提供方或推理强度",
+            "需要提供 运行工具、模型、提供方或推理强度",
         ));
     }
     let mut settings = ExtractionSettings::from_settings(db)?;
-    if let Some(agent) = patch.agent {
+    if let Some(agent) = patch.tool {
         let agent = if agent == "none" {
             agent
         } else {
-            Agent::parse(&agent)
-                .ok_or_else(|| CliError::new("invalid_arguments", "未知的 Agent"))?
+            AgentTool::parse(&agent)
+                .ok_or_else(|| CliError::new("invalid_arguments", "未知的 运行工具"))?
                 .as_str()
                 .to_string()
         };
-        let previous = Agent::parse(&settings.agent)
+        let previous = AgentTool::parse(&settings.agent)
             .map(|a| a.as_str())
             .unwrap_or(&settings.agent);
         if agent != previous {

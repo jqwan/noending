@@ -6,7 +6,7 @@ export function packageDetailRoute(entry: PackageEntry) {
 
 const ORIGIN_LABELS: Record<PackageOrigin, string> = {
   market: "市场安装",
-  bundled: "Agent 内置",
+  bundled: "运行工具内置",
   noending_managed: "NoEnding 内置",
   local: "本地安装",
   profile: "配置档安装",
@@ -32,7 +32,7 @@ export function originLabel(entry: PackageEntry): string {
   return ORIGIN_LABELS[entry.origin];
 }
 
-/** Board badge: what the owning Agent reports right now, never merged across
+/** Board badge: what the owning AgentTool reports right now, never merged across
  *  scopes. Unset (never written) counts as 未启用; unknown = no evidence. */
 export function entryState(entry: PackageEntry): PackageToggleState {
   return entry.scopes[0]?.state ?? "unknown";

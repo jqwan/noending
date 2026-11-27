@@ -1,10 +1,10 @@
 import { readViewPreference, writeViewPreference } from "../../hooks/useViewState";
-import { AGENT_LABELS, type Agent, type AgentRuntimeOverrides } from "../../types";
-import { NATIVE_RUNTIME } from "../agents/RuntimeFields";
+import { AGENT_TOOL_LABELS, type AgentTool, type AgentRuntimeOverrides } from "../../types";
+import { NATIVE_RUNTIME } from "../agent-tools/RuntimeFields";
 
 interface NewSessionPreferences {
   projectId: string;
-  agent: Agent | null;
+  agent: AgentTool | null;
   directories: Record<string, string>;
   drafts: Record<string, string>;
 }
@@ -21,7 +21,7 @@ function isPreferences(value: unknown): value is NewSessionPreferences {
   if (typeof value !== "object" || value === null) return false;
   const prefs = value as NewSessionPreferences;
   return typeof prefs.projectId === "string"
-    && (prefs.agent === null || Object.keys(AGENT_LABELS).includes(prefs.agent))
+    && (prefs.agent === null || Object.keys(AGENT_TOOL_LABELS).includes(prefs.agent))
     && isStringRecord(prefs.directories) && isStringRecord(prefs.drafts);
 }
 
@@ -42,10 +42,10 @@ function isRuntime(value: unknown): value is AgentRuntimeOverrides {
   return [runtime.model, runtime.provider, runtime.effort].every(field => field === null || typeof field === "string");
 }
 
-export function lastNewSessionRuntime(agent: Agent) {
+export function lastNewSessionRuntime(agent: AgentTool) {
   return readViewPreference(`new-session.runtime.${agent}`, NATIVE_RUNTIME, isRuntime);
 }
 
-export function rememberNewSessionRuntime(agent: Agent, runtime: AgentRuntimeOverrides) {
+export function rememberNewSessionRuntime(agent: AgentTool, runtime: AgentRuntimeOverrides) {
   writeViewPreference(`new-session.runtime.${agent}`, runtime);
 }

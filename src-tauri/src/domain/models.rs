@@ -1,8 +1,8 @@
 //! Platform-agnostic domain model — nothing here may depend on a specific
-//! Agent's data format.
+//! agent tool's data format.
 //!
 //! Workspace invariant: a physical working path IS domain state
-//! (`WorkspacePath` and its Project), while an Agent's
+//! (`WorkspacePath` and its Project), while an agent tool's
 //! raw transcript layout never is. A Session carries cwd as optional metadata: a
 //! Session with no cwd is legal and gets no WorkspacePath — nothing fabricates
 //! one from a default.
@@ -178,18 +178,18 @@ pub mod workstream_visibility {
     pub const ARCHIVED: &str = "archived";
 }
 
-/// Every Agent NoEnding knows how to READ. Not every entry can be launched:
+/// Every agent tool NoEnding knows how to READ. Not every entry can be launched:
 /// Qoder ships no headless CLI, so its adapter ingests history only and
 /// `exec_resolver::resolve` fails by design.
 ///
 /// Each variant's serde rename is the IPC spelling and MUST equal `as_str()` —
-/// the sessions table, the frontend's `Agent` union and `AGENT_LABELS` all use
+/// the sessions table, the frontend's `AgentTool` union and `AGENT_TOOL_LABELS` all use
 /// that same string. It is declared per variant rather than derived: the derive
 /// spelled two variants (`work_buddy`, `z_code`) differently from everything
-/// else, so those rows rendered as「未知 Agent」and every command taking an
+/// else, so those rows rendered as「未知 运行工具」and every command taking an
 /// `agent` argument failed to deserialize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Agent {
+pub enum AgentTool {
     #[serde(rename = "codex")]
     Codex,
     #[serde(rename = "claude_code")]
@@ -208,67 +208,67 @@ pub enum Agent {
     Antigravity,
 }
 
-impl Agent {
+impl AgentTool {
     /// A slice rather than a fixed-size array: the roster grows, and every
     /// caller only iterates.
-    pub fn all() -> &'static [Agent] {
+    pub fn all() -> &'static [AgentTool] {
         &[
-            Agent::Codex,
-            Agent::ClaudeCode,
-            Agent::Pi,
-            Agent::Qoder,
-            Agent::WorkBuddy,
-            Agent::Dsh,
-            Agent::ZCode,
-            Agent::Antigravity,
+            AgentTool::Codex,
+            AgentTool::ClaudeCode,
+            AgentTool::Pi,
+            AgentTool::Qoder,
+            AgentTool::WorkBuddy,
+            AgentTool::Dsh,
+            AgentTool::ZCode,
+            AgentTool::Antigravity,
         ]
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Agent::Codex => "Codex",
-            Agent::ClaudeCode => "Claude Code",
-            Agent::Pi => "Pi",
-            Agent::Qoder => "Qoder",
-            Agent::WorkBuddy => "WorkBuddy",
-            Agent::Dsh => "DSH",
-            Agent::ZCode => "ZCode",
-            Agent::Antigravity => "Antigravity",
+            AgentTool::Codex => "Codex",
+            AgentTool::ClaudeCode => "Claude Code",
+            AgentTool::Pi => "Pi",
+            AgentTool::Qoder => "Qoder",
+            AgentTool::WorkBuddy => "WorkBuddy",
+            AgentTool::Dsh => "DSH",
+            AgentTool::ZCode => "ZCode",
+            AgentTool::Antigravity => "Antigravity",
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Agent::Codex => "codex",
-            Agent::ClaudeCode => "claude_code",
-            Agent::Pi => "pi",
-            Agent::Qoder => "qoder",
-            Agent::WorkBuddy => "workbuddy",
-            Agent::Dsh => "dsh",
-            Agent::ZCode => "zcode",
-            Agent::Antigravity => "antigravity",
+            AgentTool::Codex => "codex",
+            AgentTool::ClaudeCode => "claude_code",
+            AgentTool::Pi => "pi",
+            AgentTool::Qoder => "qoder",
+            AgentTool::WorkBuddy => "workbuddy",
+            AgentTool::Dsh => "dsh",
+            AgentTool::ZCode => "zcode",
+            AgentTool::Antigravity => "antigravity",
         }
     }
 
-    pub fn parse(s: &str) -> Option<Agent> {
+    pub fn parse(s: &str) -> Option<AgentTool> {
         match s {
-            "codex" => Some(Agent::Codex),
-            "claude_code" | "claude" => Some(Agent::ClaudeCode),
-            "pi" => Some(Agent::Pi),
-            "qoder" | "qcoder" => Some(Agent::Qoder),
-            "workbuddy" | "work_buddy" => Some(Agent::WorkBuddy),
-            "dsh" | "deepseek_harness" => Some(Agent::Dsh),
-            "zcode" | "z_code" => Some(Agent::ZCode),
-            "antigravity" => Some(Agent::Antigravity),
+            "codex" => Some(AgentTool::Codex),
+            "claude_code" | "claude" => Some(AgentTool::ClaudeCode),
+            "pi" => Some(AgentTool::Pi),
+            "qoder" | "qcoder" => Some(AgentTool::Qoder),
+            "workbuddy" | "work_buddy" => Some(AgentTool::WorkBuddy),
+            "dsh" | "deepseek_harness" => Some(AgentTool::Dsh),
+            "zcode" | "z_code" => Some(AgentTool::ZCode),
+            "antigravity" => Some(AgentTool::Antigravity),
             _ => None,
         }
     }
 }
 
 /// A Logical Session: the one user-visible conversation, one root source, one
-/// cursor, one fact frontier. Not an Agent thread — it is keyed by the root
+/// cursor, one fact frontier. Not an agent tool thread — it is keyed by the root
 /// source's real Resume identity (`root_agent_session_id`). Child/side sources
-/// an Agent spawns alongside are recognized at discovery and skipped silently.
+/// an agent tool spawns alongside are recognized at discovery and skipped silently.
 ///
 /// - `workspace_path_id` is the authoritative link to the physical workspace,
 ///   set only when the source really has a cwd (the default workspace is a
@@ -279,8 +279,8 @@ impl Agent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Id, // internal stable id (app-owned)
-    pub agent: Agent,
-    /// The root source's Agent-side Resume identity. Authority for
+    pub agent: AgentTool,
+    /// The root source's agent tool-side Resume identity. Authority for
     /// terminal binding and `resume`.
     pub root_agent_session_id: String,
     pub title: Option<String>,
@@ -299,7 +299,7 @@ pub struct Session {
     /// Archive authority. `None` = unarchived; `Some(ts)` = archived. This
     /// is the single lifecycle authority — there is no separate visibility
     /// flag. Archiving is reversible (unarchiving keeps the same Session id) and
-    /// never touches the Agent source; permanent deletion removes the row
+    /// never touches the agent tool source; permanent deletion removes the row
     /// entirely.
     pub archived_at: Option<String>,
     // ---- The root source ----
@@ -340,7 +340,7 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionListItem {
     pub id: Id,
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub root_agent_session_id: String,
     pub title: Option<String>,
     pub cwd: Option<String>,
@@ -491,7 +491,7 @@ pub enum ContextUpdateStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "message")]
 pub enum ContextUpdateError {
-    /// The Assistant Agent is `none`, the CLI is missing, or its config is
+    /// The configured extraction tool is `none`, the CLI is missing, or its config is
     /// invalid.
     AiUnavailable(String),
     /// The model call itself failed (timeout, non-zero exit, model error).
@@ -596,7 +596,7 @@ pub struct SourceCursorUpdate {
     pub prefix_hash: String,
 }
 
-/// A directory whose Agent sessions may be ingested. The standard agent
+/// A directory whose agent tool sessions may be ingested. The standard agent
 /// data roots (~/.codex, ~/.claude, ~/.pi/agent/sessions, honoring env
 /// overrides) are registered automatically. Every registered source
 /// participates in automatic and explicit incremental sync. Users may add
@@ -604,7 +604,7 @@ pub struct SourceCursorUpdate {
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestSource {
     pub id: Id,
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub path: String,
     pub origin: String, // default | user
 }
@@ -618,13 +618,13 @@ pub mod ingest_origin {
 mod agent_wire_spelling_tests {
     use super::*;
 
-    /// The Agent enum has THREE spellings to keep in step: `as_str()` (the DB
+    /// The agent tool enum has THREE spellings to keep in step: `as_str()` (the DB
     /// column and every SQL literal), `parse` (what we read back), and serde
     /// (the Tauri IPC boundary). They are hand-written in two places and derived
     /// in the third, so only a test keeps them equal.
     #[test]
     fn agent_spellings_agree_across_storage_and_ipc() {
-        for agent in Agent::all() {
+        for agent in AgentTool::all() {
             let wire = serde_json::to_value(agent).unwrap();
             assert_eq!(
                 wire.as_str(),
@@ -632,9 +632,9 @@ mod agent_wire_spelling_tests {
                 "{}: the wire spelling must be as_str(), or the frontend cannot label it",
                 agent.display_name()
             );
-            let back: Agent = serde_json::from_value(wire).unwrap();
+            let back: AgentTool = serde_json::from_value(wire).unwrap();
             assert_eq!(back, *agent);
-            assert_eq!(Agent::parse(agent.as_str()), Some(*agent));
+            assert_eq!(AgentTool::parse(agent.as_str()), Some(*agent));
         }
     }
 }

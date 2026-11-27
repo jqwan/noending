@@ -7,7 +7,7 @@ import { viewState } from "../../hooks/useViewState";
 vi.mock("../../api", () => ({
   api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
-    getAgentStatus: vi.fn().mockResolvedValue({ codex: { desktop_app: "ChatGPT", desktop_app_present: true } }),
+    getToolStatus: vi.fn().mockResolvedValue({ codex: { desktop_app: "ChatGPT", desktop_app_present: true } }),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
   },
 }));
@@ -91,7 +91,7 @@ it("disables archived session continuation in both card and list terminal modes"
   assertBlocked();
 });
 
-it("separates Agent activity from the terminal continue action and keeps exited terminals reconnectable", async () => {
+it("separates AgentTool activity from the terminal continue action and keeps exited terminals reconnectable", async () => {
   const sLive = { ...session, id: "s-live", title: "活跃终端会话" };
   const sExited = { ...session, id: "s-exited", title: "退出终端会话" };
   const terminals: TerminalSummary[] = [

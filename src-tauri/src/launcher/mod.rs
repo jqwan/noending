@@ -1,10 +1,10 @@
 //! Session Launcher — New / Resume flows (技术实现).
 //!
-//! Resume: starts the Agent in the Session's own directory. Neither flow
-//! synchronizes or injects Context: a launch carries only launch facts (Agent,
+//! Resume: starts the agent tool in the Session's own directory. Neither flow
+//! synchronizes or injects Context: a launch carries only launch facts (agent tool,
 //! cwd, runtime) and an optional first user turn for New.
 //! Context is consumed on demand from the Session / Workstream pages.
-//! Interactive terminal sessions use each Agent’s full-access launch mode.
+//! Interactive terminal sessions use each agent tool’s full-access launch mode.
 //!
 //! Working directory: every launch resolves
 //! its directory through `resolve_new_cwd` / `resolve_resume_cwd`, which read
@@ -22,13 +22,13 @@ pub mod message;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adapters::{AgentCommand, DesktopResume};
+use crate::adapters::{AgentToolCommand, DesktopResume};
 use crate::agent_runtime::AgentRuntimeOverrides;
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use crate::storage::{new_id, Db};
 
-/// Resolution source shown in the UI and checked before spawning the Agent.
+/// Resolution source shown in the UI and checked before spawning the agent tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CwdSource {
@@ -39,7 +39,7 @@ pub enum CwdSource {
     SessionCwd,
     /// NoEnding Home's default workspace (`<home>/workspace`).
     DefaultWorkspace,
-    /// Nothing resolved: the Agent starts in the terminal's own default
+    /// Nothing resolved: the agent tool starts in the terminal's own default
     /// directory. Honest, never implied.
     #[default]
     Unresolved,
@@ -66,7 +66,7 @@ impl CwdSource {
 pub struct CwdResolution {
     pub source: CwdSource,
     pub cwd: Option<String>,
-    /// True when the Agent will not start where this flow normally starts:
+    /// True when the agent tool will not start where this flow normally starts:
     /// a resume that lost its Session directory.
     pub fallback: bool,
     /// Why a fallback happened, for the UI ("发生 fallback 必须在 UI 明确显示").
@@ -82,7 +82,7 @@ impl CwdResolution {
         let note = if is_usable_directory(&cwd) {
             None
         } else {
-            Some("指定的目录当前不是一个可用的目录，Agent 可能落在终端默认目录".into())
+            Some("指定的目录当前不是一个可用的目录，运行工具 可能落在终端默认目录".into())
         };
         Self {
             source: CwdSource::Explicit,
@@ -138,12 +138,12 @@ impl LaunchWorkspace {
 #[derive(Debug, Clone)]
 pub struct PreparedLaunch {
     pub mode: String, // "new" | "resume"
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub session_id: Option<String>,
     /// Working directory passed to the spawn step.
     pub cwd: Option<String>,
     pub cwd_resolution: CwdResolution,
-    /// Overrides for this launch. Empty fields defer to the Agent.
+    /// Overrides for this launch. Empty fields defer to the agent tool.
     pub runtime: AgentRuntimeOverrides,
     /// None inherits saved settings; Some(empty) explicitly uses native defaults.
     pub runtime_override: Option<AgentRuntimeOverrides>,
@@ -176,7 +176,7 @@ pub struct EmbeddedSpawn<'a> {
     pub registry: &'a crate::terminal::TerminalRegistry,
     pub reconnect: Option<&'a crate::terminal::TerminalSummary>,
     pub spawn: fn(
-        &AgentCommand,
+        &AgentToolCommand,
         &crate::terminal::EmbeddedTarget,
     ) -> Result<crate::platform::launcher::LaunchOutcome>,
 }
@@ -197,7 +197,7 @@ impl SessionLauncher {
     pub fn prepare_new_in(
         &self,
         db: &Db,
-        agent: Agent,
+        agent: AgentTool,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
     ) -> Result<PreparedLaunch> {
@@ -207,13 +207,15 @@ impl SessionLauncher {
     pub fn prepare_new_with_runtime_in(
         &self,
         db: &Db,
-        agent: Agent,
+        agent: AgentTool,
         cwd: Option<&str>,
         workspace: &LaunchWorkspace,
         runtime_override: Option<&AgentRuntimeOverrides>,
     ) -> Result<PreparedLaunch> {
         if !crate::agent_runtime::store::launch_enabled(db, agent)? {
-            return Err(other("该 Agent 已关闭用于新建会话，请在 Agent 设置中启用"));
+            return Err(other(
+                "该 运行工具 已关闭用于新建会话，请在 运行工具 设置中启用",
+            ));
         }
         let resolution = resolve_new_cwd(cwd, workspace)?;
         let runtime = resolve_launch_runtime(db, agent, runtime_override)?;
@@ -280,7 +282,7 @@ impl SessionLauncher {
 
         let resolution = resolve_resume_cwd(db, session_id, workspace)?;
         // The Continue route rides on the session's SOURCE FORMAT: it tells
-        // whether the Agent's CLI can resume at all and how
+        // whether the agent tool's CLI can resume at all and how
         // (`AgentAdapter::continue_route`). A refusal is stated HERE, at
         // preview time — a launch that cannot resume must never look
         // preparable.
@@ -331,13 +333,13 @@ impl SessionLauncher {
     ///    directory inputs or the Runtime override intent changed since
     ///    preview, aborts with a stale error.
     /// 2. Identity preservation: passes the EXACT prepared runtime overrides
-    ///    (NO re-reading Settings) and starts the Agent in `prepared.cwd` (NO
+    ///    (NO re-reading Settings) and starts the agent tool in `prepared.cwd` (NO
     ///    re-resolving).
     /// 3. Launching does not write or inject Context or sync history.
     ///
     /// The default workspace is a Home fact the fingerprint has to re-read from
     /// *now*: if the Home moved after Preview, the prepared launch must abort,
-    /// not start the Agent in a directory the user never saw.
+    /// not start the agent tool in a directory the user never saw.
     pub fn launch_prepared_in(
         &self,
         db: &Db,
@@ -358,7 +360,7 @@ impl SessionLauncher {
     /// `launch_prepared` with the *process spawn* steps injected.
     ///
     /// The injected functions replace ONLY the OS calls: `spawn` opens a
-    /// terminal and runs the Agent CLI, `open` dispatches a desktop-open URI
+    /// terminal and runs the agent tool CLI, `open` dispatches a desktop-open URI
     /// (deep link / app activation). Every integrity gate stays on the same
     /// path, including the state fingerprint check.
     ///
@@ -370,7 +372,7 @@ impl SessionLauncher {
         db: &Db,
         prepared: &PreparedLaunch,
         workspace: &LaunchWorkspace,
-        spawn: fn(&AgentCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
+        spawn: fn(&AgentToolCommand) -> Result<crate::platform::launcher::LaunchOutcome>,
         open: fn(&str) -> Result<()>,
         embedded: Option<&EmbeddedSpawn<'_>>,
     ) -> Result<LaunchResult> {
@@ -416,7 +418,7 @@ impl SessionLauncher {
             runtime_opts.root_session_id = expected_root_session_id.clone();
             runtime_opts.initial_message = initial.as_ref().map(|m| m.text.clone());
 
-            let cmd: AgentCommand =
+            let cmd: AgentToolCommand =
                 adapter.build_new_command(&install, &runtime_opts, cwd_path.as_deref())?;
             // Each interactive adapter puts the first message in the final
             // argv element. Only redact that element in UI diagnostics: the
@@ -431,7 +433,7 @@ impl SessionLauncher {
             // An embedded NEW launch spawns into NoEnding's own PTY with no
             // session identity yet: the registry entry starts unbound and
             // binds when discovery supplies the same native identity
-            // (prespecified or reported by the Agent). External
+            // (prespecified or reported by the agent tool). External
             // spawns stay the default when no embedded surface is provided.
             let outcome = if prepared.embedded {
                 let embedded =
@@ -584,9 +586,9 @@ impl SessionLauncher {
     }
 }
 
-/// The full fingerprint. Everything that decides what the Agent receives:
+/// The full fingerprint. Everything that decides what the agent tool receives:
 ///
-/// * the Agent runtime override intent;
+/// * the agent tool runtime override intent;
 /// * the resolved launch directory and the tier that produced it;
 /// * NoEnding Home's default workspace, which is not in the DB at all;
 /// * in resume mode: whether the Session still exists, its `last_activity_at`,
@@ -598,7 +600,7 @@ pub fn compute_state_fingerprint_in(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    agent: Agent,
+    agent: AgentTool,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
 ) -> Result<String> {
@@ -608,7 +610,7 @@ pub fn compute_state_fingerprint_in(
 
 fn resolve_launch_runtime(
     db: &Db,
-    agent: Agent,
+    agent: AgentTool,
     one_time: Option<&AgentRuntimeOverrides>,
 ) -> Result<AgentRuntimeOverrides> {
     match one_time {
@@ -624,7 +626,7 @@ fn compute_state_fingerprint_with_runtime(
     db: &Db,
     mode: &str,
     session_id: Option<&str>,
-    agent: Agent,
+    agent: AgentTool,
     workspace: &LaunchWorkspace,
     resolution: &CwdResolution,
     runtime_override: Option<&AgentRuntimeOverrides>,
@@ -640,7 +642,7 @@ fn compute_state_fingerprint_with_runtime(
     // up silently. Only the intent is hashed — NoEnding has no resolved
     // default to hash.
     if mode == "new" && !crate::agent_runtime::store::launch_enabled(db, agent)? {
-        return Err(other("该 Agent 已关闭用于新建会话"));
+        return Err(other("该 运行工具 已关闭用于新建会话"));
     }
     let archive_project = if mode == "new" {
         archive_launch_project(db, resolution.cwd.as_deref())?
@@ -668,7 +670,7 @@ fn compute_state_fingerprint_with_runtime(
     }
     hasher.update(b"|");
 
-    // The directory the Agent will actually start in, and why.
+    // The directory the agent tool will actually start in, and why.
     hasher.update(resolution.fingerprint_input());
 
     if mode == "resume" {
@@ -728,7 +730,7 @@ fn archive_launch_project(db: &Db, cwd: Option<&str>) -> Result<Option<String>> 
     let Some(path_id) = crate::workspace::path_identity_of(cwd) else {
         return Ok(None);
     };
-    let project_id = crate::storage::assistant_profiles::project_for_path(&db.read(), &path_id)?;
+    let project_id = crate::storage::agent_profiles::project_for_path(&db.read(), &path_id)?;
     let Some(id) = project_id else {
         return Ok(None);
     };
@@ -750,8 +752,8 @@ fn archive_launch_project(db: &Db, cwd: Option<&str>) -> Result<Option<String>> 
 
 fn resolve_install(
     db: &Db,
-    agent: Agent,
-) -> Result<crate::platform::exec_resolver::AgentInstallation> {
+    agent: AgentTool,
+) -> Result<crate::platform::exec_resolver::AgentToolInstallation> {
     match db.get_installation(agent)? {
         Some(i) if std::path::Path::new(&i.executable_path).exists() => Ok(i),
         _ => {
@@ -776,7 +778,7 @@ pub fn expand_tilde(p: &str) -> String {
     crate::workspace::expand_tilde(p)
 }
 
-/// Is this recorded directory something an Agent can actually be started in?
+/// Is this recorded directory something an agent tool can actually be started in?
 ///
 /// An *observation*, never an identity: the path's
 /// WorkspacePath row and its `canonical_path` stay exactly as they are whether
@@ -831,7 +833,7 @@ pub fn resolve_new_cwd(
     }
     Ok(CwdResolution {
         source: CwdSource::Unresolved,
-        note: Some("没有可解析的工作目录，Agent 将在终端默认目录启动".into()),
+        note: Some("没有可解析的工作目录，运行工具 将在终端默认目录启动".into()),
         ..Default::default()
     })
 }
@@ -871,13 +873,13 @@ pub fn resolve_resume_cwd(
     }
     Ok(CwdResolution {
         source: CwdSource::Unresolved,
-        note: Some("没有可解析的工作目录，Agent 将在终端默认目录启动".into()),
+        note: Some("没有可解析的工作目录，运行工具 将在终端默认目录启动".into()),
         ..Default::default()
     })
 }
 
 /// Re-resolve what a prepared launch resolved, from the state that exists at
-/// launch time; the Agent still starts in `prepared.cwd`, so a difference
+/// launch time; the agent tool still starts in `prepared.cwd`, so a difference
 /// here is a refusal, never a silent change.
 fn recompute_launch_cwd(
     db: &Db,

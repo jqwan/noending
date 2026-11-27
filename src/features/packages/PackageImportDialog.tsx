@@ -6,9 +6,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../api";
 import Icon from "../../components/Icon";
 import { Modal } from "../../components/common";
-import { AGENT_LABELS, type Agent, type PackageImportPreview } from "../../types";
+import { AGENT_TOOL_LABELS, type AgentTool, type PackageImportPreview } from "../../types";
 
-type Selection = { agent: Agent; plugins: string[] };
+type Selection = { agent: AgentTool; plugins: string[] };
 
 export default function PackageImportDialog({ onClose, onDone }: {
   onClose: () => void;
@@ -61,13 +61,13 @@ export default function PackageImportDialog({ onClose, onDone }: {
     return () => window.clearTimeout(timer);
   }, [path]);
 
-  const toggleAgent = (agent: Agent, on: boolean) => setSelections(prev =>
+  const toggleAgent = (agent: AgentTool, on: boolean) => setSelections(prev =>
     on ? [...prev, { agent, plugins: pluginsOf(agent, prev) }] : prev.filter(s => s.agent !== agent));
-  const togglePlugin = (agent: Agent, plugin: string, on: boolean) => setSelections(prev =>
+  const togglePlugin = (agent: AgentTool, plugin: string, on: boolean) => setSelections(prev =>
     prev.map(s => s.agent === agent
       ? { ...s, plugins: on ? [...s.plugins, plugin] : s.plugins.filter(p => p !== plugin) }
       : s));
-  const pluginsOf = (agent: Agent, list: Selection[]) => list.find(s => s.agent === agent)?.plugins ?? [];
+  const pluginsOf = (agent: AgentTool, list: Selection[]) => list.find(s => s.agent === agent)?.plugins ?? [];
 
   const ready = preview !== null && !previewError && !previewing
     && (preview.kind === "marketplace"
@@ -95,8 +95,8 @@ export default function PackageImportDialog({ onClose, onDone }: {
   return <Modal title="导入插件包" onClose={() => { if (!busy) onClose(); }}>
     <p className="package-dialog-hint">
       {preview?.kind === "marketplace"
-        ? "该目录是本地插件市场：目录将注册到所选 Agent，需保留在原处；勾选要安装的插件。"
-        : "将本地插件包目录安装到所选 Agent。NoEnding 不复制、不修改目录；Pi 引用源目录，Antigravity 复制安装。"}
+        ? "该目录是本地插件市场：目录将注册到所选 运行工具，需保留在原处；勾选要安装的插件。"
+        : "将本地插件包目录安装到所选 运行工具。NoEnding 不复制、不修改目录；Pi 引用源目录，Antigravity 复制安装。"}
     </p>
     <label>插件包目录
       <div className="row">
@@ -119,7 +119,7 @@ export default function PackageImportDialog({ onClose, onDone }: {
       {single.description
         ? <p className="package-preview-desc">{single.description}</p>
         : <p className="small muted">清单未提供描述。</p>}
-      <p className="small muted package-preview-agent">将安装到 {AGENT_LABELS[single.agent]}</p>
+      <p className="small muted package-preview-agent">将安装到 {AGENT_TOOL_LABELS[single.agent]}</p>
     </div>}
     {preview?.kind === "package" && !single && <div className="inset-card compact package-preview" aria-label="导入预览">
       <p className="small muted">该目录包含多种清单格式，勾选要安装的：</p>
@@ -128,7 +128,7 @@ export default function PackageImportDialog({ onClose, onDone }: {
           <input type="checkbox" checked={selections.some(s => s.agent === option.agent)} disabled={busy}
             onChange={e => toggleAgent(option.agent, e.target.checked)} />
           <span className="package-preview-name">{option.name || option.manifest}</span>
-          <span className="badge">{AGENT_LABELS[option.agent]} · {option.manifest}</span>
+          <span className="badge">{AGENT_TOOL_LABELS[option.agent]} · {option.manifest}</span>
         </label>
       ))}
     </div>}
@@ -138,7 +138,7 @@ export default function PackageImportDialog({ onClose, onDone }: {
           <div className="package-preview-head">
             <Icon name="puzzle" />
             <span className="package-preview-name">{option.name || option.manifest}</span>
-            <span className="badge">{AGENT_LABELS[option.agent]}</span>
+            <span className="badge">{AGENT_TOOL_LABELS[option.agent]}</span>
           </div>
           {option.plugins.map(plugin => (
             <label key={plugin.name} className="package-check">

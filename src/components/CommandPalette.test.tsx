@@ -10,13 +10,13 @@ beforeEach(() => vi.mocked(api.lookupNavigation).mockReset().mockResolvedValue({
 afterEach(cleanup);
 
 function item(over: Partial<NavigationItem> = {}): NavigationItem {
-  return { kind: "agent", ref_id: "codex", title: "Codex", hint: "Agent 详情", agent: "codex", archived: false, ...over };
+  return { kind: "agent_tool", ref_id: "codex", title: "Codex", hint: "运行工具详情", agent: "codex", archived: false, ...over };
 }
 const cases: { entry: NavigationItem; route: Route }[] = [
-  { entry: item(), route: { view: "agents", agent: "codex" } },
+  { entry: item(), route: { view: "agent-tools", agent: "codex" } },
   { entry: item({ kind: "project", ref_id: "p", title: "Project", hint: "/repo", agent: null }), route: { view: "project", projectId: "p", initialTitle: "Project" } },
   { entry: item({ kind: "workstream", ref_id: "w", title: "Task", hint: "", agent: null, archived: true }), route: { view: "workstream", workstreamId: "w", initialTitle: "Task" } },
-  { entry: item({ kind: "session", ref_id: "s", title: "Conversation", hint: "/repo" }), route: { view: "session", sessionId: "s", initialTitle: "Conversation", initialAgent: "codex" } },
+  { entry: item({ kind: "session", ref_id: "s", title: "Conversation", hint: "/repo" }), route: { view: "session", sessionId: "s", initialTitle: "Conversation", initialTool: "codex" } },
   { entry: item({ kind: "skill", ref_id: "review", title: "Review Skill", hint: "Code review helper", agent: null }), route: { view: "skill", resourceId: "review", initialTitle: "Review Skill" } },
 ];
 it("opens the appropriate detail for each kind in a mixed result list", async () => {
@@ -37,22 +37,22 @@ it("discards superseded lookup responses and never opens a stale result while ty
   let resolveOld!: (value: NavigationResults) => void;
   vi.mocked(api.lookupNavigation).mockImplementation(query => query === "old"
     ? new Promise(resolve => { resolveOld = resolve; })
-    : Promise.resolve({ items: [item({ title: query === "new" ? "New Agent" : "Recent Agent" })], has_more: false }));
+    : Promise.resolve({ items: [item({ title: query === "new" ? "New AgentTool" : "Recent AgentTool" })], has_more: false }));
   const navigate = vi.fn();
   render(<CommandPalette navigate={navigate} onClose={vi.fn()} />);
-  await screen.findByRole("option", { name: /Recent Agent/ });
+  await screen.findByRole("option", { name: /Recent AgentTool/ });
   const input = screen.getByRole("combobox");
   fireEvent.change(input, { target: { value: "old" } });
   fireEvent.keyDown(input, { key: "Enter" });
   expect(navigate).not.toHaveBeenCalled();
   await waitFor(() => expect(api.lookupNavigation).toHaveBeenCalledWith("old"));
   fireEvent.change(input, { target: { value: "new" } });
-  await screen.findByRole("option", { name: /New Agent/ });
-  await act(async () => { resolveOld({ items: [item({ title: "Old Agent" })], has_more: false }); });
-  expect(screen.queryByText("Old Agent")).toBeNull();
-  expect(screen.queryByText("Recent Agent")).toBeNull();
+  await screen.findByRole("option", { name: /New AgentTool/ });
+  await act(async () => { resolveOld({ items: [item({ title: "Old AgentTool" })], has_more: false }); });
+  expect(screen.queryByText("Old AgentTool")).toBeNull();
+  expect(screen.queryByText("Recent AgentTool")).toBeNull();
   fireEvent.keyDown(input, { key: "Enter" });
-  expect(navigate).toHaveBeenCalledWith({ view: "agents", agent: "codex" });
+  expect(navigate).toHaveBeenCalledWith({ view: "agent-tools", agent: "codex" });
 });
 
 it("supports keyboard selection without treating IME confirmation as navigation", async () => {

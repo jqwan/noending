@@ -24,7 +24,7 @@ vi.mock("../../api", () => ({
     getOperationStatus: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
     terminalList: vi.fn().mockResolvedValue([]),
-    getAgentStatus: vi.fn().mockResolvedValue({}),
+    getToolStatus: vi.fn().mockResolvedValue({}),
     getSessionDetail: vi.fn(),
     getSessionContext: vi.fn(),
     mailboxList: vi.fn(),
@@ -40,7 +40,7 @@ beforeEach(() => {
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getSessionTerminalStates).mockImplementation(async ids => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }])));
   vi.mocked(api.terminalList).mockResolvedValue([]);
-  vi.mocked(api.getAgentStatus).mockResolvedValue({});
+  vi.mocked(api.getToolStatus).mockResolvedValue({});
   vi.mocked(api.getSessionContext).mockResolvedValue({ session_id: "me", fields: null, revision: 0, ingest_generation: 0,
     processed_through_seq: 0, latest_message_seq: 0, updated_at: null, pending: false,
     freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false } });
@@ -647,7 +647,7 @@ it("shows the supplied title while session details are still loading", async () 
     <SessionConversationView
       sessionId="me"
       initialTitle="正在进行的任务"
-      initialAgent="codex"
+      initialTool="codex"
       initialTotal={10}
       navigate={vi.fn()}
     />

@@ -12,7 +12,7 @@
 
 use noending::adapters::AgentAdapter;
 use noending::domain::{
-    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceCursorUpdate,
+    AgentTool, ParsedSessionMessage, Session, SessionMessageRole, SourceCursorUpdate,
 };
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
@@ -96,7 +96,7 @@ fn append_framed(file: &std::path::Path, extra: &str) {
 /// identity is the source's identity, exactly as discovery creates it.
 fn fixture_session(
     db: &Db,
-    agent: Agent,
+    agent: AgentTool,
     root_agent_session_id: &str,
     path: &std::path::Path,
 ) -> Session {
@@ -256,7 +256,7 @@ macro_rules! identity_suite {
         fn $fn_name() {
             let db = open_db(stringify!($fn_name));
             let dir = unique_dir(stringify!($fn_name));
-            let file = dir.join(if $agent == Agent::Codex {
+            let file = dir.join(if $agent == AgentTool::Codex {
                 "rollout-2026-09-13T10-00-00.jsonl"
             } else {
                 "session.jsonl"
@@ -406,7 +406,7 @@ macro_rules! identity_suite {
 
 identity_suite!(
     codex_truncate_rewrite_dedup,
-    Agent::Codex,
+    AgentTool::Codex,
     noending::adapters::codex::CodexAdapter,
     codex_line,
     codex_line,
@@ -415,7 +415,7 @@ identity_suite!(
 );
 identity_suite!(
     claude_truncate_rewrite_dedup,
-    Agent::ClaudeCode,
+    AgentTool::ClaudeCode,
     noending::adapters::claude::ClaudeAdapter,
     claude_line,
     claude_line,
@@ -424,7 +424,7 @@ identity_suite!(
 );
 identity_suite!(
     pi_truncate_rewrite_dedup,
-    Agent::Pi,
+    AgentTool::Pi,
     noending::adapters::pi::PiAdapter,
     pi_line,
     pi_line,
@@ -433,7 +433,7 @@ identity_suite!(
 );
 identity_suite!(
     qoder_truncate_rewrite_dedup,
-    Agent::Qoder,
+    AgentTool::Qoder,
     noending::adapters::qoder::QoderAdapter,
     qoder_line,
     qoder_line,
@@ -442,7 +442,7 @@ identity_suite!(
 );
 identity_suite!(
     workbuddy_truncate_rewrite_dedup,
-    Agent::WorkBuddy,
+    AgentTool::WorkBuddy,
     noending::adapters::workbuddy::WorkBuddyAdapter,
     workbuddy_line,
     workbuddy_line,
@@ -451,7 +451,7 @@ identity_suite!(
 );
 identity_suite!(
     dsh_truncate_rewrite_dedup,
-    Agent::Dsh,
+    AgentTool::Dsh,
     noending::adapters::dsh::DshAdapter,
     dsh_line,
     dsh_line,
@@ -480,7 +480,7 @@ fn same_size_rewrite_is_detected() {
     );
 
     std::fs::write(&file, format!("{}\n", before)).unwrap();
-    let s = fixture_session(&db, Agent::Pi, "same-size-root", &file);
+    let s = fixture_session(&db, AgentTool::Pi, "same-size-root", &file);
     assert_eq!(ingest(&db, adapter, &s), 1);
 
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -518,7 +518,7 @@ fn identity_dedup_follows_chain_semantics() {
     let dir = unique_dir("chain-identity");
     let s = fixture_session(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "chain-identity-root",
         &dir.join("x.jsonl"),
     );
@@ -581,7 +581,12 @@ fn identity_dedup_follows_chain_semantics() {
 fn stats_only_batch_advances_cursor_but_keeps_identity_tail() {
     let db = open_db("stats-only-tail");
     let dir = unique_dir("stats-only-tail");
-    let s = fixture_session(&db, Agent::Codex, "stats-only-root", &dir.join("x.jsonl"));
+    let s = fixture_session(
+        &db,
+        AgentTool::Codex,
+        "stats-only-root",
+        &dir.join("x.jsonl"),
+    );
 
     let first = db
         .commit_ingest(
@@ -656,7 +661,7 @@ fn truncate_replaces_the_projection_and_removes_retired_history() {
     let dir = unique_dir("truncate-frontier");
     let s = fixture_session(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "truncate-frontier-root",
         &dir.join("x.jsonl"),
     );
@@ -728,7 +733,7 @@ fn truncate_replaces_the_projection_and_removes_retired_history() {
 fn full_scan_updates_search_without_rewriting_retained_documents() {
     let db = open_db("search-diff");
     let dir = unique_dir("search-diff");
-    let s = fixture_session(&db, Agent::Codex, "search-diff", &dir.join("s.jsonl"));
+    let s = fixture_session(&db, AgentTool::Codex, "search-diff", &dir.join("s.jsonl"));
     let keep = msg("keep", SessionMessageRole::User, "retainedlexeme");
     let edit = msg("edit", SessionMessageRole::Assistant, "retiredlexeme");
     let first = db
@@ -744,7 +749,12 @@ fn full_scan_updates_search_without_rewriting_retained_documents() {
         .unwrap();
     // Another session holds a later FTS rowid. Deleting and reinserting the
     // retained document cannot accidentally reuse its original rowid.
-    let other = fixture_session(&db, Agent::Codex, "search-other", &dir.join("other.jsonl"));
+    let other = fixture_session(
+        &db,
+        AgentTool::Codex,
+        "search-other",
+        &dir.join("other.jsonl"),
+    );
     let foreign = db
         .commit_ingest(
             &other.id,
@@ -848,7 +858,7 @@ fn append_after_compact_chains_from_source_tail_not_store_tail() {
         ),
     )
     .unwrap();
-    let s = fixture_session(&db, Agent::Pi, "compact-tail-root", &file);
+    let s = fixture_session(&db, AgentTool::Pi, "compact-tail-root", &file);
     assert_eq!(ingest(&db, adapter, &s), 4);
     let store_tail_before = db
         .get_session(&s.id)
@@ -957,7 +967,7 @@ fn reingest_preserves_message_ids_and_dedups() {
         ),
     )
     .unwrap();
-    let s = fixture_session(&db, Agent::Pi, "reingest-root", &file);
+    let s = fixture_session(&db, AgentTool::Pi, "reingest-root", &file);
     assert_eq!(ingest(&db, adapter, &s), 2);
     let ids_before: Vec<String> = db
         .get_messages(&s.id, None, 100)
@@ -1010,7 +1020,7 @@ fn reingest_preserves_message_ids_and_dedups() {
 fn incomplete_replacement_preserves_all_facts_and_complete_replacement_retires_them() {
     let db = open_db("incomplete-replacement");
     let file = unique_dir("incomplete-replacement").join("s.jsonl");
-    let s = fixture_session(&db, Agent::Pi, "incomplete", &file);
+    let s = fixture_session(&db, AgentTool::Pi, "incomplete", &file);
     let original = db
         .commit_ingest(
             &s.id,
@@ -1087,7 +1097,7 @@ fn incomplete_replacement_preserves_all_facts_and_complete_replacement_retires_t
 fn full_scan_collects_unmapped_rows_without_rewriting_unchanged_messages() {
     let db = open_db("collect-unmapped");
     let file = unique_dir("collect-unmapped").join("s.jsonl");
-    let s = fixture_session(&db, Agent::Pi, "collect-unmapped", &file);
+    let s = fixture_session(&db, AgentTool::Pi, "collect-unmapped", &file);
     let messages = [msg("current", SessionMessageRole::User, "current history")];
     let current = db.commit_ingest(&s.id, &messages, &rescan(0)).unwrap();
     db.write().execute(
@@ -1146,7 +1156,7 @@ fn full_scan_collects_unmapped_rows_without_rewriting_unchanged_messages() {
 fn a_stale_read_cannot_overwrite_a_newer_cursor_messages_or_search() {
     let db = open_db("stale-read");
     let file = unique_dir("stale-read").join("s.jsonl");
-    let s = fixture_session(&db, Agent::Codex, "stale-read", &file);
+    let s = fixture_session(&db, AgentTool::Codex, "stale-read", &file);
     let old = msg("old", SessionMessageRole::User, "originalhistory");
     db.commit_ingest(&s.id, &[old.clone()], &rescan(0)).unwrap();
     let stale = db.get_session(&s.id).unwrap().unwrap().source_cursor();
@@ -1197,7 +1207,7 @@ fn message_parts_preserve_unicode_ranges_and_offsets_across_append_and_reorder()
     let exact = msg("parts-exact", SessionMessageRole::User, "é".repeat(4000));
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "message-parts",
         &[first.clone(), empty.clone(), exact.clone()],
     );

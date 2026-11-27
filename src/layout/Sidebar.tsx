@@ -1,7 +1,7 @@
 import type { Route } from "../app/routes";
 import Icon from "../components/Icon";
-import { AGENT_LABELS } from "../types";
-import { useAgentStatus } from "../features/sessions/continueDesktop";
+import { AGENT_TOOL_LABELS } from "../types";
+import { useToolStatus } from "../features/sessions/continueDesktop";
 import { useSidebarData } from "./useSidebarData";
 import SidebarSessionRow from "./SidebarSessionRow";
 import SidebarGroupHeader from "./SidebarGroupHeader";
@@ -26,7 +26,7 @@ export default function Sidebar({
   collapsed?: boolean;
   hidden?: boolean;
 }) {
-  const agentStatus = useAgentStatus();
+  const toolStatus = useToolStatus();
   const {
     terminalsLoading,
     groupBy,
@@ -97,7 +97,7 @@ export default function Sidebar({
                   resumeState={resumeStates[s.sessionId ?? ""]}
                   route={route}
                   navigate={navigate}
-                  agentStatus={agentStatus}
+                  toolStatus={toolStatus}
                   loading={terminalsLoading}
                   isPinned={true}
                   onTogglePin={() => togglePin(s.id, s.sessionId)}
@@ -159,7 +159,7 @@ export default function Sidebar({
                 resumeState={resumeStates[s.sessionId ?? ""]}
                 route={route}
                 navigate={navigate}
-                agentStatus={agentStatus}
+                toolStatus={toolStatus}
                 loading={terminalsLoading}
                 isPinned={isSessionPinned(s)}
                 onTogglePin={() => togglePin(s.id, s.sessionId)}
@@ -176,7 +176,7 @@ export default function Sidebar({
           sessionGroups.map((group) => {
             const isCollapsed = Boolean(collapsedGroups[collapseKey(group.id)]);
             const isUnassignedGroup = group.id === "__unassigned_project__";
-            const isKnownAgent = groupBy === "agent" && group.id in AGENT_LABELS;
+            const isKnownAgent = groupBy === "agent" && group.id in AGENT_TOOL_LABELS;
             const iconName = isUnassignedGroup
               ? isCollapsed
                 ? "chevronRight"
@@ -213,7 +213,7 @@ export default function Sidebar({
                           resumeState={resumeStates[s.sessionId ?? ""]}
                           route={route}
                           navigate={navigate}
-                          agentStatus={agentStatus}
+                          toolStatus={toolStatus}
                           loading={terminalsLoading}
                           isPinned={isSessionPinned(s)}
                           onTogglePin={() => togglePin(s.id, s.sessionId)}

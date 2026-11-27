@@ -2,7 +2,7 @@
 //! purge, and the search cleanup used only by permanent deletion.
 //!
 //! There is no deletion job, no crash recovery and no filesystem step: NoEnding
-//! never deletes an Agent-owned source, so a purge is one SQLite transaction.
+//! never deletes an agent tool-owned source, so a purge is one SQLite transaction.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
@@ -80,7 +80,7 @@ impl PermanentDeletionCounts {
 
 /// The whole NoEnding LOCAL purge in ONE transaction, in the fixed order.
 /// Callers have already required Archive. Other sessions, physical paths,
-/// task summaries and Agent-owned sources survive.
+/// task summaries and agent tool-owned sources survive.
 pub fn purge_session_data_conn(tx: &Transaction, session_id: &str) -> Result<()> {
     // The Session's current summary.
     tx.execute(

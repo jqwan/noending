@@ -5,17 +5,17 @@ import type { OperationStatus } from "../../types";
 import SessionHeaderActions, { DesktopContinueButton } from "./SessionHeaderActions";
 import { clearReadResources } from "../../hooks/readResource";
 vi.mock("../../api", () => ({ api: {
-  getOperationStatus: vi.fn(), refreshSession: vi.fn(), getAgentStatus: vi.fn().mockResolvedValue({}),
+  getOperationStatus: vi.fn(), refreshSession: vi.fn(), getToolStatus: vi.fn().mockResolvedValue({}),
 } }));
 afterEach(() => { cleanup(); clearReadResources(); vi.clearAllMocks(); });
 const View = () => <SessionHeaderActions sessionId="one" agent="pi" sourceKind="jsonl" title="测试" archived={false} onChanged={vi.fn()} />;
-it("retains desktop availability across pages until a fresh Agent status arrives", async () => {
-  vi.mocked(api.getAgentStatus).mockResolvedValue({ codex: { desktop_app_present: false, desktop_app: "Codex" } } as never);
+it("retains desktop availability across pages until a fresh AgentTool status arrives", async () => {
+  vi.mocked(api.getToolStatus).mockResolvedValue({ codex: { desktop_app_present: false, desktop_app: "Codex" } } as never);
   const first = render(<DesktopContinueButton sessionId="one" agent="codex" archived={false} />);
   await waitFor(() => expect(screen.getByRole("button")).toHaveProperty("disabled", true));
   first.unmount();
-  let finish!: (value: Awaited<ReturnType<typeof api.getAgentStatus>>) => void;
-  vi.mocked(api.getAgentStatus).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  let finish!: (value: Awaited<ReturnType<typeof api.getToolStatus>>) => void;
+  vi.mocked(api.getToolStatus).mockReturnValue(new Promise(resolve => { finish = resolve; }));
   render(<DesktopContinueButton sessionId="one" agent="codex" archived={false} />);
   expect(screen.getByRole("button")).toHaveProperty("disabled", true);
   await act(async () => { finish({ codex: { desktop_app_present: true } } as never); });

@@ -1,6 +1,6 @@
 /** Route model — 手写 union，集中在此管理。 */
 
-import type { Agent } from "../types";
+import type { AgentTool } from "../types";
 
 /**
  * 页面动作直接携带在 Route 上（palette → 页面 Modal），目标页已挂载时也能收到：
@@ -18,10 +18,10 @@ export type SessionEntry = "conversation";
 export type WorkstreamEntry = "detail" | "collaboration";
 
 /** 智能体项目的子页，省略即项目详情。 */
-export type ProjectEntry = "assistant";
+export type ProjectEntry = "agent";
 
 export type Route =
-  | { view: "new-session"; agent?: Agent; projectId?: string; archivePathId?: string }
+  | { view: "new-session"; agent?: AgentTool; projectId?: string; archivePathId?: string }
   | { view: "workstreams"; action?: ViewAction; scope?: WorkstreamScope }
   | { view: "workstream"; workstreamId: string; initialTitle?: string; entry?: WorkstreamEntry }
   | { view: "sessions"; scope?: SessionScope }
@@ -30,22 +30,22 @@ export type Route =
       sessionId: string;
       entry?: SessionEntry;
       initialTitle?: string;
-      initialAgent?: Agent;
+      initialTool?: AgentTool;
       initialTotal?: number;
     }
   /** 会话的内嵌终端面板（也容纳尚未绑定的实例）：内嵌新建与「先跳后启」的共同落点。
    *  会话身份由后端绑定（预指定 id 精确匹配 / 会话页按需校验匹配），绑定
    *  事实经 `terminal-bound` 事件推给视图，点亮会话详情入口。从会话页跳转
-   *  时携带已知的身份种子（initialTitle/initialAgent/initialSessionId），
+   *  时携带已知的身份种子（initialTitle/initialTool/initialSessionId），
    *  首帧即终帧——标题不闪、入口即刻可点；内嵌新建不传，从「新会话」起步。 */
-  | { view: "terminal"; terminalId: string; initialTitle?: string; initialAgent?: Agent; initialSessionId?: string }
-  | { view: "agents"; agent?: Agent }
+  | { view: "terminal"; terminalId: string; initialTitle?: string; initialTool?: AgentTool; initialSessionId?: string }
+  | { view: "agent-tools"; agent?: AgentTool }
   | { view: "skills"; projectId?: string }
   | { view: "skill"; resourceId: string; initialTitle?: string; projectId?: string; workspacePathId?: string }
   | { view: "packages" }
-  | { view: "package"; packageId: string; initialTitle?: string; agent?: Agent }
-  | { view: "projects"; scope?: "unarchived" | "archived"; assistantOnly?: boolean }
-  | { view: "project"; projectId: string; initialTitle?: string; entry?: ProjectEntry; fromAssistants?: boolean }
+  | { view: "package"; packageId: string; initialTitle?: string; agent?: AgentTool }
+  | { view: "projects"; scope?: "unarchived" | "archived"; agentOnly?: boolean }
+  | { view: "project"; projectId: string; initialTitle?: string; entry?: ProjectEntry; fromAgents?: boolean }
   | { view: "settings" };
 
 export function withoutAction(route: Route): Route {

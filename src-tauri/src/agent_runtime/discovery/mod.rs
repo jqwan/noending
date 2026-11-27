@@ -1,7 +1,7 @@
 //! Model Discovery — advisory only.
 //!
 //! Discovery exists to help the user pick an override. It never participates
-//! in default resolution: an Agent left at *Agent default* launches fine even
+//! in default resolution: an agent tool left at *agent tool default* launches fine even
 //! when every discovery call in this module fails. Consequently discovery
 //! returns a value, not a `Result`, and every failure path folds into
 //! `warnings` + `ModelCatalog::Unavailable`.
@@ -13,8 +13,8 @@ pub mod pi;
 
 use serde::Serialize;
 
-use crate::adapters::AgentCommand;
-use crate::domain::Agent;
+use crate::adapters::AgentToolCommand;
+use crate::domain::AgentTool;
 use crate::error::Result;
 
 use super::AgentRuntimeCapabilities;
@@ -33,7 +33,7 @@ pub struct ModelOption {
 
 #[derive(Debug, Clone)]
 pub enum ModelCatalog {
-    /// Fetched from the Agent CLI, so it reflects what this install offers.
+    /// Fetched from the agent tool CLI, so it reflects what this install offers.
     Dynamic(Vec<ModelOption>),
     /// NoEnding's own suggestions; explicitly NOT the account's full model list.
     Suggested(Vec<ModelOption>),
@@ -65,29 +65,29 @@ pub struct AgentRuntimeDiscovery {
     /// Catalog entries flattened for the UI; `model_source` says what they are.
     pub models: Vec<ModelOption>,
     /// `dynamic` | `suggested` | `unavailable` — the UI must not present a
-    /// suggestion list as if it were the Agent's real catalog.
+    /// suggestion list as if it were the agent tool's real catalog.
     pub model_source: &'static str,
     /// Effort levels the CLI documents, independent of any model override.
     pub effort_levels: Vec<String>,
     pub warnings: Vec<String>,
 }
 
-/// What the user may set for one Agent: capabilities (contract), a model
+/// What the user may set for one agent tool: capabilities (contract), a model
 /// catalog (advice), and the effort vocabulary.
 ///
 /// Timing log: agent + duration + outcome only — never CLI output,
 /// tokens, credentials or environment. Slow CLIs show up as long durations.
-pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
+pub fn discover_runtime_options(agent: AgentTool) -> AgentRuntimeDiscovery {
     let started = std::time::Instant::now();
     eprintln!("[agent-runtime] {} discovery started", agent.as_str());
     let capabilities = super::capabilities_of(agent);
     let effort_levels = effort_levels_for(agent);
     let (models, warnings) = match agent {
-        Agent::Codex => codex::discover(),
-        Agent::ClaudeCode => claude::discover(),
-        Agent::Pi => pi::discover(),
-        Agent::Antigravity => antigravity::discover(),
-        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode => {
+        AgentTool::Codex => codex::discover(),
+        AgentTool::ClaudeCode => claude::discover(),
+        AgentTool::Pi => pi::discover(),
+        AgentTool::Antigravity => antigravity::discover(),
+        AgentTool::Qoder | AgentTool::WorkBuddy | AgentTool::Dsh | AgentTool::ZCode => {
             (ModelCatalog::Unavailable, vec![])
         }
     };
@@ -116,26 +116,26 @@ pub fn discover_runtime_options(agent: Agent) -> AgentRuntimeDiscovery {
 
 /// Effort vocabulary the CLI documents. Static on purpose: the effort picker
 /// must work even when the model catalog could not be fetched.
-pub fn effort_levels_for(agent: Agent) -> Vec<String> {
+pub fn effort_levels_for(agent: AgentTool) -> Vec<String> {
     let levels: &[&str] = match agent {
-        Agent::Codex => codex::EFFORT_LEVELS,
-        Agent::ClaudeCode => claude::EFFORT_LEVELS,
-        Agent::Pi => pi::EFFORT_LEVELS,
+        AgentTool::Codex => codex::EFFORT_LEVELS,
+        AgentTool::ClaudeCode => claude::EFFORT_LEVELS,
+        AgentTool::Pi => pi::EFFORT_LEVELS,
         // `agy --effort low|medium|high|xhigh|max` (from the CLI's own help).
-        Agent::Antigravity => &["low", "medium", "high", "xhigh", "max"],
-        Agent::Qoder | Agent::WorkBuddy | Agent::Dsh | Agent::ZCode => &[],
+        AgentTool::Antigravity => &["low", "medium", "high", "xhigh", "max"],
+        AgentTool::Qoder | AgentTool::WorkBuddy | AgentTool::Dsh | AgentTool::ZCode => &[],
     };
     levels.iter().map(|s| s.to_string()).collect()
 }
 
 /// Run a read-only CLI probe. Failures stay failures: the caller decides how
 /// to degrade (warning + Unavailable), never the launcher.
-pub(crate) fn run_cli(agent: Agent, args: &[&str]) -> Result<String> {
+pub(crate) fn run_cli(agent: AgentTool, args: &[&str]) -> Result<String> {
     let install = crate::platform::exec_resolver::resolve(agent)?;
-    let cmd = AgentCommand {
+    let cmd = AgentToolCommand {
         program: install.executable_path.clone(),
         args: args.iter().map(|s| s.to_string()).collect(),
-        cwd: None, // probes read the Agent's own global config, not a repo
+        cwd: None, // probes read the AgentTool's own global config, not a repo
     };
     let out = crate::platform::exec_runner::run_headless(&cmd, DISCOVERY_TIMEOUT_SECS)?;
     Ok(out.stdout)

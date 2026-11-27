@@ -10,7 +10,7 @@ description: 用 NoEnding 回顾对话、接续任务和记录进展、查收和
 | 遇到的事 | 按需读取 |
 | --- | --- |
 | 用户问“上次怎么定的”或需要核对来源 | [找回记忆](references/memory.md) |
-| 从智能体档案开始工作，或接续自己的另一段对话 | [以智能体身份工作](references/assistant.md) |
+| 从智能体档案开始工作，或接续自己的另一段对话 | [以智能体身份工作](references/agent.md) |
 | 接手任务、记录验证结果或交接剩余工作 | [接手与推进任务](references/task.md) |
 | 收到查信提醒、处理智能体来信或联系另一段对话 | [查信与回信](references/mailbox.md) |
 | 收到协作邀请、和成员分工或协调收尾 | [在协作室工作](references/collaboration.md) |

@@ -1,7 +1,7 @@
 //! Object lookup for navigation. Intentionally independent of content search:
 //! no message text, descriptions, summaries, source metadata or CLI detection.
 use super::objects::{predicate, ObjectKind, ObjectQuery};
-use crate::{domain::Agent, error::Result, storage::Db};
+use crate::{domain::AgentTool, error::Result, storage::Db};
 use rusqlite::params;
 use serde::Serialize;
 
@@ -13,7 +13,7 @@ pub struct NavigationItem {
     pub ref_id: String,
     pub title: String,
     pub hint: String,
-    pub agent: Option<Agent>,
+    pub agent: Option<AgentTool>,
     pub archived: bool,
 }
 
@@ -86,7 +86,7 @@ pub fn lookup_with_context(
                     hint: r.get(3)?,
                     agent: r
                         .get::<_, Option<String>>(4)?
-                        .and_then(|s| Agent::parse(&s)),
+                        .and_then(|s| AgentTool::parse(&s)),
                     archived: r.get(5)?,
                 },
                 activity: r.get(6)?,
@@ -108,14 +108,14 @@ pub fn lookup_with_context(
         };
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
-    for agent in Agent::all() {
-        if let Some(rank) = parsed.agent_rank(*agent) {
+    for agent in AgentTool::all() {
+        if let Some(rank) = parsed.tool_rank(*agent) {
             candidates.push(RankedItem {
                 item: NavigationItem {
-                    kind: ObjectKind::Agent,
+                    kind: ObjectKind::AgentTool,
                     ref_id: agent.as_str().to_string(),
                     title: agent.display_name().to_string(),
-                    hint: "Agent 详情".into(),
+                    hint: "运行工具 详情".into(),
                     agent: Some(*agent),
                     archived: false,
                 },

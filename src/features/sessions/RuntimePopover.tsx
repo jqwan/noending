@@ -2,11 +2,11 @@ import "./runtimeControls.css";
 import PopupMenu, { PopupMenuItem } from "../../components/PopupMenu";
 import { useEffect, useRef, useState } from "react";
 import Icon from "../../components/Icon";
-import type { Agent, AgentRuntimeOverrides } from "../../types";
-import type { useAgentRuntime } from "../agents/useAgentRuntime";
+import type { AgentTool, AgentRuntimeOverrides } from "../../types";
+import type { useAgentRuntime } from "../agent-tools/useAgentRuntime";
 
 export interface RuntimePopoverProps {
-  agent: Agent;
+  agent: AgentTool;
   runtime: ReturnType<typeof useAgentRuntime>;
   value: AgentRuntimeOverrides;
   onChange: (value: AgentRuntimeOverrides) => void;

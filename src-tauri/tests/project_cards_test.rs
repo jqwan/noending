@@ -1,7 +1,7 @@
 //! The `list_project_cards` projection: search_paths covers EVERY workspace
 //! path while representative_paths stays a display-only truncation.
 
-use noending::domain::{Agent, ProjectKind, Workstream};
+use noending::domain::{AgentTool, ProjectKind, Workstream};
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, now, Db};
 use noending::workspace::normalize_path;
@@ -44,7 +44,7 @@ fn session_at(db: &Db, id: &str, path_id: &str, trashed: bool) {
     // derived from workspace_paths inside upsert_logical_session.
     let (sid, _) = db
         .upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             &format!("root-{id}"),
             Some(id),
             None,

@@ -33,11 +33,11 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentCommand, DesktopResume,
+    detect_format, ms_epoch_to_rfc3339, read_jsonl_delta, AgentToolCommand, DesktopResume,
     DiscoveredMember, DiscoveredMemberKind, ExecOptions, ParsedLine, ResumeRoute,
     SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct WorkBuddyAdapter;
@@ -96,7 +96,7 @@ impl SessionTitles {
             return None;
         }
         Some(DiscoveredMember {
-            agent: Agent::WorkBuddy,
+            agent: AgentTool::WorkBuddy,
             source_member_id: id.to_string(),
             kind: DiscoveredMemberKind::Root,
             parent_source_member_id: None,
@@ -266,7 +266,7 @@ impl WorkBuddyAdapter {
             .ok()
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
         Ok(Some(DiscoveredMember {
-            agent: Agent::WorkBuddy,
+            agent: AgentTool::WorkBuddy,
             source_member_id: format!("{parent_id}:subagent:{stem}"),
             kind: DiscoveredMemberKind::Child,
             parent_source_member_id: Some(parent_id.to_string()),
@@ -325,7 +325,7 @@ impl WorkBuddyAdapter {
                 last_ts = Some(ts);
             }
             // WorkBuddy rewrites its `ai-title` as the conversation moves on,
-            // so the last one written is the Agent's final word on the session.
+            // so the last one written is the agent tool's final word on the session.
             if v.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
                 if let Some(t) = v
                     .get("aiTitle")
@@ -361,7 +361,7 @@ impl WorkBuddyAdapter {
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::WorkBuddy,
+            agent: AgentTool::WorkBuddy,
             source_member_id: session_id.unwrap_or(file_name),
             kind: DiscoveredMemberKind::Root,
             parent_source_member_id: None,
@@ -380,12 +380,12 @@ impl WorkBuddyAdapter {
 }
 
 impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
-    fn agent(&self) -> Agent {
-        Agent::WorkBuddy
+    fn tool(&self) -> AgentTool {
+        AgentTool::WorkBuddy
     }
 
     /// Always `None`: an Electron GUI with no CLI to run.
-    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
+    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentToolInstallation> {
         None
     }
 
@@ -457,7 +457,7 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
                 {
                     continue;
                 }
-                if detect_format(&p) != Some(Agent::WorkBuddy) {
+                if detect_format(&p) != Some(AgentTool::WorkBuddy) {
                     continue;
                 }
                 match Self::parse_member(&p) {
@@ -493,30 +493,30 @@ impl crate::adapters::AgentAdapter for WorkBuddyAdapter {
 
     fn build_new_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }
 
     fn build_resume_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _agent_session_id: &str,
         _cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }
 
     fn build_exec_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("WorkBuddy 是 GUI 应用，没有可启动的 CLI"))
     }
 
@@ -672,7 +672,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1, "{found:#?}");
         let m = &found[0];
-        assert_eq!(m.agent, Agent::WorkBuddy);
+        assert_eq!(m.agent, AgentTool::WorkBuddy);
         assert_eq!(m.source_member_id, "s1");
         assert_eq!(m.kind, DiscoveredMemberKind::Root);
         assert_eq!(m.cwd.as_deref(), Some("/Users/jqk/Workbuddy/x"));

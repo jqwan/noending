@@ -1,7 +1,7 @@
 import { invalidateTargets } from "./app/removedTargets";
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  Agent, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
+  AgentTool, AgentRuntimeDiscovery, AgentRuntimeOverrides, AgentRuntimeSettings,
 
   CwdResolution, IngestTaskStatus, LaunchResult, LocalDeletePreview, PathProbe,
   PermanentDeleteResult,
@@ -56,9 +56,9 @@ export const api = {
     invoke<import("./types").PackageOperationResult>("enable_package", { id, revision }),
   disablePackage: (id: string, revision: string) =>
     invoke<import("./types").PackageOperationResult>("disable_package", { id, revision }),
-  installLocalPackage: (path: string, agents: Agent[]) =>
+  installLocalPackage: (path: string, agents: AgentTool[]) =>
     invoke<import("./types").PackageOperationResult>("install_local_package", { path, agents }),
-  installLocalMarketplace: (path: string, selections: { agent: Agent; plugins: string[] }[]) =>
+  installLocalMarketplace: (path: string, selections: { agent: AgentTool; plugins: string[] }[]) =>
     invoke<import("./types").PackageOperationResult>("install_local_marketplace", { path, selections }),
   getSessionTerminalStates: (sessionIds: string[]) =>
     invoke<Record<string, import("./types").TerminalResumeState>>("get_session_terminal_states", { sessionIds }),
@@ -117,23 +117,23 @@ export const api = {
 
   getWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamContext>("get_workstream_context", { workstreamId }),
-  listSessions: (projectId?: string, agent?: Agent, scope?: "unarchived" | "archived" | "all", limit?: number) =>
+  listSessions: (projectId?: string, agent?: AgentTool, scope?: "unarchived" | "archived" | "all", limit?: number) =>
     invoke<SessionListItem[]>("list_sessions", {
       projectId: projectId ?? null,
       agent: agent ?? null,
       scope: scope ?? null,
       limit: limit ?? null,
     }),
-  getSessionCountsByAgent: () => invoke<Partial<Record<Agent, number>>>("get_session_counts_by_agent"),
-  getAgentLatestActivities: () => invoke<Partial<Record<Agent, string>>>("get_agent_latest_activities"),
+  getSessionCountsByTool: () => invoke<Partial<Record<AgentTool, number>>>("get_session_counts_by_tool"),
+  getToolLatestActivities: () => invoke<Partial<Record<AgentTool, string>>>("get_tool_latest_activities"),
   // Session Lifecycle: UI 只提交 session id。没有删除 job，也不删来源：
-  // NoEnding 不删 Agent 自有的源；permanent delete 是本地清除。
+  // NoEnding 不删 AgentTool 自有的源；permanent delete 是本地清除。
   archiveSession: (sessionId: string) => invoke<Session>("archive_session", { sessionId }),
   restoreSession: (sessionId: string) => invoke<Session>("restore_session", { sessionId }),
   /** 无状态预览：fresh root source verdict + counts，没有 job。 */
   getSessionLocalDeletePreview: (sessionId: string) =>
     invoke<LocalDeletePreview>("get_session_local_delete_preview", { sessionId }),
-  /** 仅已归档的会话可永久删除；不删除 Agent 源文件。 */
+  /** 仅已归档的会话可永久删除；不删除 AgentTool 源文件。 */
   permanentlyDeleteSession: async (sessionId: string) => {
     const result = await invoke<PermanentDeleteResult>("permanently_delete_session", { sessionId });
     invalidateTargets({ sessionIds: [sessionId], terminalIds: result.terminal_ids,
@@ -196,7 +196,7 @@ export const api = {
     invoke<void>("delete_task_item", { taskId, itemId, revision }),
   getWorkstreamContextState: (workstreamId: string) =>
     invoke<WorkstreamContextView>("get_workstream_context_state", { workstreamId }),
-  /** 当前摘要与增量消息整合，最多启动一次 Agent。 */
+  /** 当前摘要与增量消息整合，最多启动一次 AgentTool。 */
   updateSessionContext: (sessionId: string) =>
     invoke<SessionUpdateOutcome>("update_session_context", { sessionId }),
   /** 从完整有效历史重新生成，不沿用当前摘要。 */
@@ -216,21 +216,21 @@ export const api = {
   regenerateWorkstreamContext: (workstreamId: string) =>
     invoke<WorkstreamUpdateOutcome>("regenerate_workstream_context", { workstreamId }),
 
-  previewNewSession: (agent: Agent, cwd?: string, runtime?: AgentRuntimeOverrides) =>
+  previewNewSession: (agent: AgentTool, cwd?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<CwdResolution>("preview_new_session", {
       agent,
       runtime: runtime ?? null,
       cwd: cwd ?? null,
     }),
 
-  /** Agent 图标「继续」按钮：直接在会话格式对应的桌面应用里打开，无预览。
+  /** AgentTool 图标「继续」按钮：直接在会话格式对应的桌面应用里打开，无预览。
    *  没有桌面路由的格式（后端 desktop_resume_route 拒绝）在此报错。 */
   continueSessionDesktop: (sessionId: string) =>
     invoke<{ uri: string; note: string }>("continue_session_desktop", { sessionId }),
 
   /** 新建会话的内嵌直启：prepare + 起一个未绑定会话的内嵌终端（会话身份由
-   *  Agent 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
-  launchEmbeddedNew: (agent: Agent, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
+   *  AgentTool 通知或预设原生 ID 与摄入记录精确匹配后绑定）。返回携带 terminal_id。 */
+  launchEmbeddedNew: (agent: AgentTool, cwd?: string, initialMessage?: string, runtime?: AgentRuntimeOverrides) =>
     invoke<LaunchResult>("launch_embedded_new", {
       agent,
       runtime: runtime ?? null,
@@ -240,7 +240,7 @@ export const api = {
   /** 保留的内嵌终端（含已退出，新→旧）：侧边栏读这里；手动关闭才移除。 */
   terminalList: () =>
     invoke<import("./types").TerminalSummary[]>("terminal_list"),
-  /** 重启此终端当前绑定会话的 Agent，返回新终端；失败保留旧终端以便重试。 */
+  /** 重启此终端当前绑定会话的 AgentTool，返回新终端；失败保留旧终端以便重试。 */
   terminalReconnect: (terminalId: string, sessionId: string) =>
     invoke<import("./types").LaunchResult>("terminal_reconnect", { terminalId, sessionId }),
   /** 侧边栏「运行中」的显式关闭：杀进程并移除记录。 */
@@ -306,7 +306,7 @@ export const api = {
     invoke<void>("terminal_release_output", { terminalId, consumerId }),
   terminalResize: (terminalId: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { terminalId, cols, rows }),
-  // 原生读取系统剪贴板的非空文本；图片由 Agent TUI 自己处理。
+  // 原生读取系统剪贴板的非空文本；图片由 AgentTool TUI 自己处理。
   readClipboardForTerminal: () =>
     invoke<string | null>("read_clipboard_for_terminal"),
   writeClipboardForTerminal: (text: string) =>
@@ -314,43 +314,43 @@ export const api = {
 
   listIngestSources: () =>
     invoke<import("./types").IngestSource[]>("list_ingest_sources"),
-  addIngestSource: (agent: Agent, path: string) =>
+  addIngestSource: (agent: AgentTool, path: string) =>
     invoke<import("./types").IngestSource>("add_ingest_source", { agent, path }),
   removeIngestSource: (sourceId: string) =>
     invoke<void>("remove_ingest_source", { sourceId }),
 
   lookupNavigation: (query: string) => invoke<import("./types").NavigationResults>("lookup_navigation", { query }),
   matchObjects: (kind: import("./types").NavigationItem["kind"], query: string, candidateIds: readonly string[]) => invoke<string[]>("match_objects", { kind, query, candidateIds }),
-  getAgentStatus: () =>
-    invoke<Record<string, import("./types").AgentStatusEntry>>("get_agent_status"),
+  getToolStatus: () =>
+    invoke<Record<string, import("./types").AgentToolStatusEntry>>("get_tool_status"),
 
-  redetectAgent: (agent: Agent) => invoke<AgentRuntimeSettings>("redetect_agent", { agent }),
+  redetectTool: (agent: AgentTool) => invoke<AgentRuntimeSettings>("redetect_tool", { agent }),
 
-  getDefaultAgent: () => invoke<Agent | null>("get_default_agent"),
+  getDefaultTool: () => invoke<AgentTool | null>("get_default_tool"),
 
   getExtractionSettings: () => invoke<import("./types").ExtractionSettings>("get_extraction_settings"),
   setExtractionSettings: (settings: import("./types").ExtractionSettings) =>
     invoke<import("./types").ExtractionSettings>("set_extraction_settings", { settings }),
 
-  getAgentRuntimeSettings: (agent: Agent) =>
-    invoke<AgentRuntimeSettings>("get_agent_runtime_settings", { agent }),
-  refreshAgentRuntimeOptions: (agent: Agent) =>
-    invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
+  getToolRuntimeSettings: (agent: AgentTool) =>
+    invoke<AgentRuntimeSettings>("get_tool_runtime_settings", { agent }),
+  refreshToolRuntimeOptions: (agent: AgentTool) =>
+    invoke<AgentRuntimeDiscovery>("refresh_tool_runtime_options", { agent }),
 
-  assistantMailboxList: (assistantId: string, cursor?: number) =>
-    invoke<import("./types").AssistantMailboxPage>("assistant_mailbox_list", { assistantId, cursor }),
-  assistantMailboxRead: (assistantId: string, messageId: string) =>
-    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_read", { assistantId, messageId }),
-  assistantMailboxSend: (assistantId: string, body: string) =>
-    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_send", { assistantId, body }),
-  assistantMailboxChange: (assistantId: string, change: import("./types").AssistantMailboxChange) =>
-    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_change", { assistantId, change }),
-  createAssistantProfile: (input: import("./types").CreateAssistantInput) =>
-    invoke<Project>("create_assistant_profile", { input }),
-  updateAssistantProfile: (id: string, revision: string, patch: import("./types").AssistantPatch) =>
-    invoke<import("./types").ProjectAssistant>("update_assistant_profile", { id, revision, patch }),
-  prepareAssistantFiles: (id: string) =>
-    invoke<import("./types").ProjectAssistant>("prepare_assistant_files", { id }),
+  agentMailboxList: (agentId: string, cursor?: number) =>
+    invoke<import("./types").AgentMailboxPage>("agent_mailbox_list", { agentId, cursor }),
+  agentMailboxRead: (agentId: string, messageId: string) =>
+    invoke<import("./types").AgentMailboxMessage>("agent_mailbox_read", { agentId, messageId }),
+  agentMailboxSend: (agentId: string, body: string) =>
+    invoke<import("./types").AgentMailboxMessage>("agent_mailbox_send", { agentId, body }),
+  agentMailboxChange: (agentId: string, change: import("./types").AgentMailboxChange) =>
+    invoke<import("./types").AgentMailboxMessage>("agent_mailbox_change", { agentId, change }),
+  createAgentProfile: (input: import("./types").CreateAgentInput) =>
+    invoke<Project>("create_agent_profile", { input }),
+  updateAgentProfile: (id: string, revision: string, patch: import("./types").AgentPatch) =>
+    invoke<import("./types").ProjectAgent>("update_agent_profile", { id, revision, patch }),
+  prepareAgentFiles: (id: string) =>
+    invoke<import("./types").ProjectAgent>("prepare_agent_files", { id }),
 };
 
-export type { Agent };
+export type { AgentTool };

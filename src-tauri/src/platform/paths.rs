@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 
 /// Resolve the current user's home directory on any supported platform:
 /// macOS `$HOME`, Windows `%USERPROFILE%` / Known Folders.
@@ -17,53 +17,53 @@ pub fn resolve_home() -> Option<PathBuf> {
 /// Environment variable that overrides the data root for each agent,
 /// mirroring what the agents themselves honour where applicable.
 ///
-/// The empty string means "this Agent documents no override": the IDE-hosted
+/// The empty string means "this agent tool documents no override": the IDE-hosted
 /// ones (Qoder) hard-code their home, and inventing a variable name here would
 /// be a guess that silently points at nothing.
-pub fn agent_env_override(agent: Agent) -> &'static str {
+pub fn agent_env_override(agent: AgentTool) -> &'static str {
     match agent {
-        Agent::Codex => "CODEX_HOME",
-        Agent::ClaudeCode => "CLAUDE_CONFIG_DIR",
+        AgentTool::Codex => "CODEX_HOME",
+        AgentTool::ClaudeCode => "CLAUDE_CONFIG_DIR",
         // Pi composes two documented variables around its sessions folder;
         // this names the primary one (see `resolve_pi_sessions_dir`).
-        Agent::Pi => "PI_CODING_AGENT_DIR",
-        Agent::Qoder => "",
+        AgentTool::Pi => "PI_CODING_AGENT_DIR",
+        AgentTool::Qoder => "",
         // Electron app; no documented override.
-        Agent::WorkBuddy => "",
+        AgentTool::WorkBuddy => "",
         // Documented by dsh's own settings loader: `$DSH_HOME` ?? `~/.dsh`.
-        Agent::Dsh => "DSH_HOME",
+        AgentTool::Dsh => "DSH_HOME",
         // Desktop app with no documented override; its data root is `~/.zcode`.
-        Agent::ZCode => "",
+        AgentTool::ZCode => "",
         // Desktop IDE, no documented override; conversations under
         // `~/.gemini/antigravity`.
-        Agent::Antigravity => "",
+        AgentTool::Antigravity => "",
     }
 }
 
 /// Default data root relative to the user home for each agent.
-pub fn agent_default_dir(agent: Agent) -> PathBuf {
+pub fn agent_default_dir(agent: AgentTool) -> PathBuf {
     match agent {
-        Agent::Codex => [".codex"].iter().collect(),
-        Agent::ClaudeCode => [".claude"].iter().collect(),
+        AgentTool::Codex => [".codex"].iter().collect(),
+        AgentTool::ClaudeCode => [".claude"].iter().collect(),
         // Sessions live under `agent/`; `~/.pi` itself also holds package
         // caches (278 MB on the reference machine), so discovery must never
         // start there.
-        Agent::Pi => [".pi", "agent", "sessions"].iter().collect(),
-        Agent::Qoder => [".qoder-cn"].iter().collect(),
-        Agent::WorkBuddy => [".workbuddy"].iter().collect(),
-        Agent::Dsh => [".dsh"].iter().collect(),
-        Agent::ZCode => [".zcode"].iter().collect(),
-        Agent::Antigravity => [".gemini", "antigravity"].iter().collect(),
+        AgentTool::Pi => [".pi", "agent", "sessions"].iter().collect(),
+        AgentTool::Qoder => [".qoder-cn"].iter().collect(),
+        AgentTool::WorkBuddy => [".workbuddy"].iter().collect(),
+        AgentTool::Dsh => [".dsh"].iter().collect(),
+        AgentTool::ZCode => [".zcode"].iter().collect(),
+        AgentTool::Antigravity => [".gemini", "antigravity"].iter().collect(),
     }
 }
 
 /// Working directories that app-initiated chats get allocated INSIDE an
-/// Agent's own area — one throwaway directory per conversation
+/// agent tool's own area — one throwaway directory per conversation
 /// (`~/Documents/Codex/<date>/<slug>`, `~/Documents/Qoder/<date>/<hash>`,
 /// `~/Workbuddy/<timestamp>` on the reference machine). A chat never opens
 /// its directory again, so these must not become Projects of their own: every
 /// Git-evidence-free path under a root here joins the ONE bucket Project
-/// named after the Agent.
+/// named after the agent tool.
 ///
 /// The roots are listed explicitly instead of grepping for an agent name in
 /// the path — a real repository called `codex` is a project, not a bucket.
@@ -97,7 +97,7 @@ fn non_empty_env(name: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn dsh_home_override() -> Option<PathBuf> {
-    let configured = std::env::var(agent_env_override(Agent::Dsh)).ok()?;
+    let configured = std::env::var(agent_env_override(AgentTool::Dsh)).ok()?;
     if configured.trim().is_empty() {
         return None;
     }
@@ -128,7 +128,7 @@ fn pi_sessions_dir(
 ) -> Option<PathBuf> {
     session_dir
         .or_else(|| agent_dir.map(|d| d.join("sessions")))
-        .or_else(|| home.map(|h| h.join(agent_default_dir(Agent::Pi))))
+        .or_else(|| home.map(|h| h.join(agent_default_dir(AgentTool::Pi))))
 }
 
 fn resolve_pi_sessions_dir() -> Option<PathBuf> {
@@ -146,12 +146,12 @@ fn resolve_pi_sessions_dir() -> Option<PathBuf> {
 /// it composes two documented variables around its sessions folder, so it
 /// delegates to `resolve_pi_sessions_dir` rather than the single-variable
 /// pattern, and never resolves to the whole `~/.pi`.
-pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
-    if matches!(agent, Agent::Pi) {
+pub fn resolve_agent_data_dir(agent: AgentTool) -> Option<PathBuf> {
+    if matches!(agent, AgentTool::Pi) {
         return resolve_pi_sessions_dir();
     }
     let configured = match agent {
-        Agent::Dsh => dsh_home_override(),
+        AgentTool::Dsh => dsh_home_override(),
         _ => non_empty_env(agent_env_override(agent)),
     };
     if let Some(p) = configured {
@@ -168,10 +168,10 @@ pub fn resolve_agent_data_dir(agent: Agent) -> Option<PathBuf> {
 /// ingest sources and one enable covers both surfaces. Qoder's CN and
 /// international builds are the same story for the same transcript format:
 /// `~/.qoder` sits beside `~/.qoder-cn`.
-fn agent_extra_ingest_dirs(agent: Agent) -> Vec<PathBuf> {
+fn agent_extra_ingest_dirs(agent: AgentTool) -> Vec<PathBuf> {
     match agent {
-        Agent::Qoder => vec![[".qoder"].iter().collect()],
-        Agent::Antigravity => vec![[".gemini", "antigravity-cli"].iter().collect()],
+        AgentTool::Qoder => vec![[".qoder"].iter().collect()],
+        AgentTool::Antigravity => vec![[".gemini", "antigravity-cli"].iter().collect()],
         _ => vec![],
     }
 }
@@ -181,10 +181,10 @@ pub fn resolve_antigravity_cli_dir() -> Option<PathBuf> {
     resolve_home().map(|home| home.join(".gemini").join("antigravity-cli"))
 }
 
-/// Every root an Agent's conversations are known to live under: the resolved
+/// Every root an agent tool's conversations are known to live under: the resolved
 /// data dir first, then any extra official surface. The default-ingest
 /// seeding (`reconcile_runtime_defaults`) runs over this list.
-pub fn agent_ingest_roots(agent: Agent) -> Vec<PathBuf> {
+pub fn agent_ingest_roots(agent: AgentTool) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = resolve_agent_data_dir(agent).into_iter().collect();
     let home = resolve_home();
     roots.extend(
@@ -479,9 +479,12 @@ mod tests {
 
     #[test]
     fn agent_override_env() {
-        assert_eq!(agent_env_override(Agent::Codex), "CODEX_HOME");
-        assert_eq!(agent_env_override(Agent::ClaudeCode), "CLAUDE_CONFIG_DIR");
-        assert_eq!(agent_env_override(Agent::Pi), "PI_CODING_AGENT_DIR");
+        assert_eq!(agent_env_override(AgentTool::Codex), "CODEX_HOME");
+        assert_eq!(
+            agent_env_override(AgentTool::ClaudeCode),
+            "CLAUDE_CONFIG_DIR"
+        );
+        assert_eq!(agent_env_override(AgentTool::Pi), "PI_CODING_AGENT_DIR");
     }
 
     /// Pi resolves to its sessions folder — never the whole `~/.pi`, which
@@ -490,9 +493,9 @@ mod tests {
     #[test]
     fn pi_sessions_dir_prefers_the_specific_override() {
         let home = PathBuf::from("/home/ada");
-        let default = home.join(agent_default_dir(Agent::Pi));
+        let default = home.join(agent_default_dir(AgentTool::Pi));
         assert!(
-            agent_default_dir(Agent::Pi).ends_with(".pi/agent/sessions"),
+            agent_default_dir(AgentTool::Pi).ends_with(".pi/agent/sessions"),
             "default must narrow to the sessions folder"
         );
         assert_eq!(
@@ -638,7 +641,7 @@ mod tests {
     /// the IDE store and the `agy` CLI store, siblings under the same home.
     #[test]
     fn antigravity_ingest_roots_cover_the_ide_and_cli_stores() {
-        let roots = agent_ingest_roots(Agent::Antigravity);
+        let roots = agent_ingest_roots(AgentTool::Antigravity);
         assert_eq!(roots.len(), 2, "{roots:?}");
         assert!(
             roots.iter().any(|r| r.ends_with(".gemini/antigravity")),
@@ -654,7 +657,7 @@ mod tests {
     /// two sibling data roots, so both are seeded as default sources.
     #[test]
     fn qoder_ingest_roots_cover_the_cn_and_international_stores() {
-        let roots = agent_ingest_roots(Agent::Qoder);
+        let roots = agent_ingest_roots(AgentTool::Qoder);
         assert_eq!(roots.len(), 2, "{roots:?}");
         assert!(roots.iter().any(|r| r.ends_with(".qoder-cn")), "{roots:?}");
         assert!(roots.iter().any(|r| r.ends_with(".qoder")), "{roots:?}");

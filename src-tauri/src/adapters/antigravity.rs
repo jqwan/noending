@@ -56,10 +56,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::adapters::{
-    ms_epoch_to_rfc3339, AgentCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
+    ms_epoch_to_rfc3339, AgentToolCommand, DesktopResume, DiscoveredMember, DiscoveredMemberKind,
     ExecOptions, MemberReadDelta, ParsedLine, ResumeRoute, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::{other, Result};
 
 pub struct AntigravityAdapter;
@@ -441,7 +441,7 @@ fn parse_member(
         .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
     Ok(Some(DiscoveredMember {
-        agent: Agent::Antigravity,
+        agent: AgentTool::Antigravity,
         source_member_id: conversation_id.to_string(),
         kind: if parent.is_some() {
             DiscoveredMemberKind::Child
@@ -585,12 +585,12 @@ impl AntigravityAdapter {
 }
 
 impl crate::adapters::AgentAdapter for AntigravityAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Antigravity
+    fn tool(&self) -> AgentTool {
+        AgentTool::Antigravity
     }
 
-    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentInstallation> {
-        crate::platform::exec_resolver::resolve_quiet(Agent::Antigravity)
+    fn detect(&self) -> Option<crate::platform::exec_resolver::AgentToolInstallation> {
+        crate::platform::exec_resolver::resolve_quiet(AgentTool::Antigravity)
     }
 
     fn discover_members_in(
@@ -698,10 +698,10 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
 
     fn build_new_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &ExecOptions,
         cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // Bare `agy` opens the interactive TUI. With a first message, its
         // interactive-prompt flag runs that turn and keeps the TUI open;
         // `--prompt` would run print mode and exit instead.
@@ -709,7 +709,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         if let Some(message) = opts.initial_message() {
             args.extend(["--prompt-interactive".into(), message.into()]);
         }
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -718,18 +718,18 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
 
     fn build_resume_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         _source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // `--conversation <id>` resumes by id — but only for conversations in
         // the CLI's own store; the IDE store is invisible to the CLI (see the
         // module header). The launch still starts in `cwd` when it is given.
         let mut args = vec!["--conversation".into(), agent_session_id.to_string()];
         args.extend(interactive_args(opts));
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -738,13 +738,13 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
 
     fn build_resume_message_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
         message: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut command =
             self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
         if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
@@ -757,20 +757,20 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
 
     fn build_exec_command(
         &self,
-        _install: &crate::platform::exec_resolver::AgentInstallation,
+        _install: &crate::platform::exec_resolver::AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         Err(other("Antigravity 尚未接入助手的一次性执行"))
     }
 
     fn build_context_extraction_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &ExecOptions,
         prompt: &str,
         runtime_dir: &Path,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // AGY records print-mode turns. Keep its store inside the disposable
         // extraction directory so the normal session scanner never sees them.
         let executable = crate::cli::executable()?;
@@ -792,7 +792,7 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         ];
         args.extend(runtime_args(opts));
         args.extend(["--print".into(), prompt.into()]);
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: Some(runtime_dir.to_path_buf()),
@@ -803,8 +803,8 @@ impl crate::adapters::AgentAdapter for AntigravityAdapter {
         Some("Antigravity")
     }
 
-    /// The open-method configuration for this Agent's TWO source formats,
-    /// keyed on the member's `source_kind` (not on the Agent): a CLI-store
+    /// The open-method configuration for this agent tool's TWO source formats,
+    /// keyed on the member's `source_kind` (not on the agent tool): a CLI-store
     /// conversation resumes through `agy --conversation` (the terminal
     /// route), but an IDE-store conversation has NO binding in the CLI's
     /// registry — resuming one opens a blank session that fails at the first
@@ -871,8 +871,8 @@ mod tests {
     /// `--conversation` and both carry the frozen runtime intent as flags.
     #[test]
     fn launch_commands_target_the_agy_cli() {
-        let install = crate::platform::exec_resolver::AgentInstallation {
-            agent: Agent::Antigravity,
+        let install = crate::platform::exec_resolver::AgentToolInstallation {
+            agent: AgentTool::Antigravity,
             executable_path: "/Users/x/.local/bin/agy".into(),
             version: None,
         };
@@ -938,8 +938,8 @@ mod tests {
 
     #[test]
     fn extraction_uses_sandboxed_print_mode_and_redirects_the_agy_store() {
-        let install = crate::platform::exec_resolver::AgentInstallation {
-            agent: Agent::Antigravity,
+        let install = crate::platform::exec_resolver::AgentToolInstallation {
+            agent: AgentTool::Antigravity,
             executable_path: "agy".into(),
             version: None,
         };
@@ -1087,7 +1087,7 @@ mod tests {
     fn root_session(db: &Path) -> Session {
         Session {
             id: "sess-ag".into(),
-            agent: Agent::Antigravity,
+            agent: AgentTool::Antigravity,
             root_agent_session_id: db.file_stem().unwrap().to_str().unwrap().into(),
             title: None,
             cwd: None,
@@ -1301,7 +1301,7 @@ mod tests {
             rusqlite::params![wanted, child],
         ).unwrap();
         let db = crate::storage::Db::open(&base.join("noending.db")).unwrap();
-        db.add_ingest_source(Agent::Antigravity, &root.to_string_lossy())
+        db.add_ingest_source(AgentTool::Antigravity, &root.to_string_lossy())
             .unwrap();
         let transcript = root
             .join("brain")
@@ -1309,7 +1309,7 @@ mod tests {
             .join(".system_generated/logs/transcript_full.jsonl");
         let result = crate::ingestion::reconcile_native(
             &db,
-            Agent::Antigravity,
+            AgentTool::Antigravity,
             wanted,
             Some(&transcript.to_string_lossy()),
             &|_| {},
@@ -1317,7 +1317,7 @@ mod tests {
         .unwrap();
         assert_eq!(result, (1, 1));
         let session = db
-            .find_session_by_root_agent_id(Agent::Antigravity, wanted)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, wanted)
             .unwrap()
             .unwrap();
         assert_eq!(session.source_kind, "antigravity_cli_conversation");
@@ -1341,7 +1341,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            crate::ingestion::reconcile_native(&db, Agent::Antigravity, wanted, None, &|_| {})
+            crate::ingestion::reconcile_native(&db, AgentTool::Antigravity, wanted, None, &|_| {})
                 .unwrap(),
             (1, 1)
         );
@@ -1349,16 +1349,16 @@ mod tests {
         assert_eq!(updated.cwd.as_deref(), workspace.to_str());
         assert_eq!(updated.title.as_deref(), Some("新标题"));
         assert!(db
-            .find_session_by_root_agent_id(Agent::Antigravity, neighbor)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, neighbor)
             .unwrap()
             .is_none());
         assert_eq!(
-            crate::ingestion::reconcile_native(&db, Agent::Antigravity, child, None, &|_| {})
+            crate::ingestion::reconcile_native(&db, AgentTool::Antigravity, child, None, &|_| {})
                 .unwrap(),
             (0, 0)
         );
         assert!(
-            db.find_session_by_root_agent_id(Agent::Antigravity, child)
+            db.find_session_by_root_agent_id(AgentTool::Antigravity, child)
                 .unwrap()
                 .is_none(),
             "child notifications cannot create logical sessions"
@@ -1379,7 +1379,7 @@ mod tests {
     fn test_source(root: &Path) -> crate::domain::IngestSource {
         crate::domain::IngestSource {
             id: "ag-test-source".into(),
-            agent: Agent::Antigravity,
+            agent: AgentTool::Antigravity,
             path: root.to_string_lossy().into_owned(),
             origin: crate::domain::ingest_origin::USER.into(),
         }
@@ -1417,7 +1417,7 @@ mod tests {
         let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
         assert_eq!(reconcile_store(&db, &root), 2);
         let session = db
-            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, id)
             .unwrap()
             .unwrap();
         let mut delta = AntigravityAdapter
@@ -1499,7 +1499,7 @@ mod tests {
         let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
         assert_eq!(reconcile_store(&db, &root), 1);
         let session = db
-            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, id)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1606,7 +1606,7 @@ mod tests {
         );
         assert_eq!(reconcile_store(&db, &root), 2);
         let before = db
-            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, id)
             .unwrap()
             .unwrap();
         assert_eq!(before.cwd, None);
@@ -1664,7 +1664,7 @@ mod tests {
         let db = crate::storage::Db::open(&root.join("noending.db")).unwrap();
         assert_eq!(reconcile_store(&db, &root), 0);
         assert!(db
-            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, id)
             .unwrap()
             .is_none());
 
@@ -1677,7 +1677,7 @@ mod tests {
         .unwrap();
         assert_eq!(reconcile_store(&db, &root), 0);
         assert!(db
-            .find_session_by_root_agent_id(Agent::Antigravity, id)
+            .find_session_by_root_agent_id(AgentTool::Antigravity, id)
             .unwrap()
             .is_none());
         // An assistant-only completed answer is sufficient; no user text is invented.
@@ -1902,7 +1902,7 @@ mod tests {
         let db = Db::open(&root.join("noending.db")).unwrap();
         let (session_id, _) = db
             .upsert_logical_session(
-                Agent::Antigravity,
+                AgentTool::Antigravity,
                 id,
                 None,
                 None,
@@ -2000,7 +2000,7 @@ mod tests {
         let db = Db::open(&root.join("noending.db")).unwrap();
         let (session_id, _) = db
             .upsert_logical_session_unchecked(
-                Agent::Antigravity,
+                AgentTool::Antigravity,
                 root_id,
                 None,
                 None,

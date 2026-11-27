@@ -1,9 +1,9 @@
-//! Package mutations. Install/uninstall delegate to the owning Agent's native
-//! CLI so downloads, dependencies and install records stay Agent-managed;
+//! Package mutations. Install/uninstall delegate to the owning agent tool's native
+//! CLI so downloads, dependencies and install records stay agent tool-managed;
 //! enable/disable uses the native toggle and checks the discovery revision.
 
 use super::{dsh, files, Origin, PackageEntry, PackageInventory, Roots};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -25,33 +25,37 @@ pub struct PackageOperationResult {
     pub message: String,
 }
 
-/// CLI argument mapping per Agent. Pure: tests pin the contract without
+/// CLI argument mapping per agent tool. Pure: tests pin the contract without
 /// launching anything. Every package command is user-scope in this iteration.
-pub fn cli_args(agent: Agent, action: PackageAction, target: &str) -> Result<Vec<String>> {
+pub fn cli_args(agent: AgentTool, action: PackageAction, target: &str) -> Result<Vec<String>> {
     validate_target(target)?;
     let linked;
     let args: Vec<&str> = match (agent, action) {
-        (Agent::Pi, PackageAction::Install) => vec!["install", target],
+        (AgentTool::Pi, PackageAction::Install) => vec!["install", target],
         // The plugin subcommand forwards to pnpm in the desktop profile; the
         // local directory is referenced (link:), never copied.
-        (Agent::Dsh, PackageAction::Install) => {
+        (AgentTool::Dsh, PackageAction::Install) => {
             linked = format!("link:{target}");
             vec!["plugin", "--profile", "desktop", "add", &linked]
         }
-        (Agent::Antigravity, PackageAction::Install) => vec!["plugin", "install", target],
-        (Agent::Codex, PackageAction::Uninstall) => vec!["plugin", "remove", target, "--json"],
-        (Agent::ClaudeCode, PackageAction::Uninstall) => {
+        (AgentTool::Antigravity, PackageAction::Install) => vec!["plugin", "install", target],
+        (AgentTool::Codex, PackageAction::Uninstall) => vec!["plugin", "remove", target, "--json"],
+        (AgentTool::ClaudeCode, PackageAction::Uninstall) => {
             vec!["plugin", "uninstall", target, "--scope", "user"]
         }
-        (Agent::Pi, PackageAction::Uninstall) => vec!["remove", target],
-        (Agent::Dsh, PackageAction::Uninstall) => {
+        (AgentTool::Pi, PackageAction::Uninstall) => vec!["remove", target],
+        (AgentTool::Dsh, PackageAction::Uninstall) => {
             vec!["plugin", "--profile", "desktop", "remove", target]
         }
-        (Agent::Antigravity, PackageAction::Uninstall) => vec!["plugin", "uninstall", target],
-        (Agent::ClaudeCode, PackageAction::Enable) => vec!["plugin", "enable", target, "--json"],
-        (Agent::ClaudeCode, PackageAction::Disable) => vec!["plugin", "disable", target, "--json"],
-        (Agent::Antigravity, PackageAction::Enable) => vec!["plugin", "enable", target],
-        (Agent::Antigravity, PackageAction::Disable) => vec!["plugin", "disable", target],
+        (AgentTool::Antigravity, PackageAction::Uninstall) => vec!["plugin", "uninstall", target],
+        (AgentTool::ClaudeCode, PackageAction::Enable) => {
+            vec!["plugin", "enable", target, "--json"]
+        }
+        (AgentTool::ClaudeCode, PackageAction::Disable) => {
+            vec!["plugin", "disable", target, "--json"]
+        }
+        (AgentTool::Antigravity, PackageAction::Enable) => vec!["plugin", "enable", target],
+        (AgentTool::Antigravity, PackageAction::Disable) => vec!["plugin", "disable", target],
         _ => {
             return Err(other(
                 "不支持的插件包操作；本地目录安装仅支持 Pi、DSH 和 Antigravity",
@@ -73,7 +77,9 @@ fn validate_target(target: &str) -> Result<()> {
 /// name for DSH (its marketplace field is the profile label, not a market).
 fn cli_target(entry: &PackageEntry) -> String {
     match entry.marketplace.as_deref() {
-        Some(market) if entry.agent != Some(Agent::Pi) && entry.agent != Some(Agent::Dsh) => {
+        Some(market)
+            if entry.agent != Some(AgentTool::Pi) && entry.agent != Some(AgentTool::Dsh) =>
+        {
             format!("{}@{market}", entry.name)
         }
         _ => entry.name.clone(),
@@ -86,13 +92,16 @@ fn run_dsh_cli(roots: &Roots, args: &[String]) -> Result<()> {
         .to_str()
         .ok_or_else(|| other("DSH 数据目录包含无法传给 CLI 的字符"))?;
     run_cli(
-        Agent::Dsh,
+        AgentTool::Dsh,
         args,
-        &[(crate::platform::paths::agent_env_override(Agent::Dsh), home)],
+        &[(
+            crate::platform::paths::agent_env_override(AgentTool::Dsh),
+            home,
+        )],
     )
 }
 
-fn run_cli(agent: Agent, args: &[String], env: &[(&str, &str)]) -> Result<()> {
+fn run_cli(agent: AgentTool, args: &[String], env: &[(&str, &str)]) -> Result<()> {
     let installation = crate::platform::exec_resolver::resolve(agent)?;
     let output = crate::platform::exec_runner::run_with_env(
         Path::new(&installation.executable_path),
@@ -103,7 +112,7 @@ fn run_cli(agent: Agent, args: &[String], env: &[(&str, &str)]) -> Result<()> {
     )?;
     if !output.success {
         let reason = if output.exit_code.is_none() {
-            "操作超时，请检查 Agent 的安装状态".to_string()
+            "操作超时，请检查 运行工具 的安装状态".to_string()
         } else {
             format!("{}\n{}", output.stderr.trim(), output.stdout.trim())
         };
@@ -120,9 +129,9 @@ pub fn uninstall(
     let entry = locate(inventory, id)?;
     let agent = entry
         .agent
-        .ok_or_else(|| other("该插件包没有所属 Agent，无法卸载"))?;
+        .ok_or_else(|| other("该插件包没有所属 运行工具，无法卸载"))?;
     let args = cli_args(agent, PackageAction::Uninstall, &cli_target(entry))?;
-    if agent == Agent::Dsh {
+    if agent == AgentTool::Dsh {
         let _guard = DSH_MUTATION
             .lock()
             .map_err(|_| other("DSH 插件操作锁不可用"))?;
@@ -153,7 +162,7 @@ pub fn set_enabled(
         PackageAction::Disable
     };
     match entry.agent {
-        Some(Agent::Codex) => {
+        Some(AgentTool::Codex) => {
             // Each discovered entry carries exactly one scope.
             let scope = entry
                 .scopes
@@ -163,20 +172,20 @@ pub fn set_enabled(
             let text = codex_toggle(&raw, entry, enable)?;
             files::write_atomic(Path::new(&scope.config_path), &text)?;
         }
-        Some(Agent::ClaudeCode) => {
-            let args = cli_args(Agent::ClaudeCode, action, &cli_target(entry))?;
-            run_cli(Agent::ClaudeCode, &args, &[])?;
+        Some(AgentTool::ClaudeCode) => {
+            let args = cli_args(AgentTool::ClaudeCode, action, &cli_target(entry))?;
+            run_cli(AgentTool::ClaudeCode, &args, &[])?;
         }
-        Some(Agent::Antigravity) => {
+        Some(AgentTool::Antigravity) => {
             // agy's enable/disable keys on the bare plugin name, matching
             // `plugin list --json`.
-            let args = cli_args(Agent::Antigravity, action, &entry.name)?;
-            run_cli(Agent::Antigravity, &args, &[])?;
+            let args = cli_args(AgentTool::Antigravity, action, &entry.name)?;
+            run_cli(AgentTool::Antigravity, &args, &[])?;
         }
-        _ => return Err(other("该 Agent 未提供插件启停开关")),
+        _ => return Err(other("该 运行工具 未提供插件启停开关")),
     }
     Ok(PackageOperationResult {
-        message: "启停配置已保存，下次启动 Agent 生效".into(),
+        message: "启停配置已保存，下次启动 运行工具 生效".into(),
     })
 }
 
@@ -187,14 +196,14 @@ fn locate<'a>(inventory: &'a PackageInventory, id: &str) -> Result<&'a PackageEn
         .find(|entry| entry.id == id)
         .ok_or_else(|| other("插件包已不存在，请刷新"))?;
     // Codex's bundled markets are ordinary config.toml entries — writing
-    // `enabled` there is exactly how the Agent itself toggles them, so
+    // `enabled` there is exactly how the agent tool itself toggles them, so
     // Bundled is not blocked here (capability flags already gate the UI).
     // NoEnding's own built-ins stay app-managed.
     if entry.origin == Origin::NoEndingManaged {
         return Err(other("NoEnding 内置插件包由应用管理，不能在这里操作"));
     }
     if !entry.capabilities.toggle && !entry.capabilities.uninstall {
-        return Err(other("该 Agent 未提供插件包管理命令"));
+        return Err(other("该 运行工具 未提供插件包管理命令"));
     }
     Ok(entry)
 }
@@ -218,7 +227,7 @@ pub fn marketplace_add_args(market_path: &str) -> Vec<String> {
 }
 
 pub fn marketplace_install_args(
-    agent: Agent,
+    agent: AgentTool,
     plugin: &str,
     market_path: &str,
     market_name: &str,
@@ -228,7 +237,7 @@ pub fn marketplace_install_args(
     let args: Vec<String> = match agent {
         // Claude installs straight from a marketplace source path; the
         // marketplace is registered automatically on first use.
-        Agent::ClaudeCode => [
+        AgentTool::ClaudeCode => [
             "plugin",
             "install",
             plugin,
@@ -238,14 +247,14 @@ pub fn marketplace_install_args(
         ],
         // Codex needs the marketplace registered first and selects by
         // `name@market`.
-        Agent::Codex => {
+        AgentTool::Codex => {
             return Ok(vec![
                 "plugin".into(),
                 "add".into(),
                 format!("{plugin}@{market_name}"),
             ])
         }
-        _ => return Err(other("该 Agent 不支持从本地市场安装")),
+        _ => return Err(other("该 运行工具 不支持从本地市场安装")),
     }
     .iter()
     .map(|s| s.to_string())
@@ -255,11 +264,11 @@ pub fn marketplace_install_args(
 
 /// Installs a local marketplace directory's plugins into the selected
 /// Agents. Unlike the single-package flow this REGISTERS the directory as a
-/// marketplace in each Agent's config, so the source path must stay in
+/// marketplace in each agent tool's config, so the source path must stay in
 /// place; every requested plugin must be listed by the marketplace manifest.
 pub fn install_local_marketplace(
     raw_path: &str,
-    selections: &[(Agent, Vec<String>)],
+    selections: &[(AgentTool, Vec<String>)],
 ) -> Result<PackageOperationResult> {
     let canonical = super::imported::canonical_dir(raw_path)?;
     let path = canonical.to_string_lossy().into_owned();
@@ -290,8 +299,8 @@ pub fn install_local_marketplace(
                 return Err(other(format!("市场清单里没有插件「{plugin}」")));
             }
         }
-        if *agent == Agent::Codex {
-            run_cli(Agent::Codex, &marketplace_add_args(&path), &[])?;
+        if *agent == AgentTool::Codex {
+            run_cli(AgentTool::Codex, &marketplace_add_args(&path), &[])?;
         }
         for plugin in plugins {
             let args = marketplace_install_args(*agent, plugin, &path, &market_name)?;
@@ -301,17 +310,17 @@ pub fn install_local_marketplace(
     }
     Ok(PackageOperationResult {
         message: format!(
-            "已安装 {installed} 个插件；本地市场已注册到 Agent，目录需保留在原处；已有终端请重新加载或重新打开"
+            "已安装 {installed} 个插件；本地市场已注册到 运行工具，目录需保留在原处；已有终端请重新加载或重新打开"
         ),
     })
 }
 
-/// Installs a local package directory through each selected Agent's CLI.
-pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperationResult> {
+/// Installs a local package directory through each selected agent tool's CLI.
+pub fn install_local(raw_path: &str, agents: &[AgentTool]) -> Result<PackageOperationResult> {
     let canonical = super::imported::canonical_dir(raw_path)?;
     let path = canonical.to_string_lossy().into_owned();
     if agents.is_empty() {
-        return Err(other("请选择要安装到的 Agent"));
+        return Err(other("请选择要安装到的 运行工具"));
     }
     let supported = super::imported::installable_manifests(&canonical)?;
     for agent in agents {
@@ -330,7 +339,7 @@ pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperatio
     let mut failures = Vec::new();
     for agent in agents {
         let outcome = cli_args(*agent, PackageAction::Install, &path).and_then(|args| {
-            if *agent == Agent::Dsh {
+            if *agent == AgentTool::Dsh {
                 install_dsh(&canonical, &args)
             } else {
                 run_cli(*agent, &args, &[])
@@ -343,11 +352,11 @@ pub fn install_local(raw_path: &str, agents: &[Agent]) -> Result<PackageOperatio
     }
     if installed == 0 {
         return Err(other(format!(
-            "未能安装到任何 Agent：{}",
+            "未能安装到任何 运行工具：{}",
             failures.join("；")
         )));
     }
-    let mut message = format!("已安装到 {installed} 个 Agent；已有终端请重新加载或重新打开");
+    let mut message = format!("已安装到 {installed} 个 运行工具；已有终端请重新加载或重新打开");
     if !failures.is_empty() {
         message.push_str(&format!("；失败：{}", failures.join("；")));
     }

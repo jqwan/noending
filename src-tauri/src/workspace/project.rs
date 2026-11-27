@@ -279,7 +279,7 @@ pub fn ensure_workspace_path_conn(
                     None => create_project_row(conn, &canonical, Some(&f.git_id), "normal")?.id,
                 },
                 None => {
-                    // A chat scratch directory joins its Agent's ONE bucket;
+                    // A chat scratch directory joins its agent tool's ONE bucket;
                     // everything else becomes its own path-backed Project.
                     match directory_group_label(&canonical, policy) {
                         Some(label) => {
@@ -419,11 +419,11 @@ pub fn rename_project(
     id: &str,
     name: &str,
 ) -> Result<Project> {
-    let _profile_lock = crate::assistant::lock(home)?;
+    let _profile_lock = crate::agent::lock(home)?;
     let mut identity_written = false;
     let renamed = db.tx(|tx| {
         let project = crate::storage::workspace::rename_project_conn(tx, id, name)?;
-        identity_written = crate::assistant::sync_project_identity(tx, home, &project)?;
+        identity_written = crate::agent::sync_project_identity(tx, home, &project)?;
         Ok(project)
     });
     match renamed {
@@ -433,7 +433,7 @@ pub fn rename_project(
             let conn = db.read();
             let restore = get_project_conn(&conn, id).and_then(|project| {
                 if let Some(project) = project {
-                    crate::assistant::sync_project_identity(&conn, home, &project)?;
+                    crate::agent::sync_project_identity(&conn, home, &project)?;
                 }
                 Ok(())
             });
@@ -474,7 +474,7 @@ pub(crate) fn set_project_archived_conn(
 }
 
 /// Shared cleanup projection. Physical checks run outside a database lock;
-/// unreadable paths, symlinks, Session and Assistant references are retained.
+/// unreadable paths, symlinks, Session and Agent references are retained.
 fn cleanable_missing_paths(db: &Db, project_id: &str) -> Result<Vec<(String, String)>> {
     let candidates = {
         let conn = db.read();
@@ -497,7 +497,7 @@ fn cleanable_missing_paths(db: &Db, project_id: &str) -> Result<Vec<(String, Str
 }
 
 /// Explicitly forget eligible missing paths, rechecking ownership and all
-/// Session/Assistant references in the deletion transaction.
+/// Session/Agent references in the deletion transaction.
 pub fn clean_missing_project_paths(db: &Db, project_id: &str) -> Result<usize> {
     if db.get_project(project_id)?.is_none() {
         return Err(other(format!("Project {project_id} 不存在")));
@@ -539,7 +539,7 @@ pub fn delete_project_permanently(
     policy: &dyn WorkspacePolicy,
     home: Option<&super::home::NoEndingHome>,
 ) -> Result<ProjectDeletion> {
-    let _profile_lock = home.map(crate::assistant::lock).transpose()?;
+    let _profile_lock = home.map(crate::agent::lock).transpose()?;
     let mut staged = Vec::new();
     let removed = db.tx(|tx| {
         let project =
@@ -574,13 +574,13 @@ pub fn delete_project_permanently(
                 rusqlite::params![task, now()],
             )?;
         }
-        if let Some(path_id) = crate::storage::assistant_profiles::path_for_project(tx, id)? {
+        if let Some(path_id) = crate::storage::agent_profiles::path_for_project(tx, id)? {
             let home = home.ok_or_else(|| other("NoEnding Home 未初始化"))?;
             let path = paths
                 .iter()
                 .find(|path| path.id == path_id)
                 .ok_or_else(|| other("智能体档案目录未登记"))?;
-            if let Some(directory) = crate::assistant::stage_profile_directory(home, path)? {
+            if let Some(directory) = crate::agent::stage_profile_directory(home, path)? {
                 staged.push(directory);
             }
             tx.execute("DELETE FROM project_assistants WHERE project_id=?1", [id])?;
@@ -948,12 +948,12 @@ pub fn merge_projects_conn(conn: &Connection, a: &str, b: &str) -> Result<MergeO
             adopted_name: None,
         });
     }
-    let assistant_count: usize = conn.query_row(
+    let agent_count: usize = conn.query_row(
         "SELECT COUNT(*) FROM project_assistants WHERE project_id IN (?1,?2)",
         [&left.id, &right.id],
         |row| row.get(0),
     )?;
-    if assistant_count > 1 {
+    if agent_count > 1 {
         return Err(other("两个项目各有独立的智能体属性，不能自动合并"));
     }
 
@@ -1163,9 +1163,9 @@ pub struct ProjectDetail {
     pub project: Project,
     pub kind: ProjectKind,
     pub purpose: Option<ProjectPurpose>,
-    pub assistant: Option<crate::assistant::ProjectAssistantDetail>,
+    pub agent: Option<crate::agent::ProjectAgentDetail>,
     pub workspace_paths: Vec<WorkspacePath>,
-    /// Missing, physically absent paths with neither Session nor Assistant references.
+    /// Missing, physically absent paths with neither Session nor Agent references.
     pub cleanable_missing_path_ids: Vec<String>,
     pub workstreams: Vec<ProjectWorkstream>,
     pub sessions: Vec<SessionListItem>,
@@ -1207,7 +1207,7 @@ pub fn project_detail(
         }
         None => None,
     };
-    let assistant = crate::assistant::project_assistant(db, project_id, &workspace_paths)?;
+    let agent = crate::agent::project_agent(db, project_id, &workspace_paths)?;
     let purpose = project_purpose(
         &workspace_paths
             .iter()
@@ -1222,7 +1222,7 @@ pub fn project_detail(
     Ok(Some(ProjectDetail {
         cleanable_missing_path_ids,
         purpose,
-        assistant,
+        agent,
         project,
         kind,
         workspace_paths,

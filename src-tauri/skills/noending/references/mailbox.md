@@ -24,20 +24,20 @@ CLI 发信显式提供 `--from-session SELF`，MCP 提供 `from_session: SELF`�
 
 ## 发给智能体的信
 
-派工或长期反馈可以写给智能体本身，使用公开的智能体 ID 作为地址。只有名字时，按[找到合作者](assistant.md#找到合作者)查名录，按需阅读名片。要回应某段对话或传递只给那段对话的消息，使用那段对话的 Session ID 和上面的对话信箱。
+派工或长期反馈可以写给智能体本身，使用公开的智能体 ID 作为地址。只有名字时，按[找到合作者](agent.md#找到合作者)查名录，按需阅读名片。要回应某段对话或传递只给那段对话的消息，使用那段对话的 Session ID 和上面的对话信箱。
 
 通过内嵌终端或继承该终端会话凭证的 MCP 使用智能体信箱。后端验证本次对话。收到 `session_access_required`、`session_access_denied` 或 `sender_identity_changed` 时，按实际状态恢复绑定或重连，再继续收发。
 
 用户请你处理智能体的来信时，核对档案身份和本次对话的 Session ID。通过智能体信箱查阅待接手来信。看完可标为已读，要执行信中工作时先用当前 `revision` 接手。其他对话已经接手或版本有变化时，重新读取状态后再决定。完成并核实结果后标为已处理。需要交接时，在任务事项记录已做工作和下一步，再放回待处理。关闭对话时接手状态仍会保留，用户可在档案页转交。
 
-需要回信时，`sender_assistant_id` 可以用于联系发信的智能体，`sender_session_id` 用于联系原对话。用户来信可在当前对话回复。智能体信箱可以主动查阅，查信提醒仍对应发到本次对话的信。
+需要回信时，`sender_agent_id` 可以用于联系发信的智能体，`sender_session_id` 用于联系原对话。用户来信可在当前对话回复。智能体信箱可以主动查阅，查信提醒仍对应发到本次对话的信。
 
 | 操作 | CLI | MCP |
 | --- | --- | --- |
-| 查待接手来信 | `ne assistant-mailbox list --state pending` | `assistant_mailbox_list {state:"pending"}` |
-| 读取正文 | `ne assistant-mailbox read --message-id LETTER` | `assistant_mailbox_read {message_id:LETTER}` |
-| 发给智能体 | `ne assistant-mailbox send --assistant ID --message TEXT` | `assistant_mailbox_send {assistant:ID,message:TEXT}` |
-| 标为已读、接手、放回或完成 | `ne assistant-mailbox mark-read\|claim\|release\|complete --message-id LETTER --revision N`，选用一个子命令 | `assistant_mailbox_change {message_id:LETTER,revision:N,operation:"read"\|"claim"\|"release"\|"complete"}` |
+| 查待接手来信 | `ne agent-mailbox list --state pending` | `agent_mailbox_list {state:"pending"}` |
+| 读取正文 | `ne agent-mailbox read --message-id LETTER` | `agent_mailbox_read {message_id:LETTER}` |
+| 发给智能体 | `ne agent-mailbox send --agent ID --message TEXT` | `agent_mailbox_send {agent:ID,message:TEXT}` |
+| 标为已读、接手、放回或完成 | `ne agent-mailbox mark-read\|claim\|release\|complete --message-id LETTER --revision N`，选用一个子命令 | `agent_mailbox_change {message_id:LETTER,revision:N,operation:"read"\|"claim"\|"release"\|"complete"}` |
 
 接手、已读和已处理各自记录。返回的 `handler_session_id` 是接手对话，`completed_at` 是处理完成时间。再次操作前使用最新 `revision`。分页需保持筛选并使用 `next_cursor`。写操作可用原 `request_id` 和相同参数重试。
 
@@ -46,7 +46,7 @@ CLI 发信显式提供 `--from-session SELF`，MCP 提供 `from_session: SELF`�
 | 操作 | CLI | MCP |
 | --- | --- | --- |
 | 当前终端身份 | `ne session identity` | 通过当前运行工具的执行入口运行 CLI；共享 MCP 无当前调用方终端身份 |
-| 解析外部原生身份 | `ne session resolve --agent AGENT --native-id NATIVE_ID` | `session_resolve {agent,native_id}` |
+| 解析外部原生身份 | `ne session resolve --tool TOOL --native-id NATIVE_ID` | `session_resolve {tool,native_id}` |
 | 查未读 | `ne mailbox list --session SELF --state unread` | `mailbox_list {session:SELF,state:"unread"}` |
 | 查询全部记录 | `ne mailbox list --session SELF --state all` | `mailbox_list {session:SELF,state:"all"}` |
 | 单条读取 | `ne mailbox read --session SELF --message-id ID` | `mailbox_read {session:SELF,message_id:ID}` |

@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import Icon from "../../components/Icon";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import PageHeader from "../../layout/PageHeader";
 import { DetailLayout, DetailPanelProvider } from "../../components/DetailLayout";
 import { useRefreshSignal } from "../../components/common";
@@ -26,7 +26,7 @@ import { sessionDetailCache } from "./sessionDetailCache";
 import { useLoadingDelay } from "../../hooks/useLoadingDelay";
 
 import type {
-  Agent,
+  AgentTool,
   Session,
   SessionDetail,
   SessionMessageMark,
@@ -153,16 +153,16 @@ function captureAnchor(scroller: HTMLElement | null): PagingAnchor | null {
 export default function SessionConversationView({
   sessionId,
   initialTitle,
-  initialAgent,
+  initialTool,
   navigate,
 }: {
   sessionId: string;
   initialTitle?: string;
-  initialAgent?: Agent;
+  initialTool?: AgentTool;
   initialTotal?: number;
   navigate: (r: Route) => void;
 }) {
-  // 标题与 Agent 在首帧就要位：导航方给了 initialTitle 就以它为准（看板/列表
+  // 标题与 运行工具 在首帧就要位：导航方给了 initialTitle 就以它为准（看板/列表
   // 带来的当前事实）；没给（子页切换走 tabs）就同步取详情缓存——两条路都不让
   // 标题先落兜底文案再跳回来（闪）。
   const [session, setSession] = useState<Session | null>(
@@ -544,7 +544,7 @@ export default function SessionConversationView({
     node?.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
   };
 
-  const currentAgent = session?.agent ?? initialAgent;
+  const currentAgent = session?.agent ?? initialTool;
   const cachedDetail = sessionDetailCache.get(sessionId);
   const rawTitle = session ? sessionDisplayTitle(session.title) : initialTitle;
   const displayTitle = rawTitle
@@ -555,7 +555,7 @@ export default function SessionConversationView({
     return (
       <div className="main narrow" role="status">
         <PageHeader
-          title={displayTitle} icon={currentAgent ? <AgentIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
+          title={displayTitle} icon={currentAgent ? <AgentToolIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
           navigation={<SessionSubpageTabs sessionId={sessionId} title={displayTitle} agent={currentAgent ?? undefined} entry="conversation" navigate={navigate} />}
         />
         <div className="empty">
@@ -569,7 +569,7 @@ export default function SessionConversationView({
   return (
     <DetailPanelProvider kind="session"><div className="main fill detail-page">
       <PageHeader
-        title={displayTitle} icon={currentAgent ? <AgentIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
+        title={displayTitle} icon={currentAgent ? <AgentToolIcon agent={currentAgent} size={18} /> : <Icon name="chat" />}
         navigation={<SessionSubpageTabs
               sessionId={sessionId}
               title={displayTitle}
@@ -680,7 +680,7 @@ function TurnBlock({ turn, finalTs, expansion, agent, onToggle }: {
   /** 那轮最终回复的时间戳：块头的时长算到它为止。 */
   finalTs: string | null;
   expansion: TurnExpansion | undefined;
-  agent: Agent | null;
+  agent: AgentTool | null;
   onToggle: () => void;
 }) {
   const open = expansion !== undefined;

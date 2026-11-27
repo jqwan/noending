@@ -16,7 +16,7 @@ import { setPackageCatalogCache } from "../features/packages/packageDetailCache"
 
 vi.mock("./Router", () => ({ prepareRouteModule: vi.fn() }));
 vi.mock("../api", () => ({ api: {
-  listProjectCards: vi.fn(), getDefaultAgent: vi.fn(), getWorkstreamContext: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(),
+  listProjectCards: vi.fn(), getDefaultTool: vi.fn(), getWorkstreamContext: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(),
   collaborationRoomGet: vi.fn(), collaborationCandidates: vi.fn(), getOperationStatus: vi.fn(), getExtractionSettings: vi.fn(), getWorkspaceSettings: vi.fn(),
   listPackages: vi.fn(), mailboxList: vi.fn(), mailboxNotificationHint: vi.fn(),
 } }));
@@ -26,7 +26,7 @@ const task = { id: "task", title: "统一首屏加载", description: "目标：�
 beforeEach(() => {
   cleanup(); vi.resetAllMocks(); clearReadResources(); clearProjectCardsCache(); clearWorkstreamDetailCache(); clearProjectSummaryCache(); viewState.clear(); localStorage.clear();
   setPackageCatalogCache(null);
-  vi.mocked(api.getDefaultAgent).mockResolvedValue(null);
+  vi.mocked(api.getDefaultTool).mockResolvedValue(null);
   vi.mocked(api.getOperationStatus).mockResolvedValue([]);
   vi.mocked(api.getWorkstreamContext).mockResolvedValue({ workstream: task, projects: [] });
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({ task_id: "task", title: task.title, room: null, run: null, members: [] });

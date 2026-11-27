@@ -8,7 +8,7 @@ const KIND_LABELS: Record<NavigationItem["kind"], string> = {
   project: "项目",
   workstream: "任务",
   session: "会话",
-  agent: "Agent",
+  agent_tool: "运行工具",
   skill: "技能",
 };
 
@@ -16,8 +16,8 @@ function destination(item: NavigationItem): Route | null {
   switch (item.kind) {
     case "project": return { view: "project", projectId: item.ref_id, initialTitle: item.title };
     case "workstream": return { view: "workstream", workstreamId: item.ref_id, initialTitle: item.title };
-    case "session": return { view: "session", sessionId: item.ref_id, initialTitle: item.title, initialAgent: item.agent ?? undefined };
-    case "agent": return item.agent ? { view: "agents", agent: item.agent } : null;
+    case "session": return { view: "session", sessionId: item.ref_id, initialTitle: item.title, initialTool: item.agent ?? undefined };
+    case "agent_tool": return item.agent ? { view: "agent-tools", agent: item.agent } : null;
     case "skill": return { view: "skill", resourceId: item.ref_id, initialTitle: item.title };
   }
 }
@@ -76,8 +76,8 @@ export default function CommandPalette({ onClose, navigate }: {
           aria-controls="navigation-results"
           aria-expanded="true"
           aria-activedescendant={items[selected] ? `navigation-result-${selected}` : undefined}
-          aria-label="查找项目、任务、会话、Agent 或技能"
-          placeholder="查找项目、任务、会话、Agent 或技能…"
+          aria-label="查找项目、任务、会话、运行工具 或技能"
+          placeholder="查找项目、任务、会话、运行工具 或技能…"
           value={q}
           onChange={(e) => { setQ(e.target.value); setSelected(0); }}
           onKeyDown={(e) => {
@@ -108,8 +108,8 @@ export default function CommandPalette({ onClose, navigate }: {
         </div>
         {!result && !failed && <div className="palette-empty" role="status">正在查找…</div>}
         {failed && <div className="palette-empty" role="alert">查找失败。<button className="btn small ghost" onClick={() => setAttempt(a => a + 1)}>重试</button></div>}
-        {result && items.length === 0 && <div className="palette-empty">没有匹配的项目、任务、会话、Agent 或技能。</div>}
-        {result && items.length > 0 && !query && <div className="palette-empty">最近会话与 Agent；输入名称或目录查找其他对象。</div>}
+        {result && items.length === 0 && <div className="palette-empty">没有匹配的项目、任务、会话、运行工具 或技能。</div>}
+        {result && items.length > 0 && !query && <div className="palette-empty">最近会话与 运行工具；输入名称或目录查找其他对象。</div>}
         {result?.has_more && <div className="palette-empty">结果较多，请补充名称或目录缩小范围。</div>}
       </div>
     </div>

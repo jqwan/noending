@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readRuntimeCatalog, saveRuntimeCatalog, removeRuntimeCatalog } from "./runtimeCatalog";
 import { api } from "../../api";
-import type { Agent, AgentRuntimeDiscovery, AgentRuntimeSettings } from "../../types";
+import type { AgentTool, AgentRuntimeDiscovery, AgentRuntimeSettings } from "../../types";
 
-const generations = new Map<Agent, number>();
-const pending = new Map<Agent, Promise<AgentRuntimeDiscovery>>();
+const generations = new Map<AgentTool, number>();
+const pending = new Map<AgentTool, Promise<AgentRuntimeDiscovery>>();
 const CACHE_MS = 5 * 60 * 1000;
 
 /** Re-detection invalidates advisory data without touching saved overrides. */
-export function clearRuntimeCatalog(agent?: Agent) {
+export function clearRuntimeCatalog(agent?: AgentTool) {
   removeRuntimeCatalog(agent);
   for (const item of agent ? [agent] : [...pending.keys()]) {
     generations.set(item, (generations.get(item) ?? 0) + 1);
@@ -17,9 +17,9 @@ export function clearRuntimeCatalog(agent?: Agent) {
 }
 
 /** Catalogs are advisory, persisted for immediate display, and refreshed only on user action. */
-export function useAgentRuntime(agent: Agent, enabled = true) {
+export function useAgentRuntime(agent: AgentTool, enabled = true) {
   const [loaded, setLoaded] = useState<AgentRuntimeSettings | null>(null);
-  const [catalog, setCatalog] = useState<{ agent: Agent; value: AgentRuntimeDiscovery } | null>(null);
+  const [catalog, setCatalog] = useState<{ agent: AgentTool; value: AgentRuntimeDiscovery } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const current = useRef(agent);
@@ -32,7 +32,7 @@ export function useAgentRuntime(agent: Agent, enabled = true) {
     if (!enabled) return;
     let cancelled = false;
     setError("");
-    api.getAgentRuntimeSettings(agent).then((value) => {
+    api.getToolRuntimeSettings(agent).then((value) => {
       if (!cancelled) setLoaded(value);
     }).catch((e) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
@@ -52,7 +52,7 @@ export function useAgentRuntime(agent: Agent, enabled = true) {
     try {
       let request = pending.get(agent);
       if (!request) {
-        request = api.refreshAgentRuntimeOptions(agent);
+        request = api.refreshToolRuntimeOptions(agent);
         pending.set(agent, request);
         void request.finally(() => { if (pending.get(agent) === request) pending.delete(agent); }).catch(() => {});
       }

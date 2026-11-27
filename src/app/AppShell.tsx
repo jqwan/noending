@@ -45,7 +45,7 @@ function sameRoute(a: Route, b: Route): boolean {
   if (left.view === "terminal" && right.view === "terminal") return left.terminalId === right.terminalId;
   if (left.view === "project" && right.view === "project") {
     return left.projectId === right.projectId && left.entry === right.entry
-      && Boolean(left.fromAssistants) === Boolean(right.fromAssistants);
+      && Boolean(left.fromAgents) === Boolean(right.fromAgents);
   }
   if (left.view === "workstream" && right.view === "workstream") return left.workstreamId === right.workstreamId;
   return JSON.stringify(left) === JSON.stringify(right);

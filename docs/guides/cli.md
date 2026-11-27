@@ -2,7 +2,7 @@
 
 数据命令独立打开 NoEnding 数据库，复用桌面应用的业务模块，无需启动桌面应用；会话终端控制需同一 Home 的桌面应用正在运行。普通命令完成后退出，不自动扫描会话、技能或项目；协作室 `room join` 会维持本次参与的心跳进程，退出参与或协作停止后结束。`ne` 是短命令，`noending` 保留完整名称，子命令不使用缩写。输出为 JSON，日志不写入标准输出。
 
-Agent 也可以使用 `ne mcp serve [--home PATH]` 启动 stdio MCP 服务，直接调用同一业务能力。该服务保持连接期间运行，标准输出专供 MCP 协议；配置及工具见 [MCP 使用说明](mcp.md)。
+会话也可以使用 `ne mcp serve [--home PATH]` 启动 stdio MCP 服务，直接调用同一业务能力。该服务保持连接期间运行，标准输出专供 MCP 协议；配置及工具见 [MCP 使用说明](mcp.md)。
 
 ## 安装
 
@@ -29,7 +29,7 @@ Windows 使用 `ne.exe` 或 `noending.exe cli install --dir <目录>`，生成 `
 
 ## 内置技能
 
-桌面应用启动时在技能库提供统一的 `noending` 技能，默认不为 Agent 或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应 Agent 会话以加载。
+桌面应用启动时在技能库提供统一的 `noending` 技能，默认不为运行工具或项目启用。在项目详情的「配置技能」或技能详情中启用，也可配置用户级启用；之后新建或重新启动对应运行工具会话以加载。
 
 统一入口按请求选择记忆检索、任务管理、会话信箱和摘要提取参考，共用身份发现、访问入口及写入规则。检索不自动创建任务、发信或刷新摘要；后台委托提取和当前会话自主提取均保留。桌面应用只为终端控制等交互功能提供运行入口，数据操作可独立执行。
 
@@ -37,7 +37,7 @@ Windows 使用 `ne.exe` 或 `noending.exe cli install --dir <目录>`，生成 `
 
 应用更新只维护内置定义、操作参考及访问入口，保留其他支持文件；项目／用户级停用和删除源文件的卸载不会在重启时被恢复。存储位置变更后保留现有技能源和加载链接，更新它们访问的 Home。同名、未经应用管理的目录会保留，不自动覆盖。
 
-通过 NoEnding 新建或继续的终端 Agent 会话，默认使用各自的完全访问模式：Codex 使用 `--dangerously-bypass-approvals-and-sandbox`；Claude Code 使用 `--dangerously-skip-permissions`，并在支持沙箱的非 Windows 平台通过本次启动的 `--settings` 关闭沙箱；Antigravity 使用 `--dangerously-skip-permissions --sandbox=false`。Pi 原生按当前系统账户权限执行工具，无需额外权限参数。这些启动参数不依赖助手项目或记忆技能是否启用，不修改 Agent 的持久配置，也不改变后台摘要提取的权限策略。
+通过 NoEnding 新建或继续的终端会话，默认使用各自的完全访问模式：Codex 使用 `--dangerously-bypass-approvals-and-sandbox`；Claude Code 使用 `--dangerously-skip-permissions`，并在支持沙箱的非 Windows 平台通过本次启动的 `--settings` 关闭沙箱；Antigravity 使用 `--dangerously-skip-permissions --sandbox=false`。Pi 原生按当前系统账户权限执行工具，无需额外权限参数。这些启动参数不依赖助手项目或记忆技能是否启用，不修改运行工具的持久配置，也不改变后台摘要提取的权限策略。
 
 参数依据：[Codex CLI](https://developers.openai.com/codex/cli/reference)、[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) 与[沙箱说明](https://code.claude.com/docs/en/sandboxing)、[Antigravity CLI 权限](https://www.antigravity.google/docs/permissions?tab=cli)、[Pi 安全模型](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)。
 
@@ -50,7 +50,7 @@ ne freshness
 ne freshness --session <id>
 ne freshness --task <id>
 ne freshness --project <id>
-ne agent list
+ne runtime list
 ne project resolve
 ne project resolve --path /absolute/project/subdirectory
 ne session list --project <id> --scope all
@@ -58,7 +58,7 @@ ne session list --title "摘要" --path /absolute/path
 ne task list --title "任务名称"
 ne project list --path /absolute/path
 ne search --query "关键词" --project <id>
-ne session resolve --agent codex --native-id <原生线程id>
+ne session resolve --tool codex --native-id <原生线程id>
 ne session show <id>
 ne session summary <id>
 ne session summary <id> --item 2 --revision 3
@@ -78,7 +78,7 @@ ne project summary <id>
 
 三个列表的 --title 按标题或项目名称作不区分 ASCII 大小写的子串匹配，`%` 和 `_` 按原文匹配。--path 为绝对工作路径，匹配会话工作目录、任务关联目录或项目任一目录；不递归包含子目录。
 
-`ne search` 跨会话搜索标题、关联背景和当前历史消息，复用 FTS5 及无匹配时的字面子串回退。支持 --project、--agent 和 --scope（默认 unarchived）。返回 session_id，消息命中还包含 message_id 对应的 ref_id 和当前 sequence，可用 session messages --from/--to 读取上下文。分页按相关度及稳定 ID 排序，使用 next_cursor 时保持过滤条件。搜索结果随数据库变化，不是固定快照；阅读固定消息历史仍使用下面的消息分页。
+`ne search` 跨会话搜索标题、关联背景和当前历史消息，复用 FTS5 及无匹配时的字面子串回退。支持 --project、--tool 和 --scope（默认 unarchived）。返回 session_id，消息命中还包含 message_id 对应的 ref_id 和当前 sequence，可用 session messages --from/--to 读取上下文。分页按相关度及稳定 ID 排序，使用 next_cursor 时保持过滤条件。搜索结果随数据库变化，不是固定快照；阅读固定消息历史仍使用下面的消息分页。
 
 `session messages` 默认返回最近 8 条已同步消息，可用 `--limit` 指定每页条数（1～50）。每页内按消息编号从旧到新排列，下一页是更早的消息。指定 `--from` 或 `--to` 时，按编号范围从旧到新分页，包含指定端点。未指定的起点和终点分别是 1 和查询时的最新编号。提供当前 Home 中的 NoEnding 会话 ID 即可查询。
 
@@ -90,28 +90,30 @@ ne project summary <id>
 
 `ne project resolve` 使用命令进程的当前目录，`--path` 可指定其他已存在的绝对目录。依次匹配当前目录和最近的已登记父目录；相同物理目录的路径别名也可识别，不修改数据库里的路径标识。遇到独立 Git 仓库边界时不继续归入外层项目；未登记的 worktree 可通过已有 Git common dir 身份找到项目，不按项目名称或远程 URL 猜测。
 
-返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。命中登记的智能体档案目录时，返回 `assistant.id` 和 `assistant.archive_directory`。智能体标识来自档案目录 UUID，项目和任务操作仍使用各自的 ID。
+返回 `found`、`query_path`、`project`、`matched_path`、`matched_by` 和 `reason`。`matched_by` 为 `exact_path`、`physical_path`、`ancestor_path` 或 `git_family`。项目包含归档状态，已归档项目也可定位。未匹配时 `found=false`，包括未登记、未知仓库边界或物理路径映射到多个不同项目等情况；不存在的目录返回参数错误。查询不注册目录、创建项目、发现并摄入会话或改写归属，需要注册时显式执行 `ne path register`。命中登记的智能体档案目录时，返回 `agent.id` 和 `agent.archive_directory`。智能体标识来自档案目录 UUID，项目和任务操作仍使用各自的 ID。
 
-## Agent 可用性与提取配置
+## 运行工具可用性与提取配置
+
+用 `ne runtime list` 查看 Codex 等运行工具。会话和摘要相关命令通过 `--tool` 指定运行工具。要查找有长期身份和信箱的智能体，请用 `ne agent list`。
 
 ```sh
-ne agent list
+ne runtime list
 ne summary config show
-ne summary config set --agent codex --model gpt-6-luna --effort high
-ne summary config set --agent pi --provider lmstudio --model local-model
+ne summary config set --tool codex --model gpt-6-luna --effort high
+ne summary config set --tool pi --provider lmstudio --model local-model
 ne summary config set --model ""
-ne summary config set --agent none
+ne summary config set --tool none
 ```
 
-`agent list` 单独查询当前机器，返回各 Agent 的 `supports_cli`、`cli_available`、可执行文件路径、可读取的版本、`supports_extraction` 和可覆盖的运行字段。`supports_cli` 表示 NoEnding 提供可调用的 CLI 入口；有些适配器仅摄入历史，不提供这个入口。`cli_available` 仅表示本机找到可执行文件，不证明已登录、模型可用或远程请求会成功；查询只做本地版本探测，不调用模型，不改写检测缓存或提取配置。
+`runtime list` 单独查询当前机器，返回各运行工具的 `supports_cli`、`cli_available`、可执行文件路径、可读取的版本、`supports_extraction` 和可覆盖的运行字段。`supports_cli` 表示 NoEnding 提供可调用的 CLI 入口；有些适配器仅摄入历史，不提供这个入口。`cli_available` 仅表示本机找到可执行文件，不证明已登录、模型可用或远程请求会成功；查询只做本地版本探测，不调用模型，不改写检测缓存或提取配置。
 
-`summary config show/set` 复用设置页的提取配置。`set` 只修改提供的字段；切换 Agent 时先清除旧 Agent 的运行参数，再应用本次参数，同一 Agent 的别名不视为切换。模型、provider 和 effort 传空字符串恢复 Agent 默认值。`--agent none` 停用提取；不能同时设置非空运行参数。当前提取支持 Codex、Claude Code、Pi 和 Antigravity（`agy`），参数字段遵守各自能力约束。允许预先保存尚未安装的 Agent 配置，不自动选择其他 Agent；实际提取仍会重新检查 CLI 并报告调用结果。保存配置本身不触发同步或提取。
+`summary config show/set` 复用设置页的提取配置。`set` 只修改提供的字段；切换运行工具时先清除旧运行工具的运行参数，再应用本次参数，同一运行工具的别名不视为切换。模型、provider 和 effort 传空字符串恢复运行工具默认值。`--tool none` 停用提取；不能同时设置非空运行参数。当前提取支持 Codex、Claude Code、Pi 和 Antigravity（`agy`），参数字段遵守各自能力约束。允许预先保存尚未安装的运行工具配置，不自动选择其他运行工具；实际提取仍会重新检查 CLI 并报告调用结果。保存配置本身不触发同步或提取。
 
 Antigravity 后台提取使用已登录的 `agy`，通过其终端沙箱调用 NoEnding CLI。平台要求见 [Antigravity CLI 沙箱说明](https://antigravity.google/docs/sandbox?tab=cli)。
 
-`session resolve --agent AGENT --native-id NATIVE_ID` 按 Agent 与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`agent`、标题、项目 `project_id` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。Agent 名称与 `agent list` 一致，接受已有别名，例如 `claude`。
+`session resolve --tool TOOL --native-id NATIVE_ID` 按运行工具与原生主会话／线程 ID 精确查询当前 Home，包含已归档会话。返回 `id`（NoEnding 会话 ID）、`native_id`、`tool`、标题、项目 `project_id` 及会话时间等元数据；后续查询、写入及 `--from-session` 使用返回的 `id`。运行工具名称与 `runtime list` 一致，接受已有别名，例如 `claude`。
 
-此查询无需桌面在线，不扫描、不启动终端，也不自动同步；尚未摄入或 Home 不匹配时返回 `not_found`。应由调用方明确传入自己的原生身份，不读取 MCP 服务进程的会话环境来猜测调用者，也不按目录、标题或最新活动推断。Codex 使用线程 ID，文件名中回退版本的后缀 ID 不是独立会话身份；内部子 Agent 的 ID 不自动映射为主会话。
+此查询无需桌面在线，不扫描、不启动终端，也不自动同步；尚未摄入或 Home 不匹配时返回 `not_found`。应由调用方明确传入自己的原生身份，不读取 MCP 服务进程的会话环境来猜测调用者，也不按目录、标题或最新活动推断。Codex 使用线程 ID，文件名中回退版本的后缀 ID 不是独立会话身份；内部子智能体 的 ID 不自动映射为主会话。
 
 ## 编辑与归档
 
@@ -146,8 +148,8 @@ path register 要求目录已存在且为绝对路径，不创建磁盘目录，
 这些命令需要同一 Home 的桌面应用运行，只控制 NoEnding 内嵌终端：
 
 ```sh
-ne session new --agent codex --cwd /absolute/project --message "开始工作"
-ne session new --agent pi --cwd /absolute/project --file prompt.txt
+ne session new --tool codex --cwd /absolute/project --message "开始工作"
+ne session new --tool pi --cwd /absolute/project --file prompt.txt
 ne session identity
 ne session terminals --session SESSION_ID
 ```
@@ -158,10 +160,10 @@ ne session terminals --session SESSION_ID
 
 ## 会话信箱
 
-所有会话都能收信，包括没有终端 TUI 的 Agent。信箱持久化，数据命令无需桌面运行：
+所有会话都能收信，包括来自无终端入口的工具的会话。信箱持久化，数据命令无需桌面运行：
 
 ```sh
-ne session resolve --agent codex --native-id NATIVE_ID
+ne session resolve --tool codex --native-id NATIVE_ID
 ne mailbox send --session RECIPIENT --from-session SELF --file message.txt --request-id unique-id
 # 可选请求立即通知；省略或 false 时遵循普通自动查信提醒规则
 ne mailbox send --session RECIPIENT --from-session SELF --message "请查收新的信息" --notify-immediately true
@@ -175,7 +177,7 @@ ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 
 `wait` 在没有未读时由服务端持续等待，不返回周期性空结果：调用时已有未读立即返回 `status=messages`，否则等到新消息、取消、会话删除（`not_found`）或可选 `--timeout` 到期（`status=timeout`）。返回体与 `list` 的未读分页同构；等待、返回和取消都不改动已读状态，继续分页用 `list --cursor`，随后显式标记。等待跨进程可用、无需桌面运行，也不阻塞其他进程写信。宿主工具超时属于客户端限制：需要与宿主时限对齐时传入 `--timeout`，收到 `timeout` 视为继续等待，可再次调用；只有用户明确要求持续监听时才循环等待，普通查信不自动进入永久监听。
 
-发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 发信必须显式提供有效来源会话，内嵌终端也不能省略 `--from-session` / `from_session`，不能使用 user、external 或匿名来源。内嵌终端先用 `session identity` 查询自身会话，外部 Agent 用宿主原生 ID 解析；内嵌终端发信时，后端以实际绑定覆盖传入的来源，外部调用则使用并校验传入 ID。标记消息时，内嵌终端仍可省略来源，由绑定确定，显式来源与绑定冲突则拒绝；共享 MCP 调用显式提供已确认的来源。不按目录猜测身份，会话 ID 用于本地关联，不是认证凭证。
+发件人只有用户和会话 ID。用户消息由界面发送；CLI/MCP 发信必须显式提供有效来源会话，内嵌终端也不能省略 `--from-session` / `from_session`，不能使用 user、external 或匿名来源。内嵌终端先用 `session identity` 查询自身会话，外部运行工具用宿主原生 ID 解析；内嵌终端发信时，后端以实际绑定覆盖传入的来源，外部调用则使用并校验传入 ID。标记消息时，内嵌终端仍可省略来源，由绑定确定，显式来源与绑定冲突则拒绝；共享 MCP 调用显式提供已确认的来源。不按目录猜测身份，会话 ID 用于本地关联，不是认证凭证。
 
 会话不能给自己发信，按后端实际采用的发件身份判断；用户界面发信不受此限制。发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
 
@@ -183,27 +185,27 @@ ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 
 右侧栏只显示未读，模型标记已读后自动移除；会话详情展示全部消息，可点击查看完整正文，或点「写信」向本次对话发信。自动查信提醒关闭时用户可以在右侧栏编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
 
-收发和标记的 Agent 操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
+收发和标记的运行工具操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标运行工具作用域启用；短提醒本身不能保证未接入 CLI/MCP 的运行工具自动查收。
 
-## 智能体信箱
+## 智能体名录与信箱
 
-智能体详情页可以直接写信。即使当前没有打开对话，信件也会保存到这个智能体的信箱。同一档案的对话可以查阅来信，以当前版本接手。用户可以指定接手对话、转交或放回待处理。不同智能体的信箱按 `assistant.id` 区分，改名后地址保持有效。
+智能体详情页可以直接写信。即使当前没有打开对话，信件也会保存到这个智能体的信箱。同一档案的对话可以查阅来信，以当前版本接手。用户可以指定接手对话、转交或放回待处理。不同智能体的信箱按 `agent.id` 区分，改名后地址保持有效。
 
 ```sh
-ne assistant list
-ne assistant list --name "协调"
-ne assistant show ASSISTANT_ID
-ne assistant self
-ne assistant-mailbox send --assistant ASSISTANT_ID --message "请核对交付"
-ne assistant-mailbox list --state pending
-ne assistant-mailbox claim --message-id LETTER_ID --revision N
+ne agent list
+ne agent list --name "协调"
+ne agent show AGENT_ID
+ne agent self
+ne agent-mailbox send --agent AGENT_ID --message "请核对交付"
+ne agent-mailbox list --state pending
+ne agent-mailbox claim --message-id LETTER_ID --revision N
 ```
 
-`ne assistant list` 返回同一 Home 内未归档智能体的 `id` 和 `name`。`--name` 按名称片段匹配，忽略大小写，重名的匹配结果都会返回。用返回的 ID 投递，或通过 `ne assistant show` 查阅公开名片和自我介绍。名录和名片无需会话凭证。
+`ne agent list` 返回同一 Home 内未归档智能体的 `id` 和 `name`。`--name` 按名称片段匹配，忽略大小写，重名的匹配结果都会返回。用返回的 ID 投递，或通过 `ne agent show` 查阅公开名片和自我介绍。名录和名片无需会话凭证。
 
-`ne assistant self` 和信箱操作需要运行中的 NoEnding 桌面端签发的会话凭证。内嵌终端自动继承。收发信时后台验证真实会话，旧的 `--from-session` 参数只用于核对。读或处理智能体来信时默认使用自己的档案。兼容的 `--assistant` 参数也必须指向同一档案。智能体档案对话使用普通会话信箱时，同样验证会话身份。
+`ne agent self` 和信箱操作需要运行中的 NoEnding 桌面端签发的会话凭证。内嵌终端自动继承。收发信时后台验证真实会话，旧的 `--from-session` 参数只用于核对。读或处理智能体来信时默认使用自己的档案。兼容的 `--agent` 参数也必须指向同一档案。智能体档案对话使用普通会话信箱时，同样验证会话身份。
 
-CLI 和 MCP 的智能体信箱写入回执按来源会话隔离。在同一会话中查询 `request show` 或重试写入。来信和投递回执可以包含 `sender_assistant_id`，发件对话属于某个智能体时，用它给该智能体回信。智能体项目的重命名、归档和恢复由桌面端执行。
+CLI 和 MCP 的智能体信箱写入回执按来源会话隔离。在同一会话中查询 `request show` 或重试写入。来信和投递回执可以包含 `sender_agent_id`，发件对话属于某个智能体时，用它给该智能体回信。智能体项目的重命名、归档和恢复由桌面端执行。
 
 `read` 查看正文和版本，`mark-read` 确认查阅，`release` 放回待处理，`complete` 标为已处理。写入需要实际读取到的 `revision`，同一操作重试可沿用 `--request-id`。本阶段由智能体对话主动查阅。发给特定对话的信与协作邀请仍使用会话地址。
 
@@ -255,7 +257,7 @@ ne summary update project <id>
 
 ## 任务事项
 
-任务描述仍为一个可由用户编辑的文本字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符。目标说明问题和预期结果，必要的范围与验收要求融入其中；现状说明已核实的整体阶段、主要缺口或关键阻碍。Agent 按用户明确要求调整目标，在重要阶段变化时融合更新现状，保留用户确定的要求，不逐轮追加。任务事项保存实际进展、验证结果和待解决的问题。协作摘要保存该任务协作室的重要共识、原因、依赖和交接背景。任务事项仅作提取背景，保持独立存储，摘要提取不会改变它们或成员已读位置。需要长期稳定保留的执行要求写入描述或任务事项。
+任务描述仍为一个可由用户编辑的文本字段，按“目标：”“现状：”两段组织，每段通常一两句，整体建议不超过 300 字符。目标说明问题和预期结果，必要的范围与验收要求融入其中；现状说明已核实的整体阶段、主要缺口或关键阻碍。会话按用户明确要求调整目标，在重要阶段变化时融合更新现状，保留用户确定的要求，不逐轮追加。任务事项保存实际进展、验证结果和待解决的问题。协作摘要保存该任务协作室的重要共识、原因、依赖和交接背景。任务事项仅作提取背景，保持独立存储，摘要提取不会改变它们或成员已读位置。需要长期稳定保留的执行要求写入描述或任务事项。
 
 追加单条进展使用 `task item note`，无需读取后重写全部细则，也无需 revision。后端在当前值上事务性追加，保留已有细则并递增事项版本。重试沿用同一 request_id，避免重复追加；需要融合、修正或精简整份进展时，读取最新细则和 revision 后用 update 替换。追加不自动整理重复内容，不将一条新记录误作完整细则提交。
 
@@ -271,14 +273,14 @@ ne task item delete TASK_ID --item-id ITEM_ID --revision 3
 
 每个任务事项包含 `id`、`task_id`、`title`、`description`、`details`、`revision`、`created_at`、`updated_at`。列表返回全部事项。桌面任务详情按最近更新排序，支持新增、编辑和二次确认删除，外部修改自动刷新。任务归档保留事项，永久删除任务时一并删除。
 
-完整编辑和删除使用该任务事项的 revision（note 无需版本），不使用摘要版本或事项序号。版本冲突先重新读取；相同写操作重试保持 request-id 和全部参数。不会改动摘要、消息消费位置或其他任务事项，不启动或通知 Agent。
+完整编辑和删除使用该任务事项的 revision（note 无需版本），不使用摘要版本或事项序号。版本冲突先重新读取；相同写操作重试保持 request-id 和全部参数。不会改动摘要、消息消费位置或其他任务事项，不启动会话或发送通知。
 
 ## 记忆更新状态
 
-`ne freshness` 读取全部已登记来源和本机已入库会话的检查状态；`--session`、`--task`、`--project` 三选一，查询对应范围及摘要覆盖。查询不扫描文件、不调用模型，包含已归档会话。项目返回所有来源的扫描状态，因为新会话可能来自尚无该项目记录的 Agent；会话返回自身所属来源。任务范围返回协作摘要覆盖。未登记来源的会话仍可查询单会话状态。
+`ne freshness` 读取全部已登记来源和本机已入库会话的检查状态；`--session`、`--task`、`--project` 三选一，查询对应范围及摘要覆盖。查询不扫描文件、不调用模型，包含已归档会话。项目返回所有来源的扫描状态，因为新会话可能来自尚无该项目记录的运行工具；会话返回自身所属来源。任务范围返回协作摘要覆盖。未登记来源的会话仍可查询单会话状态。
 
 - `all_sources` 是最近一次全部来源同步的观察；`sources[].check` 是各来源扫描状态；`session_check` 只在单会话查询中提供。单会话同步不更新来源或全部来源时间，单来源同步不更新全部来源时间。
-- `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装 Agent 的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。
+- `started_at` / `finished_at` 记录最近已结束检查；`outcome` 为 `success`、`partial`、`failed`、`missing`、`cancelled` 或未知。`checked_at` 是最近成功检查的起始时间，采用保守观察边界；成功但无新消息也推进，失败保留之前的成功时间。它不保证之后源文件没有继续变化。未安装运行工具的默认路径可显示 `missing`，全部来源因此可为 `partial`，不代表已经摄入的数据丢失。
 - `sessions` 汇总范围内会话数量、曾成功检查数、从未成功检查数、最近检查失败／来源缺失数，以及成功检查时间的最早／最晚值；这些计数可交叉，曾成功检查的会话也可能最近失败。查询不验证当前磁盘状态。
 - `summary` 与普通摘要读取返回的 `freshness` 含义相同。`refreshed_at` 是最近成功提取并提交的时间（含保留摘要但确认材料已处理的跳过结果）；`updated_at` 表示摘要记录的更新时间，覆盖状态仍需结合消费位置判断。
 - `pending_messages` 是已入库、尚未被目标摘要消费的 user/assistant 消息数，按会话去重，不是长消息分页块数或工具事件数。协作摘要统计房间消息；项目按自身消费位置计算，单独刷新子会话摘要不会将项目计数归零。新关联会话的未覆盖消息也计入，因此它不等同于按时间统计“刚刚新产生”的消息。
@@ -318,13 +320,13 @@ ne request show create-task-1
 
 默认按 `NOENDING_HOME`、应用保存的当前存储位置、默认存储目录依次定位数据，`--home <目录>` 可明确指定 Home；待迁移位置由桌面启动处理，CLI 不执行目录搬迁。桌面、CLI 和 MCP 共用数据库身份、基线、格式版本及开发结构检查入口；不兼容时保留数据并返回错误。格式版本独立于应用版本，只在承诺兼容的发布中递增；本地开发结构调整按 AGENTS.md 的草案规则处理。桌面或 CLI 使用数据目录期间会持有共享锁，目录迁移必须等待这些进程释放访问。`--connection <文件>` 仅用于提取查询，不能用于普通业务命令。
 
-后台提取为 Agent 提供完整可执行文件路径及一次性连接，通过 `extraction inputs/read/search/submit` 查询本次材料并主动提交。每次提交由后端校验、保存并返回回执。CLI 退出状态用于诊断运行结果。
+后台提取为运行工具提供完整可执行文件路径及一次性连接，通过 `extraction inputs/read/search/submit` 查询本次材料并主动提交。每次提交由后端校验、保存并返回回执。CLI 退出状态用于诊断运行结果。
 
 事项定位优先使用稳定 ID：CLI 在现有 `--item NUMBER` 的位置改传 `--item-id ITEM_ID`；MCP 在 `item` 的位置改传 `item_id`，两者不能同时提供。读取单个摘要事项需要当前摘要 `revision`。序号仍只属于对应摘要版本。摘要查询返回事项 ID；提取延续事项保留原有 ID，新事项由 NoEnding 分配 ID。ID 不代替并发版本检查，已删除或被合并掉的 ID 不再有效。
 
 ## 当前会话自主提取
 
-启用 `noending` 后，当前 Agent 可自行完成提取，不调用设置中的其他 Agent，桌面应用无需运行：
+启用 `noending` 后，当前会话可自行完成提取，不调用设置中的其他运行工具，桌面应用无需运行：
 
 ```sh
 ne summary context session <id> --mode update
@@ -340,6 +342,6 @@ ne summary submit <context_id> --file result.json --request-id extraction-1
 
 `summary submit` 每次提交一个目标。项目提取按 `pending_sessions` 逐个读取并提交，在文件中携带 `session_id`，`results` 仅包含对应的 `session-ID`。会话全部处理完才可读取并提交项目汇总，提交时省略 `session_id`，结果键为 `project-ID`。已提交的会话摘要会在中断后保留。具体回包及跳过、失败规则见[摘要提交协议](../../src-tauri/skills/noending/references/extraction-protocol.md)。
 
-`summary update/regenerate` 另行启动配置中的 Agent，由该会话通过专用连接提交。项目返回 `partial` 时，当前项目摘要仍待汇总，`updated_sessions` 列出已保存的会话，`remaining_session_summaries` 是仍待更新摘要的会话数。`remaining_pending` 还包含已更新但尚未汇入项目的会话。会话失败原因可在提取日志中查看。
+`summary update/regenerate` 另行启动配置中的运行工具，由该会话通过专用连接提交。项目返回 `partial` 时，当前项目摘要仍待汇总，`updated_sessions` 列出已保存的会话，`remaining_session_summaries` 是仍待更新摘要的会话数。`remaining_pending` 还包含已更新但尚未汇入项目的会话。会话失败原因可在提取日志中查看。
 
 `task summary` 返回协作摘要，`processed_through_seq` 为已整理的房间消息位置，`pending_messages` 为未整理消息数；不表示成员已读。项目摘要仍供用户阅读，独立于协作摘要。

@@ -1,6 +1,6 @@
-import type { Agent, AgentRuntimeSettings } from "../../types";
+import type { AgentTool, AgentRuntimeSettings } from "../../types";
 /** Deterministic mock of the backend settings contract, used by UI regressions. */
-export function runtimeFixture(agent: Agent = "codex"): AgentRuntimeSettings {
+export function runtimeFixture(agent: AgentTool = "codex"): AgentRuntimeSettings {
   return {
     agent, detected: true, executable: `/bin/${agent}`, version: "test",
     overrides: { model: "saved-model", provider: null, effort: "high" },

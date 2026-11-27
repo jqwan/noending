@@ -1,12 +1,12 @@
 //! Shared object identity matching for boards and navigation.
-use crate::{domain::Agent, error::Result, storage::Db};
+use crate::{domain::AgentTool, error::Result, storage::Db};
 use rusqlite::{params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
-    Agent,
+    AgentTool,
     Project,
     Session,
     Workstream,
@@ -33,10 +33,12 @@ impl ObjectQuery {
             lower: query.to_lowercase(),
         }
     }
-    pub fn agent_rank(&self, agent: Agent) -> Option<i64> {
+    pub fn tool_rank(&self, agent: AgentTool) -> Option<i64> {
         let label = agent.display_name().to_lowercase();
         let id = agent.as_str();
-        if self.lower.is_empty() || label == self.lower || Agent::parse(&self.lower) == Some(agent)
+        if self.lower.is_empty()
+            || label == self.lower
+            || AgentTool::parse(&self.lower) == Some(agent)
         {
             Some(0)
         } else if label.starts_with(&self.lower) || id.starts_with(&self.lower) {
@@ -75,7 +77,7 @@ pub(super) fn predicate(kind: ObjectKind) -> &'static str {
         ObjectKind::Project=>"(p.name LIKE ?1 ESCAPE '!' OR EXISTS(SELECT 1 FROM workspace_paths wp WHERE wp.project_id=p.id AND wp.canonical_path LIKE ?1 ESCAPE '!'))",
         ObjectKind::Workstream=>"w.title LIKE ?1 ESCAPE '!'",
         ObjectKind::Session=>"(s.title LIKE ?1 ESCAPE '!' OR s.cwd LIKE ?1 ESCAPE '!' OR s.id LIKE ?2 ESCAPE '!' OR s.root_agent_session_id LIKE ?2 ESCAPE '!')",
-        ObjectKind::Agent=>unreachable!("Agent names come from the roster"),
+        ObjectKind::AgentTool=>unreachable!("AgentTool names come from the roster"),
         ObjectKind::Skill=>unreachable!("Skill names come from the catalog"),
     }
 }
@@ -94,11 +96,11 @@ pub fn matching_ids(
         return Ok(Vec::new());
     }
     let parsed = ObjectQuery::new(query);
-    if kind == ObjectKind::Agent {
-        return Ok(Agent::all()
+    if kind == ObjectKind::AgentTool {
+        return Ok(AgentTool::all()
             .iter()
             .filter(|a| {
-                candidate_ids.iter().any(|id| id == a.as_str()) && parsed.agent_rank(**a).is_some()
+                candidate_ids.iter().any(|id| id == a.as_str()) && parsed.tool_rank(**a).is_some()
             })
             .map(|a| a.as_str().to_string())
             .collect());
@@ -117,7 +119,7 @@ pub fn matching_ids(
         ObjectKind::Project => ("projects", "p"),
         ObjectKind::Workstream => ("workstreams", "w"),
         ObjectKind::Session => ("sessions", "s"),
-        ObjectKind::Agent | ObjectKind::Skill => unreachable!(),
+        ObjectKind::AgentTool | ObjectKind::Skill => unreachable!(),
     };
     let empty = query.trim().is_empty();
     let mut values = Vec::<Value>::new();

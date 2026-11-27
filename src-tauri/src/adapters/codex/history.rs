@@ -51,7 +51,7 @@ fn header(path: &Path) -> Result<Option<Value>> {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if crate::adapters::fingerprint_line(&v) == Some(Agent::Codex)
+        if crate::adapters::fingerprint_line(&v) == Some(AgentTool::Codex)
             && v["type"] == "session_meta"
         {
             return Ok(Some(v["payload"].clone()));
@@ -106,8 +106,8 @@ impl Rollout {
     }
 }
 
-/// Search only the Agent's transcript roots. Explicit/custom transcript roots
-/// use their own directory; standard date subdirectories share the Agent root.
+/// Search only the agent tool's transcript roots. Explicit/custom transcript roots
+/// use their own directory; standard date subdirectories share the agent tool root.
 pub(super) fn roots_for(path: &Path) -> Vec<PathBuf> {
     for parent in path.ancestors() {
         if parent

@@ -39,7 +39,7 @@ const modules = {
   "projects": deferredRoute(() => import("../features/projects/ProjectsView")),
   "project": deferredRoute(() => import("../features/projects/ProjectDetail")),
   "settings": deferredRoute(() => import("../features/settings/SettingsView")),
-  "agents": deferredRoute(() => import("../features/agents/AgentsView")),
+  "agent-tools": deferredRoute(() => import("../features/agent-tools/AgentToolsView")),
   "skills": deferredRoute(() => import("../features/skills/SkillsView")),
   "skill": deferredRoute(() => import("../features/skills/SkillDetailView")),
   "packages": deferredRoute(() => import("../features/packages/PackagesView")),
@@ -56,7 +56,7 @@ const SessionTerminalView = modules["terminal"].View;
 const ProjectsView = modules["projects"].View;
 const ProjectDetail = modules["project"].View;
 const SettingsView = modules["settings"].View;
-const AgentsView = modules["agents"].View;
+const AgentToolsView = modules["agent-tools"].View;
 const SkillsView = modules["skills"].View;
 const SkillDetailView = modules["skill"].View;
 const PackagesView = modules["packages"].View;
@@ -69,7 +69,7 @@ export function prepareRouteModule(route: Route) {
 
 export function preloadCommonRoutes() {
   for (const module of Object.values(modules)) void module.preload()?.catch(() => {});
-  void import("../features/agents/agentsCache").then(m => m.preloadAgentsCache()).catch(() => {});
+  void import("../features/agent-tools/agentToolsCache").then(m => m.preloadAgentToolsCache()).catch(() => {});
 }
 
 export default function Router({ route, navigate, goBack, actionSeq }: {
@@ -136,7 +136,7 @@ function renderRoute(
           key={route.sessionId}
           sessionId={route.sessionId}
           initialTitle={route.initialTitle ?? sessionDetailCache.get(route.sessionId)?.session.title ?? undefined}
-          initialAgent={route.initialAgent ?? sessionDetailCache.get(route.sessionId)?.session.agent}
+          initialTool={route.initialTool ?? sessionDetailCache.get(route.sessionId)?.session.agent}
           initialTotal={route.initialTotal}
           navigate={navigate}
         />
@@ -145,7 +145,7 @@ function renderRoute(
           key={route.sessionId}
           sessionId={route.sessionId}
           initialTitle={route.initialTitle ?? sessionDetailCache.get(route.sessionId)?.session.title ?? undefined}
-          initialAgent={route.initialAgent ?? sessionDetailCache.get(route.sessionId)?.session.agent}
+          initialTool={route.initialTool ?? sessionDetailCache.get(route.sessionId)?.session.agent}
           navigate={navigate}
         />
       );
@@ -155,17 +155,17 @@ function renderRoute(
           key={route.terminalId}
           terminalId={route.terminalId}
           initialTitle={route.initialTitle}
-          initialAgent={route.initialAgent}
+          initialTool={route.initialTool}
           initialSessionId={route.initialSessionId}
           navigate={navigate}
         />
       );
     case "projects":
-      return <ProjectsView key={route.assistantOnly ? "assistants" : "projects"} navigate={navigate} scope={route.scope} assistantOnly={route.assistantOnly} />;
+      return <ProjectsView key={route.agentOnly ? "agents" : "projects"} navigate={navigate} scope={route.scope} agentOnly={route.agentOnly} />;
     case "project":
-      return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} entry={route.entry} fromAssistants={route.fromAssistants} />;
-    case "agents":
-      return <AgentsView key={route.agent ?? "overview"} navigate={navigate} initialAgent={route.agent} />;
+      return <ProjectDetail key={route.projectId} projectId={route.projectId} initialTitle={route.initialTitle ?? projectDetailCache.get(route.projectId)?.project.name} navigate={navigate} entry={route.entry} fromAgents={route.fromAgents} />;
+    case "agent-tools":
+      return <AgentToolsView key={route.agent ?? "overview"} navigate={navigate} initialTool={route.agent} />;
     case "skills":
       return <SkillsView key={route.projectId ?? "user"} initialProjectId={route.projectId} navigate={navigate} />;
     case "skill":

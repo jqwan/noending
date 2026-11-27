@@ -5,7 +5,7 @@
 use super::{
     files, gemini_dir, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState,
 };
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 
 pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<PackageEntry> {
@@ -80,7 +80,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
                 .unwrap_or_default();
             entries.push(PackageEntry {
                 id: files::key(format!("package:antigravity:{}", root.display())),
-                agent: Some(Agent::Antigravity),
+                agent: Some(AgentTool::Antigravity),
                 name: name.to_string(),
                 version: version.to_string(),
                 description: manifest

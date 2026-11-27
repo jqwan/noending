@@ -1,6 +1,6 @@
-//! Agent Adapter layer.
+//! agent tool Adapter layer.
 //!
-//! Each adapter owns its Agent's data-dir layout, formats, member identity,
+//! Each adapter owns its agent tool's data-dir layout, formats, member identity,
 //! resume parameters and new-session invocation. Upper layers must never
 //! reference `~/.codex` / `~/.claude` / `~/.pi` directly — that is
 //! PlatformPaths' job.
@@ -22,10 +22,10 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::domain::{
-    Agent, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
+    AgentTool, ParsedSessionMessage, Session, SessionMessageRole, SourceAvailability, SourceCursor,
 };
 use crate::error::{other, Result};
-use crate::platform::exec_resolver::AgentInstallation;
+use crate::platform::exec_resolver::AgentToolInstallation;
 
 /// Declarative command produced by an adapter; execution is delegated to
 /// the PlatformLauncher so OS differences stay out of adapters.
@@ -34,13 +34,13 @@ use crate::platform::exec_resolver::AgentInstallation;
 /// order); the payload is always the literal string, never a shell
 /// expression. The Platform layer owns how argv is safely quoted.
 #[derive(Debug, Clone)]
-pub struct AgentCommand {
+pub struct AgentToolCommand {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
 }
 
-impl AgentCommand {
+impl AgentToolCommand {
     /// Human-readable rendering for diagnostics / LaunchResult.
     pub fn display(&self) -> String {
         let mut parts = vec![self.program.clone()];
@@ -81,8 +81,8 @@ impl DiscoveredMemberKind {
 /// One discovered execution member before ingestion.
 #[derive(Debug, Clone)]
 pub struct DiscoveredMember {
-    pub agent: Agent,
-    /// Adapter-stable execution identity. Not required to equal the Agent's
+    pub agent: AgentTool,
+    /// Adapter-stable execution identity. Not required to equal the agent tool's
     /// native session id — e.g. Qoder subagent transcripts repeat the
     /// parent id, so the adapter derives `root-id:subagent:<file-stem>`.
     pub source_member_id: String,
@@ -122,8 +122,7 @@ impl DiscoveredMember {
 }
 
 /// Options for a headless ("exec"/print-mode) invocation of the agent CLI.
-/// The Workspace Assistant uses these to run intelligence through the
-/// user's already-authenticated agent CLIs.
+/// NoEnding uses these to run headless commands through the user's authenticated CLI.
 #[derive(Debug, Clone, Default)]
 pub struct ExecOptions {
     pub model: Option<String>,
@@ -155,7 +154,7 @@ impl ExecOptions {
 
     /// Audit rendering of what NoEnding will actually pass: `agent-default`
     /// means no runtime flag at all, so a record can never be read as
-    /// "NoEnding chose this model" when the Agent did.
+    /// "NoEnding chose this model" when the agent tool did.
     pub fn override_summary(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(m) = &self.model {
@@ -315,12 +314,12 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<f64> {
 /// Returns None when the file is not a recognizable session file of any known
 /// agent — including genuinely ambiguous content, which must be left unclaimed
 /// rather than guessed at.
-pub fn detect_format(path: &Path) -> Option<Agent> {
+pub fn detect_format(path: &Path) -> Option<AgentTool> {
     let file = std::fs::File::open(path).ok()?;
     detect_format_reader(std::io::BufReader::new(file))
 }
 
-pub(crate) fn detect_format_reader(reader: impl BufRead) -> Option<Agent> {
+pub(crate) fn detect_format_reader(reader: impl BufRead) -> Option<AgentTool> {
     const MAX_PARSE_LINES: usize = 10;
     let mut parsed = 0usize;
     for line in reader.lines() {
@@ -343,7 +342,7 @@ pub(crate) fn detect_format_reader(reader: impl BufRead) -> Option<Agent> {
     None
 }
 
-fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
+fn fingerprint_line(v: &serde_json::Value) -> Option<AgentTool> {
     if !v.is_object() {
         return None;
     }
@@ -355,14 +354,14 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
                 && p.get("cwd").is_some_and(serde_json::Value::is_string)
         })
     {
-        return Some(Agent::Codex);
+        return Some(AgentTool::Codex);
     }
     // Codex desktop envelope: {ordinal, payload, type} on every line.
     if v.get("ordinal").is_some()
         && v.get("payload").map(|p| p.is_object()).unwrap_or(false)
         && v.get("type").is_some()
     {
-        return Some(Agent::Codex);
+        return Some(AgentTool::Codex);
     }
     // Qoder BEFORE Claude, and deliberately so: its transcript is
     // Claude-shaped, so every Qoder message line would satisfy the Claude
@@ -379,14 +378,14 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
             | Some("worktree-state")
             | Some("active-leaf")
     ) {
-        return Some(Agent::Qoder);
+        return Some(AgentTool::Qoder);
     }
     // Claude event chain: sessionId plus the parentUuid/uuid pair.
     // Housekeeping lines (mode, permission-mode, atis-latch — a 2.1.x
     // transcript HEAD is exactly those) carry sessionId alone and are
     // deliberately not decisive.
     if v.get("sessionId").is_some() && (v.get("parentUuid").is_some() || v.get("uuid").is_some()) {
-        return Some(Agent::ClaudeCode);
+        return Some(AgentTool::ClaudeCode);
     }
     // WorkBuddy: no session header, and unlike pi the message payload is NOT
     // nested — `role` / `content` sit at the top level next to `type`. Its
@@ -403,25 +402,25 @@ fn fingerprint_line(v: &serde_json::Value) -> Option<Agent> {
         .map(serde_json::Value::is_number)
         .unwrap_or(false)
     {
-        return Some(Agent::WorkBuddy);
+        return Some(AgentTool::WorkBuddy);
     }
     if v.get("type").and_then(|t| t.as_str()) == Some("message")
         && v.get("role").is_some()
         && v.get("content").map(|c| c.is_array()).unwrap_or(false)
     {
-        return Some(Agent::WorkBuddy);
+        return Some(AgentTool::WorkBuddy);
     }
     // Pi: self-describing session header, or event lines with a parentId
     // plus one of the pi-specific fields.
     if v.get("type").and_then(|t| t.as_str()) == Some("session") && v.get("id").is_some() {
-        return Some(Agent::Pi);
+        return Some(AgentTool::Pi);
     }
     if v.get("parentId").is_some()
         && ["provider", "modelId", "thinkingLevel"]
             .iter()
             .any(|k| v.get(*k).is_some())
     {
-        return Some(Agent::Pi);
+        return Some(AgentTool::Pi);
     }
     None
 }
@@ -796,19 +795,19 @@ pub(crate) fn str_field<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a s
 }
 
 /// The Continue route the launcher takes for a session's ROOT member.
-/// Adapters decide per member: one Agent can be CLI-resumable for one store
+/// Adapters decide per member: one agent tool can be CLI-resumable for one store
 /// and app-only (or unsupported) for another (Antigravity).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeRoute {
     /// Build and run the terminal CLI command (`build_resume_command`).
     Terminal,
-    /// Open the Agent's desktop app on this deep link instead.
+    /// Open the agent tool's desktop app on this deep link instead.
     Desktop(DesktopResume),
     /// No viable Continue: refuse with this user-facing reason.
     Refused(String),
 }
 
-/// Opening a session in the Agent's own desktop app: the Continue route for
+/// Opening a session in the agent tool's own desktop app: the Continue route for
 /// sessions whose CLI cannot resume them. `note` is user-facing Chinese,
 /// rendered verbatim in the resume preview — an app activation that does NOT
 /// land on the conversation must say so.
@@ -821,14 +820,14 @@ pub struct DesktopResume {
 }
 
 pub trait AgentAdapter: Send + Sync {
-    fn agent(&self) -> Agent;
+    fn tool(&self) -> AgentTool;
 
     /// CLI detect() via ExecutableResolver + data-dir presence.
-    fn detect(&self) -> Option<AgentInstallation>;
+    fn detect(&self) -> Option<AgentToolInstallation>;
 
-    /// Bound a default Agent data directory to its conversation stores.
+    /// Bound a default agent tool data directory to its conversation stores.
     /// Custom sources bypass this mapping, so an explicit transcript directory
-    /// never needs to match the Agent's normal installation layout.
+    /// never needs to match the agent tool's normal installation layout.
     fn default_discovery_roots(&self, data_root: &Path) -> Vec<PathBuf> {
         vec![data_root.to_path_buf()]
     }
@@ -891,16 +890,16 @@ pub trait AgentAdapter: Send + Sync {
     /// Build the command line for a New Session.
     ///
     /// NoEnding never injects Context at launch: the command carries only the
-    /// launch facts (Agent, cwd, runtime overrides) and an optional first user
+    /// launch facts (agent tool, cwd, runtime overrides) and an optional first user
     /// message as the final argv element. A missing runtime override must
-    /// produce no corresponding CLI argument, so the Agent's own
+    /// produce no corresponding CLI argument, so the agent tool's own
     /// configuration stays untouched and unguessed.
     fn build_new_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         cwd: Option<&Path>,
-    ) -> Result<AgentCommand>;
+    ) -> Result<AgentToolCommand>;
 
     /// Whether this CLI accepts a prespecified session id for a NEW session
     /// (claude `--session-id`, pi `--session-id`). Only then does the launcher
@@ -914,46 +913,46 @@ pub trait AgentAdapter: Send + Sync {
 
     fn build_resume_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
-    ) -> Result<AgentCommand>;
+    ) -> Result<AgentToolCommand>;
 
     /// An explicitly supplied follow-up for a newly resumed terminal. New-session
     /// ExecOptions never implicitly carry their first message into Resume.
     fn build_resume_message_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
         message: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         if message.is_some_and(|text| !text.trim().is_empty()) {
-            return Err(crate::error::other("此 Agent 不支持继续会话时附带消息"));
+            return Err(crate::error::other("此 运行工具 不支持继续会话时附带消息"));
         }
         self.build_resume_command(install, opts, agent_session_id, cwd, source_path)
     }
 
     /// Desktop app display name (also its bundle name on macOS).
-    /// `None` means this Agent has no desktop surface.
+    /// `None` means this agent tool has no desktop surface.
     fn desktop_app_name(&self) -> Option<&'static str> {
         None
     }
 
     /// Registered URI scheme used to activate the desktop surface.
     fn desktop_app_scheme(&self) -> Option<&'static str> {
-        match self.agent() {
-            Agent::Codex => Some("codex"),
-            Agent::Qoder => Some("qoder-cn"),
-            Agent::WorkBuddy => Some("workbuddy"),
-            Agent::Dsh => Some("dsh"),
-            Agent::ZCode => Some("zcode"),
-            Agent::Antigravity => Some("antigravity"),
-            Agent::ClaudeCode | Agent::Pi => None,
+        match self.tool() {
+            AgentTool::Codex => Some("codex"),
+            AgentTool::Qoder => Some("qoder-cn"),
+            AgentTool::WorkBuddy => Some("workbuddy"),
+            AgentTool::Dsh => Some("dsh"),
+            AgentTool::ZCode => Some("zcode"),
+            AgentTool::Antigravity => Some("antigravity"),
+            AgentTool::ClaudeCode | AgentTool::Pi => None,
         }
     }
 
@@ -964,15 +963,15 @@ pub trait AgentAdapter: Send + Sync {
         }
     }
 
-    /// Whether NoEnding supports starting terminal sessions for this Agent.
+    /// Whether NoEnding supports starting terminal sessions for this agent tool.
     /// Defaults to the presence of CLI candidates; adapters with management-only
     /// CLI integration must override this separately.
     fn has_terminal_cli(&self) -> bool {
-        !crate::platform::exec_resolver::cli_names(self.agent()).is_empty()
+        !crate::platform::exec_resolver::cli_names(self.tool()).is_empty()
     }
 
     /// How Continue surfaces for THIS member's session. `Terminal` keeps the
-    /// CLI path; `Desktop` opens the Agent's own app (only when the app is
+    /// CLI path; `Desktop` opens the agent tool's own app (only when the app is
     /// actually present on this machine — a missing app must refuse, never
     /// dispatch a deep link into nothing); `Refused` states the reason.
     fn continue_route(&self, _session: &Session) -> ResumeRoute {
@@ -997,22 +996,22 @@ pub trait AgentAdapter: Send + Sync {
     /// The returned command is executed by platform::exec_runner.
     fn build_exec_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &ExecOptions,
         prompt: &str,
-    ) -> Result<AgentCommand>;
+    ) -> Result<AgentToolCommand>;
 
     /// Build the isolated command used only for explicit Context extraction.
-    /// Adapters must opt in so an unsupported Agent can never silently run an
-    /// ordinary assistant command in the extraction runtime directory.
+    /// Adapters must opt in so an unsupported agent tool can never silently run an
+    /// ordinary headless command in the extraction runtime directory.
     fn build_context_extraction_command(
         &self,
-        _install: &AgentInstallation,
+        _install: &AgentToolInstallation,
         _opts: &ExecOptions,
         _prompt: &str,
         _runtime_dir: &Path,
-    ) -> Result<AgentCommand> {
-        Err(other("该 Agent 不支持 Context 提取"))
+    ) -> Result<AgentToolCommand> {
+        Err(other("该 运行工具 不支持 Context 提取"))
     }
 }
 
@@ -1029,7 +1028,7 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
-/// Default sources describe Agent data roots; user sources describe exactly
+/// Default sources describe agent tool data roots; user sources describe exactly
 /// the directory the user selected. Keep this distinction shared by automatic,
 /// explicit, full and native-fallback discovery.
 pub fn source_discovery_roots(source: &crate::domain::IngestSource) -> Vec<PathBuf> {
@@ -1041,12 +1040,12 @@ pub fn source_discovery_roots(source: &crate::domain::IngestSource) -> Vec<PathB
     }
 }
 
-pub fn adapter_for(agent: Agent) -> &'static dyn AgentAdapter {
+pub fn adapter_for(agent: AgentTool) -> &'static dyn AgentAdapter {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<Vec<Box<dyn AgentAdapter>>> = OnceLock::new();
     let reg = REGISTRY.get_or_init(all_adapters);
     for a in reg {
-        if a.agent() == agent {
+        if a.tool() == agent {
             // Safe: registry outlives 'static and elements are never removed.
             return unsafe { &*(a.as_ref() as *const dyn AgentAdapter) };
         }
@@ -1318,7 +1317,7 @@ mod context_extraction_command_tests {
 
     #[test]
     fn context_commands_use_isolated_cwd_ephemeral_flags_and_runtime_overrides() {
-        let install = |agent| AgentInstallation {
+        let install = |agent| AgentToolInstallation {
             agent,
             executable_path: "/usr/bin/agent-cli".into(),
             version: None,
@@ -1328,7 +1327,7 @@ mod context_extraction_command_tests {
 
         for (agent, opts, expected) in [
             (
-                Agent::Codex,
+                AgentTool::Codex,
                 ExecOptions {
                     model: Some("model-codex".into()),
                     effort: Some("high".into()),
@@ -1344,7 +1343,7 @@ mod context_extraction_command_tests {
                 ],
             ),
             (
-                Agent::ClaudeCode,
+                AgentTool::ClaudeCode,
                 ExecOptions {
                     model: Some("model-claude".into()),
                     effort: Some("high".into()),
@@ -1363,7 +1362,7 @@ mod context_extraction_command_tests {
                 ],
             ),
             (
-                Agent::Pi,
+                AgentTool::Pi,
                 ExecOptions {
                     model: Some("model-pi".into()),
                     provider: Some("provider-pi".into()),
@@ -1403,15 +1402,15 @@ mod context_extraction_command_tests {
                 .unwrap();
             assert_eq!(
                 ordinary.cwd, None,
-                "ordinary Assistant exec keeps its old cwd policy"
+                "ordinary headless execution keeps its old cwd policy"
             );
             match agent {
-                Agent::Codex => assert!(!ordinary.args.iter().any(|arg| arg == "--ephemeral")),
-                Agent::ClaudeCode => assert!(!ordinary
+                AgentTool::Codex => assert!(!ordinary.args.iter().any(|arg| arg == "--ephemeral")),
+                AgentTool::ClaudeCode => assert!(!ordinary
                     .args
                     .iter()
                     .any(|arg| arg == "--no-session-persistence")),
-                Agent::Pi => {
+                AgentTool::Pi => {
                     assert!(ordinary.args.iter().any(|arg| arg == "--no-session"));
                     assert!(ordinary.args.iter().any(|arg| arg == "--no-tools"));
                 }
@@ -1432,14 +1431,14 @@ mod fingerprint_tests {
             "ordinal": 0, "type": "session_meta", "timestamp": "t",
             "payload": {"session_id": "s", "cwd": "/x"}
         });
-        assert_eq!(fingerprint_line(&codex), Some(Agent::Codex));
+        assert_eq!(fingerprint_line(&codex), Some(AgentTool::Codex));
 
         // Claude: event chain line (parentUuid may be null on the first one)
         let claude = serde_json::json!({
             "type": "user", "sessionId": "s", "uuid": "u", "parentUuid": null,
             "message": {"role": "user", "content": []}
         });
-        assert_eq!(fingerprint_line(&claude), Some(Agent::ClaudeCode));
+        assert_eq!(fingerprint_line(&claude), Some(AgentTool::ClaudeCode));
 
         // Claude housekeeping lines are NOT decisive on their own
         let queue_op = serde_json::json!({
@@ -1450,12 +1449,12 @@ mod fingerprint_tests {
         // Pi: self-describing session header, or provider/modelId/thinkingLevel lines
         let pi_header =
             serde_json::json!({"type": "session", "id": "p1", "cwd": "/x", "version": 3});
-        assert_eq!(fingerprint_line(&pi_header), Some(Agent::Pi));
+        assert_eq!(fingerprint_line(&pi_header), Some(AgentTool::Pi));
         let pi_event = serde_json::json!({
             "type": "message", "id": "m1", "parentId": "p1",
             "provider": "openai", "modelId": "m"
         });
-        assert_eq!(fingerprint_line(&pi_event), Some(Agent::Pi));
+        assert_eq!(fingerprint_line(&pi_event), Some(AgentTool::Pi));
 
         // Anything else (including foreign tools' exports) is not a session
         let other = serde_json::json!({"hello": "world", "data": [1, 2, 3]});
@@ -1471,7 +1470,7 @@ mod fingerprint_tests {
         let qoder = serde_json::json!({
             "type": "workspace-directories", "sessionId": "s", "directories": ["/repo"]
         });
-        assert_eq!(fingerprint_line(&qoder), Some(Agent::Qoder));
+        assert_eq!(fingerprint_line(&qoder), Some(AgentTool::Qoder));
         // `last-prompt` is written by BOTH qoder and Claude Code 2.1.x, so it
         // decides nothing — a bare one claims nobody.
         let last_prompt = serde_json::json!({"type": "last-prompt", "sessionId": "s"});
@@ -1485,7 +1484,10 @@ mod fingerprint_tests {
             "type": "user", "sessionId": "s", "uuid": "u", "parentUuid": null,
             "message": {"role": "user", "content": []}
         });
-        assert_eq!(fingerprint_line(&claude_shaped), Some(Agent::ClaudeCode));
+        assert_eq!(
+            fingerprint_line(&claude_shaped),
+            Some(AgentTool::ClaudeCode)
+        );
 
         // A whole Qoder file (head included) resolves to Qoder.
         let dir = std::env::temp_dir().join(format!("noending-fp-qoder-{}", std::process::id()));
@@ -1500,7 +1502,7 @@ mod fingerprint_tests {
             ),
         )
         .unwrap();
-        assert_eq!(detect_format(&path), Some(Agent::Qoder));
+        assert_eq!(detect_format(&path), Some(AgentTool::Qoder));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1515,16 +1517,16 @@ mod fingerprint_tests {
             "role": "user", "content": [{"type": "input_text", "text": "hi"}],
             "sessionId": "s", "cwd": "/repo"
         });
-        assert_eq!(fingerprint_line(&msg), Some(Agent::WorkBuddy));
+        assert_eq!(fingerprint_line(&msg), Some(AgentTool::WorkBuddy));
 
         let title = serde_json::json!({
             "timestamp": 1783137451207i64, "type": "ai-title", "aiTitle": "t", "sessionId": "s"
         });
-        assert_eq!(fingerprint_line(&title), Some(Agent::WorkBuddy));
+        assert_eq!(fingerprint_line(&title), Some(AgentTool::WorkBuddy));
         let snapshot = serde_json::json!({
             "timestamp": 1783137449152i64, "type": "file-history-snapshot", "sessionId": "s"
         });
-        assert_eq!(fingerprint_line(&snapshot), Some(Agent::WorkBuddy));
+        assert_eq!(fingerprint_line(&snapshot), Some(AgentTool::WorkBuddy));
 
         // Claude Code 2.1.x writes the SAME two line types, but bare — no
         // timestamp at all (its real head is exactly these shapes). The
@@ -1547,7 +1549,7 @@ mod fingerprint_tests {
             "type": "message", "id": "m1", "parentId": "p1", "provider": "openai",
             "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}
         });
-        assert_eq!(fingerprint_line(&pi_event), Some(Agent::Pi));
+        assert_eq!(fingerprint_line(&pi_event), Some(AgentTool::Pi));
     }
 
     /// A Claude Code 2.1.x transcript HEAD is four bookkeeping lines (mode →
@@ -1584,7 +1586,7 @@ mod fingerprint_tests {
                 + "\n",
         )
         .unwrap();
-        assert_eq!(detect_format(&path), Some(Agent::ClaudeCode));
+        assert_eq!(detect_format(&path), Some(AgentTool::ClaudeCode));
         std::fs::write(&path, head.join("\n")).unwrap();
         assert_eq!(detect_format(&path), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1600,11 +1602,11 @@ mod fingerprint_tests {
     /// Code's line shapes and are therefore claimed by nobody —
     /// and a file nobody claims is not a misattribution.
     #[test]
-    #[ignore = "requires real local Agent history; fails when no member is discovered"]
+    #[ignore = "requires real local AgentTool history; fails when no member is discovered"]
     fn real_agent_files_match_fingerprints() {
         use crate::platform::paths::resolve_agent_data_dir;
         let mut checked = 0;
-        for agent in Agent::all() {
+        for agent in AgentTool::all() {
             let Some(root) = resolve_agent_data_dir(*agent) else {
                 continue;
             };

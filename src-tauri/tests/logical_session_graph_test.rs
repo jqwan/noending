@@ -10,7 +10,7 @@ mod support;
 use std::path::{Path, PathBuf};
 
 use noending::adapters::all_adapters;
-use noending::domain::{Agent, ParsedSessionMessage, Session, SessionMessageRole};
+use noending::domain::{AgentTool, ParsedSessionMessage, Session, SessionMessageRole};
 use noending::ingestion;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
@@ -84,7 +84,7 @@ fn open_db(tag: &str) -> Db {
 
 /// Register exactly one Codex ingest source pointing at `root`.
 fn register_codex_source(db: &Db, root: &Path) {
-    db.add_ingest_source(Agent::Codex, &root.to_string_lossy())
+    db.add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
         .unwrap();
 }
 
@@ -109,16 +109,16 @@ fn all_registered_sources_sync_and_pick_up_appended_messages() {
         std::fs::create_dir_all(dir).unwrap();
     }
     let source = db
-        .add_ingest_source(Agent::Codex, &codex.to_string_lossy())
+        .add_ingest_source(AgentTool::Codex, &codex.to_string_lossy())
         .unwrap();
-    db.add_ingest_source(Agent::Codex, &other.to_string_lossy())
+    db.add_ingest_source(AgentTool::Codex, &other.to_string_lossy())
         .unwrap();
-    db.add_ingest_source(Agent::Pi, &pi.to_string_lossy())
+    db.add_ingest_source(AgentTool::Pi, &pi.to_string_lossy())
         .unwrap();
     // A fresh computer normally has configured defaults for agents that have
     // never written history. Missing roots must not block the valid sources.
-    for agent in Agent::all() {
-        if !matches!(agent, Agent::Codex | Agent::Pi) {
+    for agent in AgentTool::all() {
+        if !matches!(agent, AgentTool::Codex | AgentTool::Pi) {
             db.add_ingest_source(
                 *agent,
                 &root.join("absent").join(agent.as_str()).to_string_lossy(),
@@ -159,11 +159,11 @@ fn all_registered_sources_sync_and_pick_up_appended_messages() {
     assert!(report.failures.is_empty(), "{:?}", report.failures);
     assert_eq!((report.discovered, report.messages), (3, 3));
     let codex_session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     let pi_session = db
-        .find_session_by_root_agent_id(Agent::Pi, "pi-native")
+        .find_session_by_root_agent_id(AgentTool::Pi, "pi-native")
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -196,7 +196,7 @@ fn all_registered_sources_sync_and_pick_up_appended_messages() {
     assert_eq!(db.message_count(&codex_session.id).unwrap(), 2);
     assert_eq!(db.message_count(&pi_session.id).unwrap(), 2);
     assert_eq!(
-        db.find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        db.find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
             .unwrap()
             .unwrap()
             .id,
@@ -217,7 +217,7 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
         let db = open_db("root-transaction");
         if existing {
             db.upsert_logical_session(
-                Agent::Codex,
+                AgentTool::Codex,
                 ROOT_ID,
                 Some("original title"),
                 None,
@@ -233,7 +233,7 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
             .unwrap();
         }
         let before = db
-            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
             .unwrap();
         // The session INSERT/UPDATE succeeds before indexing reaches the missing table.
         db.write()
@@ -241,7 +241,7 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
             .unwrap();
         assert!(db
             .upsert_logical_session(
-                Agent::Codex,
+                AgentTool::Codex,
                 ROOT_ID,
                 Some("changed title"),
                 None,
@@ -256,7 +256,7 @@ fn logical_session_create_and_refresh_roll_back_when_search_indexing_fails() {
             )
             .is_err());
         let after = db
-            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
             .unwrap();
         assert_eq!(
             serde_json::to_value(after).unwrap(),
@@ -314,13 +314,13 @@ fn a_root_discovered_in_a_later_batch_still_becomes_the_session() {
     assert_eq!(sessions.len(), 1, "exactly one Logical Session");
     assert_eq!(sessions[0].root_agent_session_id, ROOT_ID);
     assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        db.find_session_by_root_agent_id(AgentTool::Codex, CHILD_ID)
             .unwrap()
             .is_none(),
         "a skipped child never becomes a session"
     );
     assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, SIDE_ID)
+        db.find_session_by_root_agent_id(AgentTool::Codex, SIDE_ID)
             .unwrap()
             .is_none(),
         "a skipped side thread never becomes a session"
@@ -368,7 +368,7 @@ fn child_transcript_text_never_becomes_conversation() {
     // Every stored message belongs to the root's own session.
     assert!(messages.iter().all(|m| m.session_id == sessions[0].id));
     assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        db.find_session_by_root_agent_id(AgentTool::Codex, CHILD_ID)
             .unwrap()
             .is_none(),
         "a skipped child never becomes a session"
@@ -391,7 +391,7 @@ fn a_missing_root_does_not_fail_reconcile_and_resumes_when_it_returns() {
     reconcile(&db);
 
     let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     let cursor = db
@@ -506,7 +506,7 @@ fn a_child_rollout_never_moves_the_session() {
         "child cwd is execution fact, never Session.cwd — and the child has no row at all"
     );
     assert!(db
-        .find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, CHILD_ID)
         .unwrap()
         .is_none());
 }
@@ -569,7 +569,7 @@ fn a_growing_child_transcript_touches_nothing() {
         "a skipped child is not activity either"
     );
     assert!(db
-        .find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, CHILD_ID)
         .unwrap()
         .is_none());
 }
@@ -622,7 +622,7 @@ fn trash_does_not_freeze_discovery() {
     assert_eq!(current.cwd.as_deref(), Some("/repo-after-restore"));
     assert!(current.last_activity_at > session.last_activity_at);
     assert!(
-        db.find_session_by_root_agent_id(Agent::Codex, CHILD_ID)
+        db.find_session_by_root_agent_id(AgentTool::Codex, CHILD_ID)
             .unwrap()
             .is_none(),
         "a child rollout discovered while trashed is skipped like any other"
@@ -892,7 +892,7 @@ fn every_adapter_inspects_sources_without_panicking() {
     for adapter in all_adapters() {
         let session = Session {
             id: new_id(),
-            agent: adapter.agent(),
+            agent: adapter.tool(),
             root_agent_session_id: "no-such-source".into(),
             title: None,
             cwd: None,
@@ -936,7 +936,7 @@ fn seed_root(
 ) {
     let (session_id, _) = db
         .upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             ROOT_ID,
             None,
             Some("/repo-a"),
@@ -999,7 +999,7 @@ fn a_stored_root_is_never_re_homed_as_a_child() {
     register_codex_source(&db, &root_dir);
     reconcile(&db);
     let session_a = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
 
@@ -1024,13 +1024,13 @@ fn a_stored_root_is_never_re_homed_as_a_child() {
 
     // Session A survives, still keyed by its root identity — no ghost.
     let stored = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     assert_eq!(stored.id, session_a.id, "no re-home");
     // The new root still resolves as its own session.
     assert!(db
-        .find_session_by_root_agent_id(Agent::Codex, OTHER_ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, OTHER_ROOT_ID)
         .unwrap()
         .is_some());
 }
@@ -1044,7 +1044,7 @@ fn a_native_title_renames_and_a_fallback_title_only_fills() {
     let db = open_db("title-policy");
     let refresh = |db: &Db, native: Option<&str>, fallback: Option<&str>| {
         db.upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             "title-policy-root",
             native,
             fallback,
@@ -1058,7 +1058,7 @@ fn a_native_title_renames_and_a_fallback_title_only_fills() {
             &serde_json::json!({}),
         )
         .unwrap();
-        db.find_session_by_root_agent_id(Agent::Codex, "title-policy-root")
+        db.find_session_by_root_agent_id(AgentTool::Codex, "title-policy-root")
             .unwrap()
             .unwrap()
             .title
@@ -1115,7 +1115,7 @@ fn codex_compression_roundtrip_preserves_identity_context_and_activity() {
     register_codex_source(&db, &root);
     assert_eq!(reconcile(&db).1, 2);
     let before = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     let original_ids: Vec<_> = db
@@ -1231,7 +1231,7 @@ fn compressed_codex_discovery_append_and_damage_preserve_current_history() {
     register_codex_source(&db, &root);
     assert_eq!(reconcile(&db).1, 1);
     let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     use std::io::Write;
@@ -1286,7 +1286,7 @@ fn full_sync_rechecks_plain_and_compressed_content_even_when_metadata_is_unchang
         let root = temp_root("force-full-content");
         let db = open_db("force-full-content");
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
+            .add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
             .unwrap();
         let path = root.join(format!(
             "{}{}",
@@ -1318,7 +1318,7 @@ fn full_sync_rechecks_plain_and_compressed_content_even_when_metadata_is_unchang
         std::fs::write(&path, before).unwrap();
         reconcile(&db);
         let session = db
-            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
             .unwrap()
             .unwrap();
         let old = db.get_messages(&session.id, None, 10).unwrap()[0].clone();
@@ -1374,7 +1374,7 @@ fn source_retries_cover_old_sessions_outside_a_bounded_preview() {
     let root = temp_root("retry-old-session");
     let db = open_db("retry-old-session");
     let source = db
-        .add_ingest_source(Agent::Codex, &root.to_string_lossy())
+        .add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
         .unwrap();
     let path = write_rollout(
         &root,
@@ -1386,7 +1386,7 @@ fn source_retries_cover_old_sessions_outside_a_bounded_preview() {
     );
     reconcile(&db);
     let session = db
-        .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+        .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
         .unwrap()
         .unwrap();
     let old_message = db.get_messages(&session.id, None, 10).unwrap()[0].clone();
@@ -1430,7 +1430,7 @@ fn a_failed_full_sync_preserves_messages_and_cursor_after_discovery() {
         let root = temp_root("failed-full-after-discovery");
         let db = open_db("failed-full-after-discovery");
         let source = db
-            .add_ingest_source(Agent::Codex, &root.to_string_lossy())
+            .add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
             .unwrap();
         let path = root.join(format!(
             "{}{}",
@@ -1455,7 +1455,7 @@ fn a_failed_full_sync_preserves_messages_and_cursor_after_discovery() {
         write(&valid);
         reconcile(&db);
         let before = db
-            .find_session_by_root_agent_id(Agent::Codex, ROOT_ID)
+            .find_session_by_root_agent_id(AgentTool::Codex, ROOT_ID)
             .unwrap()
             .unwrap();
         let old = db.get_messages(&before.id, None, 10).unwrap()[0].clone();

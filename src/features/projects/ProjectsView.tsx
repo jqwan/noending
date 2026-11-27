@@ -11,7 +11,7 @@ import "../workstreams/workstreams.css";
 import { api } from "../../api";
 
 import PageHeader from "../../layout/PageHeader";
-import CreateAssistantModal from "../assistants/CreateAssistantModal";
+import CreateAgentModal from "../agents/CreateAgentModal";
 import EmptyState from "../../components/EmptyState";
 import { showToast } from "../../components/Toast";
 import { timeAgo, useRefreshSignal } from "../../components/common";
@@ -49,23 +49,23 @@ const SORTERS: Record<SortKey, (a: ProjectCardData, b: ProjectCardData) => numbe
 import { projectCardsCache, clearProjectCardsCache } from "./projectCardsCache";
 export { clearProjectCardsCache };
 
-export default function ProjectsView({ navigate, scope, assistantOnly = false }: {
+export default function ProjectsView({ navigate, scope, agentOnly = false }: {
   navigate: (r: Route) => void;
   scope?: "unarchived" | "archived";
-  assistantOnly?: boolean;
+  agentOnly?: boolean;
 }) {
   const archivedMode = scope === "archived";
-  const label = assistantOnly ? "智能体" : "项目";
-  const icon = assistantOnly ? "spark" : "project";
-  const board = assistantOnly ? "assistants" : "projects";
-  const scopeRoute = (scope: "unarchived" | "archived"): Route => ({ view: "projects", scope, ...(assistantOnly && { assistantOnly }) });
+  const label = agentOnly ? "智能体" : "项目";
+  const icon = agentOnly ? "spark" : "project";
+  const board = agentOnly ? "agents" : "projects";
+  const scopeRoute = (scope: "unarchived" | "archived"): Route => ({ view: "projects", scope, ...(agentOnly && { agentOnly }) });
   const openProject = (id: string, name: string) => navigate({
     view: "project", projectId: id, initialTitle: name,
-    ...(assistantOnly && { entry: "assistant", fromAssistants: true }),
+    ...(agentOnly && { entry: "agent", fromAgents: true }),
   });
   const [deleteTarget, setDeleteTarget] = useState<LifecycleProject | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-  const [creatingAssistant, setCreatingAssistant] = useState(false);
+  const [creatingAgent, setCreatingAgent] = useState(false);
   const [cards, setCards] = useState<ProjectCardData[] | null>(projectCardsCache.cards);
   const [listError, setListError] = useState("");
   const [query, setQuery] = useViewState(`${board}.query`, "");
@@ -125,7 +125,7 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
   };
 
   const scopedCards = useMemo(() => cards?.filter(c => c.visibility === (archivedMode ? "archived" : "normal")
-    && (!assistantOnly || c.is_assistant)) ?? null, [cards, archivedMode, assistantOnly]);
+    && (!agentOnly || c.is_agent)) ?? null, [cards, archivedMode, agentOnly]);
   const candidates = useMemo(() => scopedCards?.filter(FILTERS[filter])
       .filter((c) => effectiveKindFilter === "all" || c.kind === effectiveKindFilter) ?? null, [scopedCards, filter, effectiveKindFilter]);
   const candidateIds = useMemo(() => candidates?.map(item => item.id) ?? [], [candidates]);
@@ -141,7 +141,7 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
     if (deleteBusy) return;
     setDeleteBusy(true);
     try {
-      const result = assistantOnly
+      const result = agentOnly
         ? await api.deleteProjectPermanently(p.id, scopeRoute("archived"))
         : await api.deleteProjectPermanently(p.id);
       setDeleteTarget(null);
@@ -170,10 +170,10 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
             </div>}
         actions={<>
             {archivedMode ? (
-              <BulkProjectDeleteAction projects={scopedCards ?? []} label={assistantOnly ? "智能体项目" : "项目"}
-                replacement={assistantOnly ? scopeRoute("archived") : undefined} />
-            ) : assistantOnly ? (
-              <button className="btn ghost icon-button" aria-label="新建智能体" title="新建智能体" onClick={() => setCreatingAssistant(true)}>
+              <BulkProjectDeleteAction projects={scopedCards ?? []} label={agentOnly ? "智能体项目" : "项目"}
+                replacement={agentOnly ? scopeRoute("archived") : undefined} />
+            ) : agentOnly ? (
+              <button className="btn ghost icon-button" aria-label="新建智能体" title="新建智能体" onClick={() => setCreatingAgent(true)}>
                 <Icon name="plus" />
               </button>
             ) : (
@@ -294,7 +294,7 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
         {scopedCards?.length === 0 && (
           <EmptyState
             title={archivedMode ? `没有已归档${label}` : `还没有${label}`}
-            hint={archivedMode ? `归档的${label}会显示在这里。` : assistantOnly ? undefined : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
+            hint={archivedMode ? `归档的${label}会显示在这里。` : agentOnly ? undefined : "添加目录、打开会话或给任务添加工作路径后，项目会出现在这里。"}
           />
         )}
 
@@ -321,9 +321,9 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
                   onClick={() => openProject(c.id, c.name)}
                 >
                   <div className="project-list-title" title={c.name}>
-                    <Icon name={c.is_assistant ? "spark" : "project"} />
+                    <Icon name={c.is_agent ? "spark" : "project"} />
                     <span>{c.name}</span>
-                    {c.is_assistant && <span className="badge accent">智能体</span>}
+                    {c.is_agent && <span className="badge accent">智能体</span>}
                     {c.missing_path_count > 0 && isProjectAllPathsMissing(c) && (
                       <span className="badge warn">全部目录缺失</span>
                     )}
@@ -360,15 +360,15 @@ export default function ProjectsView({ navigate, scope, assistantOnly = false }:
       {deleteTarget && (
         <ProjectDeleteModal
           names={[deleteTarget.name]}
-          removesAssistantDirectories={deleteTarget.is_assistant}
+          removesAgentDirectories={deleteTarget.is_agent}
           busy={deleteBusy}
           onClose={() => { if (!deleteBusy) setDeleteTarget(null); }}
           onConfirm={() => void handleDeleteTarget(deleteTarget)}
         />
       )}
-      {creatingAssistant && !archivedMode && <CreateAssistantModal open onClose={() => setCreatingAssistant(false)}
+      {creatingAgent && !archivedMode && <CreateAgentModal open onClose={() => setCreatingAgent(false)}
         onCreated={(id, name) => {
-          setCreatingAssistant(false);
+          setCreatingAgent(false);
           clearProjectCardsCache();
           refresh();
           openProject(id, name);
@@ -396,9 +396,9 @@ function ProjectCard({ card, navigate, onOpen, onChanged, onRequestDelete }: {
       <div className="ws-card-head">
         <button type="button" className="ws-card-title project-card-open" title={card.name}
           aria-label={card.name} onClick={onOpen}>
-          <Icon name={card.is_assistant ? "spark" : "project"} />
+          <Icon name={card.is_agent ? "spark" : "project"} />
           <span className="truncate">{card.name}</span>
-          {card.is_assistant && <span className="badge accent">智能体</span>}
+          {card.is_agent && <span className="badge accent">智能体</span>}
         </button>
         {card.missing_path_count > 0 && isProjectAllPathsMissing(card) && (
           <div className="ws-card-side">

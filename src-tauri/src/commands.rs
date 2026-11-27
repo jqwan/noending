@@ -12,7 +12,7 @@ use crate::domain::*;
 use crate::error::{other, Result};
 use crate::storage::Db;
 
-pub mod assistant;
+pub mod agent;
 pub mod collaboration;
 pub mod ingestion;
 pub mod packages;
@@ -57,30 +57,30 @@ pub(crate) fn launch_workspace(app: &AppHandle) -> crate::launcher::LaunchWorksp
         .unwrap_or_default()
 }
 
-// ---------------- Default Agent ----------------
+// ---------------- Default agent tool ----------------
 
-const DEFAULT_AGENT_KEY: &str = "launcher.default_agent";
+const DEFAULT_TOOL_KEY: &str = "launcher.default_agent";
 
 #[tauri::command]
-pub fn get_default_agent(state: State<AppState>) -> Result<Option<String>> {
+pub fn get_default_tool(state: State<AppState>) -> Result<Option<String>> {
     with_db(&state, |db| {
-        Ok(default_agent_of(db)?.map(|a| a.as_str().to_string()))
+        Ok(default_tool_of(db)?.map(|a| a.as_str().to_string()))
     })
 }
 
-/// Settings → Default Agent. Resolution order: the user's explicit choice
+/// Settings → Default agent tool. Resolution order: the user's explicit choice
 /// stays authoritative even when currently undetected (the UI warns instead
 /// of silently substituting); without an explicit choice we fall back to the
 /// first detected agent; with no detected agent at all the default is None
 /// and New actions render disabled instead of failing at launch.
 /// Storage errors propagate — a broken DB must not masquerade as "no agent".
-pub fn default_agent_of(db: &Db) -> Result<Option<Agent>> {
-    if let Some(v) = db.get_setting(DEFAULT_AGENT_KEY)? {
-        if let Some(a) = Agent::parse(&v) {
+pub fn default_tool_of(db: &Db) -> Result<Option<AgentTool>> {
+    if let Some(v) = db.get_setting(DEFAULT_TOOL_KEY)? {
+        if let Some(a) = AgentTool::parse(&v) {
             return Ok(Some(a));
         }
     }
-    for a in Agent::all() {
+    for a in AgentTool::all() {
         if db.get_installation(*a)?.is_some() {
             return Ok(Some(*a));
         }
@@ -94,8 +94,8 @@ pub fn default_agent_of(db: &Db) -> Result<Option<Agent>> {
 /// being auto-selected as default agent.
 pub fn record_installation_probe(
     db: &Db,
-    agent: Agent,
-    resolved: Option<crate::platform::exec_resolver::AgentInstallation>,
+    agent: AgentTool,
+    resolved: Option<crate::platform::exec_resolver::AgentToolInstallation>,
 ) -> Result<()> {
     match resolved {
         Some(install) => db.save_installation(&install),
@@ -127,12 +127,12 @@ pub fn get_workstream_context_state(
     })
 }
 
-/// ONE user action → AT MOST ONE Agent invocation → one new Session Context.
+/// ONE user action → AT MOST ONE agent tool invocation → one new Session Context.
 /// Returns `updated`, `skipped` or `no_change`; a stale snapshot is an error.
 ///
 /// Async on purpose: the model call blocks for up to the configured CLI
 /// timeout, so the body goes through [`run_on_blocking_worker`] and the UI
-/// thread stays responsive (same seam as `refresh_agent_runtime_options`).
+/// thread stays responsive (same seam as `refresh_tool_runtime_options`).
 #[tauri::command]
 pub async fn update_session_context(
     app: AppHandle,
@@ -162,7 +162,7 @@ pub async fn regenerate_session_context(
     .and_then(|outcome| outcome)
 }
 
-/// ONE user action → AT MOST ONE Agent invocation → every affected Session Context AND
+/// ONE user action → AT MOST ONE agent tool invocation → every affected Session Context AND
 /// the task summary, committed atomically.
 #[tauri::command]
 pub async fn update_workstream_context(
@@ -194,7 +194,7 @@ pub async fn regenerate_workstream_context(
     .await?
 }
 
-/// Project summary reads never ingest or invoke an Agent.
+/// Project summary reads never ingest or invoke an agent tool.
 #[tauri::command]
 pub fn get_project_context_state(
     state: State<AppState>,
@@ -298,7 +298,7 @@ pub fn preview_new_session(
     cwd: Option<String>,
     runtime: Option<crate::agent_runtime::AgentRuntimeOverrides>,
 ) -> Result<crate::launcher::CwdResolution> {
-    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    let agent = AgentTool::parse(&agent).ok_or_else(|| other("未知 运行工具"))?;
     let launcher = crate::launcher::SessionLauncher;
     let workspace = launch_workspace(&app);
     let prepared = with_db(&state, |db| {
@@ -390,8 +390,8 @@ pub fn launch_embedded_resume(
 /// session in ONE step. The spawned terminal starts UNBOUND — the session
 /// does not exist until the TUI writes its file and ingestion discovers it,
 /// at which point an exact native identity binds the terminal
-/// and the board's pseudo-row becomes a real session. Agent lifecycle
-/// notifications enqueue ingestion for that Agent; spawning the terminal
+/// and the board's pseudo-row becomes a real session. agent tool lifecycle
+/// notifications enqueue ingestion for that agent tool; spawning the terminal
 /// itself does not enqueue a full reconcile.
 #[tauri::command]
 pub fn launch_embedded_new(
@@ -455,7 +455,7 @@ pub fn terminal_list(
 // ---------------- Clipboard paste → terminal ----------------
 
 /// Read non-empty clipboard text natively to avoid duplicate WebView pastes.
-/// Image clipboard handling belongs to the Agent TUI.
+/// Image clipboard handling belongs to the agent tool TUI.
 #[tauri::command]
 pub fn read_clipboard_for_terminal() -> Result<Option<String>> {
     let mut clipboard =
@@ -513,7 +513,7 @@ pub(crate) fn wake_mailbox_terminal(
         .ok_or_else(|| other("未获得会话终端"))
 }
 
-/// Explicitly restart the Agent for the terminal's current, verified Session.
+/// Explicitly restart the agent tool for the terminal's current, verified Session.
 /// Prepare validates archive/source/runtime state before touching the old PTY.
 #[tauri::command]
 pub fn terminal_reconnect(
@@ -686,7 +686,7 @@ pub fn add_ingest_source(
     agent: String,
     path: String,
 ) -> Result<IngestSourceView> {
-    let agent = Agent::parse(&agent).ok_or_else(|| other("未知 Agent"))?;
+    let agent = AgentTool::parse(&agent).ok_or_else(|| other("未知 运行工具"))?;
     crate::storage::ensure_not_empty("数据源路径", &path)?;
     let expanded = crate::platform::paths::expand_tilde(&path);
     let canonical = expanded.to_string_lossy().to_string();
@@ -740,10 +740,10 @@ pub async fn lookup_navigation(
     .await?
 }
 
-/// Presence-aware surface label for Settings: what this Agent's Continue can
+/// Presence-aware surface label for Settings: what this agent tool's Continue can
 /// target on THIS machine. A desktop surface counts only while the app is
 /// installed — an uninstalled app must not be advertised.
-pub fn surface_of(agent: Agent) -> &'static str {
+pub fn surface_of(agent: AgentTool) -> &'static str {
     let adapter = crate::adapters::adapter_for(agent);
     let desktop = adapter.desktop_app_present();
     match (adapter.has_terminal_cli(), desktop) {
@@ -755,9 +755,9 @@ pub fn surface_of(agent: Agent) -> &'static str {
 }
 
 #[tauri::command]
-pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
+pub fn get_tool_status(state: State<AppState>) -> Result<serde_json::Value> {
     let mut out = serde_json::Map::new();
-    for agent in Agent::all() {
+    for agent in AgentTool::all() {
         let install = with_db(&state, |db| db.get_installation(*agent))?;
         let surface = surface_of(*agent);
         // 设置页按启动面分组：能力是适配器的静态事实，在场是本机状态——
@@ -783,7 +783,7 @@ pub fn get_agent_status(state: State<AppState>) -> Result<serde_json::Value> {
 }
 
 #[tauri::command]
-pub async fn redetect_agent(
+pub async fn redetect_tool(
     state: State<'_, AppState>,
     agent: String,
 ) -> Result<AgentRuntimeSettings> {
@@ -800,17 +800,17 @@ pub async fn redetect_agent(
     .await?
 }
 
-// ---------------- Agent Runtime Configuration ----------------
+// ---------------- agent tool Runtime Configuration ----------------
 
-/// What Settings → Agents renders for one Agent: install state plus the
+/// What Settings → Agents renders for one agent tool: install state plus the
 /// override surface.
 ///
-/// `models` is empty in this payload: discovery spawns the Agent CLI, so it
-/// only ever runs through `refresh_agent_runtime_options`. A failed or absent
+/// `models` is empty in this payload: discovery spawns the agent tool CLI, so it
+/// only ever runs through `refresh_tool_runtime_options`. A failed or absent
 /// catalog never hides the saved override.
 #[derive(Serialize)]
 pub struct AgentRuntimeSettings {
-    pub agent: Agent,
+    pub agent: AgentTool,
     pub detected: bool,
     pub executable: Option<String>,
     pub version: Option<String>,
@@ -824,11 +824,11 @@ pub struct AgentRuntimeSettings {
     pub warnings: Vec<String>,
 }
 
-fn agent_of(s: &str) -> Result<Agent> {
-    Agent::parse(s).ok_or_else(|| other(format!("未知 Agent: {}", s)))
+fn agent_of(s: &str) -> Result<AgentTool> {
+    AgentTool::parse(s).ok_or_else(|| other(format!("未知 运行工具: {}", s)))
 }
 
-fn runtime_settings(db: &Db, agent: Agent) -> Result<AgentRuntimeSettings> {
+fn runtime_settings(db: &Db, agent: AgentTool) -> Result<AgentRuntimeSettings> {
     let install = db.get_installation(agent)?;
     Ok(AgentRuntimeSettings {
         agent,
@@ -846,7 +846,7 @@ fn runtime_settings(db: &Db, agent: Agent) -> Result<AgentRuntimeSettings> {
 }
 
 #[tauri::command]
-pub fn get_agent_runtime_settings(
+pub fn get_tool_runtime_settings(
     state: State<AppState>,
     agent: String,
 ) -> Result<AgentRuntimeSettings> {
@@ -867,23 +867,23 @@ where
         .map_err(|e| other(format!("后台任务失败: {e}")))
 }
 
-/// The blocking-worker seam behind `refresh_agent_runtime_options`:
+/// The blocking-worker seam behind `refresh_tool_runtime_options`:
 /// the CLI probe (`codex debug models` / `pi --list-models`, up to
 /// DISCOVERY_TIMEOUT_SECS) must run on a blocking worker thread, never on the
 /// async command thread or the Tauri main thread. Split out as a named helper
 /// so the threading property is testable without a Tauri harness.
 pub(crate) async fn discover_runtime_options_async(
-    agent: Agent,
+    agent: AgentTool,
 ) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
     run_on_blocking_worker(move || crate::agent_runtime::discover_runtime_options(agent)).await
 }
 
-/// Advisory only: fetch the Agent's model catalog. Runs with no DB lock held
+/// Advisory only: fetch the agent tool's model catalog. Runs with no DB lock held
 /// and cannot fail a launch — the caller renders `warnings` and falls back to
-/// Agent default plus custom input. Explicit
+/// agent tool default plus custom input. Explicit
 /// user action only — opening Settings never reaches this command.
 #[tauri::command]
-pub async fn refresh_agent_runtime_options(
+pub async fn refresh_tool_runtime_options(
     agent: String,
 ) -> Result<crate::agent_runtime::AgentRuntimeDiscovery> {
     let agent = agent_of(&agent)?;
@@ -908,7 +908,7 @@ pub fn set_extraction_settings(
     with_db(&state, |db| settings.save(db))
 }
 
-// ---------------- Assistant ----------------
+// ---------------- Agent ----------------
 
 /// The async seam test: the refresh command's blocking CLI probe must run on
 /// a blocking worker, never on the calling thread, and the seam must deliver
@@ -935,7 +935,7 @@ mod agent_runtime_refresh_seam_tests {
         // Claude Code's catalog is suggested (static): the seam is exercised
         // end to end without spawning any CLI — safe in CI on both platforms.
         let discovery =
-            tauri::async_runtime::block_on(discover_runtime_options_async(Agent::ClaudeCode))
+            tauri::async_runtime::block_on(discover_runtime_options_async(AgentTool::ClaudeCode))
                 .unwrap();
         assert_eq!(discovery.model_source, "suggested");
         assert!(!discovery.models.is_empty());

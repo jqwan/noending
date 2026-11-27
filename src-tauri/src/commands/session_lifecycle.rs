@@ -42,8 +42,8 @@ pub struct SessionDeleteResult {
 }
 
 /// Execute the permanent LOCAL deletion. NoEnding data only — the
-/// Agent source availability only affects the confirmation copy. No code path
-/// here can touch it: NoEnding never deletes Agent-owned sources.
+/// agent tool source availability only affects the confirmation copy. No code path
+/// here can touch it: NoEnding never deletes agent tool-owned sources.
 #[tauri::command]
 pub fn permanently_delete_session(
     state: State<AppState>,

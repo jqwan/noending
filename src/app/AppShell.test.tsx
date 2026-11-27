@@ -1,5 +1,5 @@
 import { clearReadResources } from "../hooks/readResource";
-import { preloadAgentsCache } from "../features/agents/agentsCache";
+import { preloadAgentToolsCache } from "../features/agent-tools/agentToolsCache";
 import { invalidateTargets, removedTargets } from "./removedTargets";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -36,12 +36,12 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../api", () => ({ api: {
   appForeground, getSessionDetail: vi.fn(), getSessionContext: vi.fn(), collaborationRoomGet: vi.fn(), collaborationCandidates: vi.fn(),
-  listProjectCards: vi.fn(), listWorkstreamCards: vi.fn(), getDefaultAgent: vi.fn(), listSessions: vi.fn(), listProjects: vi.fn(),
+  listProjectCards: vi.fn(), listWorkstreamCards: vi.fn(), getDefaultTool: vi.fn(), listSessions: vi.fn(), listProjects: vi.fn(),
   listSkillCatalog: vi.fn(), listPackages: vi.fn(), listTaskItems: vi.fn(), getWorkstreamContextState: vi.fn(), mailboxList: vi.fn(), getOperationStatus: vi.fn(),
   getExtractionSettings: vi.fn(), getWorkspaceSettings: vi.fn(), getProjectContextState: vi.fn(),
 } }));
-// 导航用例默认 Agent 数据已预热，首次读取的等待由下面的独立用例覆盖。
-vi.mock("../features/agents/agentsCache", () => ({ preloadAgentsCache: vi.fn() }));
+// 导航用例默认 运行工具 数据已预热，首次读取的等待由下面的独立用例覆盖。
+vi.mock("../features/agent-tools/agentToolsCache", () => ({ preloadAgentToolsCache: vi.fn() }));
 vi.mock("../layout/Sidebar", () => ({ default: ({ collapsed, hidden }: { collapsed?: boolean; hidden?: boolean }) => <aside id="session-sidebar" aria-label="会话侧边栏" hidden={collapsed || hidden} /> }));
 const pageNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
 const sessionNavigation = vi.hoisted(() => ({ navigate: undefined as undefined | ((route: Route) => void) }));
@@ -57,12 +57,12 @@ vi.mock("./Router", () => ({ prepareRouteModule: modulePreparation, preloadCommo
 } }));
 vi.mock("../components/Toast", () => ({ default: () => null, showToast: vi.fn() }));
 vi.mock("../components/CommandPalette", () => ({ default: ({ navigate, onClose }: { navigate: (route: Route) => void; onClose: () => void }) => <div role="dialog" aria-label="查找">
-  <button onClick={() => { navigate({ view: "agents", agent: "codex" }); onClose(); }}>进入 Agent 详情</button>
+  <button onClick={() => { navigate({ view: "agent-tools", agent: "codex" }); onClose(); }}>进入 运行工具详情</button>
 </div> }));
 vi.mock("../features/launcher/LaunchResultModal", () => ({ LaunchDetailsHost: () => null }));
 
 beforeEach(() => {
-  vi.mocked(preloadAgentsCache).mockReset();
+  vi.mocked(preloadAgentToolsCache).mockReset();
   clearReadResources(); clearProjectCardsCache(); clearWorkstreamCardsCache(); clearSessionsCache(); clearSkillDetailCache(); setPackageCatalogCache(null);
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
   vi.mocked(api.listWorkstreamCards).mockReset().mockResolvedValue([]);
@@ -70,7 +70,7 @@ beforeEach(() => {
   vi.mocked(api.listProjects).mockReset().mockResolvedValue([]);
   vi.mocked(api.listSkillCatalog).mockReset().mockResolvedValue({ resources: [], locations: [], warnings: [] });
   vi.mocked(api.listPackages).mockReset().mockResolvedValue({ packages: [], warnings: [] });
-  vi.mocked(api.getDefaultAgent).mockReset().mockResolvedValue(null);
+  vi.mocked(api.getDefaultTool).mockReset().mockResolvedValue(null);
   vi.mocked(api.listTaskItems).mockReset().mockResolvedValue([]);
   vi.mocked(api.getWorkstreamContextState).mockReset().mockResolvedValue(null as never);
   vi.mocked(api.mailboxList).mockReset().mockResolvedValue({ items: [], unread: 0, total: 0, next_cursor: null });
@@ -98,14 +98,14 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("keeps the current page until Agent header prerequisites are ready", async () => {
+it("keeps the current page until AgentTool header prerequisites are ready", async () => {
   let finish!: () => void;
-  vi.mocked(preloadAgentsCache).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+  vi.mocked(preloadAgentToolsCache).mockReturnValue(new Promise(resolve => { finish = resolve; }));
   render(<AppShell />);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => { finish(); });
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agent-tools");
 });
 
 it("prepares collaboration status before navigation and leaves candidate reads to the dialog", async () => {
@@ -170,14 +170,14 @@ it("keeps icon navigation fixed and allows toggling the session sidebar in any s
   expect(screen.getByRole("complementary", { name: "会话侧边栏" })).toBeTruthy();
 });
 
-it("preserves the session page's unsent state while opening Agent details from lookup", async () => {
+it("preserves the session page's unsent state while opening AgentTool details from lookup", async () => {
   render(<AppShell />);
   fireEvent.change(screen.getByRole("textbox", { name: "会话草稿" }), { target: { value: "未发送的消息" } });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "任务" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "查找" })); });
   expect(screen.getByRole("dialog", { name: "查找" })).toBeTruthy();
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "进入 Agent 详情" })); });
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "进入 运行工具详情" })); });
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agent-tools");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
@@ -185,7 +185,7 @@ it("preserves the session page's unsent state while opening Agent details from l
 });
 
 it("restores the last session page and parameters across history navigation", async () => {
-  const route: Route = { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialAgent: "codex" };
+  const route: Route = { view: "session", sessionId: "s-4", entry: "conversation", initialTitle: "Existing", initialTool: "codex" };
   sessionDetailCache.set("s-4", { session: { id: "s-4", title: "Existing", agent: "codex" } } as never);
   render(<AppShell />);
   await act(async () => { sessionNavigation.navigate!(route); });
@@ -198,21 +198,21 @@ it("restores the last session page and parameters across history navigation", as
   expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual(route);
 });
 
-it("keeps project and assistant views of the same project in navigation history", async () => {
-  const project: Route = { view: "project", projectId: "assistant-dual-view", initialTitle: "评审员", fromAssistants: true };
-  const assistant: Route = { ...project, entry: "assistant" };
+it("keeps project and agent views of the same project in navigation history", async () => {
+  const project: Route = { view: "project", projectId: "agent-dual-view", initialTitle: "评审员", fromAgents: true };
+  const agent: Route = { ...project, entry: "agent" };
   projectDetailCache.set(project.projectId, { project: { name: "评审员" } } as never);
   render(<AppShell />);
 
   const currentRoute = () => JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!);
-  await act(async () => { pageNavigation.navigate!(assistant); });
-  expect(currentRoute()).toEqual(assistant);
+  await act(async () => { pageNavigation.navigate!(agent); });
+  expect(currentRoute()).toEqual(agent);
   expect(api.getProjectContextState).not.toHaveBeenCalled();
   await act(async () => { pageNavigation.navigate!(project); });
   expect(currentRoute()).toEqual(project);
   expect(api.getProjectContextState).toHaveBeenCalledWith(project.projectId);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "返回上一页" })); });
-  expect(currentRoute()).toEqual(assistant);
+  expect(currentRoute()).toEqual(agent);
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "前进到下一页" })); });
   expect(currentRoute()).toEqual(project);
 });
@@ -222,7 +222,7 @@ it("remembers a background launch result without changing the current section", 
   const finishLaunch = sessionNavigation.navigate!;
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   act(() => finishLaunch({ view: "terminal", terminalId: "t-created" }));
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agent-tools");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
@@ -266,7 +266,7 @@ it("resolves an ID-only destination before changing pages, and cancels a late re
   await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "pending" }); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => resolve({ session: { id: "pending", title: "Ready", agent: "codex" } } as never));
-  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toMatchObject({ view: "session", initialTitle: "Ready", initialAgent: "codex" });
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toMatchObject({ view: "session", initialTitle: "Ready", initialTool: "codex" });
   await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "late" }); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   await act(async () => resolve({ session: { id: "late", title: "Late", agent: "codex" } } as never));
@@ -277,7 +277,7 @@ it("waits for full header data even when a destination already supplies its titl
   let resolve!: (value: Awaited<ReturnType<typeof api.getSessionDetail>>) => void;
   vi.mocked(api.getSessionDetail).mockReturnValue(new Promise(done => { resolve = done; }));
   render(<AppShell />);
-  await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "ready", initialTitle: "已知标题", initialAgent: "codex" }); });
+  await act(async () => { sessionNavigation.navigate!({ view: "session", sessionId: "ready", initialTitle: "已知标题", initialTool: "codex" }); });
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => resolve({ session: { id: "ready", title: "已知标题", agent: "codex" } } as never));
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("session");
@@ -291,7 +291,7 @@ it("retains the current page until code is ready and ignores a late destination 
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("new-session");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "运行工具" })); });
   await act(async () => finish());
-  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agents");
+  expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("agent-tools");
 });
 
 it("prepares back and forward destinations before hiding the current page", async () => {
@@ -309,29 +309,29 @@ it("prepares back and forward destinations before hiding the current page", asyn
   expect(screen.getByRole("status", { name: "当前页面" }).textContent).toBe("projects");
 });
 
-it("keeps assistant project launches and terminals in the session section", async () => {
+it("keeps agent project launches and terminals in the session section", async () => {
   render(<AppShell />);
-  await act(async () => { sessionNavigation.navigate!({ view: "new-session", projectId: "assistant-project" }); });
-  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "new-session", projectId: "assistant-project" });
-  await act(async () => { sessionNavigation.navigate!({ view: "terminal", terminalId: "assistant-terminal" }); });
+  await act(async () => { sessionNavigation.navigate!({ view: "new-session", projectId: "agent-project" }); });
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "new-session", projectId: "agent-project" });
+  await act(async () => { sessionNavigation.navigate!({ view: "terminal", terminalId: "agent-terminal" }); });
   expect(screen.getByRole("button", { name: "会话" }).getAttribute("aria-current")).toBe("page");
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "项目" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "会话" })); });
-  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "assistant-terminal" });
+  expect(JSON.parse(screen.getByRole("status", { name: "页面参数" }).textContent!)).toEqual({ view: "terminal", terminalId: "agent-terminal" });
 });
 
 it.each([
-  { route: { view: "session", sessionId: "deleted", initialTitle: "S", initialAgent: "codex" }, targets: { sessionIds: ["deleted"] }, replacement: { view: "sessions", scope: "archived" }, section: "会话" },
+  { route: { view: "session", sessionId: "deleted", initialTitle: "S", initialTool: "codex" }, targets: { sessionIds: ["deleted"] }, replacement: { view: "sessions", scope: "archived" }, section: "会话" },
   { route: { view: "workstream", workstreamId: "deleted", initialTitle: "T" }, targets: { workstreamIds: ["deleted"] }, replacement: { view: "workstreams", scope: "archived" }, section: "任务" },
   { route: { view: "project", projectId: "deleted", initialTitle: "P" }, targets: { projectIds: ["deleted"] }, replacement: { view: "projects", scope: "archived" }, section: "项目" },
   { route: { view: "skill", resourceId: "skill1", projectId: "deleted", workspacePathId: "w1" }, targets: { projectIds: ["deleted"] }, replacement: { view: "skills" }, section: "技能" },
-  { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialAgent: "codex" }, section: "会话" },
+  { route: { view: "terminal", terminalId: "deleted", initialSessionId: "s" }, targets: { terminalIds: ["deleted"] }, replacement: { view: "session", sessionId: "s", initialTitle: "S", initialTool: "codex" }, section: "会话" },
 ] as const)("removes invalid $route.view routes from back/forward and section memory", async ({ route, targets, replacement, section }) => {
-  if (route.view === "session") sessionDetailCache.set(route.sessionId, { session: { id: route.sessionId, title: route.initialTitle, agent: route.initialAgent } } as never);
+  if (route.view === "session") sessionDetailCache.set(route.sessionId, { session: { id: route.sessionId, title: route.initialTitle, agent: route.initialTool } } as never);
   if (route.view === "workstream") workstreamDetailCache.set(route.workstreamId, { ctx: { workstream: { title: route.initialTitle } } } as never);
   if (route.view === "project") projectDetailCache.set(route.projectId, { project: { name: route.initialTitle } } as never);
   if (route.view === "skill") skillDetailCache.set(route.resourceId, {} as never);
-  if (replacement.view === "session") sessionDetailCache.set(replacement.sessionId, { session: { id: replacement.sessionId, title: replacement.initialTitle, agent: replacement.initialAgent } } as never);
+  if (replacement.view === "session") sessionDetailCache.set(replacement.sessionId, { session: { id: replacement.sessionId, title: replacement.initialTitle, agent: replacement.initialTool } } as never);
   render(<AppShell />);
   await act(async () => { pageNavigation.navigate!(route); });
   if (route.view === "session") await act(async () => { pageNavigation.navigate!({ ...route, entry: "conversation" }); });

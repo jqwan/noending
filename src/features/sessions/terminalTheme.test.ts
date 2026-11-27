@@ -159,7 +159,7 @@ it("follows system changes only while the app uses the system theme", async () =
   expect(term.options.theme).toBe(held);
 });
 
-it("preserves explicit Agent OSC colors across appearance changes until reset", async () => {
+it("preserves explicit AgentTool OSC colors across appearance changes until reset", async () => {
   const term = terminal();
   const stop = observeTerminalTheme(term, () => {}, true);
   await write(term, "\x1b]10;rgb:12/34/56;#223344\x07\x1b]4;1;rgb:aa/bb/cc;200;#a1b2c3\x07");

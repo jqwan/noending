@@ -18,7 +18,7 @@ vi.mock("../../api", () => ({
     restoreSession: vi.fn(),
     getSessionLocalDeletePreview: vi.fn(),
     permanentlyDeleteSession: vi.fn(),
-    getAgentStatus: vi.fn().mockResolvedValue({}),
+    getToolStatus: vi.fn().mockResolvedValue({}),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
     terminalList: vi.fn().mockResolvedValue([]),
   },
@@ -84,7 +84,7 @@ it("offers source configuration when a directory is missing and can start an ind
   render(<SessionsView navigate={navigate} />);
   await screen.findByText("来源目录不存在：/missing/history");
   fireEvent.click(screen.getByRole("button", { name: "配置会话来源" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "agents" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "agent-tools" });
   navigate.mockClear();
   const buttons = screen.getAllByRole("button", { name: "新建会话" });
   expect(buttons).toHaveLength(2);

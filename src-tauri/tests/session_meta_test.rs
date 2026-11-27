@@ -7,7 +7,7 @@
 //!   overwrite one (the authority is the root's title chain);
 //! - project membership is derived from the registered workspace path.
 
-use noending::domain::Agent;
+use noending::domain::AgentTool;
 use noending::storage::workspace::insert_workspace_path_conn;
 use noending::storage::{new_id, Db};
 use noending_lib as noending;
@@ -23,7 +23,7 @@ fn db(tag: &str) -> Db {
 /// return the stored row.
 fn ensure(
     db: &Db,
-    agent: Agent,
+    agent: AgentTool,
     root_id: &str,
     cwd: Option<&str>,
     activity: &str,
@@ -50,7 +50,7 @@ fn upsert_follows_the_root_identity_in_place() {
 
     let first = ensure(
         &database,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         &root_id,
         None,
         "2026-08-18T14:30:00Z",
@@ -63,7 +63,7 @@ fn upsert_follows_the_root_identity_in_place() {
     // Re-discovery of the same root: same row, not a duplicate.
     let (second_id, is_new) = database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
             None,
@@ -77,7 +77,7 @@ fn upsert_follows_the_root_identity_in_place() {
     assert_eq!(second_id, first.id, "same root identity, same row");
     assert_eq!(
         database
-            .find_session_by_root_agent_id(Agent::ClaudeCode, &root_id)
+            .find_session_by_root_agent_id(AgentTool::ClaudeCode, &root_id)
             .unwrap()
             .expect("row")
             .id,
@@ -88,7 +88,7 @@ fn upsert_follows_the_root_identity_in_place() {
     // A different root is a different Logical Session.
     let (other_id, is_new) = database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             "another-root",
             None,
             None,
@@ -109,7 +109,7 @@ fn a_later_upsert_refreshes_cwd_and_activity() {
 
     let first = ensure(
         &database,
-        Agent::ClaudeCode,
+        AgentTool::ClaudeCode,
         &root_id,
         Some("/Users/jqk/projects/r/stock/quant"),
         "2026-08-18T14:30:00Z",
@@ -119,7 +119,7 @@ fn a_later_upsert_refreshes_cwd_and_activity() {
     // advanced, and the row follows.
     let (second_id, _) = database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
             Some("/Users/jqk/projects/r/stock_quant"),
@@ -157,7 +157,7 @@ fn upsert_without_cwd_keeps_the_original_directory_and_project() {
     let path_id = insert_workspace_path_conn(&database.write(), cwd, "p-meta").unwrap();
     database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             None,
             Some(cwd),
@@ -172,7 +172,7 @@ fn upsert_without_cwd_keeps_the_original_directory_and_project() {
     // stored value — the absence of a fact is not a new fact.
     let (_, _) = database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
             None,
@@ -184,7 +184,7 @@ fn upsert_without_cwd_keeps_the_original_directory_and_project() {
         .unwrap();
 
     let stored = database
-        .find_session_by_root_agent_id(Agent::ClaudeCode, &root_id)
+        .find_session_by_root_agent_id(AgentTool::ClaudeCode, &root_id)
         .unwrap()
         .unwrap();
     assert_eq!(stored.cwd.as_deref(), Some(cwd));
@@ -202,7 +202,7 @@ fn title_is_write_once() {
     // Row created without a title (no usable title source yet).
     let (row_id, _) = database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             None,
             Some("/tmp/w"),
@@ -218,7 +218,7 @@ fn title_is_write_once() {
     // The title source appears on the next pass: the absent title is filled.
     database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             Some("帮我看看这个量化脚本"),
             Some("/tmp/w"),
@@ -234,7 +234,7 @@ fn title_is_write_once() {
     // A later source (or a source that changed its mind) never overwrites.
     database
         .upsert_logical_session_unchecked(
-            Agent::ClaudeCode,
+            AgentTool::ClaudeCode,
             &root_id,
             Some("一个全新的标题"),
             Some("/tmp/w"),

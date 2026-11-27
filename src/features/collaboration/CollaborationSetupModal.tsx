@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import CustomSelect from "../../components/CustomSelect";
 import { DetailLoading } from "../../components/DetailSection";
 import DialogActions from "../../components/DialogActions";
@@ -121,12 +121,12 @@ export default function CollaborationSetupModal({
                 <li className="collab-candidate" key={candidate.session_id}>
                   <input type="checkbox" aria-label={name} checked={!!chosen} disabled={!!blocked && !chosen}
                     onChange={event => event.target.checked ? add(candidate) : remove(candidate.session_id)} />
-                  {candidate.agent && <AgentIcon agent={candidate.agent} />}
+                  {candidate.agent && <AgentToolIcon agent={candidate.agent} />}
                   <div className="collab-candidate-copy">
                     <button type="button" className="link truncate" title={name}
                       onClick={() => {
                         onClose();
-                        navigate({ view: "session", sessionId: candidate.session_id, initialTitle: name, initialAgent: candidate.agent ?? undefined });
+                        navigate({ view: "session", sessionId: candidate.session_id, initialTitle: name, initialTool: candidate.agent ?? undefined });
                       }}>{name}</button>
                     {candidate.project_id && <div className="small muted truncate">{projectNames.get(candidate.project_id)}</div>}
                     {blocked && <div className="small muted">{blocked}</div>}

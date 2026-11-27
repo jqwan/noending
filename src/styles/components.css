@@ -44,7 +44,7 @@
 /* ---------- Board cards & toolbar controls (shared across boards) ----------
    所有看板共用的卡片基样式与搜索/筛选工具栏。放在 main.tsx 全量加载的
    components.css 里：此前它们只在 workstreams.css，除工作区/项目外的看板
-   （会话、Agent、技能、插件包）都靠该样式表恰好被加载过才得到卡片外观。 */
+   （会话、AgentTool、技能、插件包）都靠该样式表恰好被加载过才得到卡片外观。 */
 .ws-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -385,7 +385,7 @@ button.panel-toggle:hover { color: var(--text-primary); background: var(--bg-hov
 
 
 
-/* Shared detail page layout & cards (Agent, Project, Workstream, Session) */
+/* Shared detail page layout & cards (AgentTool, Project, Workstream, Session) */
 .panel-resizer {
   user-select: none;
   -webkit-user-select: none;

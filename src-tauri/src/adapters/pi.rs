@@ -1,7 +1,7 @@
 //! Pi Adapter: `~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl`.
 //! `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` override the sessions
 //! root (see `platform::paths`). Pi sessions are plain JSONL trees, read-only
-//! always — NoEnding never deletes an Agent-owned source.
+//! always — NoEnding never deletes an agent tool-owned source.
 //!
 //! Member mapping: today's sources are single-root — one transcript, one ROOT
 //! member. Thinking blocks, tool traffic and runtime injections never become
@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::adapters::{
-    detect_format, read_jsonl_delta, AgentCommand, DiscoveredMember, DiscoveredMemberKind,
+    detect_format, read_jsonl_delta, AgentToolCommand, DiscoveredMember, DiscoveredMemberKind,
     ParsedLine, SessionMessageRole,
 };
-use crate::domain::{Agent, Session, SourceAvailability, SourceCursor};
+use crate::domain::{AgentTool, Session, SourceAvailability, SourceCursor};
 use crate::error::Result;
-use crate::platform::exec_resolver::{self, AgentInstallation};
+use crate::platform::exec_resolver::{self, AgentToolInstallation};
 
 pub struct PiAdapter;
 
@@ -116,7 +116,7 @@ impl PiAdapter {
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
         Ok(Some(DiscoveredMember {
-            agent: Agent::Pi,
+            agent: AgentTool::Pi,
             source_member_id: session_id,
             kind: DiscoveredMemberKind::Root,
             parent_source_member_id: None,
@@ -151,12 +151,12 @@ fn runtime_args(opts: &crate::adapters::ExecOptions) -> Vec<String> {
 }
 
 impl crate::adapters::AgentAdapter for PiAdapter {
-    fn agent(&self) -> Agent {
-        Agent::Pi
+    fn tool(&self) -> AgentTool {
+        AgentTool::Pi
     }
 
-    fn detect(&self) -> Option<AgentInstallation> {
-        exec_resolver::resolve_quiet(Agent::Pi)
+    fn detect(&self) -> Option<AgentToolInstallation> {
+        exec_resolver::resolve_quiet(AgentTool::Pi)
     }
 
     fn discover_members_in(
@@ -187,7 +187,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
                 }
                 // Any .jsonl is a candidate; only the content fingerprint
                 // accepts it. One bad file never aborts the whole scan.
-                if detect_format(&p) != Some(Agent::Pi) {
+                if detect_format(&p) != Some(AgentTool::Pi) {
                     eprintln!(
                         "[discover] skip {} (content fingerprint is not pi)",
                         p.display()
@@ -226,10 +226,10 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
     fn build_new_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         cwd: Option<&Path>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut args = runtime_args(opts);
         // The launcher's prespecified id: pi creates the session with this
         // exact id ("creating it if missing"), so the embedded terminal binds
@@ -248,7 +248,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
             };
             args.extend(["--".into(), message]);
         }
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -257,12 +257,12 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
     fn build_resume_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // pi [options] [--] [@files...] [messages...] — options first, then
         // the session selector.
         //
@@ -277,7 +277,7 @@ impl crate::adapters::AgentAdapter for PiAdapter {
             .unwrap_or_else(|| agent_session_id.to_string());
         let mut args = runtime_args(opts);
         args.extend(["--session".into(), selector]);
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: cwd.map(|p| p.to_path_buf()),
@@ -286,13 +286,13 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
     fn build_resume_message_command(
         &self,
-        install: &crate::platform::exec_resolver::AgentInstallation,
+        install: &crate::platform::exec_resolver::AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         agent_session_id: &str,
         cwd: Option<&Path>,
         source_path: Option<&str>,
         message: Option<&str>,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut command =
             self.build_resume_command(install, opts, agent_session_id, cwd, source_path)?;
         if let Some(message) = message.filter(|text| !text.trim().is_empty()) {
@@ -308,16 +308,16 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
     fn build_exec_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         prompt: &str,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         // pi -p: non-interactive; --no-session keeps analysis ephemeral;
         // --no-tools makes it a pure text model call (safe + cheap).
         let mut args: Vec<String> = vec!["-p".into(), "--no-session".into(), "--no-tools".into()];
         args.extend(runtime_args(opts));
         args.push(prompt.to_string());
-        Ok(AgentCommand {
+        Ok(AgentToolCommand {
             program: install.executable_path.clone(),
             args,
             cwd: None,
@@ -326,11 +326,11 @@ impl crate::adapters::AgentAdapter for PiAdapter {
 
     fn build_context_extraction_command(
         &self,
-        install: &AgentInstallation,
+        install: &AgentToolInstallation,
         opts: &crate::adapters::ExecOptions,
         prompt: &str,
         runtime_dir: &Path,
-    ) -> Result<AgentCommand> {
+    ) -> Result<AgentToolCommand> {
         let mut cmd = self.build_exec_command(install, opts, prompt)?;
         // Explicit tools for skill reads, result writes and the scoped query CLI.
         cmd.args
@@ -392,7 +392,7 @@ mod tests {
     fn root_session(path: &Path) -> Session {
         Session {
             id: "sess-pi".into(),
-            agent: Agent::Pi,
+            agent: AgentTool::Pi,
             root_agent_session_id: "p1".into(),
             title: None,
             cwd: None,
@@ -466,8 +466,8 @@ mod tests {
     #[test]
     fn resume_prefers_the_source_file_path_over_the_session_id() {
         let adapter = PiAdapter;
-        let install = crate::platform::exec_resolver::AgentInstallation {
-            agent: Agent::Pi,
+        let install = crate::platform::exec_resolver::AgentToolInstallation {
+            agent: AgentTool::Pi,
             executable_path: "/usr/local/bin/pi".into(),
             version: None,
         };

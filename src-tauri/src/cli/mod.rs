@@ -1,10 +1,10 @@
 //! Standalone console commands sharing the desktop business modules.
-mod agents;
 mod arguments;
 pub(crate) mod extraction_settings;
 mod installation;
 pub(crate) mod messages;
 pub(crate) mod receipts;
+mod runtimes;
 mod search;
 pub(crate) mod service;
 mod summaries;
@@ -197,7 +197,7 @@ fn attach_parent_console() {
             fn AttachConsole(process_id: u32) -> i32;
             fn GetStdHandle(kind: u32) -> *mut std::ffi::c_void;
         }
-        // Preserve redirected stdout supplied by an Agent or another process.
+        // Preserve redirected stdout supplied by an agent tool or another process.
         // Only a GUI-subsystem entry without stdout needs the parent console.
         let stdout = GetStdHandle((-11i32) as u32);
         if stdout.is_null() || stdout as isize == -1 {

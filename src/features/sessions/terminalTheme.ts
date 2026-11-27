@@ -1,7 +1,7 @@
 import type { ITheme, Terminal } from "@xterm/xterm";
 
 // ANSI colors need separate palettes so colored CLI output remains legible
-// against both app surfaces. Explicit RGB colors from an Agent stay its own.
+// against both app surfaces. Explicit RGB colors from an AgentTool stay its own.
 const palettes = {
   light: {
     black: "#24292f", red: "#cf222e", green: "#116329", yellow: "#9a6700",

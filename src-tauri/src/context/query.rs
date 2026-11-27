@@ -1,5 +1,5 @@
 //! Scoped database reads. Guards contain only identities and progress; bodies
-//! are selected when the Agent requests a page, never exported or cached.
+//! are selected when the agent tool requests a page, never exported or cached.
 use super::{stale, SessionSnapshot};
 use crate::error::{other, Result};
 use crate::storage::Db;
@@ -86,7 +86,7 @@ impl Input<'_> {
     ) -> Result<Value> {
         let conn = db.read();
         // Short read transaction makes each page consistent. No transaction is
-        // held while the Agent thinks or invokes its next command.
+        // held while the agent tool thinks or invokes its next command.
         let tx = conn.unchecked_transaction()?;
         let total = self.count(&tx)?;
         if cursor > total {

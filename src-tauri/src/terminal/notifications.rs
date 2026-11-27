@@ -110,10 +110,10 @@ impl TerminalRegistry {
                     ActivityState::Failed | ActivityState::Interrupted
                 )
             {
-                return Err(other("Agent 状态尚不允许自动通知"));
+                return Err(other("运行工具 状态尚不允许自动通知"));
             }
             if !crate::adapters::adapter_for(r.summary.agent).has_terminal_cli() {
-                return Err(other("此 Agent 不支持终端通知"));
+                return Err(other("此 运行工具 不支持终端通知"));
             }
             let session = r.summary.session_id.as_deref().unwrap();
             let immediate = if enabled {
@@ -274,7 +274,7 @@ impl TerminalRegistry {
                 || r.summary.session_id.is_none()
                 || !ReminderKind::Manual.eligible(r.summary.activity.state, false)
             {
-                return Err(other("当前 Agent 状态不允许提醒"));
+                return Err(other("当前 运行工具 状态不允许提醒"));
             }
             r.notification.manual_check = true;
         }
@@ -321,7 +321,7 @@ impl TerminalRegistry {
                 || kind != ReminderKind::Manual && !r.notification.enabled
             {
                 return if kind == ReminderKind::Manual {
-                    Err(other("当前 Agent 状态不允许提醒"))
+                    Err(other("当前 运行工具 状态不允许提醒"))
                 } else {
                     Ok(())
                 };
@@ -383,7 +383,7 @@ impl TerminalRegistry {
             if let Some(gap) = messaging::reminder_submit_gap(summary.agent) {
                 input.flush()?;
                 // Keep user input locked out via `writing`, but let terminal
-                // protocol replies reach the Agent while the paste settles.
+                // protocol replies reach the agent tool while the paste settles.
                 drop(input);
                 std::thread::sleep(gap);
                 input = writer

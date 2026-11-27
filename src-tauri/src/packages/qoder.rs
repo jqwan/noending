@@ -6,7 +6,7 @@
 use super::{
     files, qoder_dir, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState,
 };
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use serde_json::Value;
 
 pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<PackageEntry> {
@@ -33,7 +33,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
     for (key, installs) in plugins {
         let (name, marketplace) = key.rsplit_once('@').unwrap_or((key, ""));
         for install in installs.as_array().into_iter().flatten() {
-            // Project/local installs stay Agent-managed; user scope only.
+            // Project/local installs stay agent tool-managed; user scope only.
             if install
                 .get("scope")
                 .and_then(Value::as_str)
@@ -44,7 +44,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
             let bundled = marketplace == "qoderapp-bundler";
             entries.push(PackageEntry {
                 id: files::key(format!("package:qoder:{key}")),
-                agent: Some(Agent::Qoder),
+                agent: Some(AgentTool::Qoder),
                 name: name.to_string(),
                 version: install
                     .get("version")

@@ -1,6 +1,6 @@
-//! PlatformLauncher: how an `AgentCommand` actually reaches the user.
+//! PlatformLauncher: how an `AgentToolCommand` actually reaches the user.
 //!
-//! Agent Adapters only produce a declarative command (program, args, cwd)
+//! agent tool Adapters only produce a declarative command (program, args, cwd)
 //! with literal strings; whether that becomes a macOS Terminal tab, a
 //! Windows PowerShell window, or a direct child process is decided here,
 //! per platform.
@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use crate::adapters::AgentCommand;
+use crate::adapters::AgentToolCommand;
 use crate::error::{other, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,7 +43,7 @@ pub fn ps_quote(s: &str) -> String {
 
 /// Render argv into a bash script (macOS terminal launch). Pure string
 /// building, testable on every platform.
-pub fn render_bash(cmd: &AgentCommand) -> String {
+pub fn render_bash(cmd: &AgentToolCommand) -> String {
     let mut script = String::from("#!/bin/bash\n");
     if let Some(cwd) = &cmd.cwd {
         // A stale recorded cwd must not abort the launch (exit 1 would leave
@@ -71,7 +71,7 @@ pub fn render_bash(cmd: &AgentCommand) -> String {
 /// comma-joined WITHOUT a trailing comma — PowerShell (unlike Rust/C) has
 /// no trailing-comma tolerance in array literals: `@('a','b',)` is
 /// `MissingExpressionAfterToken`.
-pub fn render_ps(cmd: &AgentCommand) -> String {
+pub fn render_ps(cmd: &AgentToolCommand) -> String {
     let mut script = String::new();
     if let Some(cwd) = &cmd.cwd {
         // stale cwd must not abort the launch — continue in the default dir,
@@ -156,7 +156,7 @@ fn prepend_ack_line(sentinel: &std::path::Path, body: &str) -> String {
 mod imp {
     use super::*;
 
-    pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+    pub fn launch(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
         prune_old_scripts();
         let path = script_dir().join(script_name("macos"));
         let sentinel = path.with_extension("ok");
@@ -234,7 +234,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+    pub fn launch(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
         let path = script_dir().join(script_name("windows"));
         std::fs::write(&path, render_ps(cmd))?;
 
@@ -275,7 +275,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn launch(cmd: &AgentCommand) -> Result<LaunchOutcome> {
+    pub fn launch(cmd: &AgentToolCommand) -> Result<LaunchOutcome> {
         let mut child = std::process::Command::new(&cmd.program)
             .args(&cmd.args)
             .current_dir(
@@ -333,8 +333,8 @@ mod tests {
     // round-trip needs the real PowerShell (windows-only, see below).
     #[test]
     fn bash_render_quotes_argv() {
-        let cmd = AgentCommand {
-            program: "/usr/local/bin/My Agent".into(),
+        let cmd = AgentToolCommand {
+            program: "/usr/local/bin/My AgentTool".into(),
             args: vec![
                 "resume".into(),
                 "sess-1".into(),
@@ -345,14 +345,14 @@ mod tests {
         let s = render_bash(&cmd);
         // cd failure must be VISIBLE (printf fallback notice), never silent
         assert!(s.contains("cd '/tmp/some dir' 2>/dev/null || { printf 'NoEnding: 工作目录不可用: %s — 已回退到 $HOME\\n' '/tmp/some dir'; cd \"$HOME\"; } || true"));
-        assert!(
-            s.contains("'/usr/local/bin/My Agent' 'resume' 'sess-1' 'line1\nline2 '\\''q'\\'' $X'")
-        );
+        assert!(s.contains(
+            "'/usr/local/bin/My AgentTool' 'resume' 'sess-1' 'line1\nline2 '\\''q'\\'' $X'"
+        ));
     }
 
     #[test]
     fn bash_render_skips_cd_when_no_cwd() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "pi".into(),
             args: vec![],
             cwd: None,
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn ack_line_precedes_rendered_body() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "pi".into(),
             args: vec!["hello".into()],
             cwd: Some("/tmp/x".into()),
@@ -385,7 +385,7 @@ mod tests {
     /// the string mid-message and turn the rest into bare tokens.
     #[test]
     fn ps_render_cd_notice_survives_quotes_in_path() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "x".into(),
             args: vec![],
             cwd: Some("C:\\my 'docs'".into()),
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn ps_render_quotes_argv_without_trailing_comma() {
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "C:\\Program Files\\claude.exe".into(),
             args: vec!["--resume".into(), "s1".into(), "a `b $c & d".into()],
             cwd: Some("C:\\Users\\me docs".into()),
@@ -422,7 +422,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("noending-ps-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script_path = dir.join("argv-roundtrip.ps1");
-        let cmd = AgentCommand {
+        let cmd = AgentToolCommand {
             program: "cmd.exe".into(),
             args: vec![
                 "/c".into(),

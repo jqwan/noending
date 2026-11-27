@@ -1,13 +1,13 @@
-//! Which runtime fields each Agent can override, and how.
+//! Which runtime fields each agent tool can override, and how.
 //!
-//! Capabilities are static knowledge about the Agent CLIs — they never
+//! Capabilities are static knowledge about the agent tool CLIs — they never
 //! contain user configuration, and discovery results must not be conflated
 //! with them (`ModelCatalog` is advisory UI help; this is the contract the
 //! backend enforces).
 
 use serde::Serialize;
 
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 use crate::error::{other, Result};
 
 use super::AgentRuntimeOverrides;
@@ -21,7 +21,7 @@ pub enum RuntimeFieldCapability {
     FreeForm,
     /// NoEnding has suggested values; completeness is not guaranteed.
     Suggested,
-    /// Candidates can be fetched from the Agent dynamically.
+    /// Candidates can be fetched from the agent tool dynamically.
     Discoverable,
 }
 
@@ -38,23 +38,23 @@ pub struct AgentRuntimeCapabilities {
     pub effort: RuntimeFieldCapability,
 }
 
-pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
+pub fn capabilities_of(agent: AgentTool) -> AgentRuntimeCapabilities {
     use RuntimeFieldCapability::{Discoverable, Suggested, Unsupported};
     match agent {
         // codex exec -m <model> -c model_reasoning_effort=<effort>
-        Agent::Codex => AgentRuntimeCapabilities {
+        AgentTool::Codex => AgentRuntimeCapabilities {
             model: Discoverable,
             provider: Unsupported,
             effort: Suggested,
         },
         // claude -p --model <model> --effort <level>; no provider switch
-        Agent::ClaudeCode => AgentRuntimeCapabilities {
+        AgentTool::ClaudeCode => AgentRuntimeCapabilities {
             model: Suggested,
             provider: Unsupported,
             effort: Suggested,
         },
         // pi -p --provider <p> --model <m> --thinking <level>
-        Agent::Pi => AgentRuntimeCapabilities {
+        AgentTool::Pi => AgentRuntimeCapabilities {
             model: Discoverable,
             provider: Discoverable,
             effort: Suggested,
@@ -62,32 +62,32 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
         // Qoder is IDE-hosted: no CLI, so there is no argument to override
         // anything with. Every field must read as unsupported, otherwise the
         // Settings UI would offer a control that can never take effect.
-        Agent::Qoder => AgentRuntimeCapabilities {
+        AgentTool::Qoder => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,
             effort: Unsupported,
         },
-        Agent::WorkBuddy => AgentRuntimeCapabilities {
+        AgentTool::WorkBuddy => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,
             effort: Unsupported,
         },
         // dsh's model/effort come from its own profile bundle, and NoEnding
         // cannot launch it at all, so it offers no override.
-        Agent::Dsh => AgentRuntimeCapabilities {
+        AgentTool::Dsh => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,
             effort: Unsupported,
         },
         // Desktop app, no CLI at all.
-        Agent::ZCode => AgentRuntimeCapabilities {
+        AgentTool::ZCode => AgentRuntimeCapabilities {
             model: Unsupported,
             provider: Unsupported,
             effort: Unsupported,
         },
         // agy accepts `--model <name>` and `--effort low|medium|high|max`
         // and lists available models with `agy models`.
-        Agent::Antigravity => AgentRuntimeCapabilities {
+        AgentTool::Antigravity => AgentRuntimeCapabilities {
             model: Discoverable,
             provider: Unsupported,
             effort: Suggested,
@@ -95,11 +95,14 @@ pub fn capabilities_of(agent: Agent) -> AgentRuntimeCapabilities {
     }
 }
 
-/// Reject overrides the Agent cannot receive.
+/// Reject overrides the agent tool cannot receive.
 ///
 /// Without this, a user could believe they were running configuration A
-/// while the Agent silently never saw the argument.
-pub fn validate_runtime_overrides(agent: Agent, overrides: &AgentRuntimeOverrides) -> Result<()> {
+/// while the agent tool silently never saw the argument.
+pub fn validate_runtime_overrides(
+    agent: AgentTool,
+    overrides: &AgentRuntimeOverrides,
+) -> Result<()> {
     let caps = capabilities_of(agent);
     let o = overrides.normalized();
 
@@ -110,7 +113,7 @@ pub fn validate_runtime_overrides(agent: Agent, overrides: &AgentRuntimeOverride
     ] {
         if value.is_some() && !capability.supports_override() {
             return Err(other(format!(
-                "{} 不支持覆盖 {}，该配置不会被传给 Agent CLI",
+                "{} 不支持覆盖 {}，该配置不会被传给 运行工具 CLI",
                 agent.display_name(),
                 field
             )));

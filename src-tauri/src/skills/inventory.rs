@@ -1,6 +1,6 @@
 use super::{files, location, Inventory, Location, ResourceDetail, Roots};
 use crate::{
-    domain::Agent,
+    domain::AgentTool,
     error::{other, Result},
 };
 use std::{
@@ -19,19 +19,19 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
             "共享 Skills",
         ),
         location(
-            Some(Agent::Codex),
+            Some(AgentTool::Codex),
             "user",
             roots.codex.join("skills"),
             "Codex Skills",
         ),
         location(
-            Some(Agent::ClaudeCode),
+            Some(AgentTool::ClaudeCode),
             "user",
             roots.claude.join("skills"),
             "Claude Code Skills",
         ),
         location(
-            Some(Agent::Pi),
+            Some(AgentTool::Pi),
             "user",
             roots.pi.join("skills"),
             "Pi Skills",
@@ -42,7 +42,7 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
         // The old antigravity-cli/skills target had no reader and was
         // removed.
         location(
-            Some(Agent::Antigravity),
+            Some(AgentTool::Antigravity),
             "user",
             roots.home.join(".gemini/config/skills"),
             "Antigravity Skills",
@@ -50,7 +50,7 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
         // WorkBuddy does not read the shared ~/.agents root; its own user
         // skills directory is the only link target for it.
         location(
-            Some(Agent::WorkBuddy),
+            Some(AgentTool::WorkBuddy),
             "user",
             roots.home.join(".workbuddy/skills"),
             "WorkBuddy Skills",
@@ -62,13 +62,13 @@ pub(super) fn locations(roots: &Roots, cwd: Option<&Path>) -> Vec<Location> {
         for (agent, rel, label) in [
             (None, ".agents/skills", "共享 Skills"),
             (
-                Some(Agent::ClaudeCode),
+                Some(AgentTool::ClaudeCode),
                 ".claude/skills",
                 "Claude Code Skills",
             ),
-            (Some(Agent::Pi), ".pi/skills", "Pi Skills"),
+            (Some(AgentTool::Pi), ".pi/skills", "Pi Skills"),
             (
-                Some(Agent::WorkBuddy),
+                Some(AgentTool::WorkBuddy),
                 ".workbuddy/skills",
                 "WorkBuddy Skills",
             ),

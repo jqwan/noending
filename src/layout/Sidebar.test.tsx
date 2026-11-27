@@ -16,7 +16,7 @@ import type { TerminalSummary, Session, ProjectCardData } from "../types";
 vi.mock("../api", () => ({
   api: {
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
-    getAgentStatus: vi.fn(), continueSessionDesktop: vi.fn(), launchEmbeddedResume: vi.fn(),
+    getToolStatus: vi.fn(), continueSessionDesktop: vi.fn(), launchEmbeddedResume: vi.fn(),
     terminalList: vi.fn(), terminalReconnect: vi.fn(),
     listSessions: vi.fn(),
     listWorkstreamCards: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock("../api", () => ({
 beforeEach(() => {
   clearReadResources();
   Object.values(removedTargets).forEach(ids => ids.clear());
-  vi.mocked(api.getAgentStatus).mockReset().mockResolvedValue({});
+  vi.mocked(api.getToolStatus).mockReset().mockResolvedValue({});
   vi.mocked(api.continueSessionDesktop).mockReset().mockResolvedValue({ note: "opened" } as never);
   vi.mocked(api.terminalReconnect).mockReset().mockResolvedValue({ terminal_id: "reconnected" } as never);
   vi.mocked(api.launchEmbeddedResume).mockReset().mockResolvedValue({ terminal_id: "spawned" } as never);
@@ -114,7 +114,7 @@ function projectCard(over: Partial<ProjectCardData> = {}): ProjectCardData {
   };
 }
 
-function switchGroupBy(name: "按项目归类" | "按 Agent 归类" | "不分组（全部会话）") {
+function switchGroupBy(name: "按项目归类" | "按运行工具归类" | "不分组（全部会话）") {
   const trigger = screen.getByRole("button", { name: /会话归类/ });
   fireEvent.click(trigger);
   const item = screen.getByRole("menuitemradio", { name });
@@ -162,7 +162,7 @@ describe("Sidebar unified sessions", () => {
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ live: false })]);
     const navigate = renderSidebar();
     fireEvent.click(await screen.findByTitle("新会话 · /repo/x"));
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-1", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "terminal", terminalId: "t-1", initialTool: "codex" }));
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "s1", session_title: "已绑定会话", identity_revision: 1 })]);
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
     await waitFor(() => expect(screen.queryByTitle("新会话 · /repo/x")).toBeNull());
@@ -174,13 +174,13 @@ describe("Sidebar unified sessions", () => {
     rememberSessionPage("s1", { view: "session", sessionId: "s1", entry: "conversation" });
     const navigate = renderSidebar();
     fireEvent.click(await screen.findByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "修复侧栏问题", initialTool: "codex" }));
     rememberSessionPage("s1", { view: "terminal", terminalId: "moved" });
     vi.mocked(api.terminalList).mockResolvedValue([terminal({ terminal_id: "moved", session_id: "s2", session_title: "另一会话" })]);
     act(() => { window.dispatchEvent(new CustomEvent(EVT_TERMINALS)); });
     await screen.findByText("另一会话");
     fireEvent.click(screen.getByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ view: "session", sessionId: "s1", initialTitle: "修复侧栏问题", initialTool: "codex" }));
   });
 
   it("sidebar prefers terminal capability and reuses the selected instance independently of aggregate status", async () => {
@@ -237,7 +237,7 @@ describe("Sidebar unified sessions", () => {
     ]);
     const navigate = renderSidebar({ view: "session", sessionId: "s3" });
     fireEvent.click(await screen.findByRole("button", { name: "在终端中继续：待继续" }));
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "spawned", initialTitle: "待继续", initialAgent: "pi" })));
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ terminalId: "spawned", initialTitle: "待继续", initialTool: "pi" })));
     expect(api.launchEmbeddedResume).toHaveBeenCalledWith("s1");
     expect(screen.queryByRole("button", { name: "在桌面应用中继续：待继续" })).toBeNull();
     expect(screen.queryByRole("button", { name: "在终端中继续：桌面会话" })).toBeNull();
@@ -291,7 +291,7 @@ describe("Sidebar 最近活动", () => {
     });
     const desktopOnlySession = session({
       id: "s-desktop",
-      title: "桌面 Agent 会话",
+      title: "桌面 运行工具会话",
       agent: "qoder",
       last_conversation_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
     });
@@ -315,7 +315,7 @@ describe("Sidebar 最近活动", () => {
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
     expect(screen.getByText("较旧会话")).toBeTruthy();
     expect(screen.getByText("已归档会话")).toBeTruthy();
-    expect(screen.getByText("桌面 Agent 会话")).toBeTruthy();
+    expect(screen.getByText("桌面 运行工具会话")).toBeTruthy();
 
     // 3. Open filter menu
     const filterBtn = screen.getByRole("button", { name: "筛选与排序会话" });
@@ -338,7 +338,7 @@ describe("Sidebar 最近活动", () => {
     const filterCanContinueBtn = screen.getByRole("menuitemcheckbox", { name: "可终端继续" });
     fireEvent.click(filterCanContinueBtn);
     expect(screen.getByText("近期活跃会话")).toBeTruthy();
-    expect(screen.queryByText("桌面 Agent 会话")).toBeNull();
+    expect(screen.queryByText("桌面 运行工具会话")).toBeNull();
   });
 
   it.each([true, false])("retains open terminals (live=%s), filters the current history page, and reapplies filters after removal", async live => {
@@ -482,7 +482,7 @@ describe("Sidebar 最近活动", () => {
 
     // Click on title text
     fireEvent.click(screen.getByText("修复侧栏问题"));
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", initialTitle: "修复侧栏问题", initialAgent: "codex" }));
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ view: "session", sessionId: "s-1", initialTitle: "修复侧栏问题", initialTool: "codex" }));
 
     // Click on row container edge
     const edgeRow = screen.getByText("边缘点击会话").closest(".sidebar-recent-item")!;
@@ -539,7 +539,7 @@ describe("Sidebar 最近活动", () => {
 
     renderSidebar();
 
-    switchGroupBy("按 Agent 归类");
+    switchGroupBy("按运行工具归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Codex/ })).toBeTruthy();
@@ -586,7 +586,7 @@ describe("Sidebar 最近活动", () => {
     const filterRecentBtn = screen.getByRole("menuitemcheckbox", { name: "最近5天" });
     fireEvent.click(filterRecentBtn);
 
-    switchGroupBy("按 Agent 归类");
+    switchGroupBy("按运行工具归类");
 
     expect(await screen.findByRole("button", { name: /Claude Code/ })).toBeTruthy();
     expect(screen.getByText("近5天有新消息的会话")).toBeTruthy();
@@ -603,7 +603,7 @@ describe("Sidebar 最近活动", () => {
     ]);
 
     renderSidebar();
-    switchGroupBy("按 Agent 归类");
+    switchGroupBy("按运行工具归类");
 
     await screen.findByRole("button", { name: /Claude Code/ });
     const groupHeaders = screen.getAllByRole("button").filter(b => b.className.includes("sidebar-recent-group-header"));
@@ -630,7 +630,7 @@ describe("Sidebar 最近活动", () => {
 
     const cases = [
       { mode: "按项目归类", names: ["项目乙", "项目甲"] },
-      { mode: "按 Agent 归类", names: ["Claude Code", "Codex"] },
+      { mode: "按运行工具归类", names: ["Claude Code", "Codex"] },
       { mode: "不分组（全部会话）", names: ["会话乙", "会话甲"] },
     ] as const;
     for (const [sort, newestFirst] of [["创建时间", false], ["最近更新", true], ["创建时间", false]] as const) {
@@ -757,7 +757,7 @@ describe("Sidebar 最近活动", () => {
     expect(groupTrigger.getAttribute("aria-expanded")).toBe("true");
 
     const projectOpt = screen.getByRole("menuitemradio", { name: "按项目归类" });
-    const agentOpt = screen.getByRole("menuitemradio", { name: "按 Agent 归类" });
+    const agentOpt = screen.getByRole("menuitemradio", { name: "按运行工具归类" });
     const noneOpt = screen.getByRole("menuitemradio", { name: "不分组（全部会话）" });
     expect(projectOpt.getAttribute("aria-checked")).toBe("true");
     expect(agentOpt.getAttribute("aria-checked")).toBe("false");
@@ -944,7 +944,7 @@ it("restores sidebar grouping, filters, running-only, sorting and display prefer
   vi.mocked(api.terminalList).mockResolvedValue([terminal({ session_id: "active" })]);
   renderSidebar();
   await screen.findByText("归档内容");
-  switchGroupBy("按 Agent 归类");
+  switchGroupBy("按运行工具归类");
   fireEvent.click(screen.getByRole("button", { name: "仅显示运行中会话" }));
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
   fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "未归档" }));
@@ -958,7 +958,7 @@ it("restores sidebar grouping, filters, running-only, sorting and display prefer
   expect(screen.queryByText("归档内容")).toBeNull();
   expect(screen.queryByText("未运行内容")).toBeNull();
   expect(screen.getByRole("button", { name: "仅显示运行中会话" }).getAttribute("aria-pressed")).toBe("true");
-  screen.getByRole("button", { name: "会话归类：按 Agent 归类" });
+  screen.getByRole("button", { name: "会话归类：按运行工具归类" });
   expect(screen.queryByRole("menu")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "筛选与排序会话" }));
   expect(screen.getByRole("menuitemcheckbox", { name: "未归档" }).getAttribute("aria-checked")).toBe("true");

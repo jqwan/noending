@@ -6,15 +6,15 @@ import { Modal } from "../../components/common";
 import { showToast } from "../../components/Toast";
 import Icon from "../../components/Icon";
 import { capsOf } from "./sessionFormats";
-import { continueSessionDesktopWithToast, desktopContinueState, useAgentStatus } from "./continueDesktop";
-import type { Agent, AgentStatusEntry } from "../../types";
+import { continueSessionDesktopWithToast, desktopContinueState, useToolStatus } from "./continueDesktop";
+import type { AgentTool, AgentToolStatusEntry } from "../../types";
 
-export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, cwdExists, agentStatus, className = "btn ghost icon-button", label = "在桌面应用中继续" }: {
-  sessionId: string; agent: Agent; sourceKind?: string; archived: boolean; cwdExists?: boolean;
-  agentStatus?: Record<string, AgentStatusEntry> | null; className?: string; label?: string;
+export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, cwdExists, toolStatus, className = "btn ghost icon-button", label = "在桌面应用中继续" }: {
+  sessionId: string; agent: AgentTool; sourceKind?: string; archived: boolean; cwdExists?: boolean;
+  toolStatus?: Record<string, AgentToolStatusEntry> | null; className?: string; label?: string;
 }) {
-  const localStatus = useAgentStatus(agentStatus === undefined);
-  const status = agentStatus === undefined ? localStatus : agentStatus;
+  const localStatus = useToolStatus(toolStatus === undefined);
+  const status = toolStatus === undefined ? localStatus : toolStatus;
   const [busy, setBusy] = useState(false);
   if (!capsOf(agent, sourceKind).desktop) return null;
   const availability = desktopContinueState({ agent, source_kind: sourceKind, archived_at: archived ? "archived" : null, cwd_exists: cwdExists }, status?.[agent]);
@@ -29,7 +29,7 @@ export function DesktopContinueButton({ sessionId, agent, sourceKind, archived, 
 
 /** Record/detail actions. Terminal navigation lives in the shared titlebar switcher. */
 export default function SessionHeaderActions({ sessionId, agent, sourceKind, title, archived, cwdExists, onChanged, onPurge, onRestore }: {
-  sessionId: string; agent: Agent; sourceKind: string | undefined; title: string;
+  sessionId: string; agent: AgentTool; sourceKind: string | undefined; title: string;
   archived: boolean; cwdExists?: boolean; onChanged: () => void;
   onPurge?: () => void; onRestore?: () => void;
 }) {
@@ -89,7 +89,7 @@ export default function SessionHeaderActions({ sessionId, agent, sourceKind, tit
           <p style={{ margin: "0 0 10px", maxWidth: "72ch" }}>
             <b>{title}</b> 会移至「已归档」，归档后不能通过 NoEnding 继续。消息同步、搜索和摘要更新保持可用。
           </p>
-          <p className="small muted">Agent 原始会话会保留。</p>
+          <p className="small muted">运行工具 原始会话会保留。</p>
           <DialogActions>
             <button className="btn" onClick={() => setConfirmArchive(false)} disabled={archiveBusy}>取消</button>
             <button className="btn primary" onClick={doArchive} disabled={archiveBusy}>

@@ -2,7 +2,7 @@ use super::{
     files, registry::source_is_managed, Inventory, Location, OperationResult, Resource, Roots,
 };
 use crate::{
-    domain::Agent,
+    domain::AgentTool,
     error::{other, Result},
 };
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ fn is_link(path: &Path) -> bool {
 }
 
 /// A link entry can be removed without touching its target. A real directory
-/// contains the files the Agent reads, even when an ancestor is a link.
+/// contains the files the agent tool reads, even when an ancestor is a link.
 pub(super) fn entry_is_link(entry: &Path) -> bool {
     entry.parent().is_some_and(is_link)
 }
@@ -85,41 +85,45 @@ fn links_inside(dir: &Path, source_dir: &Path) -> bool {
 /// Agents supported by Skill management. ZCode, DSH and Qoder read the
 /// shared `~/.agents/skills/` root (user-verified; DSH inherits it through
 /// its pi-based agent); WorkBuddy does not, so it carries its own locations.
-const ENABLE_AGENTS: [Agent; 8] = [
-    Agent::Codex,
-    Agent::ClaudeCode,
-    Agent::Pi,
-    Agent::Antigravity,
-    Agent::ZCode,
-    Agent::Dsh,
-    Agent::Qoder,
-    Agent::WorkBuddy,
+const ENABLE_AGENTS: [AgentTool; 8] = [
+    AgentTool::Codex,
+    AgentTool::ClaudeCode,
+    AgentTool::Pi,
+    AgentTool::Antigravity,
+    AgentTool::ZCode,
+    AgentTool::Dsh,
+    AgentTool::Qoder,
+    AgentTool::WorkBuddy,
 ];
 
-fn supports_user_agent(loc: &Location, agent: Agent) -> bool {
+fn supports_user_agent(loc: &Location, agent: AgentTool) -> bool {
     loc.agent == Some(agent)
         || (loc.agent.is_none()
             && matches!(
                 agent,
-                Agent::Codex | Agent::Pi | Agent::ZCode | Agent::Dsh | Agent::Qoder
+                AgentTool::Codex
+                    | AgentTool::Pi
+                    | AgentTool::ZCode
+                    | AgentTool::Dsh
+                    | AgentTool::Qoder
             ))
 }
 
-fn supports_project_agent(loc: &Location, agent: Agent) -> bool {
+fn supports_project_agent(loc: &Location, agent: AgentTool) -> bool {
     loc.agent == Some(agent)
         || (loc.agent.is_none()
             && matches!(
                 agent,
-                Agent::Codex
-                    | Agent::Pi
-                    | Agent::Antigravity
-                    | Agent::ZCode
-                    | Agent::Dsh
-                    | Agent::Qoder
+                AgentTool::Codex
+                    | AgentTool::Pi
+                    | AgentTool::Antigravity
+                    | AgentTool::ZCode
+                    | AgentTool::Dsh
+                    | AgentTool::Qoder
             ))
 }
 
-fn supports_scope_agent(loc: &Location, scope: &str, agent: Agent) -> bool {
+fn supports_scope_agent(loc: &Location, scope: &str, agent: AgentTool) -> bool {
     if scope == "project" {
         supports_project_agent(loc, agent)
     } else {
@@ -132,7 +136,7 @@ pub struct SkillScopeEntry {
     pub path: String,
     pub link: bool,
     pub label: String,
-    pub agents: Vec<Agent>,
+    pub agents: Vec<AgentTool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,7 +315,7 @@ pub(super) fn scan(loc: &Location, seen: &mut HashSet<String>, inventory: &mut I
                         }
                     } else {
                         let parsed = metadata(&content).or_else(|error| {
-                            if loc.agent != Some(crate::domain::Agent::ClaudeCode) {
+                            if loc.agent != Some(crate::domain::AgentTool::ClaudeCode) {
                                 return Err(error);
                             }
                             // Claude allows omitted frontmatter fields and derives
@@ -443,7 +447,7 @@ pub struct SkillDisableResult {
     pub changed: bool,
 }
 
-/// Register an existing Skill directory as a source without writing any Agent
+/// Register an existing Skill directory as a source without writing any agent tool
 /// entry. Enabling later decides which scopes receive links.
 pub fn register_source_dir(path: &Path) -> Result<SkillInstallResult> {
     let file = if path.is_dir() {
@@ -726,7 +730,7 @@ fn remove_project_links(
     (removed, failures)
 }
 
-/// Enable one source for every user-level Agent with a single action. Agents
+/// Enable one source for every user-level agent tool with a single action. Agents
 /// already covered by an existing entry are left alone. A complete user-level
 /// enable supersedes project-level links to the same source, so those are
 /// removed to avoid duplicate entries; physical project entries are untouched.
@@ -783,8 +787,8 @@ pub fn enable_skill_all(
             }
             let redundant = supported.iter().any(|index| !remaining[*index]);
             // Coverage first: with five Agents reading the shared root,
-            // double-covering one already-covered Agent beats fragmenting
-            // into per-Agent links. Redundancy only breaks ties between
+            // double-covering one already-covered agent tool beats fragmenting
+            // into per-agent tool links. Redundancy only breaks ties between
             // equally covering locations.
             let better = best
                 .as_ref()
@@ -825,12 +829,12 @@ pub fn enable_skill_all(
     };
     let mut message = if complete {
         if targets.is_empty() {
-            "所有 Agent 已启用".into()
+            "所有 运行工具 已启用".into()
         } else {
-            format!("已为所有 Agent 启用（新增 {installed} 个链接）")
+            format!("已为所有 运行工具 启用（新增 {installed} 个链接）")
         }
     } else if failures.is_empty() {
-        format!("已启用 {installed} 个位置，但部分 Agent 没有可用的加载位置")
+        format!("已启用 {installed} 个位置，但部分 运行工具 没有可用的加载位置")
     } else {
         format!("已启用 {installed} 个位置；失败：{}", failures.join("；"))
     };
@@ -889,7 +893,7 @@ fn project_targets(inventory: &Inventory, row: Option<&Resource>) -> (Vec<String
             let redundant = supported.iter().any(|index| !remaining[*index]);
             // Same coverage-first rule as the user-scope selector: the
             // shared root covers six Agents here, so double-covering one
-            // already-covered Agent beats fragmenting into per-Agent links.
+            // already-covered agent tool beats fragmenting into per-agent tool links.
             let better = best
                 .as_ref()
                 .map_or(true, |(_, best_hits, best_redundant)| {
@@ -988,10 +992,10 @@ pub(crate) fn prepare_project_skill_entries(
     }
     let message = if failures.is_empty() && unplaced.is_empty() {
         if installed == 0 {
-            "项目已为所有 Agent 启用".into()
+            "项目已为所有 运行工具 启用".into()
         } else {
             format!(
-                "已在 {} 个工作目录为所有 Agent 启用（新增 {installed} 个链接）",
+                "已在 {} 个工作目录为所有 运行工具 启用（新增 {installed} 个链接）",
                 cwds.len()
             )
         }
@@ -1013,7 +1017,7 @@ pub(crate) fn prepare_project_skill_entries(
 
 /// Remove every project-level link entry in the project's working directories.
 /// Physical entries are reported before anything is removed, because disabling
-/// them would delete the files the Agent reads.
+/// them would delete the files the agent tool reads.
 pub fn disable_skill_project(
     roots: &Roots,
     cwds: &[PathBuf],
@@ -1178,7 +1182,7 @@ fn install(
     }
     result?;
     Ok(SkillInstallResult {
-        message: "Skill 已安装；已有终端请按 Agent 的方式重新加载或重新打开".into(),
+        message: "Skill 已安装；已有终端请按 运行工具 的方式重新加载或重新打开".into(),
         source_path: fs::canonicalize(source.join("SKILL.md"))?
             .to_string_lossy()
             .into_owned(),
@@ -1207,7 +1211,7 @@ fn remove_entry_dir(dir: &Path) -> Result<()> {
 }
 
 /// Disable one link entry. Real directories are rejected: removing them would
-/// delete the files the Agent reads, which is uninstall, not disable.
+/// delete the files the agent tool reads, which is uninstall, not disable.
 pub fn disable_skill(
     roots: &Roots,
     cwd: Option<&Path>,
@@ -1243,7 +1247,7 @@ pub fn disable_skill(
         return Err(other("不能移除 Skill 根目录"));
     }
     if !entry_is_removable(Path::new(entry_path)) {
-        return Err(other("源目录位于 Agent 生效目录，不能停用；请卸载"));
+        return Err(other("源目录位于 运行工具 生效目录，不能停用；请卸载"));
     }
     remove_entry_dir(dir)?;
     Ok(SkillDisableResult {
@@ -1256,7 +1260,7 @@ pub fn disable_skill(
 }
 
 /// Disable every user-level link entry for a source in one action. Project
-/// entries are untouched; physical entries belong to their Agent directory and
+/// entries are untouched; physical entries belong to their agent tool directory and
 /// are left in place.
 pub fn disable_skill_all(roots: &Roots, id: &str) -> Result<SkillDisableResult> {
     let _guard = super::MUTATION
@@ -1318,7 +1322,7 @@ pub fn disable_skill_all(roots: &Roots, id: &str) -> Result<SkillDisableResult> 
                 removable.len()
             )
         } else {
-            "已在用户级停用所有 Agent 的加载入口".into()
+            "已在用户级停用所有 运行工具 的加载入口".into()
         },
         source_path: resource.path.clone(),
         name: resource.name.clone(),
@@ -1576,7 +1580,7 @@ pub fn unregister_skill(
 
 /// Uninstall a registered source. Link entries are removed and the source is
 /// deleted only when requested. A source that is itself a physical entry cannot
-/// be kept, because the Agent would keep discovering it.
+/// be kept, because the agent tool would keep discovering it.
 pub fn uninstall_registered_skill(
     roots: &Roots,
     cwds: &[PathBuf],
@@ -1595,7 +1599,7 @@ pub fn uninstall_registered_skill(
         .any(|entry| !entry_is_removable(Path::new(entry)))
         && !delete_source
     {
-        return Err(other("源目录位于 Agent 生效目录，必须同时删除源文件"));
+        return Err(other("源目录位于 运行工具 生效目录，必须同时删除源文件"));
     }
     let source_path = Path::new(&source.path);
     let source_dir = source_path
@@ -1624,7 +1628,7 @@ pub fn uninstall_registered_skill(
                 .filter_map(|root| fs::canonicalize(root).ok())
                 .any(|root| root == *source || root.starts_with(source));
             if contains_root {
-                return Err(other("源目录包含 Agent 配置目录，拒绝删除"));
+                return Err(other("源目录包含 运行工具 配置目录，拒绝删除"));
             }
         }
     }
@@ -1652,7 +1656,7 @@ pub fn uninstall_registered_skill(
 }
 
 /// Remove a Skill's entries across every registered project. Keeping source
-/// files is impossible when an entry is a real directory: the Agent would
+/// files is impossible when an entry is a real directory: the agent tool would
 /// discover it again. Such resources must be deleted together with the source.
 pub fn uninstall_skill(
     roots: &Roots,
@@ -1670,7 +1674,7 @@ pub fn uninstall_skill(
         .iter()
         .any(|entry| !entry_is_removable(Path::new(entry)));
     if physical && !delete_source {
-        return Err(other("源目录位于 Agent 生效目录，必须同时删除源文件"));
+        return Err(other("源目录位于 运行工具 生效目录，必须同时删除源文件"));
     }
     let source = Path::new(&row.path)
         .parent()
@@ -1680,13 +1684,13 @@ pub fn uninstall_skill(
         if fs::canonicalize(source.join("SKILL.md"))? != PathBuf::from(&row.path) {
             return Err(other("Skill 源目录已变化，请刷新"));
         }
-        // Deleting a directory that contains an Agent scan root would remove
+        // Deleting a directory that contains an agent tool scan root would remove
         // configuration unrelated to this Skill.
         if skill_roots
             .iter()
             .any(|root| root == &source || root.starts_with(&source))
         {
-            return Err(other("源目录包含 Agent 配置目录，拒绝删除"));
+            return Err(other("源目录包含 运行工具 配置目录，拒绝删除"));
         }
         Some(source)
     } else {
@@ -1745,7 +1749,7 @@ pub struct SkillMigrationResult {
 #[serde(rename_all = "snake_case")]
 pub enum SkillSourceKind {
     Library,
-    Agent,
+    AgentTool,
     External,
 }
 
@@ -1757,7 +1761,7 @@ pub fn skill_source_kind(resource: &Resource, managed_root: &Path) -> SkillSourc
     if source_is_managed(managed_root, source_dir) {
         SkillSourceKind::Library
     } else if resource.entry_links.iter().any(|link| !link) {
-        SkillSourceKind::Agent
+        SkillSourceKind::AgentTool
     } else {
         SkillSourceKind::External
     }
@@ -1799,14 +1803,14 @@ fn migration_plan(
     }
     let (skill_roots, entries, _) = collect_entries(roots, cwds, id);
     // Moving a Location root would take every sibling Skill with it, so a
-    // SKILL.md living directly in an Agent Skills root cannot be registered.
+    // SKILL.md living directly in an agent tool Skills root cannot be registered.
     if skill_roots
         .iter()
         .filter_map(|root| fs::canonicalize(root).ok())
         .any(|root| root == source_dir)
     {
         return Err(other(
-            "Agent Skills 根目录不能作为 Skill 源，请选择其中的具体 Skill 目录",
+            "运行工具 Skills 根目录不能作为 Skill 源，请选择其中的具体 Skill 目录",
         ));
     }
     for entry in &entries {
@@ -1904,7 +1908,7 @@ pub fn migrate_skill(
         }
     }
     if !delete_source && !physical_dirs.is_empty() {
-        return Err(other("源目录位于 Agent 配置目录，转移后必须删除源目录"));
+        return Err(other("源目录位于 运行工具 配置目录，转移后必须删除源目录"));
     }
     if delete_source {
         move_dir(&plan.source_dir, &plan.target)?;
@@ -1912,7 +1916,7 @@ pub fn migrate_skill(
         copy_migration_dir(&plan.source_dir, &plan.target)?;
     }
     let target = fs::canonicalize(&plan.target)?;
-    // Physical entries are the Agent-visible source itself. Creating their
+    // Physical entries are the agent tool-visible source itself. Creating their
     // replacement link is the critical step; any failure rolls the move back.
     let mut created: Vec<PathBuf> = Vec::new();
     for dir in &physical_dirs {

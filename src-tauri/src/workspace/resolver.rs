@@ -228,7 +228,7 @@ impl Default for GitAccess {
 }
 
 impl GitAccess {
-    /// Locate `git` through the same resolver the Agent CLIs use.
+    /// Locate `git` through the same resolver the agent tool CLIs use.
     pub fn auto() -> Self {
         Self {
             program: resolve_executable("git"),

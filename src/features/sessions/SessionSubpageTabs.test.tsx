@@ -79,11 +79,11 @@ it("changes detail tabs without launching until the user selects an available te
   const terminal = await screen.findByRole("button", { name: "在终端中继续" });
   expect(terminal).toHaveProperty("disabled", true);
   fireEvent.click(screen.getByRole("button", { name: "历史消息" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialAgent: "codex" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", entry: "conversation", initialTitle: "Session", initialTool: "codex" });
   view.rerender(<SessionSubpageTabs {...props} entry="conversation" />);
   expect(screen.getByRole("button", { name: "历史消息" }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "会话详情" }));
-  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialAgent: "codex" });
+  expect(navigate).toHaveBeenLastCalledWith({ view: "session", sessionId: "s1", initialTitle: "Session", initialTool: "codex" });
   expect(api.launchEmbeddedResume).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "在终端中继续" }));
   await waitFor(() => expect(navigate).toHaveBeenLastCalledWith(expect.objectContaining({ terminalId: "new" })));

@@ -7,7 +7,7 @@ import { workstreamDetailCache } from "../features/workstreams/workstreamDetailC
 import { sessionPages } from "../features/sessions/sessionNavigation";
 import type { Route } from "./routes";
 import { isRemovedRoute, removedTargets } from "./removedTargets";
-import { preloadAgentsCache } from "../features/agents/agentsCache";
+import { preloadAgentToolsCache } from "../features/agent-tools/agentToolsCache";
 import { projectCardsCache } from "../features/projects/projectCardsCache";
 import { workstreamCardsCache } from "../features/workstreams/useWorkstreamCards";
 import { sessionsCache } from "../features/sessions/sessionsCache";
@@ -47,8 +47,8 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
       return route;
     });
   }
-  if (route.view === "agents") {
-    const pending = preloadAgentsCache();
+  if (route.view === "agent-tools") {
+    const pending = preloadAgentToolsCache();
     return pending ? pending.then(() => route) : route;
   }
   if (route.view === "session") {
@@ -56,11 +56,11 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
     const remembered = sessionPages.get(route.sessionId);
     const seed = remembered && (remembered.view === "session" || remembered.view === "terminal") ? remembered : undefined;
     const initialTitle = route.initialTitle || (cached ? sessionDisplayTitle(cached.title) : seed?.initialTitle);
-    const initialAgent = route.initialAgent ?? cached?.agent ?? seed?.initialAgent;
-    if (cached) return { ...route, initialTitle, initialAgent };
+    const initialTool = route.initialTool ?? cached?.agent ?? seed?.initialTool;
+    if (cached) return { ...route, initialTitle, initialTool };
     return api.getSessionDetail(route.sessionId).then(detail => {
       if (!isRemovedRoute(route)) sessionDetailCache.set(route.sessionId, detail);
-      return { ...route, initialTitle: sessionDisplayTitle(detail.session.title), initialAgent: detail.session.agent };
+      return { ...route, initialTitle: sessionDisplayTitle(detail.session.title), initialTool: detail.session.agent };
     });
   }
   if (route.view === "workstream") {
@@ -96,13 +96,13 @@ export function prepareNavigationData(route: Route): Route | Promise<Route> {
   return route;
 }
 
-/** 只预备首屏轻量读取；不额外预取历史消息、技能/插件包目录或 Agent 运行配置。
+/** 只预备首屏轻量读取；不额外预取历史消息、技能/插件包目录或 AgentTool 运行配置。
  * 辅助读取失败时允许打开页面，由对应卡片重新读取并提供错误、重试入口。
  */
 export function prepareSupportingData(route: Route): Promise<void> | undefined {
   const reads: Promise<unknown>[] = [];
   const add = (read: Promise<unknown> | undefined) => { if (read) reads.push(read); };
-  if (["session", "workstream", "project", "agents"].includes(route.view)) add(prepareOperationStatus());
+  if (["session", "workstream", "project", "agent-tools"].includes(route.view)) add(prepareOperationStatus());
   if (route.view === "session" && route.entry !== "conversation") {
     if (!sessionContextCache.has(route.sessionId)) add(Promise.resolve().then(() => api.getSessionContext(route.sessionId)).then(context => {
       if (!isRemovedRoute(route)) sessionContextCache.set(route.sessionId, context);
@@ -121,7 +121,7 @@ export function prepareSupportingData(route: Route): Promise<void> | undefined {
       add(taskSummaryResource.ensure(route.workstreamId));
     }
   }
-  if (route.view === "project" && route.entry !== "assistant" && !projectSummaryCache.has(route.projectId)) {
+  if (route.view === "project" && route.entry !== "agent" && !projectSummaryCache.has(route.projectId)) {
     add(Promise.resolve().then(() => api.getProjectContextState(route.projectId)).then(summary => {
       if (!isRemovedRoute(route)) projectSummaryCache.set(route.projectId, summary);
     }));

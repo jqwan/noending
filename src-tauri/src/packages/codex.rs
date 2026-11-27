@@ -1,11 +1,11 @@
 //! Codex plugins live in `config.toml`'s `plugins` table keyed by
 //! `name@market`; the cache directory only shows where a single-version
-//! install unpacked. Bundled runtime markets are Agent-owned: they can be
+//! install unpacked. Bundled runtime markets are agent tool-owned: they can be
 //! toggled but not removed. NoEnding manages the user-level scope only —
-//! project-level `config.toml` files belong to the Agent's own configuration.
+//! project-level `config.toml` files belong to the agent tool's own configuration.
 
 use super::{files, Capabilities, Origin, PackageEntry, Roots, Scope, ScopeState, ToggleState};
-use crate::domain::Agent;
+use crate::domain::AgentTool;
 
 pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<PackageEntry> {
     let config = roots.codex.join("config.toml");
@@ -51,7 +51,7 @@ pub(super) fn discover(roots: &Roots, warnings: &mut Vec<String>) -> Vec<Package
             };
             PackageEntry {
                 id: files::key(format!("package:codex:{selector}")),
-                agent: Some(Agent::Codex),
+                agent: Some(AgentTool::Codex),
                 name: name.to_string(),
                 version: String::new(),
                 description: String::new(),

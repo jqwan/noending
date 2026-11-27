@@ -12,7 +12,7 @@ vi.mock("../../api", () => ({
   api: {
     getOperationStatus: vi.fn().mockResolvedValue([]),
     getSessionTerminalStates: vi.fn(async (ids: string[]) => Object.fromEntries(ids.map(id => [id, { available: true, reason: null }]))),
-    getAgentStatus: vi.fn().mockResolvedValue({}),
+    getToolStatus: vi.fn().mockResolvedValue({}),
     continueSessionDesktop: vi.fn().mockResolvedValue({ uri: "x://y", note: "已打开" }),
     listTaskItems: vi.fn().mockResolvedValue([]),
     getWorkstreamContext: vi.fn(),
@@ -27,7 +27,7 @@ vi.mock("../../api", () => ({
       processed_through_seq: 1,
       remaining_pending: 0,
     }),
-    getDefaultAgent: vi.fn().mockResolvedValue(null),
+    getDefaultTool: vi.fn().mockResolvedValue(null),
     updateWorkstream: vi.fn(),
     probeWorkspacePath: vi.fn().mockResolvedValue(null),
     listRecentWorkspacePaths: vi.fn().mockResolvedValue([]),
@@ -186,7 +186,7 @@ it("offers a copyable operation id after a structured Context update failure", a
   vi.mocked(api.getWorkstreamContextState).mockResolvedValue(contextState({ pending: true, pending_messages: 1, freshness: { refreshed_at: null, pending_messages: 0, history_rewritten_sessions: 0, unknown_coverage_sessions: 0, summary_changed_sessions: 0, scope_changed: false, pending: false }, }));
   vi.mocked(api.updateWorkstreamContext).mockRejectedValue({
     code: "cli_timeout",
-    message: "Agent CLI 超时，请重试或检查 CLI 状态。",
+    message: "运行工具 CLI 超时，请重试或检查 CLI 状态。",
     operation_id: "123e4567-e89b-12d3-a456-426614174001",
   });
   const originalClipboard = navigator.clipboard;
@@ -196,10 +196,10 @@ it("offers a copyable operation id after a structured Context update failure", a
   await screen.findByText("任务描述");
 
   fireEvent.click(screen.getByRole("button", { name: "更新摘要" }));
-  await screen.findByText("Agent CLI 超时，请重试或检查 CLI 状态。");
+  await screen.findByText("运行工具 CLI 超时，请重试或检查 CLI 状态。");
   fireEvent.click(screen.getByRole("button", { name: "复制错误详情" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(
-    "Agent CLI 超时，请重试或检查 CLI 状态。\n错误代码：cli_timeout\n操作 ID：123e4567-e89b-12d3-a456-426614174001",
+    "运行工具 CLI 超时，请重试或检查 CLI 状态。\n错误代码：cli_timeout\n操作 ID：123e4567-e89b-12d3-a456-426614174001",
   ));
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
 });

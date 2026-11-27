@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import Icon from "../components/Icon";
-import AgentIcon from "../components/AgentIcon";
-import type { Agent } from "../types";
+import AgentToolIcon from "../components/AgentToolIcon";
+import type { AgentTool } from "../types";
 import type { SidebarSessionGroup } from "./sidebarModel";
 
 export default function SidebarGroupHeader({
@@ -57,7 +57,7 @@ export default function SidebarGroupHeader({
     >
       <span className={`sidebar-group-icon${isKnownAgent ? " agent-group-icon" : ""}`}>
         {isKnownAgent ? (
-          <AgentIcon agent={group.id as Agent} size={14} />
+          <AgentToolIcon agent={group.id as AgentTool} size={14} />
         ) : (
           <Icon name={iconName} />
         )}

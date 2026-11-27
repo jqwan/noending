@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn windows_presence_requires_a_resolvable_protocol_handler() {
         // Windows PowerShell is required, as for the existing Windows launcher.
-        // Use unique per-user keys; never alter a real Agent's registration.
+        // Use unique per-user keys; never alter a real agent tool's registration.
         fn registry_script(script: &str) {
             let encoded = base64::engine::general_purpose::STANDARD.encode(
                 script

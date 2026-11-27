@@ -1,10 +1,10 @@
 import { recentFirst } from "../../components/detailOrder";
 import { DetailList, DetailListRow } from "../../components/DetailSection";
 import { timeAgo } from "../../components/common";
-import AgentIcon from "../../components/AgentIcon";
+import AgentToolIcon from "../../components/AgentToolIcon";
 import { sessionDisplayTitle, UNTITLED_SESSION, SessionResumeButton } from "./SessionTable";
-import { continueSessionDesktopWithToast, resolveSessionContinueMode, useAgentStatus } from "./continueDesktop";
-import { AGENT_LABELS, type SessionListItem, type TerminalSummary } from "../../types";
+import { continueSessionDesktopWithToast, resolveSessionContinueMode, useToolStatus } from "./continueDesktop";
+import { AGENT_TOOL_LABELS, type SessionListItem, type TerminalSummary } from "../../types";
 import { useTerminalResumeStates } from "./useTerminalResumeStates";
 import { useSessionTerminals } from "./useSessionTerminals";
 import type { Route } from "../../app/routes";
@@ -20,7 +20,7 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
   navigate: (r: Route) => void;
   terminals?: TerminalSummary[];
 }) {
-  const agentStatus = useAgentStatus();
+  const toolStatus = useToolStatus();
   const { terminals: polledTerminals } = useSessionTerminals();
   const terminals = externalTerminals ?? polledTerminals;
   const visibleSessions = recentFirst(sessions, session => session.last_activity_at ?? session.started_at);
@@ -32,16 +32,16 @@ export default function SessionMiniList({ sessions, emptyText, navigate, termina
       {sessions.length === 0 && <div className="detail-empty">{emptyText}</div>}
       {visibleSessions.map((s) => (
         <DetailListRow key={s.id}
-          icon={<span title={AGENT_LABELS[s.agent]}><AgentIcon agent={s.agent} /></span>}
+          icon={<span title={AGENT_TOOL_LABELS[s.agent]}><AgentToolIcon agent={s.agent} /></span>}
           title={sessionDisplayTitle(s.title)}
           titleHint={s.title ?? `${UNTITLED_SESSION} · ${s.root_agent_session_id}`}
           meta={<span title={s.last_activity_at ?? s.started_at ?? undefined}>{timeAgo(s.last_activity_at ?? s.started_at)}</span>}
-          onOpen={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialAgent: s.agent })}
+          onOpen={() => navigate({ view: "session", sessionId: s.id, initialTitle: sessionDisplayTitle(s.title), initialTool: s.agent })}
           actions={
               <SessionResumeButton
                 session={s}
                 resumeState={resumeStates[s.id]}
-                agentStatus={agentStatus}
+                toolStatus={toolStatus}
                 onResume={continueSessionDesktopWithToast}
                 navigate={navigate}
                 terminals={terminals}

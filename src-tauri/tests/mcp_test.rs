@@ -1,6 +1,6 @@
 //! Real stdio process boundary: no desktop app, no model or external account.
 mod support;
-use noending_lib::{domain::Agent, storage::Db, workspace::home::NoEndingHome};
+use noending_lib::{domain::AgentTool, storage::Db, workspace::home::NoEndingHome};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -186,6 +186,7 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
         for name in [
             "status",
             "freshness",
+            "runtime_list",
             "agent_list",
             "project_resolve",
             "project_rename",
@@ -224,22 +225,22 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
                 "Missing {name}"
             );
         }
-        let mut assistant_tools: Vec<_> = tools
+        let mut agent_tools: Vec<_> = tools
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
-            .filter(|name| name.starts_with("assistant_"))
+            .filter(|name| name.starts_with("agent_"))
             .collect();
-        assistant_tools.sort_unstable();
+        agent_tools.sort_unstable();
         assert_eq!(
-            assistant_tools,
+            agent_tools,
             [
-                "assistant_get",
-                "assistant_list",
-                "assistant_mailbox_change",
-                "assistant_mailbox_list",
-                "assistant_mailbox_read",
-                "assistant_mailbox_send",
-                "assistant_self",
+                "agent_get",
+                "agent_list",
+                "agent_mailbox_change",
+                "agent_mailbox_list",
+                "agent_mailbox_read",
+                "agent_mailbox_send",
+                "agent_self",
             ]
         );
         let start = tools
@@ -247,22 +248,18 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
             .find(|tool| tool["name"] == "session_start")
             .unwrap();
         assert!(start["inputSchema"]["properties"].get("cwd").is_some());
-        assert!(start["inputSchema"]["properties"]
-            .get("assistant_id")
-            .is_none());
+        assert!(start["inputSchema"]["properties"].get("agent_id").is_none());
         assert_eq!(
             client.call(
                 "session_start",
-                json!({"agent":"codex","assistant_id":"project-id"})
+                json!({"tool":"codex","agent_id":"project-id"})
             )["error"]["code"],
             "invalid_arguments"
         );
         assert!(start["inputSchema"]["properties"].get("tasks").is_none());
         assert_eq!(
-            client.call(
-                "session_start",
-                json!({"agent":"codex","tasks":["task-id"]})
-            )["error"]["code"],
+            client.call("session_start", json!({"tool":"codex","tasks":["task-id"]}))["error"]
+                ["code"],
             "invalid_arguments"
         );
         let send = tools
@@ -292,12 +289,12 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
         assert_eq!(native["annotations"]["openWorldHint"], false);
         assert_eq!(
             native["inputSchema"]["required"],
-            json!(["agent", "native_id"])
+            json!(["tool", "native_id"])
         );
         for arguments in [
-            json!({"agent":"codex"}),
-            json!({"agent":"codex","native_id":" "}),
-            json!({"agent":"unknown","native_id":"id"}),
+            json!({"tool":"codex"}),
+            json!({"tool":"codex","native_id":" "}),
+            json!({"tool":"unknown","native_id":"id"}),
         ] {
             assert_eq!(
                 client.call("session_resolve", arguments)["error"]["code"],
@@ -443,7 +440,7 @@ fn mcp_writes_persist_and_share_receipts_with_cli_while_enforcing_revisions_and_
     );
     client.ok(
         "summary_config_set",
-        json!({"agent":"pi","provider":"local","model":"test-model"}),
+        json!({"tool":"pi","provider":"local","model":"test-model"}),
     );
     client.finish();
     let mut next = f.start();
@@ -560,7 +557,7 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     .unwrap();
     let db = Db::open(&f.home.db_path).unwrap();
     let source = db
-        .add_ingest_source(Agent::Codex, source_dir.to_str().unwrap())
+        .add_ingest_source(AgentTool::Codex, source_dir.to_str().unwrap())
         .unwrap();
     drop(db);
     let mut client = f.start();
@@ -572,7 +569,7 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     assert_eq!(
         client.call(
             "session_resolve",
-            json!({"agent":"codex","native_id":"mcp-native-session"})
+            json!({"tool":"codex","native_id":"mcp-native-session"})
         )["error"]["code"],
         "not_found"
     );
@@ -585,7 +582,7 @@ fn source_queries_do_not_scan_and_explicit_sync_exposes_paginated_history_and_ev
     let id = sessions["items"][0]["id"].clone();
     let resolved = client.ok(
         "session_resolve",
-        json!({"agent":"codex","native_id":"mcp-native-session"}),
+        json!({"tool":"codex","native_id":"mcp-native-session"}),
     );
     assert_eq!(resolved["id"], id);
     assert_eq!(resolved["native_id"], "mcp-native-session");
@@ -642,7 +639,7 @@ fn cancelling_one_extraction_preserves_connection_and_eof_cleans_up_active_agent
     let db = Db::open(&f.home.db_path).unwrap();
     let id = db
         .upsert_logical_session(
-            Agent::Codex,
+            AgentTool::Codex,
             "mcp-extraction",
             None,
             Some("MCP extraction"),
@@ -689,14 +686,14 @@ fn cancelling_one_extraction_preserves_connection_and_eof_cleans_up_active_agent
     let mut client = Client::start(command);
     client.ok(
         "summary_config_set",
-        json!({"agent":"codex","model":"protocol-model"}),
+        json!({"tool":"codex","model":"protocol-model"}),
     );
     let wait_ready = || {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !ready.exists() {
             assert!(
                 Instant::now() < deadline,
-                "Agent did not reach test barrier"
+                "AgentTool did not reach test barrier"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -734,7 +731,7 @@ fn cancelling_one_extraction_preserves_connection_and_eof_cleans_up_active_agent
             .status()
             .unwrap()
             .success(),
-        "Cancelled extraction left its Agent alive"
+        "Cancelled extraction left its AgentTool alive"
     );
     client.ok(
         "task_create",
@@ -772,7 +769,7 @@ fn cancelling_one_extraction_preserves_connection_and_eof_cleans_up_active_agent
             .status()
             .unwrap()
             .success(),
-        "Disconnected MCP left its Agent alive"
+        "Disconnected MCP left its AgentTool alive"
     );
     let mut next = f.start();
     let receipt = next.ok("request_get", json!({"id":"disconnect-extraction"}));
@@ -796,7 +793,7 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
     db.write().execute_batch("INSERT INTO sessions(id,agent,root_agent_session_id,source_kind,source_path) VALUES('sender','codex','sender-native','jsonl','/sender'),('target','codex','target-native','jsonl','/target')").unwrap();
     let _host=DesktopHost::start(&f.home,move|command,sender_terminal|match command {
         ControlCommand::List{session}=>Ok(json!({"items":[],"session":session})),
-        ControlCommand::VerifyAssistantSession{..}=>unreachable!(),
+        ControlCommand::VerifyAgentSession{..}=>unreachable!(),
         ControlCommand::Start(p)=>Ok(json!({"terminal_id":noending_lib::storage::new_id(),"options":p,"caller_terminal":sender_terminal})),
         ControlCommand::Identity{claimed}=>if claimed.as_deref().is_none_or(|id|id=="sender") {
             Ok(json!({"session_id":"sender"}))
@@ -853,7 +850,7 @@ fn mcp_session_controls_share_desktop_receipts_with_cli() {
     let cwd = f.root.to_str().unwrap();
     let arguments = json!({
         "cwd": cwd,
-        "agent": "codex",
+        "tool": "codex",
         "message": "literal 中文\n$()",
         "request_id": "mcp-start"
     });
@@ -1044,7 +1041,7 @@ fn current_session_extraction_uses_scoped_mcp_pages_and_commits_without_an_agent
     db.write().execute("INSERT INTO collaboration_rooms(id,task_id,selected_members,created_at,updated_at) VALUES(?1,?1,'[]',?2,?2)",rusqlite::params![id,timestamp]).unwrap();
     db.write().execute("INSERT INTO collaboration_runs(id,room_id,status,started_at) VALUES(?1,?1,'stopped',?2)",rusqlite::params![id,timestamp]).unwrap();
     db.write().execute("INSERT INTO collaboration_messages(id,room_id,run_id,seq,kind,body,created_at) VALUES('message',?1,?1,1,'text','MCP collaboration decision',?2)",rusqlite::params![id,timestamp]).unwrap();
-    let disabled = client.call("summary_config_set", json!({"agent":"none"}));
+    let disabled = client.call("summary_config_set", json!({"tool":"none"}));
     assert_eq!(disabled["ok"], true);
     let c = client.call(
         "summary_context",
@@ -1087,7 +1084,7 @@ fn project_extraction_over_mcp_reuses_session_submissions_after_disconnect() {
     db.upsert_project(&project).unwrap();
     let (session, _) = support::seed_conversation(
         &db,
-        Agent::Codex,
+        AgentTool::Codex,
         "project-extraction-native",
         &[support::parsed_message(
             "m1",
@@ -1492,8 +1489,8 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
 }
 
 #[test]
-fn assistant_directory_finds_active_recipients_without_session_credentials() {
-    use noending_lib::{assistant, workspace};
+fn agent_directory_finds_active_recipients_without_session_credentials() {
+    use noending_lib::{agent, workspace};
 
     let f = Fixture::new();
     let db = Db::open(&f.home.db_path).unwrap();
@@ -1515,7 +1512,7 @@ fn assistant_directory_finds_active_recipients_without_session_credentials() {
             ("archived", archived, "Édit 归档", "archived"),
             ("other", other, "A 发布顾问", "normal"),
         ] {
-            let path = assistant::directory(&f.home).join(id);
+            let path = agent::directory(&f.home).join(id);
             let path = path.to_str().unwrap();
             let path_id = workspace::path_identity_of(path).unwrap();
             conn.execute(
@@ -1542,23 +1539,20 @@ fn assistant_directory_finds_active_recipients_without_session_credentials() {
     ]);
     let mut client = f.start();
     assert_eq!(
-        client.ok("assistant_list", json!({})),
+        client.ok("agent_list", json!({})),
         json!([
             {"id":other,"name":"A 发布顾问"},
             matches[0],
             matches[1]
         ])
     );
+    assert_eq!(client.ok("agent_list", json!({"name":" édit "})), matches);
     assert_eq!(
-        client.ok("assistant_list", json!({"name":" édit "})),
-        matches
-    );
-    assert_eq!(
-        client.ok("assistant_list", json!({"name":"没有匹配"})),
+        client.ok("agent_list", json!({"name":"没有匹配"})),
         json!([])
     );
     assert_eq!(
-        client.ok("assistant_get", json!({"id":matches[0]["id"]})),
+        client.ok("agent_get", json!({"id":matches[0]["id"]})),
         json!({"id":first,"name":duplicate_name,"intro":""})
     );
     client.finish();
@@ -1567,7 +1561,7 @@ fn assistant_directory_finds_active_recipients_without_session_credentials() {
         .args([
             "--home",
             f.home.root.to_str().unwrap(),
-            "assistant",
+            "agent",
             "list",
             "--name",
             "交付",
@@ -1582,9 +1576,9 @@ fn assistant_directory_finds_active_recipients_without_session_credentials() {
 }
 
 #[test]
-fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
+fn agent_access_is_verified_and_receipts_follow_the_bound_session() {
     use noending_lib::{
-        assistant,
+        agent,
         cli::CliError,
         session_control::{ControlCommand, DesktopHost},
         skills::Roots,
@@ -1607,11 +1601,11 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
         home: native_home,
     };
     let create = |name: &str| {
-        let project = assistant::create_profile_with_roots(
+        let project = agent::create_profile_with_roots(
             &db,
             &f.home,
             &WorkspaceLayer::new(&f.home),
-            assistant::AssistantCreate {
+            agent::AgentCreate {
                 name: name.into(),
                 role_md: Some(format!("档案职责 {name}")),
                 soul_md: None,
@@ -1632,7 +1626,7 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
         (project.id, path, id)
     };
     let (project_id, archive, recipient) = create("交付协调员");
-    let (_, sender_archive, sender_assistant) = create("发布顾问");
+    let (_, sender_archive, sender_agent) = create("发布顾问");
     std::fs::write(
         std::path::Path::new(&archive.canonical_path).join("INTRO.md"),
         "我可以核对交付。",
@@ -1645,7 +1639,7 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
     .unwrap();
     let session = |path: &noending_lib::domain::WorkspacePath, native: &str| {
         db.upsert_logical_session_unchecked(
-            Agent::Codex,
+            AgentTool::Codex,
             native,
             None,
             Some(&path.canonical_path),
@@ -1665,7 +1659,7 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
     let switch = switched.clone();
     let (manager_bound, peer_bound, sender_bound) = (manager.clone(), peer.clone(), sender.clone());
     let _host = DesktopHost::start(&f.home, move |command, terminal| {
-        let ControlCommand::VerifyAssistantSession { access } = command else {
+        let ControlCommand::VerifyAgentSession { access } = command else {
             unreachable!()
         };
         let (session_id, revision) = match (terminal.as_deref(), access.as_str()) {
@@ -1695,17 +1689,17 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
     };
     let mut public = f.start();
     assert_eq!(
-        public.ok("assistant_get", json!({"id":recipient})),
+        public.ok("agent_get", json!({"id":recipient})),
         json!({"id":recipient,"name":"交付协调员","intro":"我可以核对交付。"})
     );
     assert_eq!(
-        public.call("assistant_self", json!({}))["error"]["code"],
+        public.call("agent_self", json!({}))["error"]["code"],
         "session_access_required"
     );
     assert_eq!(
         public.call(
-            "assistant_mailbox_list",
-            json!({"assistant":recipient,"from_session":manager})
+            "agent_mailbox_list",
+            json!({"agent":recipient,"from_session":manager})
         )["error"]["code"],
         "session_access_required"
     );
@@ -1734,13 +1728,13 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
     assert_eq!(
         public.call(
             "session_start",
-            json!({"agent":"codex","cwd":archive.canonical_path})
+            json!({"tool":"codex","cwd":archive.canonical_path})
         )["error"]["code"],
         "permission_denied"
     );
     let mut wrong = bound("manager", "not-the-access");
     assert_eq!(
-        wrong.call("assistant_self", json!({}))["error"]["code"],
+        wrong.call("agent_self", json!({}))["error"]["code"],
         "session_access_denied"
     );
     wrong.finish();
@@ -1749,9 +1743,9 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
         .args([
             "--home",
             f.home.root.to_str().unwrap(),
-            "assistant-mailbox",
+            "agent-mailbox",
             "send",
-            "--assistant",
+            "--agent",
             &recipient,
             "--message",
             "交付已就绪",
@@ -1765,73 +1759,72 @@ fn assistant_access_is_verified_and_receipts_follow_the_bound_session() {
     let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(output.status.success(), "{receipt}");
     let letter = receipt["data"]["message_id"].as_str().unwrap();
-    assert_eq!(receipt["data"]["sender_assistant_id"], sender_assistant);
+    assert_eq!(receipt["data"]["sender_agent_id"], sender_agent);
 
     let mut sender_client = bound("sender", "sender-test-access");
     assert_eq!(
-        sender_client.ok("assistant_self", json!({}))["id"],
-        sender_assistant
+        sender_client.ok("agent_self", json!({}))["id"],
+        sender_agent
     );
     assert_eq!(
-        sender_client.call("assistant_mailbox_list", json!({"assistant":recipient}))["error"]
-            ["code"],
+        sender_client.call("agent_mailbox_list", json!({"agent":recipient}))["error"]["code"],
         "permission_denied"
     );
     assert_eq!(
         sender_client.call(
-            "assistant_mailbox_list",
-            json!({"assistant":recipient,"from_session":manager})
+            "agent_mailbox_list",
+            json!({"agent":recipient,"from_session":manager})
         )["error"]["code"],
         "identity_mismatch"
     );
     let replay = sender_client.ok(
-        "assistant_mailbox_send",
-        json!({"assistant":recipient,"message":"交付已就绪","request_id":"delivery"}),
+        "agent_mailbox_send",
+        json!({"agent":recipient,"message":"交付已就绪","request_id":"delivery"}),
     );
     assert_eq!(replay["message_id"], letter);
     let shown = sender_client.ok("request_get", json!({"id":"delivery"}));
     assert_eq!(shown["response"]["data"]["message_id"], letter);
 
     let mut manager_client = bound("manager", "manager-test-access");
-    let profile = manager_client.ok("assistant_self", json!({}));
+    let profile = manager_client.ok("agent_self", json!({}));
     assert_eq!(profile["id"], recipient);
     assert_eq!(profile["files"]["user"]["content"], "私有印象");
     assert_eq!(
         manager_client.call("request_get", json!({"id":"delivery"}))["error"]["code"],
         "not_found"
     );
-    let page = manager_client.ok("assistant_mailbox_list", json!({"state":"pending"}));
+    let page = manager_client.ok("agent_mailbox_list", json!({"state":"pending"}));
     assert_eq!(page["unread"], 1);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    let envelope = manager_client.ok("assistant_mailbox_read", json!({"message_id":letter}));
+    let envelope = manager_client.ok("agent_mailbox_read", json!({"message_id":letter}));
     assert_eq!(envelope["sender_session_id"], sender);
-    assert_eq!(envelope["sender_assistant_id"], sender_assistant);
+    assert_eq!(envelope["sender_agent_id"], sender_agent);
     let claimed = manager_client.ok(
-        "assistant_mailbox_change",
+        "agent_mailbox_change",
         json!({"message_id":letter,"revision":envelope["revision"],"operation":"claim"}),
     );
     assert_eq!(claimed["handler_session_id"], manager);
     let mut peer_client = bound("peer", "peer-test-access");
     assert_eq!(
-        peer_client.ok("assistant_mailbox_read", json!({"message_id":letter}))["id"],
+        peer_client.ok("agent_mailbox_read", json!({"message_id":letter}))["id"],
         letter
     );
     assert_eq!(
         peer_client.call(
-            "assistant_mailbox_change",
+            "agent_mailbox_change",
             json!({"message_id":letter,"revision":claimed["revision"],"operation":"complete"})
         )["ok"],
         false
     );
     let done = manager_client.ok(
-        "assistant_mailbox_change",
+        "agent_mailbox_change",
         json!({"message_id":letter,"revision":claimed["revision"],"operation":"complete"}),
     );
     assert!(done["completed_at"].is_string());
 
     switched.store(true, Ordering::Release);
     assert_eq!(
-        manager_client.call("assistant_self", json!({}))["error"]["code"],
+        manager_client.call("agent_self", json!({}))["error"]["code"],
         "sender_identity_changed"
     );
     peer_client.finish();

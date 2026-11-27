@@ -1,5 +1,5 @@
 //! The archive files are the source of the content shown in the project.
-use super::{AssistantFile, AssistantPatch, ProjectAssistant};
+use super::{AgentFile, AgentPatch, ProjectAgent};
 use crate::error::{other, Result};
 use sha2::{Digest, Sha256};
 use std::{
@@ -40,9 +40,9 @@ fn read_document(root: &Path, name: &str) -> Result<Option<(String, String)>> {
     Ok(Some((instructions, revision)))
 }
 
-pub fn inspect(root: &Path) -> ProjectAssistant {
+pub fn inspect(root: &Path) -> ProjectAgent {
     let agents = inspect_document(root, AGENTS);
-    ProjectAssistant {
+    ProjectAgent {
         guide_is_default: agents.content == STANDARD_ENTRY,
         claude_md_missing: matches!(
             fs::symlink_metadata(root.join(CLAUDE)),
@@ -56,14 +56,14 @@ pub fn inspect(root: &Path) -> ProjectAssistant {
     }
 }
 
-fn inspect_document(root: &Path, name: &str) -> AssistantFile {
+fn inspect_document(root: &Path, name: &str) -> AgentFile {
     match read_document(root, name) {
-        Ok(Some((content, revision))) => AssistantFile {
+        Ok(Some((content, revision))) => AgentFile {
             content,
             revision: Some(revision),
             state: "current",
         },
-        result => AssistantFile {
+        result => AgentFile {
             content: String::new(),
             revision: None,
             state: if result.is_err() {
@@ -123,11 +123,11 @@ fn create_document(root: &Path, name: &str, content: &str) -> std::io::Result<()
     Ok(())
 }
 
-pub fn save(root: &Path, revision: &str, patch: AssistantPatch) -> Result<()> {
+pub fn save(root: &Path, revision: &str, patch: AgentPatch) -> Result<()> {
     let (name, content) = match patch {
-        AssistantPatch::Agents { content } => (AGENTS, content),
-        AssistantPatch::Soul { content } => (SOUL, content),
-        AssistantPatch::Role { content } => (ROLE, content),
+        AgentPatch::Agents { content } => (AGENTS, content),
+        AgentPatch::Soul { content } => (SOUL, content),
+        AgentPatch::Role { content } => (ROLE, content),
     };
     save_document(root, name, revision, &content)
 }

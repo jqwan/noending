@@ -113,21 +113,21 @@ fn operation_owner() {
 
 #[test]
 fn source_sync_only_affects_sessions_in_its_discovery_roots() {
-    use noending_lib::domain::Agent;
+    use noending_lib::domain::AgentTool;
     let f = Fixture::new();
     let root = f.root.join("source");
     let other_root = f.root.join("source-other");
     let source = f
         .db()
-        .add_ingest_source(Agent::Codex, &root.to_string_lossy())
+        .add_ingest_source(AgentTool::Codex, &root.to_string_lossy())
         .unwrap();
     let _operation = Operation::start(
         f.db(),
-        OperationStatus::source(f.db(), &source.id, Some(Agent::Codex)).unwrap(),
+        OperationStatus::source(f.db(), &source.id, Some(AgentTool::Codex)).unwrap(),
     )
     .unwrap();
-    let (inside, _) = support::seed_conversation(f.db(), Agent::Codex, "inside", &[]);
-    let (outside, _) = support::seed_conversation(f.db(), Agent::Codex, "outside", &[]);
+    let (inside, _) = support::seed_conversation(f.db(), AgentTool::Codex, "inside", &[]);
+    let (outside, _) = support::seed_conversation(f.db(), AgentTool::Codex, "outside", &[]);
     f.db()
         .write()
         .execute(
