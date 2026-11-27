@@ -11,7 +11,7 @@ export function CatalogStatus({ options, saving = false }: { options: AgentRunti
           : options.model_source === "suggested"
           ? "建议模型别名，并非账户完整模型列表"
           : options.model_source === "unavailable"
-          ? "无法获取模型列表，可使用 Agent 默认或手动输入"
+          ? "无法获取模型列表，可使用工具默认值或手动输入"
           : "点击模型输入框获取列表，也可直接手动输入"}
         {saving && <span style={{ marginLeft: 8, color: "var(--accent)" }}>· 保存中…</span>}
       </div>

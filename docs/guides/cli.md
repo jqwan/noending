@@ -163,7 +163,7 @@ ne session terminals --session SESSION_ID
 ```sh
 ne session resolve --agent codex --native-id NATIVE_ID
 ne mailbox send --session RECIPIENT --from-session SELF --file message.txt --request-id unique-id
-# 可选请求立即通知；省略或 false 时遵循普通自动通知规则
+# 可选请求立即通知；省略或 false 时遵循普通自动查信提醒规则
 ne mailbox send --session RECIPIENT --from-session SELF --message "请查收新的信息" --notify-immediately true
 ne mailbox list --session SELF --state unread --limit 50
 ne mailbox read --session SELF --message-id MESSAGE_ID
@@ -179,11 +179,23 @@ ne mailbox wait --session SELF [--timeout SECONDS] [--limit 50]
 
 会话不能给自己发信，按后端实际采用的发件身份判断；用户界面发信不受此限制。发送返回消息 ID、收件会话和服务端时间，只证明正文已经保存。长正文直接存库，不改成临时正文文件；请求重试复用相同 request-id 和参数，不因为没有回复而重复发送。消息含 `sender_session_id`（为空表示用户）、`body`、`created_at`、`read_at`、`revision` 和 `notify_immediately`。向来源会话回复使用它的 sender_session_id，不解析正文前缀。
 
-桌面运行期间，新消息可唤醒可恢复的 TUI 会话，首条输入仅为“您的noending信箱中有未读信息”；应用启动不为历史未读补唤醒。运行中的终端由用户控制自动通知，开关不持久化，不能由模型设置。普通自动通知在 Idle／Completed／Unknown 时使用原生排队快捷键。发件会话可用 `--notify-immediately true` 请求立即通知：仍须用户开启自动通知，在 Idle／Completed／Unknown／Working 可发送，Waiting 时不发送；提醒使用与手动通知相同的原生插队快捷键，使用同一条查信文案，多条请求与普通查收提醒合并，不指定单条消息，不改变消息顺序。开启自动通知时会检查已有未读消息及立即通知请求，写入前复查未读状态；已读或删除的请求不再允许 Working 例外。手动查收提醒使用同一条文案，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动提醒。Unknown 允许开启并尝试自动通知，状态保持未知，不代表输入框已就绪；Failed／Interrupted 会关闭自动通知。用户须保持聊天输入框干净可用。提醒不等待送达确认，也不自动重启终端重发。
+桌面运行期间，新信可以继续支持恢复的 TUI 会话，并输入一句查信提醒“本次对话有未读来信，请查收 NoEnding 信箱。” 已有未读可在信箱中查阅。运行中的终端由用户控制自动查信提醒，开关不持久化，不能由模型设置。普通自动查信提醒在 Idle／Completed／Unknown 时使用原生排队快捷键。发件会话可用 `--notify-immediately true` 请求立即通知：仍须用户开启自动查信提醒，在 Idle／Completed／Unknown／Working 可发送，Waiting 时不发送；提醒使用与手动通知相同的原生插队快捷键，使用同一条查信文案，多条请求与普通查收提醒合并，不指定单条消息，不改变消息顺序。开启自动查信提醒时会检查已有未读消息及立即通知请求，写入前复查未读状态；已读或删除的请求不再允许 Working 例外。手动查信提醒使用同一条文案，允许在 Working／Unknown／Interrupted／Failed 插队，Waiting 时不可手动提醒。Unknown 允许开启并尝试自动查信提醒，状态保持未知，不代表输入框已就绪；Failed／Interrupted 会关闭自动查信提醒。用户须保持聊天输入框干净可用。提醒不等待送达确认，也不自动重启终端重发。
 
-右侧栏只显示未读，模型标记已读后自动移除；会话详情展示全部消息，可点击查看完整正文，或通过标题栏的“发送消息”向该会话发信。自动通知关闭时用户可以在右侧栏编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
+右侧栏只显示未读，模型标记已读后自动移除；会话详情展示全部消息，可点击查看完整正文，或点「写信」向本次对话发信。自动查信提醒关闭时用户可以在右侧栏编辑双方未读消息或原地二次确认永久删除；编辑保留 ID、来源和发送时间，不保存编辑历史。信箱随收件会话永久删除，删除来源会话不会抹掉其他会话已收到的消息。
 
 收发和标记的 Agent 操作规则见`noending` 技能的[信箱参考](../../src-tauri/skills/noending/references/mailbox.md)。统一技能需在目标 Agent 作用域启用；短提醒本身不能保证未接入 CLI/MCP 的 Agent 自动查收。
+
+## 智能体信箱
+
+智能体详情页可以直接写信。即使当前没有打开对话，信件也会保存到这个智能体的信箱。同一档案的对话可以查阅来信，以当前版本接手。用户可以指定接手对话、转交或放回待处理。不同智能体的信箱按 `assistant.id` 区分，改名后地址保持有效。
+
+```sh
+ne assistant-mailbox send --assistant ASSISTANT_ID --from-session SELF --message "请核对交付"
+ne assistant-mailbox list --assistant ASSISTANT_ID --from-session SELF --state pending
+ne assistant-mailbox claim --assistant ASSISTANT_ID --from-session SELF --message-id LETTER_ID --revision N
+```
+
+`read` 查看正文和版本，`mark-read` 确认查阅，`release` 放回待处理，`complete` 标为已处理。写入需要实际读取到的 `revision`，同一操作重试可沿用 `--request-id`。本阶段由智能体对话主动查阅。发给特定对话的信与协作邀请仍使用会话地址。
 
 ## 协作室
 

@@ -11,6 +11,7 @@ import PageHeader from "../../layout/PageHeader";
 import { Field, submitsOnEnter, timeAgo, useRefreshSignal, Modal, openPath, openRemoteUrl } from "../../components/common";
 import { GitStateBadge, MissingBadge, PathError } from "../workstreams/WorkspacePaths";
 import SkillScopeConfig from "../skills/SkillScopeConfig";
+import AssistantMailbox from "../assistants/AssistantMailbox";
 import ProjectAssistantSection from "../assistants/ProjectAssistantSection";
 import ProjectLifecycleActions from "./ProjectLifecycleActions";
 import { clearProjectCardsCache } from "./projectCardsCache";
@@ -343,7 +344,7 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             {displayedPaths.map((p) => (
               <DetailListRow key={p.id} icon={<Icon name="folder" />}
                 title={<CompactPath path={p.canonical_path} />}
-                titleHint={p.canonical_path} onOpen={() => void openPath(p.canonical_path)}
+                titleHint={p.canonical_path} openLabel={assistantView ? "打开档案目录" : undefined} onOpen={() => void openPath(p.canonical_path)}
                 meta={<>
                   {!p.exists && <MissingBadge />}
                   <GitStateBadge state={p.git_state} kind={p.git_kind} />
@@ -356,6 +357,8 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             workspacePaths={detail.workspace_paths.filter(path => path.exists).map(path => path.canonical_path)} />
       </>}>
         {assistant && <div hidden={!assistantView}>
+          <AssistantMailbox key={assistant.id} assistantId={assistant.id} name={project.name}
+            active={assistantView} archived={project.visibility === "archived"} sessions={displayedSessions} />
           <ProjectAssistantSection projectId={projectId} assistant={assistant} active={assistantView}
             archived={project.visibility === "archived"} onSaved={onAssistantSaved} onRefresh={refresh} />
         </div>}
@@ -384,15 +387,15 @@ export default function ProjectDetail({ projectId, initialTitle, navigate, entry
             )}
           </DetailSection>
         </>}
-          <DetailSection sectionId="sessions" label="会话" className="project-sessions-section" title={<>
+          <DetailSection sectionId="sessions" label={assistantView ? "对话记录" : "会话"} className="project-sessions-section" title={<>
                 <Icon name="chat" />
-                <span>会话（{displayedSessions.length}）</span>
+                <span>{assistantView ? "对话记录" : "会话"}（{displayedSessions.length}）</span>
               </>} actions={project.visibility !== "archived" && !isDirectoryGroupProject(detail) && (
                 <NewProjectSessionButton projectId={project.id} navigate={navigate}
                   archivePathId={assistantView ? assistant?.workspace_path_id : undefined} />
               )}>
             <SessionMiniList sessions={displayedSessions}
-              emptyText={assistantView ? "档案目录下还没有会话。" : "这个项目下还没有会话。"} navigate={navigate} />
+              emptyText={assistantView ? "还没有和这位智能体的对话。" : "这个项目下还没有会话。"} navigate={navigate} />
           </DetailSection>
       </DetailLayout>
 

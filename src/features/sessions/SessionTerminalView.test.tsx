@@ -904,7 +904,7 @@ it("keeps a terminal usable when closing fails", async () => {
 it("collapses the status sidebar without changing ownership or losing a composer draft", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
   const view = renderView();
-  const input = await screen.findByRole("textbox", { name: "发送消息" });
+  const input = await screen.findByRole("textbox", { name: "写信" });
   fireEvent.change(input, { target: { value: "keep this draft" } });
   fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
   expect(screen.queryByRole("complementary", { name: "终端详情栏" })).toBeNull();
@@ -913,7 +913,7 @@ it("collapses the status sidebar without changing ownership or losing a composer
   renderView();
   await screen.findByRole("button", { name: "展开详情栏" });
   fireEvent.click(screen.getByRole("button", { name: "展开详情栏" }));
-  expect((screen.getByRole("textbox", { name: "发送消息" }) as HTMLTextAreaElement).value).toBe("keep this draft");
+  expect((screen.getByRole("textbox", { name: "写信" }) as HTMLTextAreaElement).value).toBe("keep this draft");
 });
 it("managed terminals block user input but still answer terminal queries and restore manual input on exit", async () => {
   vi.mocked(api.terminalAttach).mockResolvedValue(snapshot({}));
@@ -924,14 +924,14 @@ it("managed terminals block user input but still answer terminal queries and res
   expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "终端输入" }));
   const base = await api.terminalNotifications("t-1");
   vi.mocked(api.terminalAutoNotifications).mockResolvedValueOnce({ ...base, revision: 1, input_revision: 1, enabled:true });
-  const enter = screen.getByRole("button", { name: "开启自动通知" });
+  const enter = screen.getByRole("button", { name: "开启自动查信提醒" });
   enter.focus();
   fireEvent.click(enter);
-  fireEvent.click((await screen.findAllByRole("button", { name: "开启自动通知" })).slice(-1)[0]!);
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" })));
+  fireEvent.click((await screen.findAllByRole("button", { name: "开启自动查信提醒" })).slice(-1)[0]!);
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "写信" })));
   expect(term.textarea.readOnly).toBe(true);
   term.focus();
-  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" }));
+  expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "写信" }));
   vi.mocked(api.terminalInput).mockClear();
   act(() => { FakeTerminal.last!.dataHandler("user typing"); FakeTerminal.last!.dataHandler("\x1b[1;1R"); });
   expect(api.terminalInput).toHaveBeenCalledWith("t-1", "\x1b[1;1R", undefined, 1);
@@ -947,11 +947,11 @@ it("restores managed focus routing after remount and keeps a collapsed sidebar f
   const base = { ...await api.terminalNotifications("t-1"), enabled:true, active_terminal_id: "t-1" };
   vi.mocked(api.terminalNotifications).mockResolvedValue(base);
   const first = renderView();
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "发送消息" })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "写信" })));
   first.unmount();
   renderView();
   await waitFor(() => expect(liveTerminals.get("t-1")?.onManagedFocus).toBeTypeOf("function"));
-  const input = screen.getByRole("textbox", { name: "发送消息" });
+  const input = screen.getByRole("textbox", { name: "写信" });
   FakeTerminal.last!.focus();
   expect(document.activeElement).toBe(input);
   fireEvent.click(screen.getByRole("button", { name: "收起详情栏" }));
@@ -964,12 +964,12 @@ it("restores managed focus routing after remount and keeps a collapsed sidebar f
 it("preserves an unsent sidebar draft when its Session gets a replacement terminal", async () => {
   vi.mocked(api.terminalAttach).mockImplementation(async id => snapshot({terminal_id:id}));
   const first=render(<SessionTerminalView terminalId="t-1" navigate={vi.fn()} />);
-  const input=await screen.findByRole("textbox",{name:"发送消息"});
+  const input=await screen.findByRole("textbox",{name:"写信"});
   await waitFor(()=>expect(input).toHaveProperty("disabled",false));
   fireEvent.change(input,{target:{value:"keep my unsent draft"}});
   first.unmount();
   render(<SessionTerminalView terminalId="t-new" navigate={vi.fn()} />);
-  await waitFor(()=>expect(screen.getByRole("textbox",{name:"发送消息"})).toHaveProperty("value","keep my unsent draft"));
+  await waitFor(()=>expect(screen.getByRole("textbox",{name:"写信"})).toHaveProperty("value","keep my unsent draft"));
 });
 
 it("keeps the unread mailbox and its focus when returning before notification state arrives", async () => {
@@ -979,7 +979,7 @@ it("keeps the unread mailbox and its focus when returning before notification st
     total: 1, unread: 1, next_cursor: null,
   });
   const first = renderView();
-  await screen.findByRole("button", { name: "查看消息：待处理消息" });
+  await screen.findByRole("button", { name: "查看来信：待处理消息" });
   first.unmount();
 
   const confirmed = await api.terminalNotifications("t-1");
@@ -988,25 +988,25 @@ it("keeps the unread mailbox and its focus when returning before notification st
   vi.mocked(api.mailboxList).mockImplementation(() => new Promise(() => {}));
   renderView();
 
-  expect(screen.getByRole("button", { name: "查看消息：待处理消息" })).toBeTruthy();
-  expect(screen.queryByText("绑定会话后可使用信箱。")).toBeNull();
-  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", true);
-  expect(screen.getByRole("button", { name: "提醒查收" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "查看来信：待处理消息" })).toBeTruthy();
+  expect(screen.queryByText("对话就绪后可以使用信箱。")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "写信" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "提醒查信" })).toHaveProperty("disabled", true);
   const title = screen.getByRole("button", { name: "信箱（1）" });
   title.focus();
 
   await act(async () => { pending.resolve(confirmed); });
   expect(document.activeElement).toBe(title);
-  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", false);
-  expect(screen.getByRole("button", { name: "提醒查收" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("textbox", { name: "写信" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "提醒查信" })).toHaveProperty("disabled", false);
 
   // A real unbind clears the old mailbox immediately and waits for confirmation.
   pushIdentity(null, 2);
-  expect(screen.queryByRole("button", { name: "查看消息：待处理消息" })).toBeNull();
-  expect(screen.getByRole("textbox", { name: "发送消息" })).toHaveProperty("disabled", true);
+  expect(screen.queryByRole("button", { name: "查看来信：待处理消息" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "写信" })).toHaveProperty("disabled", true);
   const unbound = deferred<TerminalNotifications>();
   vi.mocked(api.terminalNotifications).mockReturnValue(unbound.promise);
   act(() => eventHandlers.get("terminal-notifications-changed")?.({ payload: null }));
   await act(async () => { unbound.resolve({ ...confirmed, session_id: null, identity_revision: 2, revision: 1 }); });
-  expect(screen.getByText("绑定会话后可使用信箱。")).toBeTruthy();
+  expect(screen.getByText("对话就绪后可以使用信箱。")).toBeTruthy();
 });

@@ -63,7 +63,7 @@ impl ReminderKind {
             }
     }
 }
-pub(crate) const UNREAD_REMINDER: &str = "您的noending信箱中有未读信息";
+pub(crate) const UNREAD_REMINDER: &str = "本次对话有未读来信，请查收 NoEnding 信箱。";
 
 impl TerminalRegistry {
     pub fn notification_state(&self, id: &str) -> Result<NotificationSnapshot> {

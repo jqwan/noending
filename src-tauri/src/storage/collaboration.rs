@@ -13,7 +13,7 @@ pub const WAKE_DESKTOP: &str = "desktop";
 fn invitation_text(task_id: &str, room_id: &str, run_id: &str) -> String {
     format!(
         "[NoEnding 协作室] 任务 {task_id}｜房间 {room_id}｜运行 {run_id}\n\
-         请先阅读 noending 技能的协作参考，再加入本次运行并按技能规则持续监听。"
+         请先读 NoEnding Skill 的协作指南，再加入本次协作。加入后请在房间里了解分工、跟进进展和交付结果。"
     )
 }
 
@@ -480,7 +480,7 @@ impl Db {
                 return Err(other("成员列表存在重复会话"));
             }
             if member.wake_method != WAKE_TERMINAL && member.wake_method != WAKE_DESKTOP {
-                return Err(other("唤醒方式只能是 terminal 或 desktop"));
+                return Err(other("继续对话的方式只能是 terminal 或 desktop"));
             }
         }
         let selected = serde_json::to_string(members).map_err(crate::error::AppError::from)?;

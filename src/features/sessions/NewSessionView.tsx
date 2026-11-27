@@ -471,7 +471,7 @@ export default function NewSessionView({
 
   return (
     <main className="main new-session-page" aria-labelledby="new-session-title">
-      <PageHeader title="新建会话" icon={<Icon name="chatPlus" />} />
+      <PageHeader title={archivePathId ? "开始对话" : "新建会话"} icon={<Icon name="chatPlus" />} />
       <div className="new-session-content">
         <div className="new-session-heading">
           <BrandLockup cap={13} />
@@ -676,15 +676,15 @@ export default function NewSessionView({
               <p className="new-session-composer-notice">
                 <span id="new-session-agent-notice">
                   {anyAgentDetected
-                    ? "当前 Agent 不能用于新建会话，换一个或前往 Agent 设置启用。"
-                    : "本地还没有检测到受支持的 Agent TUI。安装后即可在这里新建会话。"}
+                    ? "当前运行工具无法开始新对话。可以换一个工具，或前往运行工具设置启用。"
+                    : "还没有检测到可用于终端对话的运行工具。安装后即可开始。"}
                 </span>
                 <button
                   type="button"
                   className="new-session-notice-action"
                   onClick={() => navigate({ view: "agents" })}
                 >
-                  前往 Agent 设置
+                  前往运行工具设置
                 </button>
               </p>
             )}
@@ -733,14 +733,14 @@ export default function NewSessionView({
                   role="button"
                   aria-haspopup="menu"
                   aria-expanded={agentMenuOpen}
-                  aria-label={`Agent：${agentLabel}`}
+                  aria-label={`运行工具：${agentLabel}`}
                   title={agentLabel}
                 >
                   <AgentIcon agent={selectedAgent} size={16} />
                   <span className="picker-control-label">{agentLabel}</span>
                   <Icon name="chevronDown" className="picker-control-chevron" />
                   <select
-                    aria-label="Agent"
+                    aria-label="运行工具"
                     title={agentLabel}
                     value={selectedAgent}
                     onChange={(e) => handleAgentChange(e.target.value as Agent)}
@@ -756,7 +756,7 @@ export default function NewSessionView({
                   </select>
 
                   {agentMenuOpen && (
-                    <PopupMenu className="picker-menu dropup" role="menu" aria-label="Agent 列表" onDismiss={() => setAgentMenuOpen(false)}>
+                    <PopupMenu className="picker-menu dropup" role="menu" aria-label="运行工具列表" onDismiss={() => setAgentMenuOpen(false)}>
                       <div className="picker-menu-list">
                         {cliAgents.map((a) => {
                           const isSelected = a === selectedAgent;

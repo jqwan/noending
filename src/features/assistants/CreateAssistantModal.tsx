@@ -67,15 +67,15 @@ export default function CreateAssistantModal({
             className="input"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="例如：架构师小助手、敏捷需求梳理员"
+            placeholder="例如：项目经理、架构顾问"
             autoFocus
             disabled={busy}
           />
         </div>
 
         {[
-          { id: "soul", label: "SOUL.md", value: soul, setValue: setSoul, placeholder: "描述价值观、行为原则和交流风格（可选）" },
-          { id: "role", label: "ROLE.md", value: role, setValue: setRole, placeholder: "描述长期目标、职责和工作范围（可选）" },
+          { id: "soul", label: "性格与交流方式", value: soul, setValue: setSoul, placeholder: "例如，我先说结论，再说明依据。（可选）" },
+          { id: "role", label: "长期职责", value: role, setValue: setRole, placeholder: "例如，我负责协调分工和核对交付。（可选）" },
         ].map(({ id, label, value, setValue, placeholder }) => (
           <div key={id} className="form-group" style={{ marginBottom: "var(--space-md)" }}>
             <label className="label bold" htmlFor={`${formId}-${id}`}>{label}</label>

@@ -831,6 +831,30 @@ export interface ProjectAssistant {
   role: AssistantFile;
 }
 
+export interface AssistantMailboxMessage {
+  id: string;
+  sender_session_id: string | null;
+  body: string;
+  created_at: string;
+  read_at: string | null;
+  handler_session_id: string | null;
+  completed_at: string | null;
+  revision: number;
+}
+
+export interface AssistantMailboxPage {
+  items: AssistantMailboxMessage[];
+  unread: number;
+  next_cursor: number | null;
+}
+
+export interface AssistantMailboxChange {
+  message_id: string;
+  revision: number;
+  operation: "read" | "release" | "complete" | "transfer";
+  target_session?: string;
+}
+
 export interface CreateAssistantInput {
   name: string;
   soul_md?: string;

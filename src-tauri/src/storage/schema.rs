@@ -666,6 +666,27 @@ CREATE TABLE IF NOT EXISTS mailbox_messages (
 CREATE INDEX IF NOT EXISTS mailbox_recipient ON mailbox_messages(recipient_session_id,seq);
 CREATE INDEX IF NOT EXISTS mailbox_unread ON mailbox_messages(recipient_session_id,seq) WHERE read_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS assistant_mailbox_messages (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  assistant_project_id TEXT NOT NULL REFERENCES project_assistants(project_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  sender_session_id TEXT,
+  body TEXT NOT NULL CHECK(length(trim(body)) > 0),
+  created_at TEXT NOT NULL,
+  read_at TEXT,
+  handler_session_id TEXT,
+  completed_at TEXT,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+  CHECK(completed_at IS NULL OR handler_session_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS assistant_mailbox_inbox ON assistant_mailbox_messages(assistant_project_id,seq);
+CREATE INDEX IF NOT EXISTS assistant_mailbox_handler ON assistant_mailbox_messages(handler_session_id) WHERE completed_at IS NULL;
+-- Keep completed work's provenance. A deleted handler releases unfinished work.
+CREATE TRIGGER IF NOT EXISTS assistant_mailbox_release_on_session_delete BEFORE DELETE ON sessions BEGIN
+  UPDATE assistant_mailbox_messages SET handler_session_id=NULL,revision=revision+1
+  WHERE handler_session_id=old.id AND completed_at IS NULL;
+END;
+
 -- Collaboration rooms: one per task. The persisted configuration (membership,
 -- coordinator) lives here; per-run wake state, messages, read positions and
 -- participation leases live in the sibling tables below.

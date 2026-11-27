@@ -166,7 +166,7 @@ pub(crate) fn candidates(
                 } else {
                     terminal
                         .reason
-                        .or_else(|| Some("该会话没有可用的唤醒方式".to_string()))
+                        .or_else(|| Some("这段对话暂时无法继续".to_string()))
                 }
             } else {
                 None
@@ -226,7 +226,7 @@ pub(crate) fn start(db: &Db, params: StartParams) -> CliResult<store::Collaborat
                 return Err(CliError::new(
                     "invalid_arguments",
                     format!(
-                        "成员 {} 不支持所选唤醒方式 {}",
+                        "成员 {} 不支持所选的继续方式 {}",
                         member.session_id, member.wake_method
                     ),
                 ));

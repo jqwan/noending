@@ -71,26 +71,26 @@ export default function TerminalMailbox({ terminalId, sessionId: session, notifi
   const mutable = !!confirmedSession && !enabled && !notification?.writing;
   return <DetailSection sectionId="mailbox" label="信箱" className="terminal-mailbox" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.unread}）` : ""}</span></>} actions={<>
         <button className={`btn ghost icon-button small${enabled ? " is-on" : ""}`} disabled={!confirmedSession || busy}
-          aria-label={enabled ? "关闭自动通知" : "开启自动通知"} title={enabled ? "关闭自动通知" : "开启自动通知"}
+          aria-label={enabled ? "关闭自动查信提醒" : "开启自动查信提醒"} title={enabled ? "关闭自动查信提醒" : "开启自动查信提醒"}
           aria-pressed={enabled} onClick={() => {
           if (enabled) void run(() => toggle(false));
           else if (skipHint) void run(() => toggle(true));
           else setConfirm(true);
         }}><Icon name="bell" /></button>
-        <button className="btn ghost icon-button small" aria-label="提醒查收" title="提醒查收（立即插队）"
+        <button className="btn ghost icon-button small" aria-label="提醒查信" title="提醒查信（立即插队）"
           disabled={!confirmedSession || !page?.unread || busy} onClick={() => void run(() => api.mailboxRemind(terminalId))}><Icon name="send" /></button>
       </>} status={<>
       {(error || loadError || listError || notification?.error) && <p role="alert" className="small warning">{error || loadError || listError || notification?.error}</p>}
     </>}>
 
-    {enabled && <p className="small muted">自动通知已开启，终端只读。操作授权或菜单前请先关闭。</p>}
-    {!enabled && confirmedSession && Boolean(page?.unread) && <p className="small muted">提醒会插队；请保持终端输入框就绪、无草稿。</p>}
-    {!session && notification && <p className="small muted">绑定会话后可使用信箱。</p>}
+    {enabled && <p className="small muted">自动查信提醒已开启，终端只读。操作授权或菜单前请先关闭。</p>}
+    {!enabled && confirmedSession && Boolean(page?.unread) && <p className="small muted">提醒会插队，请先清空草稿并退出终端菜单。</p>}
+    {!session && notification && <p className="small muted">对话就绪后可以使用信箱。</p>}
     {((!session && !notification && !loadError) || (session && !page && !listError)) && <DetailLoading>正在读取信箱…</DetailLoading>}
-    <div className="mailbox-unread-list" role="region" aria-label="未读消息列表" tabIndex={0}>
-    {page?.items.map(m => <article className="mailbox-item" key={`${session}:${m.id}`} aria-label="未读消息">
+    <div className="mailbox-unread-list" role="region" aria-label="未读来信列表" tabIndex={0}>
+    {page?.items.map(m => <article className="mailbox-item" key={`${session}:${m.id}`} aria-label="未读来信">
       {editing?.message.id === m.id ? <div>
-        <textarea aria-label="编辑信箱消息" value={editing.text} onChange={e => setEditing({ ...editing, text: e.target.value })} disabled={busy} />
+        <textarea aria-label="编辑来信" value={editing.text} onChange={e => setEditing({ ...editing, text: e.target.value })} disabled={busy} />
         <div className="mailbox-actions"><button className="btn small" disabled={busy || !editing.text.trim()} onClick={() => void edit(editing.message, editing.text)}>保存</button><button className="btn small ghost" onClick={() => setEditing(null)}>取消</button></div>
       </div> : <MailboxMessagePreview message={m} navigate={navigate} />}
       {mutable && <div className="mailbox-actions">
@@ -99,11 +99,11 @@ export default function TerminalMailbox({ terminalId, sessionId: session, notifi
             : <button className="btn ghost icon-button small" aria-label="删除消息" disabled={busy} onClick={() => { setEditing(null); setDeleting(m.id); }}><Icon name="trash" /></button>}
       </div>}
     </article>)}
-    {page?.items.length === 0 && <p className="small muted">暂无未读消息</p>}
+    {page?.items.length === 0 && <p className="small muted">暂无未读来信</p>}
     {page?.next_cursor != null && <button className="btn small" onClick={() => void more()}>加载更多</button>}
     </div>
     <DetailPanelFooter><form className="mailbox-compose" onSubmit={e => { e.preventDefault(); if (!confirmedSession || !draft.trim()) return; const submitted = draft; void run(async () => { await api.mailboxSend(confirmedSession, submitted); setDraft(current => current === submitted ? "" : current); }); }}>
-      <label htmlFor={`mailbox-input-${terminalId}`} className="small">发送消息</label>
+      <label htmlFor={`mailbox-input-${terminalId}`} className="small">写信</label>
       <textarea ref={inputRef} id={`mailbox-input-${terminalId}`} value={draft} disabled={!confirmedSession || busy} rows={4}
         onPaste={pasteImage} onChange={e => setDraft(e.target.value)} placeholder="输入文字或粘贴图片路径"
         aria-description="Enter 发送，Shift+Enter 换行"
@@ -113,11 +113,11 @@ export default function TerminalMailbox({ terminalId, sessionId: session, notifi
           if (!e.repeat) e.currentTarget.form?.requestSubmit();
         }} />
       <button className="btn small primary" type="submit" disabled={!confirmedSession || busy || !draft.trim()}
-        title="Enter 发送，Shift+Enter 换行" aria-keyshortcuts="Enter">发送到信箱</button>
+        title="Enter 发送，Shift+Enter 换行" aria-keyshortcuts="Enter">发信</button>
     </form></DetailPanelFooter>
 
-    {confirm && <Modal title="开启自动通知" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动通知</button></>}>
-      <p>请保持聊天输入框就绪、无草稿，并退出授权或设置菜单。开启后终端只读，请通过侧栏信箱发送消息。</p>
+    {confirm && <Modal title="开启自动查信提醒" onClose={() => !busy && setConfirm(false)} actions={<><button className="btn" disabled={busy} onClick={() => setConfirm(false)}>取消</button><button className="btn primary" disabled={busy} onClick={() => void run(() => toggle(true))}>开启自动查信提醒</button></>}>
+      <p>请保持聊天输入框就绪、无草稿，并退出授权或设置菜单。开启后终端只读，请通过侧栏信箱写信。</p>
       <label><input type="checkbox" checked={skip} onChange={e => setSkip(e.target.checked)} />不再提示</label>
     </Modal>}
   </DetailSection>;

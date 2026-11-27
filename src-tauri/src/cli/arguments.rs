@@ -273,6 +273,54 @@ pub(super) fn parse(args: &[String]) -> CliResult<Invocation> {
                     ),
                 }
             }
+            "assistant-mailbox" if words.len() == 2 => {
+                let assistant = options.required("assistant")?;
+                let from_session = options.required("from-session")?;
+                match action {
+                    "list" => Command::AssistantMailboxList(crate::mailbox::AssistantList {
+                        assistant,
+                        from_session,
+                        state: serde_json::from_value(json!(options
+                            .take("state")
+                            .unwrap_or_else(|| "all".into())))
+                        .map_err(|_| invalid("信箱筛选无效"))?,
+                        cursor: options.optional_number("cursor")?,
+                        limit: options.number("limit", 50)?,
+                    }),
+                    "read" => Command::AssistantMailboxRead(crate::mailbox::AssistantRead {
+                        assistant,
+                        from_session,
+                        message_id: options.required("message-id")?,
+                    }),
+                    "send" => Command::AssistantMailboxSend(crate::mailbox::AssistantSend {
+                        assistant,
+                        from_session,
+                        message: options
+                            .message()?
+                            .ok_or_else(|| invalid("缺少 --message 或 --file"))?,
+                    }),
+                    "mark-read" | "claim" | "release" | "complete" => {
+                        use crate::mailbox::AssistantOperation;
+                        let operation = match action {
+                            "mark-read" => AssistantOperation::Read,
+                            "claim" => AssistantOperation::Claim,
+                            "release" => AssistantOperation::Release,
+                            _ => AssistantOperation::Complete,
+                        };
+                        Command::AssistantMailboxChange(crate::mailbox::AssistantChange {
+                            assistant,
+                            from_session,
+                            message_id: options.required("message-id")?,
+                            revision: options
+                                .required("revision")?
+                                .parse()
+                                .map_err(|_| invalid("revision 无效"))?,
+                            operation,
+                        })
+                    }
+                    _ => return Err(invalid("使用 assistant-mailbox --help 查看用法")),
+                }
+            }
             "mailbox" if action == "list" && words.len() == 2 => {
                 Command::MailboxList(crate::mailbox::List {
                     session: options.required("session")?,
@@ -641,9 +689,15 @@ fn read_submission(options: &mut Options) -> CliResult<crate::context::summary::
 
 fn help_for(resource: Option<&str>) -> CliResult<Value> {
     let usage = match resource {
-        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
+        None => vec!["ne status", "ne freshness --help", "ne mcp serve [--home ABSOLUTE_DIRECTORY]", "ne agent list", "ne sync --help", "ne mailbox --help", "ne assistant-mailbox --help", "ne source list", "ne search --help", "ne session/task/project --help", "ne summary --help", "ne path --help", "ne request --help", "ne cli install --dir <PATH目录>"],
         Some("mcp") => vec!["ne mcp serve [--home ABSOLUTE_DIRECTORY]"],
         Some("room") => vec!["ne room resolve --task TASK", "ne room show ROOM", "ne room messages ROOM [--run RUN] [--cursor CURSOR] [--limit 50]", "ne room join ROOM --run RUN --from-session ID", "ne room wait ROOM --run RUN --from-session ID [--timeout SECONDS] [--limit 50]", "ne room ack ROOM --run RUN --from-session ID --through-seq N", "ne room send ROOM --run RUN --from-session ID --message TEXT (or --file FILE)", "ne room leave ROOM --run RUN --from-session ID", "ne room stop ROOM --run RUN --from-session ID"],
+        Some("assistant-mailbox") => vec![
+            "ne assistant-mailbox list --assistant ID --from-session SELF [--state all|unread|pending|in_progress|completed] [--cursor N] [--limit 50]",
+            "ne assistant-mailbox read --assistant ID --from-session SELF --message-id ID",
+            "ne assistant-mailbox send --assistant ID --from-session SELF --message TEXT (or --file FILE)",
+            "ne assistant-mailbox mark-read|claim|release|complete --assistant ID --from-session SELF --message-id ID --revision N"
+        ],
         Some("mailbox") => vec!["ne mailbox list --session ID [--state unread|read|all] [--cursor N] [--limit 50]", "ne mailbox read --session ID --message-id ID", "ne mailbox send --session ID --from-session ID --message TEXT (or --file FILE) [--notify-immediately true|false]", "ne mailbox mark --session ID --message-id ID --revision N --state read|unread [--from-session ID]", "ne mailbox wait --session ID [--timeout SECONDS] [--limit 50]"],
         Some("session") => vec!["ne session identity", "ne session resolve --agent AGENT --native-id NATIVE_ID", "ne session new --agent AGENT [--cwd ABSOLUTE_PATH] [--message TEXT | --file FILE] [--model MODEL] [--provider PROVIDER] [--effort EFFORT]", "ne session terminals [--session ID]", "ne session list [--project ID] [--agent AGENT] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne session archive ID", "ne session unarchive ID", "ne session show ID", "ne session summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne session messages ID [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session messages ID --cursor CURSOR", "ne session messages ID --content-cursor CURSOR", "ne session search ID --query TEXT [--from ORDINAL] [--to ORDINAL] [--limit 8]", "ne session search ID --cursor CURSOR"],
         Some("task") => vec!["ne task item list ID", "ne task item create ID --file FILE", "ne task item note ID --item-id ID --text TEXT", "ne task item update ID --item-id ID --revision N --file FILE", "ne task item delete ID --item-id ID --revision N", "ne task list [--project ID] [--scope unarchived|archived|all] [--title TEXT] [--path PATH] [--cursor CURSOR] [--limit 20]", "ne task show ID", "ne task summary ID [--item-id ID | --item NUMBER] [--revision REVISION]", "ne task create --title TEXT [--description TEXT] [--project ID ...]", "ne task update ID [--title TEXT] [--description TEXT]", "ne task archive ID", "ne task unarchive ID", "ne task project list ID", "ne task project set ID [--project ID ...]"],

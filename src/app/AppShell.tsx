@@ -271,7 +271,7 @@ export default function AppShell() {
     const un2 = listen("workspace-reconcile-completed", () => emitSynced());
     const unCli = listen("cli-data-changed", () => emitSynced());
     const unMailboxError = listen<{session_id:string;error:string}>("mailbox-notification-error", ({payload}) => {
-      showToast(`信箱唤醒失败：${payload.error}`);
+      showToast(`未能打开收件对话：${payload.error}`);
     });
     // 终端集合或状态变化（spawn / exit / bind / close）→ Sidebar 的
     // 「运行中」列表自行重取；terminal-bound 有 payload，由终端视图直听。

@@ -1967,7 +1967,7 @@ fn collaboration_room_cli_queries_send_and_enforces_coordinator_stop() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        prompt.contains(&run) && prompt.contains("noending 技能的协作参考"),
+        prompt.contains(&run) && prompt.contains("NoEnding Skill 的协作指南"),
         "the invitation can be read in the member's mailbox: {inbox}"
     );
 

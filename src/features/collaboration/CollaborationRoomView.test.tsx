@@ -264,7 +264,7 @@ it("writes the first message together with starting, and shows the run and membe
   await screen.findByRole("checkbox", { name: "后端会话" });
   fireEvent.click(screen.getByRole("checkbox", { name: "后端会话" }));
   fireEvent.click(screen.getByRole("checkbox", { name: "前端会话" }));
-  const wakeModes = within(screen.getByRole("group", { name: "前端会话 的唤醒方式" }));
+  const wakeModes = within(screen.getByRole("group", { name: "前端会话 的继续方式" }));
   fireEvent.click(wakeModes.getByRole("button", { name: "桌面应用" }));
   expect(wakeModes.getByRole("button", { name: "桌面应用" }).getAttribute("aria-pressed")).toBe("true");
   expect(wakeModes.getByRole("button", { name: "内嵌终端" }).getAttribute("aria-pressed")).toBe("false");
@@ -463,7 +463,7 @@ it("keeps an unconfirmed send request id when another member wake happens in bet
     .mockResolvedValue(message(3, "在吗"));
   vi.mocked(api.collaborationMemberWake).mockResolvedValue(member({ session_id: "s2" }));
   mount();
-  await screen.findByText("唤醒失败");
+  await screen.findByText("打开失败");
 
   fireEvent.change(screen.getByRole("textbox", { name: "在协作室说一句" }), { target: { value: "在吗" } });
   fireEvent.click(screen.getByRole("button", { name: "发送" }));
@@ -516,7 +516,7 @@ it("marks a listening member unresponsive while leaving a processing member alon
 
 it.each([
   { wakeStatus: "pending", label: "等待加入", action: "打开会话", error: null },
-  { wakeStatus: "failed", label: "唤醒失败", action: "重试打开", error: "应用未响应" },
+  { wakeStatus: "failed", label: "打开失败", action: "重试打开", error: "应用未响应" },
 ] as const)("opens one $wakeStatus member without restarting the run", async ({ wakeStatus, label, action, error }) => {
   vi.mocked(api.collaborationRoomGet).mockResolvedValue({
     ...activeRun,

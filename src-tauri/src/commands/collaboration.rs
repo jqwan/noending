@@ -309,7 +309,7 @@ fn wake_one(app: &AppHandle, state: &AppState, session_id: &str, wake_method: &s
                 _ => return Err(crate::error::other("该会话没有桌面端打开方式")),
             }
         }
-        other => return Err(crate::error::other(format!("未知唤醒方式 {other}"))),
+        other => return Err(crate::error::other(format!("未知的对话继续方式 {other}"))),
     }
     Ok(())
 }

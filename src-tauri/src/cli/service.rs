@@ -41,6 +41,10 @@ pub(crate) enum Command {
     MailboxSend(crate::mailbox::Send),
     MailboxMark(crate::mailbox::Mark),
     MailboxWait(crate::mailbox::Wait),
+    AssistantMailboxList(crate::mailbox::AssistantList),
+    AssistantMailboxRead(crate::mailbox::AssistantRead),
+    AssistantMailboxSend(crate::mailbox::AssistantSend),
+    AssistantMailboxChange(crate::mailbox::AssistantChange),
     RoomResolve {
         task: String,
     },
@@ -231,6 +235,8 @@ impl Command {
             self,
             Self::MailboxSend(_)
                 | Self::MailboxMark(_)
+                | Self::AssistantMailboxSend(_)
+                | Self::AssistantMailboxChange(_)
                 | Self::RoomSend(_)
                 | Self::RoomStop(_)
                 | Self::RoomJoin { .. }
@@ -336,6 +342,18 @@ impl Service {
             Command::MailboxSend(p) => crate::mailbox::send(&self.db, &self.home, p),
             Command::MailboxMark(p) => crate::mailbox::mark(&self.db, &self.home, p),
             Command::MailboxWait(p) => crate::mailbox::wait(&self.db, p),
+            Command::AssistantMailboxList(p) => {
+                crate::mailbox::assistant_list(&self.db, &self.home, p)
+            }
+            Command::AssistantMailboxRead(p) => {
+                crate::mailbox::assistant_read(&self.db, &self.home, p)
+            }
+            Command::AssistantMailboxSend(p) => {
+                crate::mailbox::assistant_send(&self.db, &self.home, p)
+            }
+            Command::AssistantMailboxChange(p) => {
+                crate::mailbox::assistant_change(&self.db, &self.home, p)
+            }
             Command::RoomResolve { task } => crate::collaboration::room_view(&self.db, &task),
             Command::RoomShow { room } => crate::collaboration::room_view_by_room(&self.db, &room),
             Command::RoomMessages {
@@ -469,7 +487,7 @@ impl Service {
                 Ok(json!({"listening":false,"exit":code}))
             }
             Command::Status => Ok(
-                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","room"]}),
+                json!({"connected":true,"version":env!("CARGO_PKG_VERSION"),"home":self.home.root,"capabilities":["search","session","task","project","summary","freshness","sync","source","agent","request","session_control","mailbox","assistant_mailbox","room"]}),
             ),
             Command::Freshness { kind, id } => {
                 if kind.is_some() != id.is_some() {

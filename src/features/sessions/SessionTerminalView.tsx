@@ -407,7 +407,7 @@ export default function SessionTerminalView({ terminalId, initialTitle, initialA
   };
 
   return (
-    <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动通知开启，终端只读" : undefined}><div className="main fill detail-page">
+    <DetailPanelProvider kind="terminal" hint={notification?.enabled ? "自动查信提醒已开启，终端只读" : undefined}><div className="main fill detail-page">
       <PageHeader
         title={headerTitle} icon={headerAgent ? <AgentIcon agent={headerAgent} size={18} /> : <Icon name="terminal" />}
         navigation={<SessionSubpageTabs sessionId={boundSessionId} title={headerTitle} terminalId={terminalId} terminalLive={state.kind === "ready" ? !exited : undefined}

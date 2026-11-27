@@ -10,12 +10,12 @@ import "./assistants.css";
 
 const documents = [
   { file: "role", filename: "ROLE.md", title: "长期职责", empty: "尚未设定长期职责。" },
-  { file: "soul", filename: "SOUL.md", title: "行为与交流", empty: "尚未设定行为与交流方式。" },
+  { file: "soul", filename: "SOUL.md", title: "性格与交流方式", empty: "尚未设定性格与交流方式。" },
 ] as const;
 
 const guideIssues = {
   missing: "通用运行指南缺失。",
-  outdated: "通用运行指南需要修复。",
+  outdated: "通用运行指南与当前模板不同。",
   unavailable: "无法读取通用运行指南，请检查档案目录中的 AGENTS.md。",
 };
 
@@ -147,7 +147,7 @@ function AssistantDocument({ projectId, archived, onSaved, onRefresh, file, titl
       status={state !== "current" && <span className="badge warn">{status}</span>}
       actions={({ expand }) => !archived && revision !== null && (
         <button ref={editButton} type="button" className="btn ghost icon-button small"
-          disabled={editing} title={`编辑 ${title}`} aria-label={`编辑 ${filename}`}
+          disabled={editing} title={`编辑 ${title}`} aria-label={`编辑${title}`}
           onClick={() => { expand(); setError(""); setEditing(true); }}><Icon name="edit" /></button>
       )}>
       {error && <Notice tone="error">{error}</Notice>}

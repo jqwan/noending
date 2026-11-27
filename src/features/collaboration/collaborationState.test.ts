@@ -32,7 +32,7 @@ it("shows the connection and listening state ahead of an earlier wake result", (
     [{ phase: null }, "仅连接"],
     [{ connection_state: "disconnected" }, "连接中断"],
     [{ connection_state: "pending", wake_status: "pending" }, "等待加入"],
-    [{ connection_state: "pending", wake_status: "failed" }, "唤醒失败"],
+    [{ connection_state: "pending", wake_status: "failed" }, "打开失败"],
     [{ wake_status: "failed", awaiting_since: null }, "等待消息"],
   ] satisfies [Partial<CollaborationMemberState>, string][];
   for (const [state, label] of cases) expect(memberStatus(member(state), NOW).label).toBe(label);

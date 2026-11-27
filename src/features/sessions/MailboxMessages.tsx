@@ -74,15 +74,15 @@ export function MailboxMessagePreview({ message, navigate }: { message: MailboxM
   return <>
     <div className="mailbox-message-item">
       <MailboxMetadata message={message} navigate={openSender} />
-      <button type="button" className="mailbox-message-preview" aria-label={`查看消息：${preview}`} aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <button type="button" className="mailbox-message-preview" aria-label={`查看来信：${preview}`} aria-haspopup="dialog" onClick={() => setOpen(true)}>
         <span className="mailbox-preview-line"><span className="mailbox-preview-text">{preview}</span><Icon name="chevronRight" /></span>
       </button>
     </div>
-    {open && <Modal title="信箱消息" onClose={() => setOpen(false)}>
+    {open && <Modal title="来信" onClose={() => setOpen(false)}>
       <div className="mailbox-message-detail">
         <MailboxMetadata message={message} navigate={openSender} />
         {message.sender_session_id && <div className="small muted mailbox-message-id">发件会话 ID：<span className="mono">{message.sender_session_id}</span></div>}
-        <div className="small muted mailbox-message-id">消息 ID：<span className="mono">{message.id}</span></div>
+        <div className="small muted mailbox-message-id">来信 ID：<span className="mono">{message.id}</span></div>
         <div className="mailbox-body">{message.body}</div>
       </div>
     </Modal>}
@@ -113,11 +113,11 @@ function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; on
       if (active.current) setBusy(false);
     }
   };
-  return <Modal title="发送信箱消息" onClose={() => { if (!sending.current) onClose(); }}>
+  return <Modal title="写信" onClose={() => { if (!sending.current) onClose(); }}>
     <form className="mailbox-compose mailbox-history-compose" onSubmit={e => { e.preventDefault(); void send(); }}>
-      <textarea aria-label="消息内容" placeholder="向此会话发送消息" value={body} disabled={busy} onChange={e => setBody(e.target.value)} />
+      <textarea aria-label="信件正文" placeholder="写给本次对话" value={body} disabled={busy} onChange={e => setBody(e.target.value)} />
       {error && <Notice role="alert" >{error}</Notice>}
-      <div className="mailbox-compose-actions"><button type="submit" className="btn primary" disabled={busy || !body.trim()}>{busy ? "发送中…" : "发送到信箱"}</button></div>
+      <div className="mailbox-compose-actions"><button type="submit" className="btn primary" disabled={busy || !body.trim()}>{busy ? "发送中…" : "发信"}</button></div>
     </form>
   </Modal>;
 }
@@ -125,17 +125,17 @@ function MailboxComposer({ sessionId, onClose, onSent }: { sessionId: string; on
 function MailboxHistoryContent({ sessionId, navigate }: { sessionId: string; navigate: (route: Route) => void }) {
   const { page, error, more, refresh } = useMailboxMessages(sessionId, "all");
   const [composing, setComposing] = useState(false);
-  return <DetailSection sectionId="mailbox" label="会话信箱" className="mailbox-history" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></>} actions={<button type="button" className="btn small ghost icon-button" title="发送消息" aria-label="发送消息" onClick={() => setComposing(true)}><Icon name="chatPlus" /></button>} status={<>
+  return <DetailSection sectionId="mailbox" label="对话信箱" className="mailbox-history" title={<><Icon name="inbox" /><span>信箱{page ? `（${page.total}）` : ""}</span></>} actions={<button type="button" className="btn small ghost icon-button" title="写信" aria-label="写信" onClick={() => setComposing(true)}><Icon name="chatPlus" /></button>} status={<>
       {error && <div role="alert" className="badge warn mailbox-history-error">{error}</div>}
     </>}>
 
 
     {!page && !error && <DetailLoading>正在读取信箱…</DetailLoading>}
-    <div className="mailbox-history-list detail-scroll" role="region" aria-label="信箱消息列表" tabIndex={0}>
+    <div className="mailbox-history-list detail-scroll" role="region" aria-label="来信列表" tabIndex={0}>
       {page?.items.map(m => <article className="mailbox-history-entry" key={`${sessionId}:${m.id}`}>
         <MailboxMessagePreview message={m} navigate={navigate} />
       </article>)}
-      {page?.items.length === 0 && <div className="l1-none">暂无信箱消息</div>}
+      {page?.items.length === 0 && <div className="l1-none">暂无来信</div>}
       {page?.next_cursor != null && <div className="mailbox-history-footer"><button className="btn small ghost" onClick={() => void more()}>加载更多</button></div>}
     </div>
     {composing && <MailboxComposer sessionId={sessionId} onClose={() => setComposing(false)} onSent={() => { setComposing(false); void refresh(); }} />}

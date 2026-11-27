@@ -292,3 +292,126 @@ mod wait_tests {
         assert_eq!(error.code, "not_found");
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantList {
+    pub assistant: String,
+    pub from_session: String,
+    #[serde(default)]
+    pub state: crate::storage::assistant_mailbox::Filter,
+    pub cursor: Option<i64>,
+    #[serde(default = "limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantRead {
+    pub assistant: String,
+    pub from_session: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantSend {
+    pub assistant: String,
+    pub from_session: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantChange {
+    pub assistant: String,
+    pub from_session: String,
+    pub message_id: String,
+    pub revision: i64,
+    pub operation: AssistantOperation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantOperation {
+    Read,
+    Claim,
+    Release,
+    Complete,
+}
+
+impl From<AssistantOperation> for crate::storage::assistant_mailbox::Action {
+    fn from(operation: AssistantOperation) -> Self {
+        match operation {
+            AssistantOperation::Read => Self::Read,
+            AssistantOperation::Claim => Self::Claim,
+            AssistantOperation::Release => Self::Release,
+            AssistantOperation::Complete => Self::Complete,
+        }
+    }
+}
+
+pub(crate) fn assistant_list(
+    db: &Db,
+    home: &NoEndingHome,
+    p: AssistantList,
+) -> CliResult<serde_json::Value> {
+    let caller = actor(db, home, Some(&p.from_session))?;
+    Ok(serde_json::to_value(db.assistant_mailbox_list(
+        home,
+        &p.assistant,
+        Some(&caller),
+        p.state,
+        p.cursor,
+        p.limit,
+    )?)?)
+}
+
+pub(crate) fn assistant_read(
+    db: &Db,
+    home: &NoEndingHome,
+    p: AssistantRead,
+) -> CliResult<serde_json::Value> {
+    let caller = actor(db, home, Some(&p.from_session))?;
+    Ok(serde_json::to_value(db.assistant_mailbox_read(
+        home,
+        &p.assistant,
+        Some(&caller),
+        &p.message_id,
+    )?)?)
+}
+
+pub(crate) fn assistant_send(
+    db: &Db,
+    home: &NoEndingHome,
+    p: AssistantSend,
+) -> CliResult<serde_json::Value> {
+    let sender = actor(db, home, Some(&p.from_session))?;
+    let saved = db.assistant_mailbox_send(home, &p.assistant, Some(&sender), &p.message)?;
+    Ok(
+        serde_json::json!({"message_id": saved.id, "assistant": p.assistant, "created_at": saved.created_at}),
+    )
+}
+
+pub(crate) fn assistant_change(
+    db: &Db,
+    home: &NoEndingHome,
+    p: AssistantChange,
+) -> CliResult<serde_json::Value> {
+    let caller = actor(db, home, Some(&p.from_session))?;
+    let saved = db.assistant_mailbox_change(
+        home,
+        &p.assistant,
+        Some(&caller),
+        &crate::storage::assistant_mailbox::Change {
+            message_id: p.message_id,
+            revision: p.revision,
+            operation: p.operation.into(),
+            target_session: None,
+        },
+    )?;
+    Ok(serde_json::json!({
+        "message_id": saved.id, "revision": saved.revision, "read_at": saved.read_at,
+        "handler_session_id": saved.handler_session_id, "completed_at": saved.completed_at,
+    }))
+}

@@ -12,6 +12,7 @@ use crate::error::{other, Result};
 
 // The WorkspacePath registry, explicit task/project memberships and Session→path
 // attach each live in their own impl file rather than growing this monolith.
+pub mod assistant_mailbox;
 pub mod assistant_profiles;
 pub mod collaboration;
 pub mod context_repo;

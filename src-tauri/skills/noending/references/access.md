@@ -1,4 +1,4 @@
-# 接入与写入规则
+# 确认使用哪一份 NoEnding 数据
 
 先读本技能目录中的 [access.json](access.json)，使用其中固定到当前 NoEnding Home 的绝对 CLI 路径。入口已带 Home，不重复追加 `--home`，不把技能 bin 当作项目目录，不修改 PATH。macOS 使用可执行脚本，Windows 按 `.cmd` 原生方式调用；参数按当前 shell 正确传递，正文不能拼成可执行代码。
 

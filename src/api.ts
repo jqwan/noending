@@ -337,6 +337,14 @@ export const api = {
   refreshAgentRuntimeOptions: (agent: Agent) =>
     invoke<AgentRuntimeDiscovery>("refresh_agent_runtime_options", { agent }),
 
+  assistantMailboxList: (assistantId: string, cursor?: number) =>
+    invoke<import("./types").AssistantMailboxPage>("assistant_mailbox_list", { assistantId, cursor }),
+  assistantMailboxRead: (assistantId: string, messageId: string) =>
+    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_read", { assistantId, messageId }),
+  assistantMailboxSend: (assistantId: string, body: string) =>
+    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_send", { assistantId, body }),
+  assistantMailboxChange: (assistantId: string, change: import("./types").AssistantMailboxChange) =>
+    invoke<import("./types").AssistantMailboxMessage>("assistant_mailbox_change", { assistantId, change }),
   createAssistantProfile: (input: import("./types").CreateAssistantInput) =>
     invoke<Project>("create_assistant_profile", { input }),
   updateAssistantProfile: (id: string, revision: string, patch: import("./types").AssistantPatch) =>

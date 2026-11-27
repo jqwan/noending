@@ -61,7 +61,7 @@ export default function RuntimePopover({
   const selectedModelObj = matchingModels.length === 1 ? matchingModels[0] : undefined;
   const activeModelLabel = selectedModelObj
     ? (selectedModelObj.display_name ?? selectedModelObj.id)
-    : value.model ?? "Agent 默认";
+    : value.model ?? "工具默认";
 
   const hasPerModelEfforts = models.some((m) => m.supported_efforts.length > 0);
   const availableEfforts = selectedModelObj && hasPerModelEfforts
@@ -125,7 +125,7 @@ export default function RuntimePopover({
               >
                 <span className="popover-row-label">推理等级</span>
                 <span className="popover-row-val">
-                  <span className="truncate">{effectiveEffort || (supportsEffort ? "Agent 默认" : "不支持")}</span>
+                  <span className="truncate">{effectiveEffort || (supportsEffort ? "工具默认" : "不支持")}</span>
                   {supportsEffort && <Icon name="chevronRight" />}
                 </span>
               </PopupMenuItem>
@@ -158,7 +158,7 @@ export default function RuntimePopover({
 
               <div className="popover-options-list">
                 <PopupMenuItem selected={!value.model} type="button" className="popover-option-item" onClick={() => { onChange({ model: null, provider: null, effort: null }); setSubpage("main"); }}>
-                  <span>Agent 默认</span>
+                  <span>工具默认</span>
 
                 </PopupMenuItem>
                 {value.model && !models.some((m) => m.id === value.model) && (
@@ -224,7 +224,7 @@ export default function RuntimePopover({
 
               <div className="popover-options-list">
                 <PopupMenuItem selected={!effectiveEffort} type="button" className="popover-option-item" onClick={() => { onChange({ ...value, effort: null }); setSubpage("main"); }}>
-                  <span>Agent 默认</span>
+                  <span>工具默认</span>
 
                 </PopupMenuItem>
                 {effectiveEffort && !availableEfforts.includes(effectiveEffort) && (

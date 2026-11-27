@@ -108,5 +108,5 @@ it("prepares the unread count before opening a bound terminal", async () => {
     render(<TerminalMailbox terminalId="t" sessionId="s" notification={null} error="" apply={vi.fn()} refresh={vi.fn()} navigate={vi.fn()} />);
   });
   expect(screen.getByRole("heading", { name: "信箱（0）" })).toBeTruthy();
-  expect(screen.getByText("暂无未读消息")).toBeTruthy();
+  expect(screen.getByText("暂无未读来信")).toBeTruthy();
 });

@@ -29,6 +29,10 @@ vi.mock("../../api", () => ({
     continueSessionDesktop: vi.fn(),
     updateAssistantProfile: vi.fn(),
     prepareAssistantFiles: vi.fn(),
+    assistantMailboxList: vi.fn(),
+    assistantMailboxRead: vi.fn(),
+    assistantMailboxSend: vi.fn(),
+    assistantMailboxChange: vi.fn(),
     archiveProject: vi.fn(),
     deleteProjectPermanently: vi.fn(),
   },
@@ -67,6 +71,10 @@ beforeEach(() => {
   vi.mocked(api.getProjectDetail).mockReset();
   vi.mocked(api.updateAssistantProfile).mockReset();
   vi.mocked(api.prepareAssistantFiles).mockReset();
+  vi.mocked(api.assistantMailboxList).mockReset().mockResolvedValue({ items: [], unread: 0, next_cursor: null });
+  vi.mocked(api.assistantMailboxRead).mockReset();
+  vi.mocked(api.assistantMailboxSend).mockReset();
+  vi.mocked(api.assistantMailboxChange).mockReset();
   vi.mocked(api.archiveProject).mockReset();
   vi.mocked(api.deleteProjectPermanently).mockReset();
   vi.mocked(api.listProjectCards).mockReset().mockResolvedValue([]);
@@ -192,11 +200,12 @@ describe("ProjectDetail", () => {
     expect(screen.getByRole("region", { name: "技能" })).toBe(skills);
     expect(screen.getByRole("button", { name: "档案会话" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Session 1" })).toBeNull();
-    expect(screen.getByRole("region", { name: "行为与交流" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "性格与交流方式" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "长期职责" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "AGENTS.md" })).toBeNull();
     expect(screen.queryByRole("region", { name: "所属项目" })).toBeNull();
-    fireEvent.click(newSessionBtn);
+    expect(within(archiveDirectory).getByRole("button", { name: "打开档案目录" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "开始对话" }));
     expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1", archivePathId: "wp-linked" });
     fireEvent.click(projectTab);
     expect(navigate).toHaveBeenLastCalledWith({ view: "project", projectId: "p1", initialTitle: "Test Project" });
@@ -206,13 +215,57 @@ describe("ProjectDetail", () => {
     expect(navigate).toHaveBeenLastCalledWith({ view: "new-session", projectId: "p1" });
   });
 
+  it("writes to the stable assistant address and assigns the letter to an archive conversation", async () => {
+    const detail = assistantProject();
+    const assistant = detail.assistant!;
+    const letter = {
+      id: "letter", sender_session_id: null, body: "核对发布结果", created_at: "2026-11-27T07:00:00Z",
+      read_at: null, handler_session_id: null, completed_at: null, revision: 1,
+    };
+    const session = detail.sessions.find(row => row.workspace_path_id === assistant.workspace_path_id)!;
+    vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
+    vi.mocked(api.assistantMailboxSend).mockImplementation(async () => {
+      vi.mocked(api.assistantMailboxList).mockResolvedValue({ items: [letter], unread: 1, next_cursor: null });
+      return letter;
+    });
+    vi.mocked(api.assistantMailboxChange).mockResolvedValue({ ...letter, handler_session_id: session.id, revision: 2 });
+    render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "写信给Test Project" }));
+    const compose = screen.getByRole("dialog", { name: "写信给Test Project" });
+    fireEvent.change(within(compose).getByRole("textbox", { name: "信件正文" }), { target: { value: letter.body } });
+    fireEvent.click(within(compose).getByRole("button", { name: "发信" }));
+    expect(api.assistantMailboxSend).toHaveBeenCalledWith(assistant.id, letter.body);
+
+    const inbox = screen.getByRole("region", { name: "智能体信箱" });
+    fireEvent.click(await within(inbox).findByRole("button", { name: /^核对发布结果/ }));
+    const reader = screen.getByRole("dialog", { name: "查看来信" });
+    expect(within(inbox).getByText("未读")).toBeTruthy();
+    fireEvent.click(within(reader).getByRole("button", { name: /^接手对话：/ }));
+    fireEvent.click(screen.getByRole("option", { name: "档案会话" }));
+    fireEvent.click(within(reader).getByRole("button", { name: "指定接手对话" }));
+    expect(api.assistantMailboxChange).toHaveBeenCalledWith(assistant.id, {
+      message_id: "letter", revision: 1, operation: "transfer", target_session: session.id,
+    });
+    expect(await within(reader).findByText("处理中 · 由 档案会话 处理")).toBeTruthy();
+    expect(within(inbox).getByText("未读")).toBeTruthy();
+
+    vi.mocked(api.assistantMailboxList).mockResolvedValue({ items: [], unread: 0, next_cursor: null });
+    vi.mocked(api.assistantMailboxRead).mockResolvedValue({
+      ...letter, handler_session_id: session.id, completed_at: letter.created_at, revision: 3,
+    });
+    await act(async () => { window.dispatchEvent(new Event("noending:sync")); });
+    expect(api.assistantMailboxRead).toHaveBeenCalledWith(assistant.id, letter.id);
+    expect(await within(reader).findByText("已处理 · 由 档案会话 处理")).toBeTruthy();
+  });
+
   it("keeps the ROLE.md draft across subpages and detects external writes", async () => {
     const detail = assistantProject();
     const remote = { ...detail, assistant: { ...detail.assistant, role: { ...detail.assistant.role, content: "外部修改", revision: "hash-2" } } };
     vi.mocked(api.getProjectDetail).mockResolvedValue(detail);
     vi.mocked(api.updateAssistantProfile).mockRejectedValueOnce(new Error("版本冲突"));
     const { rerender } = render(<ProjectDetail projectId="p1" navigate={navigate} entry="assistant" fromAssistants />);
-    fireEvent.click(await screen.findByRole("button", { name: "编辑 ROLE.md" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑长期职责" }));
     const input = screen.getByRole("textbox", { name: "ROLE.md" });
     fireEvent.change(input, { target: { value: "本地草稿" } });
     fireEvent.click(screen.getByRole("button", { name: "项目详情" }));
@@ -267,7 +320,7 @@ describe("ProjectDetail", () => {
     expect(api.prepareAssistantFiles).toHaveBeenCalledWith("p1");
     expect(screen.getByText("价值观")).toBeTruthy();
     expect(screen.getByText("尚未设定长期职责。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "编辑 ROLE.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑长期职责" }));
     expect(screen.getByRole("textbox", { name: "ROLE.md" })).toHaveProperty("value", "");
   });
 

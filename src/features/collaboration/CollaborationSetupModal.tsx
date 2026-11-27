@@ -101,7 +101,7 @@ export default function CollaborationSetupModal({
         <section className="collab-setup-pane" aria-labelledby="collab-available-heading">
           <h3 id="collab-available-heading">候选会话</h3>
           {hasProjects && <div className="collab-setup-filters">
-            <input type="search" aria-label="搜索候选会话" placeholder="搜索标题或 Agent…" value={query}
+            <input type="search" aria-label="搜索候选会话" placeholder="搜索标题或运行工具…" value={query}
               onChange={event => setQuery(event.target.value)} />
             {projects.length > 1 && <CustomSelect ariaLabel="筛选候选项目" value={projectId ?? ""}
               options={[{ value: "", label: "全部关联项目" }, ...projects.map(project => ({ value: project.id, label: project.name }))]}
@@ -116,7 +116,7 @@ export default function CollaborationSetupModal({
             {page.items.map(candidate => {
               const name = sessionName(candidate);
               const chosen = selected.find(member => member.session_id === candidate.session_id);
-              const blocked = candidate.unavailable_reason ?? (candidate.wake_modes.length === 0 ? "没有可用的唤醒方式" : null);
+              const blocked = candidate.unavailable_reason ?? (candidate.wake_modes.length === 0 ? "这段对话暂时无法继续" : null);
               return (
                 <li className="collab-candidate" key={candidate.session_id}>
                   <input type="checkbox" aria-label={name} checked={!!chosen} disabled={!!blocked && !chosen}
@@ -131,7 +131,7 @@ export default function CollaborationSetupModal({
                     {candidate.project_id && <div className="small muted truncate">{projectNames.get(candidate.project_id)}</div>}
                     {blocked && <div className="small muted">{blocked}</div>}
                   </div>
-                  {chosen && candidate.wake_modes.length > 1 && <div className="collab-candidate-wake" role="group" aria-label={`${name} 的唤醒方式`}>
+                  {chosen && candidate.wake_modes.length > 1 && <div className="collab-candidate-wake" role="group" aria-label={`${name} 的继续方式`}>
                     {candidate.wake_modes.map(mode => (
                       <button key={mode} type="button" className="btn ghost icon-button small" aria-label={WAKE_LABEL[mode]}
                         title={WAKE_LABEL[mode]} aria-pressed={chosen.wake_method === mode}

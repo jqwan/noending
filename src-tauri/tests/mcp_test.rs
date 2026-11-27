@@ -223,9 +223,21 @@ fn stdio_data_tools_work_without_desktop_and_session_controls_report_the_depende
                 "Missing {name}"
             );
         }
-        assert!(tools
+        let mut assistant_tools: Vec<_> = tools
             .iter()
-            .all(|tool| { !tool["name"].as_str().unwrap().starts_with("assistant_") }));
+            .map(|tool| tool["name"].as_str().unwrap())
+            .filter(|name| name.starts_with("assistant_"))
+            .collect();
+        assistant_tools.sort_unstable();
+        assert_eq!(
+            assistant_tools,
+            [
+                "assistant_mailbox_change",
+                "assistant_mailbox_list",
+                "assistant_mailbox_read",
+                "assistant_mailbox_send",
+            ]
+        );
         let start = tools
             .iter()
             .find(|tool| tool["name"] == "session_start")
@@ -1472,4 +1484,111 @@ fn collaboration_room_wait_ack_leave_flow_across_mcp_requests() {
     let replayed = c.ok("room_send", accepted_args);
     assert_eq!(replayed["id"], accepted["id"]);
     c.finish();
+}
+
+#[test]
+fn assistant_mailbox_supports_cli_to_mcp_handoff_and_reuses_receipts() {
+    use noending_lib::{assistant, skills::Roots, workspace::wiring::WorkspaceLayer};
+    let f = Fixture::new();
+    let db = Db::open(&f.home.db_path).unwrap();
+    let native_home = f.root.join("native");
+    std::fs::create_dir(&native_home).unwrap();
+    let project = assistant::create_profile_with_roots(
+        &db,
+        &f.home,
+        &WorkspaceLayer::new(&f.home),
+        assistant::AssistantCreate {
+            name: "交付协调员".into(),
+            role_md: None,
+            soul_md: None,
+        },
+        &Roots {
+            codex: native_home.join(".codex"),
+            claude: native_home.join(".claude"),
+            pi: native_home.join(".pi/agent"),
+            dsh: native_home.join(".dsh"),
+            home: native_home,
+        },
+    )
+    .unwrap();
+    let path = db
+        .list_workspace_paths()
+        .unwrap()
+        .into_iter()
+        .find(|path| path.project_id == project.id)
+        .unwrap();
+    let archive_id = std::path::Path::new(&path.canonical_path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let manager = db
+        .upsert_logical_session_unchecked(
+            Agent::Codex,
+            "manager-inbox",
+            None,
+            Some(&path.canonical_path),
+            Some(&path.id),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .0;
+    let sender = support::ensure_session(&db, "sender".into(), Agent::Codex, "external-work").id;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ne"))
+        .args([
+            "--home",
+            f.home.root.to_str().unwrap(),
+            "assistant-mailbox",
+            "send",
+            "--assistant",
+            archive_id,
+            "--from-session",
+            &sender,
+            "--message",
+            "交付已就绪",
+            "--request-id",
+            "delivery",
+        ])
+        .env_remove("NOENDING_TERMINAL_ID")
+        .output()
+        .unwrap();
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{result}");
+    let letter_id = result["data"]["message_id"].as_str().unwrap();
+
+    let mut client = f.start();
+    let replay = client.ok("assistant_mailbox_send", json!({
+        "assistant": archive_id, "from_session": sender, "message": "交付已就绪", "request_id": "delivery"
+    }));
+    assert_eq!(replay["message_id"], letter_id);
+    let forbidden = client.call(
+        "assistant_mailbox_list",
+        json!({"assistant":archive_id,"from_session":sender}),
+    );
+    assert_eq!(forbidden["ok"], false);
+    let page = client.ok(
+        "assistant_mailbox_list",
+        json!({"assistant":archive_id,"from_session":manager,"state":"pending"}),
+    );
+    assert_eq!(page["unread"], 1);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let letter = client.ok(
+        "assistant_mailbox_read",
+        json!({"assistant":archive_id,"from_session":manager,"message_id":letter_id}),
+    );
+    assert_eq!(letter["sender_session_id"], sender);
+    assert!(letter["read_at"].is_null());
+    let result = client.ok("assistant_mailbox_change", json!({
+        "assistant":archive_id,"from_session":manager,"message_id":letter_id,"revision":letter["revision"],"operation":"claim"
+    }));
+    assert_eq!(result["handler_session_id"], manager);
+    assert_eq!(result["revision"], 2);
+    let done = client.ok("assistant_mailbox_change", json!({
+        "assistant":archive_id,"from_session":manager,"message_id":letter_id,"revision":result["revision"],"operation":"complete"
+    }));
+    assert!(done["completed_at"].is_string());
+    client.finish();
 }

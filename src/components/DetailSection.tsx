@@ -68,7 +68,7 @@ export function DetailContent({ children, label, className = "" }: { children: R
 }
 
 /** 主入口与行尾操作是相邻控件，避免整行点击与嵌套按钮互相干扰。 */
-export function DetailListRow({ icon, title, description, meta, actions, onOpen, titleHint }: {
+export function DetailListRow({ icon, title, description, meta, actions, onOpen, titleHint, openLabel }: {
   icon?: ReactNode;
   title: ReactNode;
   description?: ReactNode;
@@ -76,6 +76,7 @@ export function DetailListRow({ icon, title, description, meta, actions, onOpen,
   actions?: ReactNode;
   onOpen?: () => void;
   titleHint?: string;
+  openLabel?: string;
 }) {
   const hint = titleHint ?? (typeof title === "string" ? title : undefined);
   const content = <>
@@ -87,7 +88,7 @@ export function DetailListRow({ icon, title, description, meta, actions, onOpen,
   </>;
   return <div className="detail-list-row">
     {onOpen
-      ? <button type="button" className="detail-list-open" title={hint} onClick={onOpen}>{content}</button>
+      ? <button type="button" className="detail-list-open" title={hint} aria-label={openLabel} onClick={onOpen}>{content}</button>
       : <div className="detail-list-content" title={hint}>{content}</div>}
     {(meta || actions) && <div className="detail-list-trailing">
       {meta && <div className="detail-list-meta">{meta}</div>}

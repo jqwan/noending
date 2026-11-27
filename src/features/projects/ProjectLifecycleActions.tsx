@@ -33,7 +33,7 @@ export function ProjectDeleteModal({ names, busy, onClose, onConfirm, removesAss
       <p>确定永久删除 {names.length === 1 ? `「${names[0]}」` : `${names.length} 个${label}`}？</p>
       <p className="muted small">项目摘要和目录登记会被删除，任务关联会解除，任务本身会保留。此操作无法撤销。</p>
       {removesAssistantDirectories
-        ? <p className="muted small">智能体设置、档案目录及其中的文件也会永久删除。</p>
+        ? <p className="muted small">智能体设置、信箱、档案目录及其中的文件也会永久删除。</p>
         : <p className="muted small">磁盘目录和文件会保留。</p>}
       <DialogActions>
         <button className="btn" disabled={busy} onClick={onClose}>取消</button>

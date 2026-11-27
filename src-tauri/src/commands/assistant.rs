@@ -59,3 +59,60 @@ pub async fn prepare_assistant_files(
     changed(&app);
     Ok(result)
 }
+
+#[tauri::command]
+pub fn assistant_mailbox_list(
+    app: AppHandle,
+    state: State<AppState>,
+    assistant_id: String,
+    cursor: Option<i64>,
+) -> Result<crate::storage::assistant_mailbox::Page> {
+    state.db.assistant_mailbox_list(
+        &home(&app)?,
+        &assistant_id,
+        None,
+        crate::storage::assistant_mailbox::Filter::All,
+        cursor,
+        30,
+    )
+}
+
+#[tauri::command]
+pub fn assistant_mailbox_read(
+    app: AppHandle,
+    state: State<AppState>,
+    assistant_id: String,
+    message_id: String,
+) -> Result<crate::storage::assistant_mailbox::Message> {
+    state
+        .db
+        .assistant_mailbox_read(&home(&app)?, &assistant_id, None, &message_id)
+}
+
+#[tauri::command]
+pub fn assistant_mailbox_send(
+    app: AppHandle,
+    state: State<AppState>,
+    assistant_id: String,
+    body: String,
+) -> Result<crate::storage::assistant_mailbox::Message> {
+    let saved = state
+        .db
+        .assistant_mailbox_send(&home(&app)?, &assistant_id, None, &body)?;
+    changed(&app);
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn assistant_mailbox_change(
+    app: AppHandle,
+    state: State<AppState>,
+    assistant_id: String,
+    change: crate::storage::assistant_mailbox::Change,
+) -> Result<crate::storage::assistant_mailbox::Message> {
+    let saved = state
+        .db
+        .assistant_mailbox_change(&home(&app)?, &assistant_id, None, &change)?;
+    changed(&app);
+    Ok(saved)
+}

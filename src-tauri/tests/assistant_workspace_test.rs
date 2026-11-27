@@ -658,3 +658,211 @@ fn assistant_deletion_rejects_a_replaced_working_directory_without_touching_its_
         .assistant
         .is_some());
 }
+
+#[test]
+fn assistant_mail_has_one_handler_and_survives_detached_conversations() {
+    use noending::storage::assistant_mailbox::{Action, Change, Filter};
+    use std::sync::{Arc, Barrier};
+
+    let f = Fixture::new();
+    let profile = create_profile(&f, "发布协调员");
+    let assistant = f
+        .project_detail(&profile.project.id)
+        .unwrap()
+        .assistant
+        .unwrap()
+        .id
+        .to_string();
+    let first = profile_session(&f, &profile, "inbox-first");
+    let second = profile_session(&f, &profile, "inbox-second");
+    let ordinary = f
+        .db()
+        .upsert_logical_session_unchecked(
+            noending::domain::Agent::Codex,
+            "outside-inbox",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .0;
+    let letter = f
+        .db()
+        .assistant_mailbox_send(&f.home, &assistant, Some(&ordinary), "核对发布结果")
+        .unwrap();
+    let another = f
+        .db()
+        .assistant_mailbox_send(&f.home, &assistant, None, "准备下次交付")
+        .unwrap();
+    assert!(f
+        .db()
+        .assistant_mailbox_list(&f.home, &assistant, Some(&ordinary), Filter::All, None, 10)
+        .is_err());
+    assert!(f
+        .db()
+        .assistant_mailbox_send(&f.home, &assistant, Some(&first), "循环")
+        .is_err());
+    let page = f
+        .db()
+        .assistant_mailbox_list(&f.home, &assistant, Some(&first), Filter::Pending, None, 1)
+        .unwrap();
+    assert_eq!(page.items[0].id, another.id);
+    assert_eq!(page.unread, 2);
+    let second_page = f
+        .db()
+        .assistant_mailbox_list(
+            &f.home,
+            &assistant,
+            Some(&second),
+            Filter::Pending,
+            page.next_cursor,
+            1,
+        )
+        .unwrap();
+    assert_eq!(second_page.items[0].id, letter.id);
+    assert_eq!(second_page.unread, 2);
+
+    let change = |operation, revision, target_session| Change {
+        message_id: letter.id.clone(),
+        operation,
+        revision,
+        target_session,
+    };
+    let claim = change(Action::Claim, 1, None);
+    let barrier = Arc::new(Barrier::new(2));
+    let claims = std::thread::scope(|scope| {
+        let handles = [&first, &second].map(|session| {
+            let barrier = barrier.clone();
+            let claim = &claim;
+            let assistant = &assistant;
+            let home = &f.home;
+            scope.spawn(move || {
+                let db = Db::open(&home.db_path).unwrap();
+                barrier.wait();
+                db.assistant_mailbox_change(home, assistant, Some(session), claim)
+            })
+        });
+        handles.map(|handle| handle.join().unwrap())
+    });
+    assert_eq!(claims.iter().filter(|result| result.is_ok()).count(), 1);
+    let claimed = claims.into_iter().find_map(Result::ok).unwrap();
+    assert!(claimed.read_at.is_none());
+    let handler = claimed.handler_session_id.unwrap();
+    let other = if handler == first { &second } else { &first };
+    assert!(f
+        .db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            Some(other),
+            &change(Action::Complete, 2, None)
+        )
+        .is_err());
+    let read = f
+        .db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            Some(other),
+            &change(Action::Read, 2, None),
+        )
+        .unwrap();
+    assert!(read.read_at.is_some());
+    assert_eq!(read.handler_session_id.as_deref(), Some(handler.as_str()));
+
+    assert!(f
+        .db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            None,
+            &change(Action::Transfer, 3, Some(ordinary))
+        )
+        .is_err());
+    let transferred = f
+        .db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            None,
+            &change(Action::Transfer, 3, Some(other.clone())),
+        )
+        .unwrap();
+    assert_eq!(
+        transferred.handler_session_id.as_deref(),
+        Some(other.as_str())
+    );
+    let completed = f
+        .db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            Some(other),
+            &change(Action::Complete, 4, None),
+        )
+        .unwrap();
+    assert!(completed.completed_at.is_some());
+    assert!(f
+        .db()
+        .assistant_mailbox_change(&f.home, &assistant, None, &change(Action::Release, 5, None))
+        .is_err());
+
+    f.db()
+        .assistant_mailbox_change(
+            &f.home,
+            &assistant,
+            Some(&handler),
+            &Change {
+                message_id: another.id.clone(),
+                operation: Action::Claim,
+                revision: 1,
+                target_session: None,
+            },
+        )
+        .unwrap();
+    f.db()
+        .write()
+        .execute("DELETE FROM sessions WHERE id=?1", [&handler])
+        .unwrap();
+    let released = f
+        .db()
+        .assistant_mailbox_read(&f.home, &assistant, Some(other), &another.id)
+        .unwrap();
+    assert!(released.handler_session_id.is_none());
+    assert_eq!(released.revision, 3);
+    let renamed = project::rename_project(f.db(), &profile.project.id, "发布负责人").unwrap();
+    assert_ne!(renamed.name, profile.project.name);
+    let page = f
+        .db()
+        .assistant_mailbox_list(
+            &f.home,
+            &assistant,
+            Some(other),
+            Filter::Completed,
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        page.items[0].handler_session_id.as_deref(),
+        Some(other.as_str())
+    );
+    assert_eq!(page.unread, 1);
+    assert_eq!(f.db().mailbox_unread(other).unwrap(), 0);
+    let mut survivor = renamed;
+    survivor.id = new_id();
+    survivor.created_at = "2000-01-01T00:00:00Z".into();
+    f.db().upsert_project(&survivor).unwrap();
+    let merged = project::merge_projects(f.db(), &survivor.id, &profile.project.id).unwrap();
+    assert_eq!(merged.survivor, survivor.id);
+    assert_eq!(
+        f.db()
+            .assistant_mailbox_read(&f.home, &assistant, Some(other), &letter.id)
+            .unwrap()
+            .completed_at,
+        completed.completed_at
+    );
+}
